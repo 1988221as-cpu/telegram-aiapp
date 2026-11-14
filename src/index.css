@@ -1,0 +1,100 @@
+@import "tailwindcss";
+@variant dark (&:where(.dark, .dark *));
+
+@layer base {
+  :root {
+    --tg-bg-base: #f2f5f9;
+    --tg-bg-surface: #ffffff;
+    --tg-bg-card: #f8fafc;
+    --tg-bg-glass: rgba(255, 255, 255, 0.86);
+    --tg-bg-active: #2481cc;
+    --tg-bg-bubble-in: #ffffff;
+    --tg-bg-bubble-out: #1e88e5;
+    --tg-color-primary: #2481cc;
+    --tg-color-accent-glow: rgba(36, 129, 204, 0.16);
+    --tg-color-text-primary: #0f172a;
+    --tg-color-text-secondary: #64748b;
+    --tg-border: #e2e8f0;
+    --tg-border-subtle: #edf2f7;
+    --tg-border-glow: rgba(36, 129, 204, 0.28);
+  }
+
+  .dark {
+    --tg-bg-base: #060b12;
+    --tg-bg-surface: #0b131f;
+    --tg-bg-card: #0f1a29;
+    --tg-bg-glass: rgba(9, 17, 27, 0.84);
+    --tg-bg-active: #2ba0ff;
+    --tg-bg-bubble-in: #111d2c;
+    --tg-bg-bubble-out: #1a446f;
+    --tg-color-primary: #2ba0ff;
+    --tg-color-accent-glow: rgba(43, 160, 255, 0.22);
+    --tg-color-text-primary: #eef4fb;
+    --tg-color-text-secondary: #7b93ad;
+    --tg-border: #172537;
+    --tg-border-subtle: #1c2d42;
+    --tg-border-glow: rgba(43, 160, 255, 0.34);
+  }
+
+  body {
+    font-family: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    background-color: var(--tg-bg-base);
+    color: var(--tg-color-text-primary);
+  }
+
+  /* Precision console slim scrollbar */
+  ::-webkit-scrollbar {
+    width: 5px;
+    height: 5px;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: rgba(100, 116, 139, 0.22);
+    border-radius: 9999px;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: rgba(100, 116, 139, 0.42);
+  }
+
+  .dark ::-webkit-scrollbar-thumb {
+    background: rgba(123, 147, 173, 0.18);
+  }
+  .dark ::-webkit-scrollbar-thumb:hover {
+    background: rgba(43, 160, 255, 0.38);
+  }
+}
+
+/* Utilities */
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+.no-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+
+/* Precision Tech Dot-Matrix Canvas for Day & Deep Space Night */
+.tg-chat-pattern {
+  background-color: #f3f6fa;
+  background-image:
+    radial-gradient(circle at 50% 0%, rgba(36, 129, 204, 0.05), transparent 60%),
+    radial-gradient(rgba(15, 23, 42, 0.05) 1px, transparent 0);
+  background-size: 100% 100%, 24px 24px;
+}
+
+.dark .tg-chat-pattern {
+  background-color: #070d16;
+  background-image:
+    radial-gradient(circle at 50% 0%, rgba(43, 160, 255, 0.07), transparent 55%),
+    radial-gradient(rgba(148, 197, 255, 0.045) 1px, transparent 0);
+  background-size: 100% 100%, 24px 24px;
+}
+
+/* Frosted Glass Surface Utility */
+.hs-glass {
+  background-color: var(--tg-bg-glass);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+}

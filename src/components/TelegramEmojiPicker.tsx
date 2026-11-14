@@ -1,0 +1,474 @@
+import React, { useState, useMemo, useEffect, useCallback } from 'react';
+import { Smile, Sparkles, Search, X, Loader2, RefreshCw, AlertCircle } from 'lucide-react';
+import { TelegramStickerItem, TelegramStickerPack } from '../types';
+import { fetchTelegramStickersApi } from '../services/apiService';
+
+interface TelegramEmojiPickerProps {
+  isOpen: boolean;
+  onClose: () => void;
+  onSelectEmoji: (emoji: string) => void;
+  onSelectSticker?: (sticker: TelegramStickerItem, packTitle?: string) => void;
+  accountId?: string;
+}
+
+interface EmojiItem {
+  char: string;
+  name: string;
+  keywords: string[];
+  category: 'smileys' | 'gestures' | 'hearts' | 'objects';
+}
+
+const EMOJI_DATABASE: EmojiItem[] = [
+  // Smileys & Emotions
+  { char: '😀', name: '大笑', keywords: ['笑', '开心', '高兴', 'grin', 'smile', 'happy'], category: 'smileys' },
+  { char: '😃', name: '哈哈', keywords: ['笑', '哈哈', 'happy', 'joy', 'smile'], category: 'smileys' },
+  { char: '😄', name: '微笑', keywords: ['微笑', '开心', 'smile', 'pleased'], category: 'smileys' },
+  { char: '😁', name: '嘻嘻', keywords: ['嘻嘻', '呲牙', 'grin', 'teeth'], category: 'smileys' },
+  { char: '😆', name: '大喜', keywords: ['大笑', '狂喜', 'laugh'], category: 'smileys' },
+  { char: '😅', name: '苦笑', keywords: ['苦笑', '流汗', 'sweat', 'awkward'], category: 'smileys' },
+  { char: '😂', name: '笑哭', keywords: ['笑哭', '爆笑', 'joy', 'tears', 'lol', 'rofl'], category: 'smileys' },
+  { char: '🤣', name: '笑倒', keywords: ['笑翻', '笑死', 'rofl', 'rolling'], category: 'smileys' },
+  { char: '😊', name: '羞涩微笑', keywords: ['害羞', '暖心', 'blush', 'warm'], category: 'smileys' },
+  { char: '😇', name: '天使光环', keywords: ['天使', '善良', 'angel', 'halo', 'innocent'], category: 'smileys' },
+  { char: '🙂', name: '淡定笑', keywords: ['淡淡的笑', '微笑', 'slightly smile'], category: 'smileys' },
+  { char: '😉', name: '眨眼', keywords: ['眨眼', '懂的', 'wink'], category: 'smileys' },
+  { char: '😌', name: '安心', keywords: ['松了口气', '释怀', 'relieved'], category: 'smileys' },
+  { char: '😍', name: '花痴心动', keywords: ['喜欢', '爱', '心动', 'heart eyes', 'love'], category: 'smileys' },
+  { char: '🥰', name: '被爱包围', keywords: ['幸福', '爱心', 'adore', 'fond'], category: 'smileys' },
+  { char: '😘', name: '飞吻', keywords: ['亲亲', '飞吻', 'kiss', 'love'], category: 'smileys' },
+  { char: '😋', name: '馋嘴美味', keywords: ['好吃', '贪吃', 'yum', 'delicious'], category: 'smileys' },
+  { char: '😛', name: '吐舌头', keywords: ['调皮', '吐舌', 'tongue', 'playful'], category: 'smileys' },
+  { char: '😜', name: '眨眼吐舌', keywords: ['搞怪', '恶作剧', 'wink tongue', 'crazy'], category: 'smileys' },
+  { char: '🤪', name: '发疯滑稽', keywords: ['疯癫', '滑稽', 'zany', 'wild'], category: 'smileys' },
+  { char: '🤩', name: '眼里放光', keywords: ['追星', '崇拜', 'star struck', 'excited'], category: 'smileys' },
+  { char: '🥳', name: '庆祝派对', keywords: ['庆祝', '生日', 'happy', 'party', 'celebrate'], category: 'smileys' },
+  { char: '😎', name: '酷炫墨镜', keywords: ['酷', '帅', '装逼', 'cool', 'sunglasses'], category: 'smileys' },
+  { char: '🤓', name: '书呆子眼镜', keywords: ['学霸', '极客', 'nerd', 'geek'], category: 'smileys' },
+  { char: '🧐', name: '单片镜审视', keywords: ['探究', '怀疑', 'curious', 'monocle'], category: 'smileys' },
+  { char: '😏', name: '得意坏笑', keywords: ['坏笑', '得意', 'smirk'], category: 'smileys' },
+  { char: '😒', name: '无语斜眼', keywords: ['鄙视', '无语', 'unamused'], category: 'smileys' },
+  { char: '😞', name: '失望低头', keywords: ['难过', '失望', 'sad', 'disappointed'], category: 'smileys' },
+  { char: '😔', name: '沉思失落', keywords: ['沮丧', '忧郁', 'pensive'], category: 'smileys' },
+  { char: '🥺', name: '委屈汪汪', keywords: ['恳求', '可怜', '拜托', 'pleading', 'puppy eyes'], category: 'smileys' },
+  { char: '😢', name: '流泪伤心', keywords: ['哭', '眼泪', 'cry', 'tear'], category: 'smileys' },
+  { char: '😭', name: '嚎啕大哭', keywords: ['大哭', '痛哭', 'sob', 'crying'], category: 'smileys' },
+  { char: '😤', name: '傲慢傲娇', keywords: ['哼', '傲娇', 'triumph', 'huff'], category: 'smileys' },
+  { char: '😠', name: '生气愤怒', keywords: ['生气', '发火', 'angry', 'mad'], category: 'smileys' },
+  { char: '😡', name: '暴怒涨红', keywords: ['大怒', '气死', 'pouting', 'rage'], category: 'smileys' },
+  { char: '🤯', name: '脑洞爆炸', keywords: ['炸裂', '吃惊', 'mind blown', 'shock'], category: 'smileys' },
+  { char: '😳', name: '脸红尴尬', keywords: ['不好意思', '吃惊', 'flushed'], category: 'smileys' },
+  { char: '🥵', name: '大汗热脸', keywords: ['好热', '发烫', 'hot', 'sweat'], category: 'smileys' },
+  { char: '🥶', name: '冷冻结冰', keywords: ['冷', '冻僵', 'cold', 'freezing'], category: 'smileys' },
+  { char: '😱', name: '尖叫恐惧', keywords: ['吓死', '救命', 'scream', 'fear'], category: 'smileys' },
+  { char: '🤔', name: '思考琢磨', keywords: ['思考', '想一下', 'thinking', 'hmm'], category: 'smileys' },
+  { char: '🤫', name: '安静嘘声', keywords: ['小声', '保密', 'shh', 'quiet'], category: 'smileys' },
+  { char: '🤭', name: '偷笑掩嘴', keywords: ['捂嘴笑', '暗笑', 'giggle'], category: 'smileys' },
+  { char: '😴', name: '呼呼大睡', keywords: ['睡觉', '晚安', 'sleep', 'zzz'], category: 'smileys' },
+
+  // Gestures
+  { char: '👍', name: '强力点赞', keywords: ['赞', '好', '顶', 'thumbs up', 'like', 'good', 'ok'], category: 'gestures' },
+  { char: '👎', name: '踩点倒彩', keywords: ['差评', '不行', 'thumbs down', 'dislike', 'bad'], category: 'gestures' },
+  { char: '👏', name: '鼓掌喝彩', keywords: ['鼓掌', '加油', 'clap', 'applause', 'bravo'], category: 'gestures' },
+  { char: '🙌', name: '举双手赞同', keywords: ['欢呼', '庆祝', 'hands up', 'hooray'], category: 'gestures' },
+  { char: '👐', name: '摊开双手', keywords: ['拥抱', '坦荡', 'open hands'], category: 'gestures' },
+  { char: '🤝', name: '商务握手', keywords: ['握手', '合作', '成交', 'handshake', 'deal', 'partner'], category: 'gestures' },
+  { char: '🙏', name: '双手合十祈祷', keywords: ['谢谢', '感谢', '拜托', 'pray', 'thanks', 'please'], category: 'gestures' },
+  { char: '✌️', name: '胜利剪刀手', keywords: ['耶', '胜利', 'peace', 'victory'], category: 'gestures' },
+  { char: '🤞', name: '祈求好运', keywords: ['保佑', '祝好运', 'crossed fingers', 'luck'], category: 'gestures' },
+  { char: '🤟', name: '我爱你手势', keywords: ['爱你', 'rock', 'love you'], category: 'gestures' },
+  { char: '🤘', name: '摇滚手势', keywords: ['摇滚', '牛', 'rock on'], category: 'gestures' },
+  { char: '👌', name: 'OK好手势', keywords: ['好', '行', '没问题', 'ok hand', 'fine'], category: 'gestures' },
+  { char: '🤌', name: '捏指强调', keywords: ['精髓', '意大利手势', 'pinched fingers'], category: 'gestures' },
+  { char: '👈', name: '指左', keywords: ['左', 'point left'], category: 'gestures' },
+  { char: '👉', name: '指右', keywords: ['右', '看这里', 'point right'], category: 'gestures' },
+  { char: '👆', name: '指上', keywords: ['楼上', '看上面', 'point up'], category: 'gestures' },
+  { char: '👇', name: '指下', keywords: ['楼下', '看下方', 'point down'], category: 'gestures' },
+  { char: '💪', name: '肌肉力量', keywords: ['强', '加油', '力量', 'muscle', 'strong', 'flex'], category: 'gestures' },
+  { char: '👋', name: '挥手问候', keywords: ['嗨', '你好', '再见', 'wave', 'hello', 'bye'], category: 'gestures' },
+  { char: '🫡', name: '敬礼遵命', keywords: ['收到', '明白', '遵命', 'salute', 'yes sir'], category: 'gestures' },
+
+  // Hearts & Emotion
+  { char: '❤️', name: '经典红心', keywords: ['爱', '红心', '喜欢', 'red heart', 'love'], category: 'hearts' },
+  { char: '🧡', name: '橙心温暖', keywords: ['温暖', '橙心', 'orange heart'], category: 'hearts' },
+  { char: '💛', name: '黄心阳光', keywords: ['友谊', '黄心', 'yellow heart'], category: 'hearts' },
+  { char: '💚', name: '绿心生机', keywords: ['健康', '绿心', 'green heart'], category: 'hearts' },
+  { char: '💙', name: '蓝心电报', keywords: ['电报蓝', '忠诚', 'blue heart', 'telegram'], category: 'hearts' },
+  { char: '💜', name: '紫心浪漫', keywords: ['浪漫', '紫心', 'purple heart'], category: 'hearts' },
+  { char: '🖤', name: '黑心高冷', keywords: ['高冷', '黑心', 'black heart'], category: 'hearts' },
+  { char: '🤍', name: '纯白之心', keywords: ['纯洁', '白心', 'white heart'], category: 'hearts' },
+  { char: '💔', name: '破碎的心', keywords: ['心碎', '难受', 'broken heart', 'hurt'], category: 'hearts' },
+  { char: '💖', name: '闪耀爱心', keywords: ['闪亮', '心动', 'sparkling heart'], category: 'hearts' },
+  { char: '💗', name: '怦然心动', keywords: ['心跳', '喜欢', 'growing heart'], category: 'hearts' },
+  { char: '💘', name: '丘比特箭', keywords: ['一见钟情', '丘比特', 'heart with arrow'], category: 'hearts' },
+  { char: '💝', name: '丝带礼物心', keywords: ['礼物心', '心意', 'heart ribbon'], category: 'hearts' },
+  { char: '🔥', name: '炽热火焰', keywords: ['火', '热', '爆', '牛逼', 'fire', 'lit', 'flame', 'hot'], category: 'hearts' },
+  { char: '✨', name: '闪烁光芒', keywords: ['闪亮', 'AI', '灵感', 'sparkles', 'magic', 'shine'], category: 'hearts' },
+  { char: '🌟', name: '发光金星', keywords: ['星星', '优质', 'glowing star', 'vip'], category: 'hearts' },
+  { char: '💫', name: '流星眩晕', keywords: ['眼花', '流星', 'dizzy star'], category: 'hearts' },
+  { char: '💥', name: '爆炸撞击', keywords: ['爆炸', '震撼', 'collision', 'boom'], category: 'hearts' },
+  { char: '💯', name: '一百分满分', keywords: ['满分', '极好', '100', 'hundred', 'perfect'], category: 'hearts' },
+
+  // Objects & Daily
+  { char: '🎉', name: '庆祝礼花', keywords: ['庆祝', '礼炮', '恭喜', 'party', 'popper', 'congrats'], category: 'objects' },
+  { char: '🎊', name: '碎纸彩花', keywords: ['狂欢', '开业', 'confetti'], category: 'objects' },
+  { char: '🎁', name: '包装礼盒', keywords: ['礼物', '惊喜', 'gift', 'present'], category: 'objects' },
+  { char: '🎈', name: '红色气球', keywords: ['气球', '派对', 'balloon'], category: 'objects' },
+  { char: '🚀', name: '火箭飞升', keywords: ['起飞', '火箭', '暴涨', 'rocket', 'moon', 'fast'], category: 'objects' },
+  { char: '🛸', name: '飞碟未来', keywords: ['科幻', '飞碟', 'ufo', 'alien'], category: 'objects' },
+  { char: '💎', name: '璀璨钻石', keywords: ['钻石', '尊贵', '宝石', 'diamond', 'gem', 'luxury'], category: 'objects' },
+  { char: '💡', name: '发光灯泡', keywords: ['想法', '主意', '灵感', 'bulb', 'idea'], category: 'objects' },
+  { char: '💰', name: '钱袋财富', keywords: ['发财', '金钱', 'money', 'bag', 'rich'], category: 'objects' },
+  { char: '💵', name: '美元钞票', keywords: ['美金', '美元', 'dollar', 'cash'], category: 'objects' },
+  { char: '🎯', name: '正中靶心', keywords: ['目标', '命中', 'bullseye', 'target', 'goal'], category: 'objects' },
+  { char: '🏆', name: '冠军奖杯', keywords: ['第一', '奖杯', 'trophy', 'winner', 'champion'], category: 'objects' },
+  { char: '⚡', name: '闪电极速', keywords: ['快', '闪电', '能量', 'zap', 'lightning', 'fast'], category: 'objects' },
+  { char: '☕', name: '热热咖啡', keywords: ['下午茶', '咖啡', '歇歇', 'coffee', 'break', 'tea'], category: 'objects' },
+  { char: '🥂', name: '碰杯香槟', keywords: ['干杯', '庆祝', 'cheers', 'champagne', 'drink'], category: 'objects' },
+  { char: '📢', name: '大声公喇叭', keywords: ['公告', '通知', 'megaphone', 'announcement'], category: 'objects' },
+  { char: '📱', name: '智能手机', keywords: ['手机', '联系', 'phone', 'mobile'], category: 'objects' },
+  { char: '💻', name: '笔记本电脑', keywords: ['工作', '电脑', 'laptop', 'work'], category: 'objects' },
+];
+
+export const TelegramEmojiPicker: React.FC<TelegramEmojiPickerProps> = ({
+  isOpen,
+  onClose,
+  onSelectEmoji,
+  onSelectSticker,
+  accountId,
+}) => {
+  const [tab, setTab] = useState<'emoji' | 'stickers'>('emoji');
+  const [searchQuery, setSearchQuery] = useState('');
+  const [selectedEmojiCategory, setSelectedEmojiCategory] = useState<'all' | 'smileys' | 'gestures' | 'hearts' | 'objects'>('all');
+  const [stickerPacks, setStickerPacks] = useState<TelegramStickerPack[]>([]);
+  const [selectedPackId, setSelectedPackId] = useState<string>('all');
+  const [isLoadingStickers, setIsLoadingStickers] = useState(false);
+  const [stickersError, setStickersError] = useState<string | null>(null);
+
+  const loadOfficialStickers = useCallback(async () => {
+    setIsLoadingStickers(true);
+    setStickersError(null);
+    const res = await fetchTelegramStickersApi(accountId);
+    setIsLoadingStickers(false);
+    if (!res.ok) {
+      setStickerPacks([]);
+      setStickersError(res.error || '无法加载官方贴纸库');
+      return;
+    }
+    setStickerPacks(res.packs);
+    if (res.packs.length > 0 && selectedPackId !== 'all' && !res.packs.some((p) => p.id === selectedPackId)) {
+      setSelectedPackId('all');
+    }
+  }, [accountId, selectedPackId]);
+
+  useEffect(() => {
+    if (isOpen && tab === 'stickers' && stickerPacks.length === 0 && !isLoadingStickers) {
+      void loadOfficialStickers();
+    }
+  }, [isOpen, tab, stickerPacks.length, isLoadingStickers, loadOfficialStickers]);
+
+  // Filtered Emojis
+  const filteredEmojis = useMemo(() => {
+    const q = searchQuery.trim().toLowerCase();
+    return EMOJI_DATABASE.filter((item) => {
+      if (selectedEmojiCategory !== 'all' && item.category !== selectedEmojiCategory) {
+        return false;
+      }
+      if (!q) return true;
+      return (
+        item.char.includes(q) ||
+        item.name.toLowerCase().includes(q) ||
+        item.keywords.some((kw) => kw.toLowerCase().includes(q))
+      );
+    });
+  }, [searchQuery, selectedEmojiCategory]);
+
+  // Filtered Real Official Telegram Stickers
+  const filteredStickers = useMemo(() => {
+    const q = searchQuery.trim().toLowerCase();
+    const list: Array<{ sticker: TelegramStickerItem; packTitle: string }> = [];
+    for (const pack of stickerPacks) {
+      if (selectedPackId !== 'all' && pack.id !== selectedPackId) continue;
+      for (const st of pack.stickers) {
+        if (!q || st.emoji.includes(q) || pack.title.toLowerCase().includes(q) || pack.shortName.toLowerCase().includes(q)) {
+          list.push({ sticker: st, packTitle: pack.title });
+        }
+      }
+    }
+    return list;
+  }, [stickerPacks, selectedPackId, searchQuery]);
+
+  if (!isOpen) return null;
+
+  return (
+    <div className="absolute bottom-16 right-4 w-[340px] sm:w-[380px] bg-white dark:bg-[#17212b] rounded-2xl shadow-2xl border border-[#e0e4e8] dark:border-[#202b36] overflow-hidden z-40 animate-in fade-in slide-in-from-bottom-2 duration-150 select-none flex flex-col max-h-[460px]">
+      {/* 1. Top Header: Tabs + Close Button */}
+      <div className="flex items-center justify-between px-3 py-2 border-b border-[#e0e4e8] dark:border-[#202b36] bg-gray-50/70 dark:bg-[#121b24] shrink-0">
+        <div className="flex items-center gap-1.5 text-xs font-semibold">
+          <button
+            type="button"
+            onClick={() => setTab('emoji')}
+            className={`px-3 py-1.5 rounded-xl cursor-pointer transition-all flex items-center gap-1.5 ${
+              tab === 'emoji'
+                ? 'bg-[#2481cc] text-white shadow-xs'
+                : 'text-[#707579] dark:text-[#7f93a5] hover:bg-black/5 dark:hover:bg-white/5'
+            }`}
+          >
+            <Smile className="w-3.5 h-3.5" />
+            <span>表情</span>
+            {searchQuery && tab === 'emoji' && (
+              <span className="text-[10px] opacity-80 tabular-nums">({filteredEmojis.length})</span>
+            )}
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setTab('stickers')}
+            className={`px-3 py-1.5 rounded-xl cursor-pointer transition-all flex items-center gap-1.5 ${
+              tab === 'stickers'
+                ? 'bg-[#2481cc] text-white shadow-xs'
+                : 'text-[#707579] dark:text-[#7f93a5] hover:bg-black/5 dark:hover:bg-white/5'
+            }`}
+          >
+            <Sparkles className="w-3.5 h-3.5" />
+            <span>电报贴纸</span>
+            {searchQuery && tab === 'stickers' && (
+              <span className="text-[10px] opacity-80 tabular-nums">({filteredStickers.length})</span>
+            )}
+          </button>
+        </div>
+
+        <button
+          type="button"
+          onClick={onClose}
+          className="p-1 rounded-lg text-[#707579] hover:text-[#111827] dark:text-[#7f93a5] dark:hover:text-white hover:bg-black/5 dark:hover:bg-white/5 transition-colors cursor-pointer"
+        >
+          <X className="w-4 h-4" />
+        </button>
+      </div>
+
+      {/* 2. Official Telegram Search Bar */}
+      <div className="p-2.5 pb-2 border-b border-[#e0e4e8] dark:border-[#202b36] shrink-0 bg-white dark:bg-[#17212b]">
+        <div className="relative flex items-center">
+          <Search className="w-3.5 h-3.5 text-[#707579] dark:text-[#7f93a5] absolute left-3 pointer-events-none" />
+          <input
+            type="text"
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+            placeholder={tab === 'emoji' ? '搜索表情 (输入关键词如: 笑, 赞, 爱心, 火...)' : '按 Emoji 或贴纸包名称搜索官方贴纸...'}
+            className="w-full bg-[#f0f2f5] dark:bg-[#242f3d] text-[#111827] dark:text-[#f5f7fa] text-xs pl-8 pr-7 py-1.5 rounded-xl border border-transparent focus:border-[#2ba0ff]/50 focus:bg-white dark:focus:bg-[#242f3d] focus:outline-none placeholder-[#8e8e93] dark:placeholder-[#7f93a5] transition-all"
+            autoFocus
+          />
+          {searchQuery && (
+            <button
+              onClick={() => setSearchQuery('')}
+              className="absolute right-2.5 text-[#707579] dark:text-[#7f93a5] hover:text-[#111827] dark:hover:text-white cursor-pointer"
+            >
+              <X className="w-3 h-3" />
+            </button>
+          )}
+        </div>
+
+        {/* Category Chips Bar */}
+        <div className="flex items-center gap-1.5 overflow-x-auto no-scrollbar pt-2 text-[11px]">
+          {tab === 'emoji' ? (
+            <>
+              <button
+                type="button"
+                onClick={() => setSelectedEmojiCategory('all')}
+                className={`px-2 py-0.5 rounded-lg whitespace-nowrap transition-colors cursor-pointer ${
+                  selectedEmojiCategory === 'all'
+                    ? 'bg-[#2481cc]/15 text-[#2481cc] dark:text-[#2ba0ff] font-semibold'
+                    : 'text-[#707579] dark:text-[#7f93a5] hover:bg-black/5 dark:hover:bg-white/5'
+                }`}
+              >
+                全部
+              </button>
+              <button
+                type="button"
+                onClick={() => setSelectedEmojiCategory('smileys')}
+                className={`px-2 py-0.5 rounded-lg whitespace-nowrap transition-colors cursor-pointer flex items-center gap-1 ${
+                  selectedEmojiCategory === 'smileys'
+                    ? 'bg-[#2481cc]/15 text-[#2481cc] dark:text-[#2ba0ff] font-semibold'
+                    : 'text-[#707579] dark:text-[#7f93a5] hover:bg-black/5 dark:hover:bg-white/5'
+                }`}
+              >
+                <span>😀</span> 脸部表情
+              </button>
+              <button
+                type="button"
+                onClick={() => setSelectedEmojiCategory('gestures')}
+                className={`px-2 py-0.5 rounded-lg whitespace-nowrap transition-colors cursor-pointer flex items-center gap-1 ${
+                  selectedEmojiCategory === 'gestures'
+                    ? 'bg-[#2481cc]/15 text-[#2481cc] dark:text-[#2ba0ff] font-semibold'
+                    : 'text-[#707579] dark:text-[#7f93a5] hover:bg-black/5 dark:hover:bg-white/5'
+                }`}
+              >
+                <span>👍</span> 手势人物
+              </button>
+              <button
+                type="button"
+                onClick={() => setSelectedEmojiCategory('hearts')}
+                className={`px-2 py-0.5 rounded-lg whitespace-nowrap transition-colors cursor-pointer flex items-center gap-1 ${
+                  selectedEmojiCategory === 'hearts'
+                    ? 'bg-[#2481cc]/15 text-[#2481cc] dark:text-[#2ba0ff] font-semibold'
+                    : 'text-[#707579] dark:text-[#7f93a5] hover:bg-black/5 dark:hover:bg-white/5'
+                }`}
+              >
+                <span>❤️</span> 情感爱心
+              </button>
+              <button
+                type="button"
+                onClick={() => setSelectedEmojiCategory('objects')}
+                className={`px-2 py-0.5 rounded-lg whitespace-nowrap transition-colors cursor-pointer flex items-center gap-1 ${
+                  selectedEmojiCategory === 'objects'
+                    ? 'bg-[#2481cc]/15 text-[#2481cc] dark:text-[#2ba0ff] font-semibold'
+                    : 'text-[#707579] dark:text-[#7f93a5] hover:bg-black/5 dark:hover:bg-white/5'
+                }`}
+              >
+                <span>🎉</span> 派对物品
+              </button>
+            </>
+          ) : (
+            <>
+              <button
+                type="button"
+                onClick={() => setSelectedPackId('all')}
+                className={`px-2 py-0.5 rounded-lg whitespace-nowrap transition-colors cursor-pointer ${
+                  selectedPackId === 'all'
+                    ? 'bg-[#2481cc]/15 text-[#2481cc] dark:text-[#2ba0ff] font-semibold'
+                    : 'text-[#707579] dark:text-[#7f93a5] hover:bg-black/5 dark:hover:bg-white/5'
+                }`}
+              >
+                全部贴纸包 ({stickerPacks.length})
+              </button>
+              {stickerPacks.map((pack) => (
+                <button
+                  key={pack.id}
+                  type="button"
+                  onClick={() => setSelectedPackId(pack.id)}
+                  className={`px-2 py-0.5 rounded-lg whitespace-nowrap transition-colors cursor-pointer max-w-[120px] truncate ${
+                    selectedPackId === pack.id
+                      ? 'bg-[#2481cc]/15 text-[#2481cc] dark:text-[#2ba0ff] font-semibold'
+                      : 'text-[#707579] dark:text-[#7f93a5] hover:bg-black/5 dark:hover:bg-white/5'
+                  }`}
+                  title={pack.title}
+                >
+                  {pack.stickers[0]?.emoji || '✨'} {pack.title}
+                </button>
+              ))}
+            </>
+          )}
+        </div>
+      </div>
+
+      {/* 3. Main Content: Emoji Grid or Sticker Grid */}
+      <div className="p-3 overflow-y-auto flex-1 min-h-[220px]">
+        {tab === 'emoji' ? (
+          filteredEmojis.length === 0 ? (
+            <div className="py-12 flex flex-col items-center justify-center text-center text-xs text-[#707579] dark:text-[#7f93a5]">
+              <Smile className="w-8 h-8 stroke-1 text-gray-400 mb-2" />
+              <p>未找到与「{searchQuery}」相关的表情</p>
+              <button
+                type="button"
+                onClick={() => setSearchQuery('')}
+                className="mt-2 text-[#2481cc] dark:text-[#2ba0ff] hover:underline cursor-pointer"
+              >
+                查看全部表情
+              </button>
+            </div>
+          ) : (
+            <div className="grid grid-cols-8 gap-1.5 text-xl text-center">
+              {filteredEmojis.map((item, index) => (
+                <button
+                  key={`${item.char}_${index}`}
+                  type="button"
+                  onClick={() => onSelectEmoji(item.char)}
+                  title={`${item.name} (${item.char})`}
+                  className="w-9 h-9 rounded-xl hover:bg-black/5 dark:hover:bg-white/10 flex items-center justify-center transition-all hover:scale-125 cursor-pointer active:scale-95"
+                >
+                  <span className="leading-none">{item.char}</span>
+                </button>
+              ))}
+            </div>
+          )
+        ) : isLoadingStickers ? (
+          <div className="py-14 flex flex-col items-center justify-center text-center text-xs text-[#707579] dark:text-[#7f93a5]">
+            <Loader2 className="w-6 h-6 animate-spin text-[#2481cc] mb-2" />
+            <p>正在从 Telegram 官方云端同步已安装贴纸包...</p>
+          </div>
+        ) : stickersError ? (
+          <div className="py-10 px-4 flex flex-col items-center justify-center text-center text-xs text-[#707579] dark:text-[#7f93a5]">
+            <AlertCircle className="w-7 h-7 text-amber-500 mb-2" />
+            <p className="text-rose-500 font-medium mb-2">{stickersError}</p>
+            <button
+              type="button"
+              onClick={() => void loadOfficialStickers()}
+              className="px-3 py-1 rounded-lg bg-[#2481cc]/10 text-[#2481cc] hover:bg-[#2481cc]/20 flex items-center gap-1 cursor-pointer"
+            >
+              <RefreshCw className="w-3 h-3" /> 重新加载官方贴纸
+            </button>
+          </div>
+        ) : filteredStickers.length === 0 ? (
+          <div className="py-12 flex flex-col items-center justify-center text-center text-xs text-[#707579] dark:text-[#7f93a5]">
+            <Sparkles className="w-8 h-8 stroke-1 text-gray-400 mb-2" />
+            <p>
+              {stickerPacks.length === 0
+                ? '当前 Telegram 账号尚未安装任何官方贴纸包'
+                : `未找到与「${searchQuery}」匹配的贴纸`}
+            </p>
+            <button
+              type="button"
+              onClick={() => {
+                if (searchQuery) {
+                  setSearchQuery('');
+                } else {
+                  void loadOfficialStickers();
+                }
+              }}
+              className="mt-2 text-[#2481cc] dark:text-[#2ba0ff] hover:underline cursor-pointer"
+            >
+              {searchQuery ? '查看全部已安装贴纸' : '刷新官方贴纸包'}
+            </button>
+          </div>
+        ) : (
+          <div className="grid grid-cols-4 gap-2">
+            {filteredStickers.map(({ sticker, packTitle }) => (
+              <button
+                key={`${sticker.setId}_${sticker.docId}`}
+                type="button"
+                title={`${sticker.emoji} · ${packTitle}`}
+                onClick={() => {
+                  onSelectSticker?.(sticker, packTitle);
+                  onClose();
+                }}
+                className="flex flex-col items-center justify-center p-1.5 rounded-xl hover:bg-black/5 dark:hover:bg-white/10 transition-all hover:scale-105 cursor-pointer group border border-transparent hover:border-[#2481cc]/20"
+              >
+                <div className="w-16 h-16 rounded-lg overflow-hidden relative flex items-center justify-center bg-black/[0.03] dark:bg-white/[0.04]">
+                  <img
+                    src={sticker.thumbUrl}
+                    alt={sticker.emoji}
+                    loading="lazy"
+                    className="w-full h-full object-contain group-hover:scale-110 transition-transform duration-200"
+                  />
+                  <span className="absolute bottom-0.5 right-0.5 text-xs bg-black/45 text-white rounded-full px-1 leading-tight">
+                    {sticker.emoji}
+                  </span>
+                </div>
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* 4. Footer Note */}
+      <div className="px-3 py-1.5 border-t border-[#e0e4e8] dark:border-[#202b36] bg-gray-50/50 dark:bg-[#121b24] flex items-center justify-between text-[11px] text-[#707579] dark:text-[#7f93a5]">
+        <span>Telegram 官方云端表情与贴纸库</span>
+        <span>
+          {tab === 'emoji'
+            ? `共 ${EMOJI_DATABASE.length} 个原生表情`
+            : `${stickerPacks.length} 套贴纸包`}
+        </span>
+      </div>
+    </div>
+  );
+};

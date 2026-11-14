@@ -1,0 +1,2924 @@
+import React, { useState, useEffect, useRef } from 'react';
+import {
+  Send,
+  Mic,
+  Smile,
+  Copy,
+  Check,
+  CheckCheck,
+  Languages,
+  ChevronDown,
+  MoreVertical,
+  Paperclip,
+  Phone,
+  Search,
+  Play,
+  Pause,
+  RotateCw,
+  X,
+  Volume2,
+  Sparkles,
+  AudioWaveform,
+  Video,
+  Music,
+  ShieldAlert,
+  Reply,
+  Pin,
+  Trash2,
+  Edit2,
+  FileText,
+  Image as ImageIcon,
+  Download,
+  Cpu,
+} from 'lucide-react';
+import { Chat, Message, TranslationSettings, MasterVoiceprint, TelegramStickerItem } from '../types';
+import { VoiceCloneStudioModal } from './VoiceCloneStudioModal';
+import { TelegramEmojiPicker } from './TelegramEmojiPicker';
+import { TelegramChatInfoDrawer } from './TelegramChatInfoDrawer';
+import type { RightPanelTab } from './UnifiedRightDock';
+import { getMasterVoiceprint } from '../services/voiceprintStorage';
+import { SUPPORTED_LANGUAGES } from '../data/mockData';
+import {
+  translateText,
+  transcribeAudio,
+  sendAutonomousChat,
+  syncTelegramCloudMessages,
+  submitTrainingFeedbackApi,
+  sendTelegramStickerApi,
+  fetchGlobalPersonaApi,
+} from '../services/apiService';
+
+function blobToDataUrl(blob: Blob): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      if (typeof reader.result === 'string') {
+        resolve(reader.result);
+      } else {
+        reject(new Error('文件读取结果无效'));
+      }
+    };
+    reader.onerror = () => reject(reader.error || new Error('文件读取失败'));
+    reader.onabort = () => reject(new Error('文件读取已中止'));
+    reader.readAsDataURL(blob);
+  });
+}
+
+export function getLanguageDisplayName(code: string): string {
+  if (!code) return '英语';
+  if (code === 'Turkish' || code === 'Türkçe' || code === 'tr') return '土耳其语';
+  if (code === 'Chinese' || code === 'zh-CN') return '中文';
+  if (code === 'Traditional Chinese' || code === 'zh-TW') return '繁体中文';
+  if (code === 'English' || code === 'en') return '英语';
+  if (code === 'Russian' || code === 'ru') return '俄语';
+  if (code === 'Spanish' || code === 'es') return '西班牙语';
+  if (code === 'Japanese' || code === 'ja') return '日语';
+  if (code === 'Korean' || code === 'ko') return '韩语';
+  if (code === 'Arabic' || code === 'ar') return '阿拉伯语';
+  if (code === 'French' || code === 'fr') return '法语';
+  if (code === 'German' || code === 'de') return '德语';
+  if (code === 'Vietnamese' || code === 'vi') return '越南语';
+  if (code === 'Thai' || code === 'th') return '泰语';
+  if (code === 'Indonesian' || code === 'id') return '印尼语';
+  if (code === 'Portuguese' || code === 'pt') return '葡萄牙语';
+  if (code === 'Italian' || code === 'it') return '意大利语';
+  const found = SUPPORTED_LANGUAGES.find((l) => l.code === code);
+  if (found) {
+    const match = found.name.match(/\(([^)]+)\)/);
+    if (match && match[1]) {
+      return match[1].split(/[·/]/)[0].trim() || found.name;
+    }
+    return found.name;
+  }
+  return code;
+}
+
+export function detectClientLangCode(text: string): string {
+  if (!text || typeof text !== 'string') return 'en';
+  const clean = text.trim();
+  if (/[\u4e00-\u9fa5]/.test(clean)) return 'zh-CN';
+  if (/[іїєґІЇЄҐ]/.test(clean) && /[\u0400-\u04FF]/.test(clean)) return 'uk';
+  if (/[\u0400-\u04FF]/.test(clean)) return 'ru';
+  if (/[\u3040-\u30ff]/.test(clean)) return 'ja';
+  if (/[\uac00-\ud7af]/.test(clean)) return 'ko';
+  if (/[پچژگک]/.test(clean) && /[\u0600-\u06FF]/.test(clean)) return 'fa';
+  if (/[\u0600-\u06FF]/.test(clean)) return 'ar';
+  if (/[\u0590-\u05FF]/.test(clean)) return 'he';
+  if (/[\u0370-\u03FF]/.test(clean)) return 'el';
+  if (/[\u0e00-\u0e7f]/.test(clean)) return 'th';
+  if (/[\u0900-\u097F]/.test(clean)) return 'hi';
+  if (/[\u0980-\u09FF]/.test(clean)) return 'bn';
+  if (/[\u0B80-\u0BFF]/.test(clean)) return 'ta';
+  if (/[\u0C00-\u0C7F]/.test(clean)) return 'te';
+  if (/[\u1000-\u109F]/.test(clean)) return 'my';
+  if (/[\u1780-\u17FF]/.test(clean)) return 'km';
+  if (/[\u0E80-\u0EFF]/.test(clean)) return 'lo';
+  if (/[\u10A0-\u10FF]/.test(clean)) return 'ka';
+  if (/[\u0530-\u058F]/.test(clean)) return 'hy';
+  if (/[\u1200-\u137F]/.test(clean)) return 'am';
+  if (
+    /[ãõ]/i.test(clean) ||
+    /\b(olá|ola|bom dia|boa tarde|boa noite|obrigado|obrigada|você|voce|tudo bem)\b/i.test(clean)
+  ) {
+    return 'pt';
+  }
+  if (
+    /\b(ciao|buongiorno|buonasera|grazie|come stai|arrivederci|prego)\b/i.test(clean)
+  ) {
+    return 'it';
+  }
+  if (
+    /[¿¡ñÑ]/i.test(clean) ||
+    /\b(hola|buenos días|buenas noches|gracias|amigo|amiga|por favor|cómo estás|como estas|adiós|adios|qué tal|que tal)\b/i.test(clean)
+  ) {
+    return 'es';
+  }
+  if (
+    /[œæ]/i.test(clean) ||
+    /\b(bonjour|bonsoir|merci|salut|comment|s'il vous plaît|sil vous plait|oui|non|mon ami|mon amour|très bien|tres bien|ça va|ca va)\b/i.test(clean)
+  ) {
+    return 'fr';
+  }
+  if (
+    /[çÇğĞıİşŞ]/.test(clean) ||
+    /\b(merhaba|günaydın|gunaydin|nasılsın|nasilsin|teşekkür|tesekkur|evet|hayır|hayir|tamam|lütfen|lutfen|görüşürüz|gorusuruz|harika|canım|canim|iyiyim|selam|nasılsınız|nasilsiniz)\b/i.test(clean)
+  ) {
+    return 'tr';
+  }
+  if (
+    /[ăắằẳẵặâầấẩẫậêềếểễệôồốổỗộơờớởỡợưừứửữựđẢảẼẽĨĩÕõŨũỸỹẠạẸẹỊịỌọỤụỴỵẢảẺẻỈỉỎỏỦủỶỷàáèéìíòóùúỳý]/i.test(clean) ||
+    /\b(xin chào|cảm ơn|cam on|chào|bạn|ơi|vâng|không|tạm biệt|chúc)\b/i.test(clean)
+  ) {
+    return 'vi';
+  }
+  if (
+    /[äöüß]/i.test(clean) ||
+    /\b(guten tag|guten morgen|danke|bitte|wie geht|hallo|tschüss|tschuess|auf wiedersehen)\b/i.test(clean)
+  ) {
+    return 'de';
+  }
+  if (
+    /\b(selamat pagi|selamat siang|terima kasih|apa kabar|sama-sama|tidak|iya|halo|bagaimana)\b/i.test(clean)
+  ) {
+    return 'id';
+  }
+  return 'en';
+}
+
+export function getOutboundTargetLanguage(
+  chat?: Chat | null,
+  settings?: TranslationSettings | null,
+  recentMessages?: Message[]
+): string {
+  // 1. Single-chat dedicated language has the absolute highest priority!
+  if (chat?.sourceLang && chat.sourceLang !== 'Auto' && chat.sourceLang !== 'Chinese') {
+    return chat.sourceLang;
+  }
+  if (chat?.targetLang && chat.targetLang !== 'Auto' && chat.targetLang !== 'Chinese') {
+    return chat.targetLang;
+  }
+  // 2. Global default language from settings
+  if (settings?.defaultSourceLang && settings.defaultSourceLang !== 'Auto') {
+    return settings.defaultSourceLang;
+  }
+
+  if (recentMessages && recentMessages.length > 0) {
+    const peerMessages = recentMessages.filter((m) => m.sender === 'peer');
+    const lastPeerMsg = peerMessages[peerMessages.length - 1];
+    if (lastPeerMsg?.text) {
+      const code = detectClientLangCode(lastPeerMsg.text);
+      if (code === 'tr') return 'Turkish';
+      if (code === 'ru') return 'Russian';
+      if (code === 'ja') return 'Japanese';
+      if (code === 'ko') return 'Korean';
+      if (code === 'ar') return 'Arabic';
+      if (code === 'es') return 'Spanish';
+      if (code === 'pt') return 'Portuguese';
+      if (code === 'fr') return 'French';
+      if (code === 'de') return 'German';
+      if (code === 'vi') return 'Vietnamese';
+      if (code === 'th') return 'Thai';
+      if (code === 'id') return 'Indonesian';
+      if (code === 'en') return 'English';
+      return code;
+    }
+  }
+
+  return 'English';
+}
+
+export function getInboundTargetLanguage(
+  chat?: Chat | null,
+  settings?: TranslationSettings | null
+): string {
+  if (settings?.defaultTargetLang && settings.defaultTargetLang !== 'Auto') {
+    return settings.defaultTargetLang;
+  }
+  if (chat?.targetLang && chat.targetLang !== 'Auto') {
+    return chat.targetLang;
+  }
+  return 'Chinese';
+}
+
+interface ChatAreaProps {
+  chat: Chat | null;
+  messages: Message[];
+  translationSettings: TranslationSettings;
+  onSendMessage: (message: Partial<Message> & { skipCloudRelay?: boolean }) => void;
+  onUpdateChatLanguage?: (chatId: string, sourceLang: string, targetLang: string) => void;
+  onOpenTranslation?: () => void;
+  customLLMConfig?: any;
+  currentAccountId?: string;
+  onMessagesSynced?: (synced: Message[]) => void;
+  onOpenKnowledgeEvolution?: () => void;
+  onDeleteMessage?: (messageId: string) => void | Promise<{ ok: boolean; error?: string } | void>;
+  onEditMessage?: (messageId: string, newText: string) => void | Promise<{ ok: boolean; error?: string } | void>;
+  onUpdateMessage?: (messageId: string, patch: Partial<Message>) => void;
+  onRetryMessage?: (messageId: string) => Promise<{ ok: boolean; error?: string }>;
+  onToggleReaction?: (messageId: string, emoji: string) => void | Promise<any>;
+  onTogglePinMessage?: (messageId: string) => void | Promise<any>;
+  onClearHistory?: (chatId: string) => void | Promise<{ ok: boolean; error?: string } | void>;
+  onToggleMuteChat?: (chatId: string) => void | Promise<any>;
+  onTogglePinChat?: (chatId: string) => void | Promise<any>;
+  onForwardMessage?: (message: Message) => void;
+  onUpdateChatTitle?: (chatId: string, newTitle: string) => void | Promise<{ ok: boolean; error?: string } | void>;
+  onChatInfoUpdated?: (chatId: string, patch: Partial<Chat>) => void;
+  onCloseChat?: () => void;
+  onOpenVoiceCall?: () => void;
+  onOpenCustomLLM?: () => void;
+  activeRightPanel?: RightPanelTab | null;
+  isChatInfoOpenExternal?: boolean;
+  onChatInfoOpenChange?: (open: boolean) => void;
+  sendWithEnter?: boolean;
+}
+
+export const ChatArea: React.FC<ChatAreaProps> = ({
+  chat,
+  messages,
+  translationSettings,
+  onSendMessage,
+  onUpdateChatLanguage,
+  onOpenTranslation,
+  customLLMConfig,
+  currentAccountId,
+  onMessagesSynced,
+  onOpenKnowledgeEvolution,
+  onDeleteMessage,
+  onEditMessage,
+  onUpdateMessage,
+  onRetryMessage,
+  onToggleReaction,
+  onTogglePinMessage,
+  onClearHistory,
+  onToggleMuteChat,
+  onTogglePinChat,
+  onForwardMessage,
+  onUpdateChatTitle,
+  onChatInfoUpdated,
+  onCloseChat,
+  onOpenVoiceCall,
+  onOpenCustomLLM,
+  activeRightPanel,
+  isChatInfoOpenExternal,
+  onChatInfoOpenChange,
+  sendWithEnter = true,
+}) => {
+  const [inputText, setInputText] = useState('');
+  const [translatedPreview, setTranslatedPreview] = useState('');
+  const [translatedPreviewSource, setTranslatedPreviewSource] = useState('');
+  const [isTranslatingPreview, setIsTranslatingPreview] = useState(false);
+  const [isTranslateBarVisible, setIsTranslateBarVisible] = useState(true);
+  const [isLangMenuOpen, setIsLangMenuOpen] = useState(false);
+  const [langMenuSearch, setLangMenuSearch] = useState('');
+  const [showEmojiPicker, setShowEmojiPicker] = useState(false);
+  const [copiedId, setCopiedId] = useState<string | null>(null);
+  const [playingAudioId, setPlayingAudioId] = useState<string | null>(null);
+  const [audioProgress, setAudioProgress] = useState<Record<string, number>>({});
+  const [transcribingMap, setTranscribingMap] = useState<Record<string, boolean>>({});
+  const [isRecordingMic, setIsRecordingMic] = useState(false);
+  const [recordDuration, setRecordDuration] = useState(0);
+  const recordDurationRef = useRef<number>(0);
+  const [retryingMsgIds, setRetryingMsgIds] = useState<Set<string>>(new Set());
+  const [isVoiceStudioOpen, setIsVoiceStudioOpen] = useState(false);
+  const [masterVoiceprint, setMasterVoiceprint] = useState<MasterVoiceprint | null>(null);
+  const [activePersonaName, setActivePersonaName] = useState<string>('默认人设');
+
+  useEffect(() => {
+    let mounted = true;
+    fetchGlobalPersonaApi()
+      .then((res) => {
+        if (mounted && res?.success && res.persona?.personaName) {
+          setActivePersonaName(res.persona.personaName);
+        }
+      })
+      .catch(() => {});
+    return () => {
+      mounted = false;
+    };
+  }, []);
+
+  // Telegram Features State
+  const [localChatInfoOpen, setLocalChatInfoOpen] = useState(false);
+  const isChatInfoOpen = isChatInfoOpenExternal ?? localChatInfoOpen;
+  const setChatInfoOpen = (open: boolean) => {
+    setLocalChatInfoOpen(open);
+    onChatInfoOpenChange?.(open);
+  };
+  const [isSearchingInChat, setIsSearchingInChat] = useState(false);
+  const [chatSearchQuery, setChatSearchQuery] = useState('');
+  const [isAttachmentMenuOpen, setIsAttachmentMenuOpen] = useState(false);
+  const imageInputRef = useRef<HTMLInputElement>(null);
+  const videoInputRef = useRef<HTMLInputElement>(null);
+  const audioInputRef = useRef<HTMLInputElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const [replyingTo, setReplyingTo] = useState<Message | null>(null);
+  const [editingMessage, setEditingMessage] = useState<Message | null>(null);
+  const [hoveredMessageId, setHoveredMessageId] = useState<string | null>(null);
+  const [activeReactionMsgId, setActiveReactionMsgId] = useState<string | null>(null);
+  const [pastedImage, setPastedImage] = useState<{
+    dataUrl: string;
+    file: File;
+    caption?: string;
+  } | null>(null);
+
+  // Message Context Menu & Delete Confirmation State
+  const [messageContextMenu, setMessageContextMenu] = useState<{
+    message: Message;
+    x: number;
+    y: number;
+  } | null>(null);
+  const [messageToDelete, setMessageToDelete] = useState<Message | null>(null);
+
+  const handleMessageContextMenu = (e: React.MouseEvent, msg: Message) => {
+    e.preventDefault();
+    e.stopPropagation();
+
+    const menuWidth = 190;
+    const menuHeight = 250;
+    let x = e.clientX;
+    let y = e.clientY;
+
+    if (x + menuWidth > window.innerWidth) {
+      x = window.innerWidth - menuWidth - 12;
+    }
+    if (y + menuHeight > window.innerHeight) {
+      y = window.innerHeight - menuHeight - 12;
+    }
+
+    setMessageContextMenu({
+      message: msg,
+      x: Math.max(12, x),
+      y: Math.max(12, y),
+    });
+  };
+
+  useEffect(() => {
+    const handleCloseMenu = () => {
+      setMessageContextMenu(null);
+    };
+    if (messageContextMenu) {
+      window.addEventListener('click', handleCloseMenu);
+      window.addEventListener('scroll', handleCloseMenu, true);
+      return () => {
+        window.removeEventListener('click', handleCloseMenu);
+        window.removeEventListener('scroll', handleCloseMenu, true);
+      };
+    }
+  }, [messageContextMenu]);
+
+  const confirmDeleteMessage = async () => {
+    if (messageToDelete) {
+      const targetId = messageToDelete.id;
+      setMessageToDelete(null);
+      const res = await onDeleteMessage?.(targetId);
+      if (res && typeof res === 'object' && res.ok === false) {
+        showSyncNotice(`云端撤回删除失败：${res.error || '请检查 Telegram 在线状态'}`);
+        return;
+      }
+      showSyncNotice('已从云端与本地删除该条消息', 2500);
+    }
+  };
+
+  // Sync Master Voiceprint & Listen for Real-Time Updates
+  useEffect(() => {
+    setMasterVoiceprint(getMasterVoiceprint());
+    const handleVoiceprintChange = (e: any) => {
+      setMasterVoiceprint(e.detail || getMasterVoiceprint());
+    };
+    window.addEventListener('tg_voiceprint_updated', handleVoiceprintChange);
+    return () => window.removeEventListener('tg_voiceprint_updated', handleVoiceprintChange);
+  }, []);
+
+  // AI Holographic Memory Suggestion State
+  const [isGeneratingAi, setIsGeneratingAi] = useState(false);
+  const [isSending, setIsSending] = useState(false);
+  const [aiSuggestion, setAiSuggestion] = useState<string | null>(null);
+  const [aiSuggestionTranslation, setAiSuggestionTranslation] = useState<string | null>(null);
+  const [isTranslatingSuggestion, setIsTranslatingSuggestion] = useState(false);
+  const [isSyncingCloud, setIsSyncingCloud] = useState(false);
+  const [syncNotice, setSyncNotice] = useState<string | null>(null);
+  const syncNoticeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const showSyncNotice = (msg: string, durationMs = 4000) => {
+    if (syncNoticeTimerRef.current) {
+      clearTimeout(syncNoticeTimerRef.current);
+    }
+    setSyncNotice(msg);
+    if (durationMs > 0) {
+      syncNoticeTimerRef.current = setTimeout(() => {
+        setSyncNotice(null);
+        syncNoticeTimerRef.current = null;
+      }, durationMs);
+    }
+  };
+
+  useEffect(() => {
+    return () => {
+      if (syncNoticeTimerRef.current) {
+        clearTimeout(syncNoticeTimerRef.current);
+      }
+    };
+  }, []);
+
+  const langMenuRef = useRef<HTMLDivElement>(null);
+  const messagesEndRef = useRef<HTMLDivElement>(null);
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const audioChunksRef = useRef<Blob[]>([]);
+  const recordTimerRef = useRef<any>(null);
+
+  const outboundTargetLang = getOutboundTargetLanguage(chat, translationSettings, messages);
+  const inboundTargetLang = getInboundTargetLanguage(chat, translationSettings);
+
+  const handleSyncCloudMessages = async () => {
+    if (!chat?.id) return;
+    setIsSyncingCloud(true);
+    setSyncNotice('正在从 Telegram 官方云端拉取真实历史消息...');
+    try {
+      const cloudMsgs = await syncTelegramCloudMessages(chat.id, currentAccountId);
+      if (cloudMsgs && cloudMsgs.length > 0) {
+        onMessagesSynced?.(cloudMsgs);
+        setSyncNotice(`云端同步成功！已拉取 ${cloudMsgs.length} 条真实聊天记录`);
+      } else {
+        setSyncNotice('云端已是最新记录或暂无更多历史');
+      }
+    } catch {
+      setSyncNotice('云端历史同步失败，请检查账号连接');
+    } finally {
+      setIsSyncingCloud(false);
+      setTimeout(() => setSyncNotice(null), 3000);
+    }
+  };
+
+  const handleGenerateAiSuggestion = async () => {
+    if (!chat) return;
+    setIsGeneratingAi(true);
+    setAiSuggestion(null);
+    setAiSuggestionTranslation(null);
+    setSyncNotice(null);
+    try {
+      const res = await sendAutonomousChat(
+        messages.slice(-30).map((m) => {
+          const resolvedText = (m.text || m.sttText || m.imageCaption || '').trim();
+          const maybeCreatedAt = (m as unknown as { createdAt?: unknown }).createdAt;
+          return {
+            id: m.id,
+            role: m.sender === 'me' ? 'assistant' : 'user',
+            text: resolvedText,
+            content: resolvedText,
+            sender: m.sender,
+            timestamp: m.timestamp,
+            createdAt: typeof maybeCreatedAt === 'number' ? maybeCreatedAt : undefined,
+            sttText: m.sttText,
+            imageCaption: m.imageCaption,
+          };
+        }),
+        customLLMConfig || {},
+        '你是一位高情商、懂倾听、生活化的真实人类伴侣/专属客服。请融入客户全息画像与过往约定，用1~2句日常短句回复，像用手机 Telegram 私聊一样自然，绝不说“作为AI”。',
+        false,
+        chat.id,
+        currentAccountId,
+        outboundTargetLang
+      );
+      if (res && res.replyText) {
+        setAiSuggestion(res.replyText);
+        if (res.cnTranslation) {
+          setAiSuggestionTranslation(res.cnTranslation);
+        } else if (outboundTargetLang && outboundTargetLang !== 'Chinese' && outboundTargetLang !== 'zh-CN') {
+          setIsTranslatingSuggestion(true);
+          try {
+            const cn = await translateText(
+              res.replyText,
+              'Auto',
+              'Chinese',
+              customLLMConfig,
+              translationSettings?.preferredEngine || 'gemini',
+              undefined,
+              translationSettings?.geminiModel,
+              translationSettings?.geminiApiKey,
+              translationSettings?.customModelName
+            );
+            setAiSuggestionTranslation(cn || null);
+          } catch (transErr: any) {
+            setAiSuggestionTranslation(null);
+            showSyncNotice(`参考译文失败：${transErr?.message || '请检查翻译通道配置'}`, 5000);
+          } finally {
+            setIsTranslatingSuggestion(false);
+          }
+        }
+      }
+    } catch (err: any) {
+      showSyncNotice(err?.message || 'AI 拟真建议生成失败，请检查网络或大模型配置', 6000);
+    } finally {
+      setIsGeneratingAi(false);
+    }
+  };
+
+  useEffect(() => {
+    const handleOutsideClick = (e: MouseEvent) => {
+      if (langMenuRef.current && !langMenuRef.current.contains(e.target as Node)) {
+        setIsLangMenuOpen(false);
+      }
+    };
+    if (isLangMenuOpen) {
+      document.addEventListener('mousedown', handleOutsideClick);
+      return () => document.removeEventListener('mousedown', handleOutsideClick);
+    }
+  }, [isLangMenuOpen]);
+
+  // Telegram Desktop Esc key handler to close overlays or active chat
+  useEffect(() => {
+    if (!chat) return;
+
+    const handleGlobalKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        // If an external modal (z-50) or docked right panel is open, let it handle Esc
+        if (document.querySelector('.z-50') || activeRightPanel) return;
+
+        // 1. Close in-chat overlays / temporary interactive states
+        if (pastedImage) {
+          e.preventDefault();
+          setPastedImage(null);
+          return;
+        }
+        if (editingMessage) {
+          e.preventDefault();
+          setEditingMessage(null);
+          setInputText('');
+          return;
+        }
+        if (replyingTo) {
+          e.preventDefault();
+          setReplyingTo(null);
+          return;
+        }
+        if (showEmojiPicker) {
+          e.preventDefault();
+          setShowEmojiPicker(false);
+          return;
+        }
+        if (isLangMenuOpen) {
+          e.preventDefault();
+          setIsLangMenuOpen(false);
+          return;
+        }
+        if (isSearchingInChat) {
+          e.preventDefault();
+          setIsSearchingInChat(false);
+          setChatSearchQuery('');
+          return;
+        }
+        if (isChatInfoOpen) {
+          e.preventDefault();
+          setChatInfoOpen(false);
+          return;
+        }
+        if (aiSuggestion) {
+          e.preventDefault();
+          setAiSuggestion(null);
+          setAiSuggestionTranslation(null);
+          return;
+        }
+        if (messageToDelete) {
+          e.preventDefault();
+          setMessageToDelete(null);
+          return;
+        }
+        if (messageContextMenu) {
+          e.preventDefault();
+          setMessageContextMenu(null);
+          return;
+        }
+        if (translatedPreview) {
+          e.preventDefault();
+          setTranslatedPreview('');
+          setTranslatedPreviewSource('');
+          return;
+        }
+
+        // 2. Close active chat workbench
+        e.preventDefault();
+        onCloseChat?.();
+      }
+    };
+
+    window.addEventListener('keydown', handleGlobalKeyDown);
+    return () => window.removeEventListener('keydown', handleGlobalKeyDown);
+  }, [
+    chat,
+    pastedImage,
+    editingMessage,
+    replyingTo,
+    showEmojiPicker,
+    isLangMenuOpen,
+    isSearchingInChat,
+    isChatInfoOpen,
+    activeRightPanel,
+    aiSuggestion,
+    translatedPreview,
+    messageContextMenu,
+    messageToDelete,
+    onCloseChat,
+  ]);
+
+  const scrollToBottom = () => {
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  };
+
+  useEffect(() => {
+    scrollToBottom();
+  }, [messages]);
+
+  // Reset translation preview & historical AI suggestion state when switching chats
+  useEffect(() => {
+    setTranslatedPreview('');
+    setTranslatedPreviewSource('');
+    setAiSuggestion(null);
+    setAiSuggestionTranslation(null);
+    setIsTranslatingSuggestion(false);
+    if (syncNoticeTimerRef.current) {
+      clearTimeout(syncNoticeTimerRef.current);
+      syncNoticeTimerRef.current = null;
+    }
+    setSyncNotice(null);
+  }, [chat?.id]);
+
+  // Real-time input translation preview
+  useEffect(() => {
+    if (!inputText.trim() || translationSettings?.autoTranslateOutbound === false) {
+      setTranslatedPreview('');
+      setTranslatedPreviewSource('');
+      return;
+    }
+
+    let isCurrent = true;
+    const timer = setTimeout(async () => {
+      setIsTranslatingPreview(true);
+      const queryText = inputText.trim();
+      try {
+        const trans = await translateText(
+          queryText,
+          'Auto',
+          outboundTargetLang,
+          customLLMConfig,
+          translationSettings?.preferredEngine,
+          undefined,
+          translationSettings?.geminiModel,
+          translationSettings?.geminiApiKey,
+          translationSettings?.customModelName
+        );
+        if (isCurrent) {
+          setTranslatedPreview(trans);
+          setTranslatedPreviewSource(queryText);
+        }
+      } catch (err: any) {
+        if (isCurrent) {
+          setTranslatedPreview(`⚠️ 当前通道不可用: ${err?.message || '请求失败'}`);
+          setTranslatedPreviewSource(queryText);
+        }
+      } finally {
+        if (isCurrent) {
+          setIsTranslatingPreview(false);
+        }
+      }
+    }, 400);
+
+    return () => {
+      isCurrent = false;
+      clearTimeout(timer);
+    };
+  }, [inputText, outboundTargetLang, translationSettings, customLLMConfig]);
+
+  // Send message
+  const handleSendText = async () => {
+    if (isSending) return;
+    const textToSend = inputText.trim();
+    if (!textToSend || !chat) return;
+
+    setIsSending(true);
+    try {
+      const shouldAutoTranslate = translationSettings?.autoTranslateOutbound !== false;
+      let targetText = textToSend;
+      let translationOfTarget = '';
+
+      if (shouldAutoTranslate) {
+        if (translatedPreview && translatedPreview.startsWith('⚠️ 当前通道不可用')) {
+          setSyncNotice('当前翻译通道不可用，请在顶栏设置中切换可用通道后再发送');
+          setTimeout(() => setSyncNotice(null), 4000);
+          return;
+        }
+
+        // Anti-race condition protection: verify preview text matches current textToSend
+        const isPreviewFresh = translatedPreview && translatedPreviewSource === textToSend;
+        targetText = isPreviewFresh ? translatedPreview : '';
+        translationOfTarget = textToSend;
+
+        if (!targetText) {
+          try {
+            targetText = await translateText(
+              textToSend,
+              'Auto',
+              outboundTargetLang,
+              customLLMConfig,
+              translationSettings?.preferredEngine,
+              undefined,
+              translationSettings?.geminiModel,
+              translationSettings?.geminiApiKey,
+              translationSettings?.customModelName
+            );
+          } catch (err: any) {
+            setSyncNotice(`当前翻译通道不可用: ${err?.message || '请求失败'}`);
+            setTimeout(() => setSyncNotice(null), 4000);
+            return;
+          }
+        }
+
+        if (detectClientLangCode(textToSend) !== 'zh-CN') {
+          targetText = textToSend;
+          // When input text is already non-Chinese, translatedPreview was generated in the foreign target language, not Chinese.
+          // We translate the typed foreign text strictly into Chinese for operator reference.
+          try {
+            translationOfTarget = await translateText(
+              textToSend,
+              'Auto',
+              'Chinese',
+              customLLMConfig,
+              translationSettings?.preferredEngine,
+              undefined,
+              translationSettings?.geminiModel,
+              translationSettings?.geminiApiKey,
+              translationSettings?.customModelName
+            );
+          } catch (err: any) {
+            translationOfTarget = '';
+            setSyncNotice(`中文对照翻译失败: ${err?.message || '请检查翻译通道配置'}`);
+            setTimeout(() => setSyncNotice(null), 4000);
+          }
+        }
+      } else {
+        targetText = textToSend;
+        translationOfTarget = '';
+      }
+
+      if (editingMessage) {
+        const editRes = await onEditMessage?.(editingMessage.id, targetText);
+        if (editRes && typeof editRes === 'object' && editRes.ok === false) {
+          showSyncNotice(`云端编辑失败：${editRes.error || '请检查 Telegram 在线状态'}`);
+          return;
+        }
+        setEditingMessage(null);
+        setInputText('');
+        setTranslatedPreview('');
+        setTranslatedPreviewSource('');
+        return;
+      }
+
+      onSendMessage({
+        sender: 'me',
+        text: targetText,
+        translatedText: translationOfTarget,
+        replyTo: replyingTo
+          ? {
+              id: replyingTo.id,
+              senderName: replyingTo.sender === 'me' ? '我' : (chat.title || '对方'),
+              text: replyingTo.text,
+            }
+          : undefined,
+        timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false }),
+      });
+
+      setReplyingTo(null);
+      setInputText('');
+      setTranslatedPreview('');
+      setTranslatedPreviewSource('');
+    } finally {
+      setIsSending(false);
+    }
+  };
+
+  const handleImageSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    try {
+      const dataUrl = await blobToDataUrl(file);
+      const userCaption = inputText.trim();
+      onSendMessage({
+        sender: 'me',
+        isImage: true,
+        imageUrl: dataUrl,
+        imageCaption: userCaption || undefined,
+        text: userCaption || '',
+        timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false }),
+      });
+      if (userCaption) {
+        setInputText('');
+        setTranslatedPreview('');
+        setTranslatedPreviewSource('');
+      }
+    } catch (err: any) {
+      console.warn('Failed to upload image', err);
+      showSyncNotice(`图片读取失败：${err?.message || '请检查图片文件是否损坏或有读取权限'}`);
+    }
+    setIsAttachmentMenuOpen(false);
+    if (e.target) e.target.value = '';
+  };
+
+  const handleVideoSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    try {
+      const dataUrl = await blobToDataUrl(file);
+      const userCaption = inputText.trim();
+
+      let duration = 0;
+      try {
+        const tempVideo = document.createElement('video');
+        tempVideo.preload = 'metadata';
+        tempVideo.src = dataUrl;
+        await new Promise((resolve) => {
+          tempVideo.onloadedmetadata = () => {
+            duration = Math.round(tempVideo.duration) || 0;
+            resolve(null);
+          };
+          tempVideo.onerror = () => resolve(null);
+          setTimeout(resolve, 800);
+        });
+      } catch {}
+
+      onSendMessage({
+        sender: 'me',
+        isVideo: true,
+        videoUrl: dataUrl,
+        videoDuration: duration,
+        text: userCaption || `[视频] ${file.name}`,
+        timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false }),
+      });
+      if (userCaption) {
+        setInputText('');
+        setTranslatedPreview('');
+        setTranslatedPreviewSource('');
+      }
+    } catch (err: any) {
+      console.warn('Failed to upload video', err);
+      showSyncNotice(`视频读取失败：${err?.message || '请检查视频文件是否损坏或有读取权限'}`);
+    }
+    setIsAttachmentMenuOpen(false);
+    if (e.target) e.target.value = '';
+  };
+
+  const handleAudioSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    try {
+      const dataUrl = await blobToDataUrl(file);
+      let duration = 0;
+      try {
+        const tempAudio = new Audio(dataUrl);
+        await new Promise((resolve) => {
+          tempAudio.onloadedmetadata = () => {
+            duration = Math.round(tempAudio.duration) || 0;
+            resolve(null);
+          };
+          tempAudio.onerror = () => resolve(null);
+          setTimeout(resolve, 800);
+        });
+      } catch {}
+
+      onSendMessage({
+        sender: 'me',
+        isAudio: true,
+        audioUrl: dataUrl,
+        audioDuration: duration || 5,
+        text: '🎤 语音消息',
+        timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false }),
+      });
+    } catch (err: any) {
+      console.warn('Failed to upload audio', err);
+      showSyncNotice(`音频读取失败：${err?.message || '请检查音频文件是否损坏或有读取权限'}`);
+    }
+    setIsAttachmentMenuOpen(false);
+    if (e.target) e.target.value = '';
+  };
+
+  const handleFileSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    try {
+      const isImg = file.type.startsWith('image/') || /\.(jpg|jpeg|png|gif|webp|bmp)$/i.test(file.name);
+      const isVid = file.type.startsWith('video/') || /\.(mp4|mov|webm|mkv|avi|m4v)$/i.test(file.name);
+      const isAud = file.type.startsWith('audio/') || /\.(mp3|ogg|wav|m4a|aac|flac)$/i.test(file.name);
+      const dataUrl = await blobToDataUrl(file);
+
+      if (isImg) {
+        const userCaption = inputText.trim();
+        onSendMessage({
+          sender: 'me',
+          isImage: true,
+          imageUrl: dataUrl,
+          imageCaption: userCaption || undefined,
+          text: userCaption || '',
+          timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false }),
+        });
+        if (userCaption) {
+          setInputText('');
+          setTranslatedPreview('');
+          setTranslatedPreviewSource('');
+        }
+      } else if (isVid) {
+        const userCaption = inputText.trim();
+        onSendMessage({
+          sender: 'me',
+          isVideo: true,
+          videoUrl: dataUrl,
+          text: userCaption || `[视频] ${file.name}`,
+          timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false }),
+        });
+        if (userCaption) {
+          setInputText('');
+          setTranslatedPreview('');
+          setTranslatedPreviewSource('');
+        }
+      } else if (isAud) {
+        onSendMessage({
+          sender: 'me',
+          isAudio: true,
+          audioUrl: dataUrl,
+          audioDuration: 5,
+          text: '🎤 语音消息',
+          timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false }),
+        });
+      } else {
+        const sizeKb = (file.size / 1024).toFixed(1);
+        onSendMessage({
+          sender: 'me',
+          isFile: true,
+          fileName: file.name,
+          fileSize: `${sizeKb} KB`,
+          fileUrl: dataUrl,
+          text: `[文件] ${file.name}`,
+          timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false }),
+        });
+      }
+    } catch (err: any) {
+      console.warn('Failed to upload file', err);
+      showSyncNotice(`文件读取失败：${err?.message || '请检查文件是否损坏或有读取权限'}`);
+    }
+    setIsAttachmentMenuOpen(false);
+    if (e.target) e.target.value = '';
+  };
+
+  const handleSendSticker = async (sticker: TelegramStickerItem, packTitle?: string) => {
+    if (!chat) return;
+    if (!chat.id.startsWith('tg_') || currentAccountId === 'acc_telegram_bot') {
+      showSyncNotice('仅已连接的 Telegram 个人账号支持发送官方云端贴纸');
+      return;
+    }
+    setShowEmojiPicker(false);
+    const replyToMsgId = replyingTo?.telegramMessageId;
+    const res = await sendTelegramStickerApi({
+      accountId: currentAccountId,
+      chatId: chat.id,
+      sticker,
+      replyToMsgId,
+    });
+    if (!res.ok) {
+      showSyncNotice(res.error || '发送官方贴纸失败');
+      return;
+    }
+    if (replyingTo) {
+      setReplyingTo(null);
+    }
+    onSendMessage({
+      sender: 'me',
+      isImage: true,
+      imageUrl: sticker.thumbUrl,
+      imageCaption: packTitle ? `${sticker.emoji} · ${packTitle}` : `${sticker.emoji} [贴纸]`,
+      text: `${sticker.emoji} [贴纸]`,
+      telegramMessageId: res.telegramMessageId,
+      deliveryStatus: 'delivered',
+      skipCloudRelay: true,
+      timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false }),
+    });
+  };
+
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    const isSendTrigger = sendWithEnter
+      ? e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing
+      : e.key === 'Enter' && (e.ctrlKey || e.metaKey) && !e.nativeEvent.isComposing;
+    if (isSendTrigger) {
+      e.preventDefault();
+      if (isSending) return;
+      if (pastedImage) {
+        handleSendPastedImage();
+      } else {
+        handleSendText();
+      }
+    } else if (e.key === 'Escape') {
+      e.preventDefault();
+      if (pastedImage) {
+        setPastedImage(null);
+      } else if (editingMessage) {
+        setEditingMessage(null);
+        setInputText('');
+      } else if (replyingTo) {
+        setReplyingTo(null);
+      } else {
+        onCloseChat?.();
+      }
+    }
+  };
+
+  const copyToClipboard = async (text: string, id: string) => {
+    if (!text) return;
+    let success = false;
+    try {
+      if (navigator.clipboard && window.isSecureContext) {
+        await navigator.clipboard.writeText(text);
+        success = true;
+      } else {
+        throw new Error('Fallback to execCommand');
+      }
+    } catch {
+      try {
+        const textArea = document.createElement('textarea');
+        textArea.value = text;
+        textArea.style.position = 'fixed';
+        textArea.style.left = '-999999px';
+        textArea.style.top = '-999999px';
+        textArea.setAttribute('readonly', '');
+        document.body.appendChild(textArea);
+        textArea.focus();
+        textArea.select();
+        success = document.execCommand('copy');
+        document.body.removeChild(textArea);
+      } catch (e) {
+        console.warn('execCommand copy fallback failed', e);
+      }
+    }
+    if (success) {
+      setCopiedId(id);
+      setSyncNotice('✅ 文字已成功复制到剪贴板');
+      setTimeout(() => {
+        setCopiedId(null);
+        setSyncNotice(null);
+      }, 2000);
+    } else {
+      setSyncNotice('复制失败，请直接在消息中划选文字后按 Ctrl+C');
+      setTimeout(() => setSyncNotice(null), 3000);
+    }
+  };
+
+  const copyImageToClipboard = async (imageUrl: string, id: string) => {
+    if (!imageUrl) return;
+    try {
+      const res = await fetch(imageUrl);
+      const blob = await res.blob();
+      let pngBlob = blob;
+      if (blob.type !== 'image/png') {
+        pngBlob = await new Promise<Blob>((resolve, reject) => {
+          const img = new Image();
+          img.crossOrigin = 'anonymous';
+          img.onload = () => {
+            const canvas = document.createElement('canvas');
+            canvas.width = img.naturalWidth || 400;
+            canvas.height = img.naturalHeight || 300;
+            const ctx = canvas.getContext('2d');
+            if (!ctx) return resolve(blob);
+            ctx.drawImage(img, 0, 0);
+            canvas.toBlob((b) => resolve(b || blob), 'image/png');
+          };
+          img.onerror = reject;
+          img.src = imageUrl;
+        });
+      }
+
+      if (navigator.clipboard && typeof navigator.clipboard.write === 'function') {
+        await navigator.clipboard.write([
+          new ClipboardItem({ 'image/png': pngBlob }),
+        ]);
+        setCopiedId(id);
+        setSyncNotice('✅ 照片已复制到剪贴板，可直接在其他应用中粘贴');
+        setTimeout(() => {
+          setCopiedId(null);
+          setSyncNotice(null);
+        }, 2500);
+        return;
+      }
+      throw new Error('ClipboardItem write not supported');
+    } catch (err: any) {
+      console.warn('Copy image to clipboard exception:', err);
+      // Fallback: download the image
+      try {
+        const a = document.createElement('a');
+        a.href = imageUrl;
+        a.download = `tg_photo_${Date.now()}.png`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        setSyncNotice('已为您下载保存该照片');
+        setTimeout(() => setSyncNotice(null), 2500);
+      } catch {
+        setSyncNotice('复制照片失败，请右键选择另存为');
+        setTimeout(() => setSyncNotice(null), 3000);
+      }
+    }
+  };
+
+  const handlePaste = async (e: React.ClipboardEvent) => {
+    const items = e.clipboardData?.items;
+    if (!items || items.length === 0) return;
+
+    for (let i = 0; i < items.length; i++) {
+      const item = items[i];
+      if (item.type.indexOf('image') !== -1) {
+        const file = item.getAsFile();
+        if (file) {
+          e.preventDefault();
+          try {
+            const dataUrl = await blobToDataUrl(file);
+            setPastedImage({
+              dataUrl,
+              file,
+              caption: inputText.trim() || undefined,
+            });
+            setSyncNotice('已捕获剪贴板照片，点击发送或按 Enter 即可发出');
+            setTimeout(() => setSyncNotice(null), 3000);
+          } catch (err) {
+            console.warn('Failed to parse pasted image', err);
+            setSyncNotice('剪贴板照片解析失败，请使用附件上传');
+            setTimeout(() => setSyncNotice(null), 3000);
+          }
+          return;
+        }
+      }
+    }
+  };
+
+  const handleSendPastedImage = () => {
+    if (!pastedImage || !chat) return;
+    const userCaption = inputText.trim() || pastedImage.caption || '';
+    onSendMessage({
+      sender: 'me',
+      isImage: true,
+      imageUrl: pastedImage.dataUrl,
+      imageCaption: userCaption || undefined,
+      text: userCaption || '',
+      timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false }),
+    });
+    setPastedImage(null);
+    setInputText('');
+    setTranslatedPreview('');
+    setTranslatedPreviewSource('');
+  };
+
+  const handleTranscribeAudio = async (msg: Message) => {
+    if (!msg.id) return;
+
+    if (!msg.audioUrl && !msg.sttText) {
+      setSyncNotice('该消息缺少有效音频数据，无法进行语音转写');
+      setTimeout(() => setSyncNotice(null), 3000);
+      return;
+    }
+
+    setTranscribingMap((prev) => ({ ...prev, [msg.id]: true }));
+
+    try {
+      let transcribed = msg.sttText;
+      if (!transcribed && msg.audioUrl) {
+        transcribed = await transcribeAudio(msg.audioUrl, 'audio/webm', customLLMConfig);
+      }
+
+      if (!transcribed || !transcribed.trim()) {
+        setSyncNotice('语音转写未能识别出文字内容');
+        setTimeout(() => setSyncNotice(null), 3000);
+        return;
+      }
+
+      const currentInboundTarget = getInboundTargetLanguage(chat, translationSettings);
+      const translated = await translateText(
+        transcribed,
+        'Auto',
+        currentInboundTarget,
+        customLLMConfig,
+        translationSettings?.preferredEngine,
+        undefined,
+        translationSettings?.geminiModel,
+        translationSettings?.geminiApiKey,
+        translationSettings?.customModelName
+      );
+
+      if (onUpdateMessage) {
+        onUpdateMessage(msg.id, {
+          sttText: transcribed,
+          translatedText: translated,
+        });
+      } else {
+        msg.sttText = transcribed;
+        msg.translatedText = translated;
+      }
+    } catch (err: any) {
+      console.error('Transcribe failed', err);
+      setSyncNotice(`语音转写失败：${err?.message || '请检查网络或大模型配置'}`);
+      setTimeout(() => setSyncNotice(null), 3500);
+    } finally {
+      setTranscribingMap((prev) => ({ ...prev, [msg.id]: false }));
+    }
+  };
+
+  const handlePlayAudio = (msgId: string, audioUrl?: string) => {
+    if (playingAudioId === msgId) {
+      audioRef.current?.pause();
+      if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
+        window.speechSynthesis.cancel();
+      }
+      setPlayingAudioId(null);
+      return;
+    }
+
+    if (audioUrl) {
+      if (!audioRef.current) {
+        audioRef.current = new Audio();
+      }
+      audioRef.current.src = audioUrl;
+      audioRef.current.play().catch((err) => {
+        setPlayingAudioId(null);
+        setSyncNotice(`语音播放失败：${err?.message || '浏览器阻止或音频不可用'}`);
+        setTimeout(() => setSyncNotice(null), 3000);
+      });
+      setPlayingAudioId(msgId);
+
+      audioRef.current.onended = () => {
+        setPlayingAudioId(null);
+        setAudioProgress((prev) => ({ ...prev, [msgId]: 0 }));
+      };
+
+      audioRef.current.ontimeupdate = () => {
+        if (audioRef.current && audioRef.current.duration) {
+          const prog = (audioRef.current.currentTime / audioRef.current.duration) * 100;
+          setAudioProgress((prev) => ({ ...prev, [msgId]: prog }));
+        }
+      };
+
+      audioRef.current.onerror = () => {
+        setPlayingAudioId(null);
+        setAudioProgress((prev) => ({ ...prev, [msgId]: 0 }));
+        setSyncNotice('语音音频加载失败，请检查网络或重新生成');
+        setTimeout(() => setSyncNotice(null), 3000);
+      };
+    } else {
+      // 纯净真实执行：坚决杜绝任何假数据兜底，无真实音频时不进行任何伪造播放
+      setPlayingAudioId(null);
+      setAudioProgress((prev) => ({ ...prev, [msgId]: 0 }));
+      setSyncNotice('当前语音消息未包含有效音频文件，已阻止伪造发音');
+      setTimeout(() => setSyncNotice(null), 3000);
+    }
+  };
+
+  const handleToggleRecordMic = async () => {
+    if (isRecordingMic) {
+      if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording') {
+        mediaRecorderRef.current.stop();
+      }
+      clearInterval(recordTimerRef.current);
+      setIsRecordingMic(false);
+    } else {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        mediaRecorderRef.current = new MediaRecorder(stream);
+        audioChunksRef.current = [];
+
+        mediaRecorderRef.current.ondataavailable = (event) => {
+          if (event.data.size > 0) {
+            audioChunksRef.current.push(event.data);
+          }
+        };
+
+        mediaRecorderRef.current.onstop = async () => {
+          const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
+          let audioUrl = '';
+          try {
+            audioUrl = await blobToDataUrl(audioBlob);
+          } catch {
+            audioUrl = URL.createObjectURL(audioBlob);
+          }
+
+          if (!audioUrl) {
+            setSyncNotice('麦克风录音数据为空，已取消发送');
+            setTimeout(() => setSyncNotice(null), 3000);
+            stream.getTracks().forEach((track) => track.stop());
+            return;
+          }
+
+          onSendMessage({
+            sender: 'me',
+            isAudio: true,
+            audioDuration: recordDurationRef.current || 1,
+            audioUrl,
+            text: '🎤 语音消息',
+            timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false }),
+          });
+          stream.getTracks().forEach((track) => track.stop());
+        };
+
+        mediaRecorderRef.current.start();
+        setIsRecordingMic(true);
+        setRecordDuration(0);
+        recordDurationRef.current = 0;
+        recordTimerRef.current = setInterval(() => {
+          recordDurationRef.current += 1;
+          setRecordDuration(recordDurationRef.current);
+        }, 1000);
+      } catch (err) {
+        console.warn('Microphone permission or recording failed', err);
+        setSyncNotice('无法访问麦克风，请检查浏览器权限');
+        setTimeout(() => setSyncNotice(null), 3500);
+      }
+    }
+  };
+
+  const handleTriggerVoiceCloneSend = (voiceData: {
+    text: string;
+    audioUrl?: string;
+    audioDuration: number;
+    voiceName: string;
+    voiceTone: string;
+    isMasterVoice?: boolean;
+  }) => {
+    if (!voiceData.audioUrl) {
+      setSyncNotice('缺少有效合成音频，已中止发送');
+      setTimeout(() => setSyncNotice(null), 3500);
+      return;
+    }
+
+    setIsVoiceStudioOpen(false);
+    onSendMessage({
+      sender: 'me',
+      isAudio: true,
+      audioDuration: voiceData.audioDuration,
+      audioUrl: voiceData.audioUrl,
+      text: '🎤 语音消息',
+      sttText: voiceData.text,
+      voiceName: voiceData.voiceName,
+      voiceTone: voiceData.voiceTone,
+      isMasterVoice: voiceData.isMasterVoice,
+      timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false }),
+    });
+
+    setInputText('');
+    setTranslatedPreview('');
+  };
+
+  if (!chat) {
+    return (
+      <div className="flex-1 min-w-0 bg-[#f4f7fb] dark:bg-[#060b12] tg-chat-pattern flex flex-col items-center justify-center select-none text-[#64748b] dark:text-[#7b93ad] transition-colors px-6">
+        <div className="flex flex-col items-center text-center max-w-xs space-y-2.5 px-6 py-5 rounded-2xl bg-white/80 dark:bg-[#0a1320]/80 backdrop-blur-md border border-[#e2e8f0] dark:border-[#162436] shadow-xs">
+          <div className="w-10 h-10 rounded-xl bg-[#e8f3ff] dark:bg-[#2ba0ff]/12 border border-[#bfdbfe] dark:border-[#2ba0ff]/25 flex items-center justify-center text-[#2481cc] dark:text-[#2ba0ff]">
+            <Sparkles className="w-5 h-5" />
+          </div>
+          <div className="text-[13px] font-semibold text-[#0f172a] dark:text-[#eef4fb]">
+            选择左侧会话开始协同
+          </div>
+          <p className="text-[11.5px] text-[#64748b] dark:text-[#7b93ad] leading-relaxed">
+            可随时点击最左侧导航栏在右侧工作台展开记忆、大模型、翻译、音色与人设配置。
+          </p>
+        </div>
+      </div>
+    );
+  }
+
+  const displayedMessages = chatSearchQuery.trim()
+    ? messages.filter((m) => m.text?.toLowerCase().includes(chatSearchQuery.toLowerCase()))
+    : messages;
+
+  const activeModelDisplay =
+    customLLMConfig?.engineMode === 'custom' && customLLMConfig?.modelName
+      ? customLLMConfig.modelName
+      : 'HumanSense 云端引擎';
+
+  return (
+    <div className="flex-1 min-w-0 bg-[#f4f7fb] dark:bg-[#060b12] flex flex-col h-full relative overflow-hidden transition-colors">
+      {/* 1. Official Telegram Top Bar Header */}
+      <header className="h-[56px] bg-white/90 dark:bg-[#09111d]/90 backdrop-blur-md border-b border-[#e2e8f0] dark:border-[#162436] flex items-center justify-between px-4 shrink-0 z-10 transition-colors">
+        {/* Left: Contact Info (Click to view Profile & Shared Media) */}
+        <div
+          onClick={() => setChatInfoOpen(true)}
+          className="flex items-center gap-3 min-w-0 cursor-pointer hover:opacity-90 transition-opacity"
+          title="点击查看联系人资料与共享媒体库"
+        >
+          <div
+            className="w-9 h-9 rounded-full flex items-center justify-center font-bold text-xs overflow-hidden shrink-0 relative"
+            style={{ backgroundColor: chat.avatarBg }}
+          >
+            <span className="text-white text-xs font-semibold select-none">{chat.avatarInitial}</span>
+            {chat.avatarUrl && (
+              <img
+                src={chat.avatarUrl}
+                alt={chat.title}
+                referrerPolicy="no-referrer"
+                className="w-full h-full object-cover absolute inset-0"
+                onError={(e) => {
+                  (e.currentTarget as HTMLElement).style.display = 'none';
+                }}
+              />
+            )}
+            {chat.isVerified && (
+              <div className="absolute inset-0 bg-[#2481cc] flex items-center justify-center text-white">
+                <Check className="w-4 h-4 stroke-[2.5]" />
+              </div>
+            )}
+          </div>
+
+          <div className="min-w-0">
+            <div className="flex items-center gap-1.5">
+              <span className="font-semibold text-[14px] text-[#0f172a] dark:text-[#f5f7fa] truncate leading-tight">
+                {chat.title}
+              </span>
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setChatInfoOpen(true);
+                }}
+                title="设置/修改好友备注"
+                className="p-0.5 text-[#64748b] hover:text-[#2481cc] dark:text-[#7f93a5] dark:hover:text-[#2ba0ff] rounded-sm transition-colors cursor-pointer"
+              >
+                <Edit2 className="w-3 h-3" />
+              </button>
+              {chat.isVerified && (
+                <span className="w-3.5 h-3.5 bg-[#2481cc] rounded-full flex items-center justify-center text-white shrink-0">
+                  <Check className="w-2.5 h-2.5 stroke-[3]" />
+                </span>
+              )}
+            </div>
+            <div
+              className={`text-[11.5px] leading-none mt-0.5 tabular-nums ${
+                chat.isOnline
+                  ? 'text-emerald-600 dark:text-emerald-400 font-medium'
+                  : chat.isGroup || chat.isChannel
+                  ? 'text-[#2481cc] dark:text-[#2ba0ff]'
+                  : 'text-[#64748b] dark:text-[#7f93a5]'
+              }`}
+            >
+              {chat.isChannel
+                ? typeof chat.memberCount === 'number'
+                  ? `${chat.memberCount} 位订阅者`
+                  : '公开频道'
+                : chat.isGroup
+                ? typeof chat.memberCount === 'number'
+                  ? `${chat.memberCount} 位成员${
+                      typeof chat.onlineCount === 'number' && chat.onlineCount > 0
+                        ? ` · ${chat.onlineCount} 人在线`
+                        : ''
+                    }`
+                  : '群组'
+                : chat.isBot
+                ? '机器人 (Bot)'
+                : chat.statusText || (chat.isOnline ? '在线' : '状态未知')}
+            </div>
+          </div>
+        </div>
+
+        {/* Right: Active Model Indicator + Translation Bar Toggle + Real Actions */}
+        <div className="flex items-center gap-1.5 shrink-0 text-[#64748b] dark:text-[#a0acb8]">
+          {/* Active LLM Indicator (Opens LLM settings in right dock) */}
+          {onOpenCustomLLM && (
+            <button
+              type="button"
+              onClick={onOpenCustomLLM}
+              title="切换或配置大模型引擎"
+              className={`hidden xl:flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[11.5px] font-medium border transition-colors cursor-pointer ${
+                activeRightPanel === 'llm'
+                  ? 'bg-[#e8f3ff] border-[#bfdbfe] text-[#2481cc] dark:bg-[#132234] dark:border-[#2ba0ff]/40 dark:text-[#2ba0ff]'
+                  : 'bg-[#f8fafc] hover:bg-[#f1f5f9] dark:bg-[#0e1726] dark:hover:bg-[#142236] border-[#e2e8f0] dark:border-[#1a2b40] text-[#334155] dark:text-[#dbe7f3]'
+              }`}
+            >
+              <Cpu className="w-3.5 h-3.5 text-[#2481cc] dark:text-[#2ba0ff]" />
+              <span className="max-w-[140px] truncate">{activeModelDisplay}</span>
+            </button>
+          )}
+
+          {/* Bidirectional Translation Bar Toggle */}
+          <button
+            type="button"
+            onClick={() => setIsTranslateBarVisible(!isTranslateBarVisible)}
+            title="展开或收起实时翻译栏"
+            className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[11.5px] font-medium border transition-colors cursor-pointer ${
+              isTranslateBarVisible
+                ? 'bg-[#e8f3ff] border-[#bfdbfe] text-[#2481cc] dark:bg-[#132234] dark:border-[#2ba0ff]/40 dark:text-[#2ba0ff]'
+                : 'bg-[#f8fafc] border-[#e2e8f0] text-[#64748b] hover:text-[#0f172a] dark:bg-[#0e1726] dark:border-[#1a2b40] dark:text-[#8aa0b8] dark:hover:text-white'
+            }`}
+          >
+            <Languages className="w-3.5 h-3.5" />
+            <span className="hidden sm:inline">
+              双向翻译: {isTranslateBarVisible ? '开启' : '收起'}
+            </span>
+          </button>
+
+          {/* Telegram Cloud History Sync Button */}
+          {chat.id.startsWith('tg_') && (
+            <button
+              type="button"
+              onClick={handleSyncCloudMessages}
+              disabled={isSyncingCloud}
+              title="同步云端消息"
+              className={`w-8 h-8 rounded-lg flex items-center justify-center transition-colors cursor-pointer ${
+                isSyncingCloud
+                  ? 'bg-[#e8f3ff] text-[#2481cc] dark:bg-[#2481cc]/20 dark:text-[#2ba0ff]'
+                  : 'hover:bg-[#f1f5f9] dark:hover:bg-[#202b36] text-[#64748b] dark:text-[#a0acb8] hover:text-[#2481cc] dark:hover:text-white'
+              }`}
+            >
+              <RotateCw className={`w-4 h-4 ${isSyncingCloud ? 'animate-spin text-[#2481cc]' : ''}`} />
+            </button>
+          )}
+
+          {/* In-Chat Search Button */}
+          <button
+            type="button"
+            onClick={() => setIsSearchingInChat(!isSearchingInChat)}
+            title="搜索消息"
+            className={`w-8 h-8 rounded-lg flex items-center justify-center transition-colors cursor-pointer ${
+              isSearchingInChat
+                ? 'bg-[#e8f3ff] text-[#2481cc] dark:bg-[#2481cc]/20 dark:text-[#2ba0ff]'
+                : 'hover:bg-[#f1f5f9] dark:hover:bg-[#202b36] text-[#64748b] dark:text-[#a0acb8] hover:text-[#0f172a] dark:hover:text-white'
+            }`}
+          >
+            <Search className="w-4 h-4" />
+          </button>
+
+          {/* 角色人设资料中心按钮 */}
+          <button
+            type="button"
+            onClick={onOpenKnowledgeEvolution}
+            title="人设资料"
+            className={`flex items-center gap-1 px-2.5 py-1 rounded-lg text-[11.5px] font-medium border transition-colors cursor-pointer ${
+              activeRightPanel === 'persona'
+                ? 'bg-[#2481cc] border-[#2481cc] text-white dark:bg-[#2ba0ff]/20 dark:border-[#2ba0ff]/50 dark:text-[#2ba0ff]'
+                : 'bg-[#f0f7ff] hover:bg-[#e0efff] dark:bg-[#102033] dark:hover:bg-[#142840] border-[#dbeafe] dark:border-[#2ba0ff]/25 text-[#2481cc] dark:text-[#2ba0ff]'
+            }`}
+          >
+            <Sparkles className="w-3.5 h-3.5" />
+            <span className="hidden lg:inline font-semibold">人设资料</span>
+          </button>
+
+          {/* Voice Call Button */}
+          {onOpenVoiceCall && (
+            <button
+              type="button"
+              onClick={onOpenVoiceCall}
+              title="语音通话"
+              className="w-8 h-8 rounded-lg hover:bg-[#f1f5f9] dark:hover:bg-[#142236] flex items-center justify-center hover:text-[#2481cc] dark:hover:text-[#2ba0ff] transition-colors cursor-pointer"
+            >
+              <Phone className="w-4 h-4" />
+            </button>
+          )}
+
+          {/* More Options / Chat Info Drawer */}
+          <button
+            type="button"
+            onClick={() => setChatInfoOpen(true)}
+            title="更多与联系人资料"
+            className={`w-8 h-8 rounded-lg flex items-center justify-center transition-colors cursor-pointer ${
+              isChatInfoOpen
+                ? 'bg-[#e8f3ff] text-[#2481cc] dark:bg-[#132234] dark:text-[#2ba0ff]'
+                : 'hover:bg-[#f1f5f9] dark:hover:bg-[#142236] hover:text-[#0f172a] dark:hover:text-white'
+            }`}
+          >
+            <MoreVertical className="w-4 h-4" />
+          </button>
+
+          {/* Close Chat Button (Esc) */}
+          {onCloseChat && (
+            <button
+              type="button"
+              onClick={onCloseChat}
+              title="关闭 (Esc)"
+              className="w-8 h-8 rounded-lg hover:bg-[#f1f5f9] dark:hover:bg-[#202b36] flex items-center justify-center hover:text-[#0f172a] dark:hover:text-white transition-colors cursor-pointer text-[#64748b] dark:text-[#a0acb8]"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          )}
+        </div>
+      </header>
+
+      {/* In-Chat Search Bar */}
+      {isSearchingInChat && (
+        <div className="bg-white dark:bg-[#17212b] border-b border-[#e0e4e8] dark:border-[#202b36] px-4 py-2 flex items-center gap-2 text-xs animate-in fade-in duration-150">
+          <Search className="w-4 h-4 text-[#707579] dark:text-[#7f93a5] shrink-0" />
+          <input
+            type="text"
+            value={chatSearchQuery}
+            onChange={(e) => setChatSearchQuery(e.target.value)}
+            placeholder={chat.isChannel ? "搜索频道帖子..." : "搜索消息..."}
+            className="flex-1 bg-[#f0f2f5] dark:bg-[#242f3d] px-3 py-1.5 rounded-lg text-xs text-[#111827] dark:text-white border border-transparent focus:border-[#2ba0ff]/50 focus:outline-none"
+            autoFocus
+          />
+          {chatSearchQuery && (
+            <span className="text-[11px] text-[#707579] dark:text-[#7f93a5] whitespace-nowrap tabular-nums">
+              匹配 {messages.filter((m) => m.text?.toLowerCase().includes(chatSearchQuery.toLowerCase())).length} 条
+            </span>
+          )}
+          <button
+            onClick={() => {
+              setIsSearchingInChat(false);
+              setChatSearchQuery('');
+            }}
+            className="p-1 text-[#707579] hover:text-[#111827] dark:text-[#7f93a5] dark:hover:text-white cursor-pointer"
+          >
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+      )}
+
+      {/* Telegram Pinned Message Top Banner */}
+      {messages.some((m) => m.isPinned) && (
+        <div className="bg-[#f0f7ff] dark:bg-[#1a2530] border-b border-[#dbeafe] dark:border-[#101b26] px-4 py-2 flex items-center justify-between text-xs animate-in fade-in duration-150">
+          <div className="flex items-center gap-2 min-w-0">
+            <Pin className="w-3.5 h-3.5 text-[#2481cc] dark:text-[#2ba0ff] shrink-0 fill-current" />
+            <div className="min-w-0 truncate">
+              <span className="font-semibold text-[#2481cc] dark:text-[#2ba0ff] mr-1.5">置顶消息:</span>
+              <span className="text-[#0f172a] dark:text-[#f5f7fa]">{messages.find((m) => m.isPinned)?.text}</span>
+            </div>
+          </div>
+          <button
+            onClick={() => {
+              const pinned = messages.find((m) => m.isPinned);
+              if (pinned) onTogglePinMessage?.(pinned.id);
+            }}
+            className="text-xs text-[#64748b] hover:text-[#0f172a] dark:hover:text-white p-1 cursor-pointer shrink-0 ml-2"
+            title="取消置顶"
+          >
+            <X className="w-3.5 h-3.5" />
+          </button>
+        </div>
+      )}
+
+      {/* Cloud Sync & Protection Notice Banner */}
+      {syncNotice && (() => {
+        const isAlertNotice = /静默|中断|失败|断连|阻断|超时|未连通|异常|错误/.test(syncNotice);
+        return (
+          <div
+            className={`border-b px-4 py-2 text-xs flex items-center justify-between animate-in fade-in duration-150 ${
+              isAlertNotice
+                ? 'bg-amber-500/15 border-amber-500/30 text-amber-700 dark:text-amber-300'
+                : 'bg-[#e8f3ff] border-[#bfdbfe] text-[#2481cc] dark:bg-[#2481cc]/15 dark:border-[#2481cc]/30 dark:text-[#2ba0ff]'
+            }`}
+          >
+            <div className="flex items-center gap-2">
+              {isAlertNotice ? (
+                <ShieldAlert className="w-4 h-4 text-amber-500 shrink-0" />
+              ) : (
+                <RotateCw className="w-3.5 h-3.5 animate-spin shrink-0" />
+              )}
+              <span className="font-medium">{syncNotice}</span>
+            </div>
+            <button onClick={() => setSyncNotice(null)} className="text-xs hover:opacity-80 p-0.5 cursor-pointer">
+              <X className="w-3.5 h-3.5" />
+            </button>
+          </div>
+        );
+      })()}
+
+      {/* 2. Official Telegram Native Translate Bar (Telegram 8.4+ Style) */}
+      {isTranslateBarVisible && (
+        <div className="bg-[#f8fafc]/90 dark:bg-[#0c1624]/90 backdrop-blur-xs border-b border-[#e2e8f0] dark:border-[#162436] px-4 py-1.5 flex items-center justify-between text-xs text-[#0f172a] dark:text-[#d3e2ef] transition-colors shrink-0">
+          <div className="flex items-center gap-2 min-w-0">
+            <Languages className="w-3.5 h-3.5 text-[#2481cc] dark:text-[#2ba0ff] shrink-0" />
+            <span className="font-medium whitespace-nowrap text-[#334155] dark:text-[#d3e2ef]">
+              自动翻译为中文
+            </span>
+            <span className="text-[#94a3b8] dark:text-[#7f93a5]">·</span>
+
+            {/* Quick Target Language Selector */}
+            <div className="relative inline-flex items-center" ref={langMenuRef}>
+              <button
+                type="button"
+                onClick={() => setIsLangMenuOpen(!isLangMenuOpen)}
+                className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-white dark:bg-[#242f3d] hover:bg-black/5 dark:hover:bg-[#2b3848] border border-[#d8dde3] dark:border-[#313f52] text-[#2481cc] dark:text-[#2ba0ff] cursor-pointer transition-colors font-medium text-[11px]"
+              >
+                <span>发信目标: {getLanguageDisplayName(outboundTargetLang)}</span>
+                <ChevronDown className="w-3 h-3 opacity-70" />
+              </button>
+
+              {isLangMenuOpen && (
+                <div className="absolute top-full left-0 mt-1.5 w-64 bg-white dark:bg-[#17212b] border border-[#e0e4e8] dark:border-[#242f3d] rounded-xl shadow-xl p-1.5 z-50 animate-in fade-in duration-150">
+                  <div className="px-2 py-1 text-[10px] font-semibold text-[#707579] dark:text-[#7f93a5] uppercase tracking-wider border-b border-black/5 dark:border-white/5 pb-1 mb-1">
+                    选择联系人语言 (全球 {SUPPORTED_LANGUAGES.length - 1} 种)
+                  </div>
+                  <div className="px-1 pb-1.5">
+                    <input
+                      type="text"
+                      value={langMenuSearch}
+                      onChange={(e) => setLangMenuSearch(e.target.value)}
+                      placeholder="搜索语言名称或代码..."
+                      className="w-full px-2 py-1 text-[11px] rounded-md bg-black/5 dark:bg-[#0e1621] border border-black/10 dark:border-[#2b3d52] text-[#111827] dark:text-white placeholder-[#707579] dark:placeholder-[#566c82] focus:outline-none focus:border-[#2481cc]"
+                    />
+                  </div>
+                  <div className="max-h-56 overflow-y-auto space-y-0.5">
+                    {SUPPORTED_LANGUAGES.filter((l) => {
+                      if (l.code === 'Auto' || l.code === 'Chinese') return false;
+                      const q = langMenuSearch.trim().toLowerCase();
+                      if (!q) return true;
+                      return l.code.toLowerCase().includes(q) || l.name.toLowerCase().includes(q);
+                    }).map((lang) => (
+                      <button
+                        key={lang.code}
+                        type="button"
+                        onClick={() => {
+                          onUpdateChatLanguage?.(chat.id, lang.code, inboundTargetLang);
+                          setIsLangMenuOpen(false);
+                          setLangMenuSearch('');
+                        }}
+                        className={`w-full flex items-center justify-between px-2.5 py-1.5 rounded-lg text-xs cursor-pointer transition-colors ${
+                          outboundTargetLang === lang.code
+                            ? 'bg-[#2481cc] text-white font-medium'
+                            : 'text-[#111827] dark:text-[#f5f7fa] hover:bg-black/5 dark:hover:bg-[#202b36]'
+                        }`}
+                      >
+                        <span className="truncate text-left">{lang.name}</span>
+                        {outboundTargetLang === lang.code && <Check className="w-3.5 h-3.5 text-white shrink-0 ml-1" />}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+
+          <div className="flex items-center gap-2 shrink-0">
+            <button
+              onClick={onOpenTranslation}
+              className="text-[#2481cc] dark:text-[#2ba0ff] hover:underline font-medium cursor-pointer"
+            >
+              设置
+            </button>
+            <button
+              onClick={() => setIsTranslateBarVisible(false)}
+              className="p-1 text-[#707579] dark:text-[#7f93a5] hover:text-[#111827] dark:hover:text-white transition-colors cursor-pointer"
+              title="关闭翻译栏"
+            >
+              <X className="w-3.5 h-3.5" />
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* 3. Messages Stream Viewport with Official Telegram Wallpaper Pattern */}
+      <div className="flex-1 overflow-y-auto px-5 py-4 space-y-3 tg-chat-pattern select-text">
+        {/* Date Marker Divider */}
+        <div className="flex items-center justify-center my-1.5">
+          <span className="px-3 py-0.5 rounded-full bg-white/90 dark:bg-black/40 border border-[#e2e8f0] dark:border-transparent text-[11px] font-medium text-[#64748b] dark:text-white shadow-xs">
+            今天
+          </span>
+        </div>
+
+        {displayedMessages.map((msg) => {
+          const isMe = msg.sender === 'me';
+
+          return (
+            <div
+              key={msg.id}
+              className={`flex flex-col ${isMe ? 'items-end' : 'items-start'} group relative my-1`}
+              onMouseEnter={() => setHoveredMessageId(msg.id)}
+              onMouseLeave={() => setHoveredMessageId(null)}
+              onContextMenu={(e) => handleMessageContextMenu(e, msg)}
+            >
+              {/* Telegram Floating Quick Action Menu on Hover */}
+              {hoveredMessageId === msg.id && (
+                <div
+                  className={`absolute -top-4 z-20 flex items-center gap-0.5 bg-white dark:bg-[#17212b] border border-[#e0e4e8] dark:border-[#2b3848] rounded-full px-1.5 py-0.5 shadow-lg animate-in fade-in zoom-in-95 duration-100 ${
+                    isMe ? 'right-2' : 'left-2'
+                  }`}
+                >
+                  {/* Quick Reactions Bar */}
+                  <div className="flex items-center gap-0.5 pr-1 border-r border-black/5 dark:border-white/10">
+                    {['👍', '❤️', '🔥', '🎉'].map((emoji) => (
+                      <button
+                        key={emoji}
+                        type="button"
+                        onClick={() => onToggleReaction?.(msg.id, emoji)}
+                        className="text-xs hover:scale-130 transition-transform p-0.5 cursor-pointer leading-none"
+                        title={`回应 ${emoji}`}
+                      >
+                        {emoji}
+                      </button>
+                    ))}
+                  </div>
+
+                  {/* Reply Button */}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setReplyingTo(msg);
+                      setEditingMessage(null);
+                    }}
+                    className="p-1 text-[#707579] hover:text-[#2481cc] dark:text-[#7f93a5] dark:hover:text-[#2ba0ff] cursor-pointer"
+                    title="回复消息"
+                  >
+                    <Reply className="w-3.5 h-3.5" />
+                  </button>
+
+                  {/* Pin Button */}
+                  <button
+                    type="button"
+                    onClick={() => onTogglePinMessage?.(msg.id)}
+                    className="p-1 text-[#707579] hover:text-[#2481cc] dark:text-[#7f93a5] dark:hover:text-[#2ba0ff] cursor-pointer"
+                    title={msg.isPinned ? '取消置顶' : '置顶此消息'}
+                  >
+                    <Pin className={`w-3.5 h-3.5 ${msg.isPinned ? 'text-[#2481cc] fill-current' : ''}`} />
+                  </button>
+
+                  {/* Edit Button (For sent messages) */}
+                  {isMe && !msg.isAudio && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setEditingMessage(msg);
+                        setInputText(msg.text);
+                        setReplyingTo(null);
+                      }}
+                      className="p-1 text-[#707579] hover:text-[#2481cc] dark:text-[#7f93a5] dark:hover:text-[#2ba0ff] cursor-pointer"
+                      title="编辑消息"
+                    >
+                      <Edit2 className="w-3.5 h-3.5" />
+                    </button>
+                  )}
+
+                  {/* Copy Text or Copy Image */}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (msg.isImage && msg.imageUrl) {
+                        copyImageToClipboard(msg.imageUrl, msg.id);
+                      } else {
+                        copyToClipboard(msg.text, msg.id);
+                      }
+                    }}
+                    className="p-1 text-[#707579] hover:text-[#2481cc] dark:text-[#7f93a5] dark:hover:text-[#2ba0ff] cursor-pointer"
+                    title={msg.isImage ? '复制照片到剪贴板' : '复制消息内容'}
+                  >
+                    {copiedId === msg.id ? (
+                      <Check className="w-3.5 h-3.5 text-emerald-500" />
+                    ) : (
+                      <Copy className="w-3.5 h-3.5" />
+                    )}
+                  </button>
+
+                  {/* Delete Button */}
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setMessageToDelete(msg);
+                    }}
+                    className="p-1 text-[#707579] hover:text-red-500 dark:text-[#7f93a5] dark:hover:text-red-400 cursor-pointer"
+                    title="删除消息"
+                  >
+                    <Trash2 className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+              )}
+
+              <div
+                className={`max-w-[80%] sm:max-w-[74%] rounded-2xl p-3 px-3.5 relative transition-all select-text ${
+                  isMe
+                    ? 'bg-[#1e88e5] text-white dark:bg-[#2b5278] dark:text-white rounded-br-xs shadow-[0_1px_3px_rgba(30,136,229,0.22)]'
+                    : 'bg-white text-[#0f172a] border border-[#e2e8f0] dark:bg-[#182533] dark:text-[#f5f7fa] dark:border-transparent rounded-bl-xs shadow-[0_1px_2px_rgba(15,23,42,0.04)]'
+                }`}
+              >
+                {/* Telegram Reply Quote Header */}
+                {msg.replyTo && (
+                  <div
+                    className={`mb-2 pl-2.5 py-1 border-l-2 rounded-r text-[11px] select-none ${
+                      isMe
+                        ? 'border-white/70 bg-white/12 text-white'
+                        : 'border-[#2481cc] bg-[#f8fafc] dark:bg-white/5 text-[#0f172a] dark:text-[#f5f7fa]'
+                    }`}
+                  >
+                    <div
+                      className={`font-semibold truncate ${
+                        isMe ? 'text-white' : 'text-[#2481cc] dark:text-[#2ba0ff]'
+                      }`}
+                    >
+                      {msg.replyTo.senderName || '回复消息'}
+                    </div>
+                    <div className="opacity-85 truncate text-[10.5px]">{msg.replyTo.text}</div>
+                  </div>
+                )}
+
+                {/* Image / Sticker Attachment with Copy and Download Overlay */}
+                {msg.isImage && msg.imageUrl && (
+                  <div className="mb-1.5 rounded-xl overflow-hidden max-w-[280px] shadow-xs relative group/img">
+                    <img
+                      src={msg.imageUrl}
+                      alt={msg.imageCaption || 'image'}
+                      className="w-full h-auto object-cover max-h-72 cursor-pointer hover:opacity-95 transition-opacity rounded-xl"
+                    />
+                    {/* Hover actions for image: Copy Image and Download Image */}
+                    <div className="absolute top-2 right-2 flex items-center gap-1 opacity-0 group-hover/img:opacity-100 transition-opacity bg-black/65 backdrop-blur-xs rounded-lg p-1 text-white shadow-md">
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          copyImageToClipboard(msg.imageUrl!, msg.id);
+                        }}
+                        title="复制照片到剪贴板"
+                        className="p-1 hover:bg-white/20 rounded-md cursor-pointer transition-colors"
+                      >
+                        {copiedId === msg.id ? (
+                          <Check className="w-3.5 h-3.5 text-emerald-400" />
+                        ) : (
+                          <Copy className="w-3.5 h-3.5" />
+                        )}
+                      </button>
+                      <a
+                        href={msg.imageUrl}
+                        download={msg.imageCaption || `tg_photo_${Date.now()}.png`}
+                        onClick={(e) => e.stopPropagation()}
+                        title="下载保存照片"
+                        className="p-1 hover:bg-white/20 rounded-md cursor-pointer transition-colors"
+                      >
+                        <Download className="w-3.5 h-3.5" />
+                      </a>
+                    </div>
+                  </div>
+                )}
+
+                {/* Video Attachment with Inline Player, Duration Badge, and Download */}
+                {msg.isVideo && msg.videoUrl && (
+                  <div className="mb-1.5 rounded-xl overflow-hidden max-w-[320px] shadow-sm relative group/vid bg-black/10 dark:bg-black/40">
+                    <video
+                      src={msg.videoUrl}
+                      controls
+                      preload="metadata"
+                      className="w-full h-auto max-h-80 object-contain rounded-xl bg-black"
+                    />
+                    <div className="absolute top-2 right-2 flex items-center gap-1 opacity-0 group-hover/vid:opacity-100 transition-opacity bg-black/65 backdrop-blur-xs rounded-lg p-1 text-white shadow-md z-10">
+                      <a
+                        href={msg.videoUrl}
+                        download={`tg_video_${Date.now()}.mp4`}
+                        onClick={(e) => e.stopPropagation()}
+                        title="下载保存视频"
+                        className="p-1 hover:bg-white/20 rounded-md cursor-pointer transition-colors"
+                      >
+                        <Download className="w-3.5 h-3.5" />
+                      </a>
+                    </div>
+                  </div>
+                )}
+
+                {/* File Attachment */}
+                {msg.isFile && (
+                  <div className="p-2.5 rounded-xl bg-black/5 dark:bg-white/10 flex items-center justify-between gap-3 text-xs mb-1.5">
+                    <div className="flex items-center gap-2 min-w-0">
+                      <FileText className="w-6 h-6 text-[#2481cc] shrink-0" />
+                      <div className="min-w-0">
+                        <div className="font-semibold truncate">{msg.fileName || '文档附件'}</div>
+                        <div className="text-[10px] opacity-70">{msg.fileSize || '128 KB'}</div>
+                      </div>
+                    </div>
+                    <a
+                      href={msg.fileUrl || '#'}
+                      download={msg.fileName || 'file'}
+                      className="p-1.5 text-[#2481cc] dark:text-[#2ba0ff] hover:bg-[#2481cc]/10 rounded-lg cursor-pointer"
+                      title="下载附件"
+                    >
+                      <Download className="w-4 h-4" />
+                    </a>
+                  </div>
+                )}
+
+                {/* Audio voice note message */}
+                {msg.isAudio ? (
+                  <div className="flex flex-col gap-2 min-w-[220px]">
+                    <div className="flex items-center gap-3">
+                      <button
+                        onClick={() => handlePlayAudio(msg.id, msg.audioUrl)}
+                        className={`w-9 h-9 rounded-full flex items-center justify-center cursor-pointer transition-transform hover:scale-105 shrink-0 ${
+                          isMe
+                            ? 'bg-[#2481cc] text-white'
+                            : 'bg-[#2481cc] text-white'
+                        }`}
+                      >
+                        {playingAudioId === msg.id ? (
+                          <Pause className="w-4 h-4 fill-current" />
+                        ) : (
+                          <Play className="w-4 h-4 fill-current ml-0.5" />
+                        )}
+                      </button>
+
+                      {/* Waveform progress bar */}
+                      <div className="flex-1">
+                        <div className="h-1.5 w-full bg-black/10 dark:bg-white/20 rounded-full overflow-hidden">
+                          <div
+                            className={`h-full transition-all duration-100 ${
+                              isMe ? 'bg-[#2481cc] dark:bg-white' : 'bg-[#2481cc]'
+                            }`}
+                            style={{ width: `${audioProgress[msg.id] || 0}%` }}
+                          />
+                        </div>
+                        <div className="flex items-center justify-between text-[11px] mt-1 opacity-70 tabular-nums">
+                          <span>{msg.audioDuration ? `${msg.audioDuration}"` : '0:04'}</span>
+                          <span className="flex items-center gap-1.5">
+                            {(msg.isMasterVoice || msg.voiceName) && (
+                              <span className="text-[10px] text-[#2481cc] dark:text-cyan-300">
+                                🎙️ {msg.voiceName || '个人预设音色'}
+                              </span>
+                            )}
+                            <span>语音消息</span>
+                          </span>
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Speech to Text Transcribe toggle */}
+                    {msg.sttText ? (
+                      <div className="mt-1 pt-1.5 border-t border-black/10 dark:border-white/10 text-xs">
+                        <div className="text-[11px] opacity-70 mb-0.5 select-none">转文字:</div>
+                        <p className="select-text cursor-text">{msg.sttText}</p>
+                        {msg.translatedText && (
+                          <p className="mt-1 font-medium text-[#2481cc] dark:text-[#2ba0ff] select-text cursor-text">
+                            译文: {msg.translatedText}
+                          </p>
+                        )}
+                      </div>
+                    ) : (
+                      <button
+                        onClick={() => handleTranscribeAudio(msg)}
+                        disabled={transcribingMap[msg.id]}
+                        className="text-[11px] text-[#2481cc] dark:text-[#2ba0ff] hover:underline self-start cursor-pointer mt-0.5"
+                      >
+                        {transcribingMap[msg.id] ? '正在转文字中...' : '转为文字'}
+                      </button>
+                    )}
+                  </div>
+                ) : (
+                  /* Standard Text Message or Photo Caption */
+                  <div>
+                    {!msg.isImage && !msg.isFile && !msg.isVideo && (
+                      <p className="text-[13.5px] leading-relaxed whitespace-pre-wrap break-words select-text cursor-text">
+                        {msg.text}
+                      </p>
+                    )}
+                    {msg.isImage && msg.text && msg.text.trim() && !msg.text.startsWith('[照片]') && !/\.(jpg|jpeg|png|gif|webp|bmp|svg|heic)$/i.test(msg.text.trim()) && (
+                      <p className="text-[13.5px] leading-relaxed whitespace-pre-wrap break-words select-text cursor-text mt-1">
+                        {msg.text}
+                      </p>
+                    )}
+                    {msg.isVideo && msg.text && msg.text.trim() && !msg.text.startsWith('[视频]') && !/\.(mp4|mov|webm|mkv|avi|m4v)$/i.test(msg.text.trim()) && (
+                      <p className="text-[13.5px] leading-relaxed whitespace-pre-wrap break-words select-text cursor-text mt-1">
+                        {msg.text}
+                      </p>
+                    )}
+
+                    {/* Official Telegram Inline Translation Card */}
+                    {msg.translatedText ? (
+                      <div
+                        className={`mt-2 p-2.5 rounded-xl border text-xs select-text cursor-text ${
+                          isMe
+                            ? 'bg-white/12 border-white/20 text-white/95'
+                            : 'bg-[#f8fafc] dark:bg-[#101b26]/75 border-[#e2e8f0] dark:border-white/10 text-[#1e293b] dark:text-[#e2e8f0]'
+                        }`}
+                      >
+                        <div className="flex items-center justify-between gap-2 mb-1 select-none">
+                          <span
+                            className={`inline-flex items-center gap-1 text-[10.5px] font-medium ${
+                              isMe ? 'text-white/80' : 'text-[#2481cc] dark:text-[#2ba0ff]'
+                            }`}
+                          >
+                            <Languages className="w-3 h-3" />
+                            <span>{isMe ? '已发送对照译文' : 'AI 实时译文'}</span>
+                          </span>
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              copyToClipboard(msg.translatedText || '', `${msg.id}_tr`);
+                            }}
+                            title="复制译文"
+                            className={`p-0.5 rounded transition-colors cursor-pointer ${
+                              isMe
+                                ? 'text-white/75 hover:text-white hover:bg-white/10'
+                                : 'text-[#64748b] hover:text-[#2481cc] hover:bg-black/5 dark:text-[#7f93a5] dark:hover:text-white'
+                            }`}
+                          >
+                            {copiedId === `${msg.id}_tr` ? (
+                              <Check className="w-3 h-3 text-emerald-400" />
+                            ) : (
+                              <Copy className="w-3 h-3" />
+                            )}
+                          </button>
+                        </div>
+                        <p className="leading-relaxed font-normal select-text cursor-text">{msg.translatedText}</p>
+                      </div>
+                    ) : msg.translationError ? (
+                      <div
+                        className={`mt-2 pt-1.5 border-t text-[11px] select-text cursor-text ${
+                          isMe
+                            ? 'border-white/20 text-amber-200'
+                            : 'border-rose-500/20 text-rose-500 dark:text-rose-400'
+                        }`}
+                      >
+                        译文失败：{msg.translationError}
+                      </div>
+                    ) : null}
+                  </div>
+                )}
+
+                {/* Message Reactions Pills */}
+                {msg.reactions && Object.keys(msg.reactions).length > 0 && (
+                  <div
+                    className={`flex flex-wrap items-center gap-1 mt-1.5 pt-1 border-t ${
+                      isMe ? 'border-white/15' : 'border-black/5 dark:border-white/10'
+                    }`}
+                  >
+                    {Object.entries(msg.reactions).map(([emoji, count]) => {
+                      const isMine = msg.myReactions?.includes(emoji);
+                      return (
+                        <button
+                          key={emoji}
+                          type="button"
+                          onClick={() => onToggleReaction?.(msg.id, emoji)}
+                          className={`px-2 py-0.5 rounded-full text-[11px] font-medium flex items-center gap-1 border transition-all cursor-pointer ${
+                            isMe
+                              ? isMine
+                                ? 'bg-white/25 border-white/50 text-white'
+                                : 'bg-white/10 border-transparent text-white/90 hover:bg-white/20'
+                              : isMine
+                              ? 'bg-[#e8f3ff] border-[#2481cc] text-[#2481cc] dark:bg-[#2481cc]/20 dark:text-[#2ba0ff]'
+                              : 'bg-[#f1f5f9] dark:bg-white/10 border-transparent text-[#0f172a] dark:text-white/90 hover:bg-[#e2e8f0]'
+                          }`}
+                        >
+                          <span>{emoji}</span>
+                          <span className="font-semibold tabular-nums">{count}</span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
+
+                {/* Message Timestamp & Status Checks */}
+                <div
+                  className={`flex items-center justify-end gap-1 mt-1.5 text-[10px] select-none tabular-nums ${
+                    isMe ? 'text-white/80' : 'text-[#64748b] dark:text-[#7f93a5]'
+                  }`}
+                >
+                  {msg.isPinned && (
+                    <Pin
+                      className={`w-3 h-3 fill-current mr-0.5 ${
+                        isMe ? 'text-white/90' : 'text-[#2481cc] dark:text-[#2ba0ff]'
+                      }`}
+                    />
+                  )}
+                  {msg.isEdited && (
+                    <span className="text-[9.5px] opacity-80 mr-0.5">已编辑</span>
+                  )}
+                  <span>{msg.timestamp}</span>
+                  {isMe && (
+                    msg.deliveryStatus === 'pending' || msg.deliveryStatus === 'retrying' || retryingMsgIds.has(msg.id) ? (
+                      <span className="inline-flex items-center gap-0.5 text-white/80" title="正在投递到 Telegram">
+                        <RotateCw className="w-3 h-3 animate-spin" />
+                      </span>
+                    ) : msg.deliveryStatus === 'failed' ? (
+                      <button
+                        type="button"
+                        onClick={async () => {
+                          if (!onRetryMessage || retryingMsgIds.has(msg.id)) return;
+                          setRetryingMsgIds((prev) => new Set(prev).add(msg.id));
+                          try {
+                            const res = await onRetryMessage(msg.id);
+                            if (!res.ok) {
+                              setSyncNotice(`重发失败：${res.error || '请检查 Telegram 在线状态'}`);
+                              setTimeout(() => setSyncNotice(null), 3500);
+                            }
+                          } finally {
+                            setRetryingMsgIds((prev) => {
+                              const next = new Set(prev);
+                              next.delete(msg.id);
+                              return next;
+                            });
+                          }
+                        }}
+                        title="消息投递失败，点击重试发送"
+                        className="inline-flex items-center gap-1 text-rose-200 hover:underline cursor-pointer font-medium"
+                      >
+                        <ShieldAlert className="w-3 h-3" />
+                        <span>失败 · 重发</span>
+                      </button>
+                    ) : (
+                      <CheckCheck className="w-3.5 h-3.5 text-white/95 dark:text-[#2ba0ff]" />
+                    )
+                  )}
+                </div>
+              </div>
+            </div>
+          );
+        })}
+        <div ref={messagesEndRef} />
+      </div>
+
+      {/* 4. Official Telegram Composer (Structured Dual-Layer Input Area) */}
+      <footer onPaste={handlePaste} className="bg-white/95 dark:bg-[#09111d]/95 backdrop-blur-md border-t border-[#e2e8f0] dark:border-[#162436] px-4 py-2.5 shrink-0 transition-colors">
+        {/* AI Generating Indicator */}
+        {isGeneratingAi && (
+          <div className="mb-2 px-3 py-2 bg-[#e8f3ff] dark:bg-[#2481cc]/10 border border-[#bfdbfe] dark:border-[#2481cc]/30 rounded-xl flex items-center gap-2 text-xs text-[#2481cc] dark:text-[#2ba0ff] animate-pulse">
+            <Sparkles className="w-4 h-4 animate-spin text-amber-500" />
+            <span>AI 正在深度检索该客户全息画像与过往约定，生成真人拟真回复...</span>
+          </div>
+        )}
+
+        {/* AI Holographic Memory Suggestion Card */}
+        {aiSuggestion && (
+          <div className="mb-2.5 p-3.5 bg-gradient-to-r from-[#eff6ff] via-[#f8fafc] to-transparent dark:from-[#2481cc]/15 dark:via-purple-500/10 dark:to-transparent border border-[#bfdbfe] dark:border-[#2481cc]/35 rounded-xl flex flex-col gap-2.5 animate-in fade-in slide-in-from-bottom-2 duration-200 shadow-xs">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-1.5 text-xs font-semibold text-[#2481cc] dark:text-[#2ba0ff]">
+                <Sparkles className="w-3.5 h-3.5 text-amber-500 shrink-0" />
+                <span>AI 回复建议</span>
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  setAiSuggestion(null);
+                  setAiSuggestionTranslation(null);
+                }}
+                className="text-gray-400 hover:text-gray-600 dark:hover:text-white p-0.5 cursor-pointer"
+                title="关闭建议"
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
+            </div>
+
+            {/* Bilingual Content Box */}
+            <div className="bg-white dark:bg-[#101b26]/90 p-3 rounded-lg border border-[#e2e8f0] dark:border-white/5 select-text space-y-2.5">
+              {/* 1. Foreign Outbound Text */}
+              <div>
+                <span className="text-[10px] font-semibold text-[#64748b] dark:text-[#7f93a5] block mb-1">
+                  外文译稿：
+                </span>
+                <div className="text-xs text-[#0f172a] dark:text-[#f5f7fa] leading-relaxed font-sans">
+                  {aiSuggestion}
+                </div>
+              </div>
+
+              {/* 2. Chinese Meaning Translation */}
+              {aiSuggestionTranslation ? (
+                <div className="pt-2 border-t border-[#e2e8f0] dark:border-white/10 text-xs text-[#2481cc] dark:text-[#2ba0ff] flex items-start gap-1.5">
+                  <Languages className="w-3.5 h-3.5 mt-0.5 shrink-0 opacity-80" />
+                  <div className="flex-1">
+                    <span className="text-[10px] font-semibold text-[#64748b] dark:text-gray-400 block mb-0.5">
+                      中文对照：
+                    </span>
+                    <span className="leading-relaxed font-sans text-[#1e293b] dark:text-gray-200">
+                      {aiSuggestionTranslation}
+                    </span>
+                  </div>
+                </div>
+              ) : isTranslatingSuggestion ? (
+                <div className="pt-2 border-t border-[#e2e8f0] dark:border-white/10 text-[11px] text-[#2481cc] dark:text-[#2ba0ff] flex items-center gap-1.5 animate-pulse">
+                  <Languages className="w-3 h-3 animate-spin shrink-0" />
+                  <span>正在获取中文含义翻译...</span>
+                </div>
+              ) : null}
+            </div>
+
+            <div className="flex items-center justify-end gap-2 text-xs pt-0.5">
+              <button
+                type="button"
+                onClick={() => {
+                  setInputText(aiSuggestion);
+                  setAiSuggestion(null);
+                  setAiSuggestionTranslation(null);
+                }}
+                className="px-2.5 py-1 rounded-lg bg-[#f1f5f9] dark:bg-[#242f3d] hover:bg-[#e2e8f0] dark:hover:bg-[#2c3a4b] text-[#0f172a] dark:text-white font-medium text-[11px] cursor-pointer transition-colors"
+              >
+                填入输入框
+              </button>
+              <button
+                type="button"
+                disabled={isSending}
+                onClick={async () => {
+                  if (isSending) return;
+                  setIsSending(true);
+                  const targetSuggestion = aiSuggestion;
+                  const targetTranslation = aiSuggestionTranslation;
+                  setAiSuggestion(null);
+                  setAiSuggestionTranslation(null);
+                  try {
+                    let cnTranslation = targetTranslation || '';
+                    if (!cnTranslation && outboundTargetLang && outboundTargetLang !== 'Chinese' && outboundTargetLang !== 'zh-CN') {
+                      try {
+                        cnTranslation = await translateText(
+                          targetSuggestion,
+                          outboundTargetLang,
+                          'Chinese',
+                          customLLMConfig,
+                          translationSettings?.preferredEngine || 'gemini',
+                          undefined,
+                          translationSettings?.geminiModel,
+                          translationSettings?.geminiApiKey,
+                          translationSettings?.customModelName
+                        );
+                      } catch (transErr: any) {
+                        setSyncNotice(`中文对照翻译失败: ${transErr?.message || '请检查翻译通道配置'}`);
+                        setTimeout(() => setSyncNotice(null), 4000);
+                      }
+                    }
+                    onSendMessage({
+                      sender: 'me',
+                      text: targetSuggestion,
+                      translatedText: cnTranslation,
+                      timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false }),
+                    });
+                    const lastPeerMsg = [...messages].reverse().find((m) => m.sender === 'peer');
+                    submitTrainingFeedbackApi({
+                      snippet: targetSuggestion.slice(0, 500),
+                      peerCue: lastPeerMsg?.text ? lastPeerMsg.text.slice(0, 200) : undefined,
+                      engineLicenseKey: customLLMConfig?.engineLicenseKey,
+                    }).catch(() => {});
+                  } finally {
+                    setIsSending(false);
+                  }
+                }}
+                className={`px-3 py-1 rounded-lg bg-[#2481cc] hover:bg-[#1d6fb3] text-white font-medium text-[11px] cursor-pointer flex items-center gap-1 shadow-xs transition-all ${
+                  isSending ? 'opacity-50 pointer-events-none' : ''
+                }`}
+              >
+                <Send className="w-3 h-3" />
+                直接发送
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* Real-time Translation Preview Strip */}
+        {Boolean(inputText.trim() && translatedPreview) && (
+          <div className="mb-2 px-3 py-1.5 bg-[#f0f7ff] dark:bg-[#1a2530] border border-[#dbeafe] dark:border-[#242f3d] rounded-xl flex items-center justify-between text-xs animate-in fade-in duration-150">
+            <div className="flex items-center gap-2 min-w-0">
+              <Languages className="w-3.5 h-3.5 text-[#2481cc] dark:text-[#2ba0ff] shrink-0" />
+              <div className="min-w-0">
+                <span className="text-[10px] text-[#64748b] dark:text-[#7f93a5] block">
+                  译文预览：
+                </span>
+                <span className="text-xs font-medium text-[#0f172a] dark:text-[#f5f7fa] truncate block">
+                  {translatedPreview}
+                </span>
+              </div>
+            </div>
+            <div className="flex items-center gap-1.5 shrink-0 ml-2">
+              <span className="text-[10px] text-[#64748b] dark:text-[#7f93a5]">
+                {sendWithEnter ? 'Enter' : 'Ctrl+Enter'} 发送
+              </span>
+              <button
+                type="button"
+                onClick={() => {
+                  setTranslatedPreview('');
+                  setTranslatedPreviewSource('');
+                }}
+                className="p-1 text-[#64748b] hover:text-[#0f172a] dark:hover:text-white rounded hover:bg-black/5 dark:hover:bg-white/10 cursor-pointer transition-colors"
+                title="取消此译文预览 (Esc)"
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* Reply Quote Banner above Input */}
+        {replyingTo && (
+          <div className="mb-2 p-2 px-3 bg-[#f0f7ff] dark:bg-[#0e1928] border border-[#bfdbfe] dark:border-[#2ba0ff]/35 rounded-xl flex items-center justify-between text-xs animate-in fade-in duration-150">
+            <div className="min-w-0 pr-2">
+              <div className="font-semibold text-[#2481cc] dark:text-[#2ba0ff] flex items-center gap-1.5">
+                <Reply className="w-3.5 h-3.5" />
+                <span>回复 {replyingTo.sender === 'me' ? '我' : (chat.title || '对方')}</span>
+              </div>
+              <div className="text-[11px] text-[#64748b] dark:text-[#7f93a5] truncate mt-0.5">
+                {replyingTo.text}
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={() => setReplyingTo(null)}
+              className="p-1 text-[#64748b] hover:text-[#0f172a] dark:hover:text-white cursor-pointer shrink-0"
+              title="取消回复"
+            >
+              <X className="w-3.5 h-3.5" />
+            </button>
+          </div>
+        )}
+
+        {/* Edit Message Banner above Input */}
+        {editingMessage && (
+          <div className="mb-2 p-2 px-3 bg-amber-50 dark:bg-amber-500/12 border border-amber-300/70 dark:border-amber-500/35 rounded-xl flex items-center justify-between text-xs animate-in fade-in duration-150">
+            <div className="min-w-0 pr-2">
+              <div className="font-semibold text-amber-600 dark:text-amber-400 flex items-center gap-1.5">
+                <Edit2 className="w-3.5 h-3.5" />
+                <span>正在编辑消息</span>
+              </div>
+              <div className="text-[11px] text-[#64748b] dark:text-[#7f93a5] truncate mt-0.5">
+                原消息: {editingMessage.text}
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={() => {
+                setEditingMessage(null);
+                setInputText('');
+              }}
+              className="p-1 text-[#64748b] hover:text-[#0f172a] dark:hover:text-white cursor-pointer shrink-0"
+              title="取消编辑"
+            >
+              <X className="w-3.5 h-3.5" />
+            </button>
+          </div>
+        )}
+
+        {/* Attachment Menu Popup */}
+        {isAttachmentMenuOpen && (
+          <div className="absolute bottom-24 left-4 bg-white dark:bg-[#17212b] rounded-2xl shadow-2xl border border-[#e2e8f0] dark:border-[#243547] p-2 flex flex-col gap-1 z-30 animate-in fade-in zoom-in-95 duration-150 text-xs select-none">
+            <button
+              type="button"
+              onClick={() => {
+                imageInputRef.current?.click();
+                setIsAttachmentMenuOpen(false);
+              }}
+              className="flex items-center gap-3 px-3 py-2 rounded-xl hover:bg-[#f1f5f9] dark:hover:bg-[#202b36] text-[#0f172a] dark:text-white cursor-pointer font-medium"
+            >
+              <ImageIcon className="w-4 h-4 text-[#2481cc]" />
+              <span>照片或图片</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                videoInputRef.current?.click();
+                setIsAttachmentMenuOpen(false);
+              }}
+              className="flex items-center gap-3 px-3 py-2 rounded-xl hover:bg-[#f1f5f9] dark:hover:bg-[#202b36] text-[#0f172a] dark:text-white cursor-pointer font-medium"
+            >
+              <Video className="w-4 h-4 text-[#2481cc]" />
+              <span>视频消息</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                audioInputRef.current?.click();
+                setIsAttachmentMenuOpen(false);
+              }}
+              className="flex items-center gap-3 px-3 py-2 rounded-xl hover:bg-[#f1f5f9] dark:hover:bg-[#202b36] text-[#0f172a] dark:text-white cursor-pointer font-medium"
+            >
+              <Music className="w-4 h-4 text-[#2481cc]" />
+              <span>音频与语音</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                fileInputRef.current?.click();
+                setIsAttachmentMenuOpen(false);
+              }}
+              className="flex items-center gap-3 px-3 py-2 rounded-xl hover:bg-[#f1f5f9] dark:hover:bg-[#202b36] text-[#0f172a] dark:text-white cursor-pointer font-medium"
+            >
+              <FileText className="w-4 h-4 text-[#2481cc]" />
+              <span>文档与文件</span>
+            </button>
+          </div>
+        )}
+
+        {/* Hidden File Inputs */}
+        <input
+          type="file"
+          ref={imageInputRef}
+          accept="image/*"
+          className="hidden"
+          onChange={handleImageSelect}
+        />
+        <input
+          type="file"
+          ref={videoInputRef}
+          accept="video/mp4,video/quicktime,video/webm,video/mkv,video/avi,video/*"
+          className="hidden"
+          onChange={handleVideoSelect}
+        />
+        <input
+          type="file"
+          ref={audioInputRef}
+          accept="audio/mp3,audio/ogg,audio/wav,audio/m4a,audio/aac,audio/*"
+          className="hidden"
+          onChange={handleAudioSelect}
+        />
+        <input
+          type="file"
+          ref={fileInputRef}
+          className="hidden"
+          onChange={handleFileSelect}
+        />
+
+        {/* Pasted Image Pending Send Strip */}
+        {pastedImage && (
+          <div className="mb-2.5 p-2.5 bg-[#f0f7ff] dark:bg-[#1a2530] border border-[#2481cc]/40 rounded-xl flex items-center justify-between gap-3 animate-in fade-in slide-in-from-bottom-2 duration-150 shadow-xs">
+            <div className="flex items-center gap-3 min-w-0">
+              <div className="relative w-12 h-12 rounded-lg overflow-hidden shrink-0 border border-black/10 dark:border-white/10 bg-black/5">
+                <img
+                  src={pastedImage.dataUrl}
+                  alt="pasted preview"
+                  className="w-full h-full object-cover"
+                />
+              </div>
+              <div className="min-w-0">
+                <div className="text-xs font-semibold text-[#2481cc] dark:text-[#2ba0ff] flex items-center gap-1.5">
+                  <ImageIcon className="w-3.5 h-3.5" />
+                  <span>已捕获剪贴板照片</span>
+                  <span className="text-[10px] text-gray-500 font-normal">
+                    ({(pastedImage.file.size / 1024).toFixed(0)} KB)
+                  </span>
+                </div>
+                <div className="text-[11px] text-[#64748b] dark:text-[#7f93a5] truncate mt-0.5">
+                  {inputText.trim() ? `配文: ${inputText}` : `可在输入框输入配文，或直接点击发送 (${sendWithEnter ? 'Enter' : 'Ctrl+Enter'})`}
+                </div>
+              </div>
+            </div>
+            <div className="flex items-center gap-1.5 shrink-0">
+              <button
+                type="button"
+                onClick={() => setPastedImage(null)}
+                className="p-1.5 text-gray-400 hover:text-gray-600 dark:hover:text-white rounded-lg hover:bg-black/5 dark:hover:bg-white/10 cursor-pointer"
+                title="取消发送此图片 (Esc)"
+              >
+                <X className="w-4 h-4" />
+              </button>
+              <button
+                type="button"
+                onClick={handleSendPastedImage}
+                className="px-3 py-1.5 rounded-lg bg-[#2481cc] hover:bg-[#1d6fb3] text-white font-medium text-xs cursor-pointer flex items-center gap-1.5 shadow-xs"
+                title={`立即发送照片 (${sendWithEnter ? 'Enter' : 'Ctrl+Enter'})`}
+              >
+                <Send className="w-3 h-3" />
+                <span>发送照片</span>
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* Composer Top Utility Strip: Active Persona + Outbound Auto-Translate Target */}
+        <div className="flex items-center justify-between gap-2 mb-2 text-[11.5px]">
+          <div className="flex items-center gap-2 min-w-0 overflow-x-auto no-scrollbar">
+            <button
+              type="button"
+              onClick={onOpenKnowledgeEvolution}
+              title="查看或切换人设资料"
+              className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg border font-medium cursor-pointer transition-colors shrink-0 ${
+                activeRightPanel === 'persona'
+                  ? 'bg-[#2481cc] border-[#2481cc] text-white dark:bg-[#132234] dark:border-[#2ba0ff]/45 dark:text-[#2ba0ff]'
+                  : 'bg-[#f0f7ff] hover:bg-[#e0efff] dark:bg-[#0e1726] dark:hover:bg-[#142236] border-[#dbeafe] dark:border-[#1a2b40] text-[#2481cc] dark:text-[#2ba0ff]'
+              }`}
+            >
+              <Sparkles className="w-3 h-3" />
+              <span className="truncate max-w-[160px]">人设: {activePersonaName}</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => {
+                if (onOpenTranslation) {
+                  onOpenTranslation();
+                } else {
+                  setIsTranslateBarVisible(true);
+                  setIsLangMenuOpen((v) => !v);
+                }
+              }}
+              title="配置发信自动翻译语言"
+              className={`inline-flex items-center gap-1 px-2 py-1 rounded-lg border transition-colors cursor-pointer shrink-0 ${
+                activeRightPanel === 'translation'
+                  ? 'bg-[#e8f3ff] border-[#bfdbfe] text-[#2481cc] dark:bg-[#132234] dark:border-[#2ba0ff]/45 dark:text-[#2ba0ff]'
+                  : 'border-transparent text-[#475569] hover:text-[#2481cc] hover:bg-[#f1f5f9] dark:text-[#94a3b8] dark:hover:text-[#2ba0ff] dark:hover:bg-[#101c2d]'
+              }`}
+            >
+              <Languages className="w-3.5 h-3.5 text-[#16a34a] dark:text-emerald-400" />
+              <span>发送时自动译为: {getLanguageDisplayName(outboundTargetLang)}</span>
+            </button>
+          </div>
+
+          <button
+            type="button"
+            onClick={() => setIsVoiceStudioOpen(true)}
+            title="打开音色克隆与语音合成工作室"
+            className="inline-flex items-center gap-1 px-2 py-1 rounded-lg text-[#64748b] hover:text-[#2481cc] hover:bg-[#f1f5f9] dark:text-[#94a3b8] dark:hover:text-[#2ba0ff] dark:hover:bg-[#101c2d] transition-colors cursor-pointer shrink-0"
+          >
+            <AudioWaveform className="w-3.5 h-3.5" />
+            <span className="hidden sm:inline">音色合成</span>
+          </button>
+        </div>
+
+        {/* Main Input Container + Bottom Compact Action Row */}
+        <div className="rounded-xl border border-[#e2e8f0] dark:border-[#18273a] bg-[#f8fafc] dark:bg-[#0e1726] focus-within:bg-white dark:focus-within:bg-[#101b2c] focus-within:border-[#2481cc] dark:focus-within:border-[#2ba0ff] transition-all">
+          <input
+            type="text"
+            value={inputText}
+            onChange={(e) => setInputText(e.target.value)}
+            onKeyDown={handleKeyDown}
+            onPaste={handlePaste}
+            placeholder={
+              editingMessage
+                ? '修改消息...'
+                : pastedImage
+                ? '添加图片说明（可选）...'
+                : '输入消息（支持自动翻译与 Ctrl+V 粘贴图片）...'
+            }
+            className="w-full bg-transparent text-[#0f172a] dark:text-[#f5f7fa] text-[13.5px] px-3.5 pt-2.5 pb-1.5 focus:outline-none placeholder-[#94a3b8] dark:placeholder-[#7f93a5]"
+          />
+
+          <div className="px-2.5 pb-2 pt-1 flex items-center justify-between border-t border-[#e2e8f0]/60 dark:border-white/5">
+            {/* Left Tools */}
+            <div className="flex items-center gap-1">
+              <button
+                type="button"
+                onClick={() => setIsAttachmentMenuOpen(!isAttachmentMenuOpen)}
+                title="附加文件、图片或文档"
+                className={`w-8 h-8 rounded-lg flex items-center justify-center transition-colors cursor-pointer ${
+                  isAttachmentMenuOpen
+                    ? 'bg-[#e8f3ff] text-[#2481cc] dark:bg-[#2481cc]/20 dark:text-[#2ba0ff]'
+                    : 'hover:bg-[#e2e8f0]/60 dark:hover:bg-white/10 text-[#64748b] dark:text-[#a0acb8] hover:text-[#2481cc] dark:hover:text-white'
+                }`}
+              >
+                <Paperclip className="w-4 h-4 -rotate-45" />
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setShowEmojiPicker(!showEmojiPicker)}
+                title="表情与贴纸"
+                className={`w-8 h-8 rounded-lg flex items-center justify-center transition-colors cursor-pointer ${
+                  showEmojiPicker
+                    ? 'bg-[#e8f3ff] text-[#2481cc] dark:bg-[#2481cc]/20 dark:text-[#2ba0ff]'
+                    : 'hover:bg-[#e2e8f0]/60 dark:hover:bg-white/10 text-[#64748b] dark:text-[#a0acb8] hover:text-[#2481cc] dark:hover:text-white'
+                }`}
+              >
+                <Smile className="w-4 h-4" />
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setIsVoiceStudioOpen(true)}
+                title="语音合成"
+                className="w-8 h-8 rounded-lg flex items-center justify-center text-[#64748b] dark:text-[#a0acb8] hover:text-[#2481cc] dark:hover:text-[#2ba0ff] hover:bg-[#e2e8f0]/60 dark:hover:bg-white/10 transition-colors cursor-pointer"
+              >
+                <AudioWaveform className="w-4 h-4" />
+              </button>
+
+              <button
+                type="button"
+                onClick={handleGenerateAiSuggestion}
+                disabled={isGeneratingAi}
+                title="基于人设与最近30条对话生成 AI 拟真回复"
+                className={`flex items-center gap-1 px-2.5 h-8 rounded-lg text-xs font-medium transition-all cursor-pointer ${
+                  isGeneratingAi
+                    ? 'bg-[#e8f3ff] text-[#2481cc] dark:bg-[#2481cc]/20 dark:text-[#2ba0ff]'
+                    : 'hover:bg-[#e8f3ff] text-[#2481cc] dark:text-[#2ba0ff] dark:hover:bg-[#2481cc]/15'
+                }`}
+              >
+                <Sparkles className={`w-3.5 h-3.5 ${isGeneratingAi ? 'animate-spin' : ''}`} />
+                <span>{isGeneratingAi ? '生成中...' : 'AI 建议回复'}</span>
+              </button>
+            </div>
+
+            {/* Right Actions: Shortcut hint + Mic / Send Button */}
+            <div className="flex items-center gap-2">
+              <span className="hidden sm:inline text-[11px] text-[#94a3b8] dark:text-[#7f93a5] select-none">
+                {sendWithEnter ? 'Enter 发送' : 'Ctrl+Enter 发送'}
+              </span>
+
+              {inputText.trim() || pastedImage ? (
+                <button
+                  type="button"
+                  disabled={isSending}
+                  onClick={pastedImage ? handleSendPastedImage : handleSendText}
+                  title={editingMessage ? '保存修改' : pastedImage ? '发送照片' : '发送消息'}
+                  className={`h-8 px-3.5 rounded-lg bg-[#2481cc] hover:bg-[#1d6fb3] text-white text-xs font-medium flex items-center gap-1.5 transition-all cursor-pointer shadow-xs shrink-0 ${
+                    isSending ? 'opacity-50 pointer-events-none' : ''
+                  }`}
+                >
+                  <span>{editingMessage ? '保存' : pastedImage ? '发送照片' : '发送'}</span>
+                  {editingMessage ? <Check className="w-3.5 h-3.5" /> : <Send className="w-3.5 h-3.5" />}
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  onClick={handleToggleRecordMic}
+                  title={isRecordingMic ? '点击停止录音并发送' : '点击录制语音消息'}
+                  className={`h-8 px-3 rounded-lg flex items-center gap-1.5 text-xs font-medium transition-all cursor-pointer shrink-0 ${
+                    isRecordingMic
+                      ? 'bg-rose-500 text-white animate-pulse'
+                      : 'bg-[#f1f5f9] hover:bg-[#e8f3ff] text-[#475569] hover:text-[#2481cc] dark:bg-[#202b36] dark:text-[#a0acb8] dark:hover:text-[#2ba0ff]'
+                  }`}
+                >
+                  <Mic className="w-3.5 h-3.5" />
+                  <span>{isRecordingMic ? `${recordDuration}s` : '语音'}</span>
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
+      </footer>
+
+      {/* Telegram Emoji & Official Stickers Picker Popover */}
+      <TelegramEmojiPicker
+        isOpen={showEmojiPicker}
+        onClose={() => setShowEmojiPicker(false)}
+        onSelectEmoji={(emoji) => setInputText((prev) => prev + emoji)}
+        onSelectSticker={handleSendSticker}
+        accountId={currentAccountId}
+      />
+
+
+      {/* Telegram Chat Info & Shared Media Drawer */}
+      <TelegramChatInfoDrawer
+        isOpen={isChatInfoOpen}
+        onClose={() => setChatInfoOpen(false)}
+        chat={chat}
+        accountId={currentAccountId}
+        messages={messages}
+        onClearHistory={onClearHistory}
+        onToggleMute={onToggleMuteChat}
+        onTogglePin={onTogglePinChat}
+        onUpdateTitle={onUpdateChatTitle}
+        onChatInfoUpdated={onChatInfoUpdated}
+      />
+
+      {/* Voice Clone Studio Modal */}
+      <VoiceCloneStudioModal
+        isOpen={isVoiceStudioOpen}
+        onClose={() => setIsVoiceStudioOpen(false)}
+        initialText={inputText.trim() || translatedPreview}
+        translatedText={translatedPreview}
+        targetLangName={getLanguageDisplayName(outboundTargetLang)}
+        customConfig={customLLMConfig}
+        onSendVoice={handleTriggerVoiceCloneSend}
+      />
+
+      {/* Telegram Message Context Menu Popup (Right-Click) */}
+      {messageContextMenu && (
+        <div
+          className="fixed z-50 bg-white dark:bg-[#17212b] border border-[#e0e4e8] dark:border-[#2b3848] rounded-2xl p-1.5 shadow-2xl min-w-[170px] text-xs select-none animate-in fade-in zoom-in-95 duration-100"
+          style={{
+            left: `${messageContextMenu.x}px`,
+            top: `${messageContextMenu.y}px`,
+          }}
+          onClick={(e) => e.stopPropagation()}
+        >
+          {/* Quick Reaction Bar in Context Menu */}
+          <div className="flex items-center justify-between px-2 py-1 mb-1 border-b border-black/5 dark:border-white/10">
+            {['👍', '❤️', '🔥', '🎉'].map((emoji) => (
+              <button
+                key={emoji}
+                type="button"
+                onClick={() => {
+                  onToggleReaction?.(messageContextMenu.message.id, emoji);
+                  setMessageContextMenu(null);
+                }}
+                className="text-base hover:scale-130 transition-transform p-1 cursor-pointer"
+                title={`回应 ${emoji}`}
+              >
+                {emoji}
+              </button>
+            ))}
+          </div>
+
+          <button
+            type="button"
+            onClick={() => {
+              setReplyingTo(messageContextMenu.message);
+              setEditingMessage(null);
+              setMessageContextMenu(null);
+            }}
+            className="w-full flex items-center gap-2.5 px-3 py-2 rounded-xl hover:bg-black/5 dark:hover:bg-[#202b36] text-[#111827] dark:text-white cursor-pointer font-medium"
+          >
+            <Reply className="w-4 h-4 text-[#2481cc]" />
+            <span>回复消息</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => {
+              if (messageContextMenu.message.isImage && messageContextMenu.message.imageUrl) {
+                copyImageToClipboard(messageContextMenu.message.imageUrl, messageContextMenu.message.id);
+              } else {
+                copyToClipboard(messageContextMenu.message.text, messageContextMenu.message.id);
+              }
+              setMessageContextMenu(null);
+            }}
+            className="w-full flex items-center gap-2.5 px-3 py-2 rounded-xl hover:bg-black/5 dark:hover:bg-[#202b36] text-[#111827] dark:text-white cursor-pointer font-medium"
+          >
+            <Copy className="w-4 h-4 text-[#707579] dark:text-[#a0acb8]" />
+            <span>{messageContextMenu.message.isImage ? '复制照片' : messageContextMenu.message.isVideo ? '复制视频说明' : '复制文字'}</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => {
+              onTogglePinMessage?.(messageContextMenu.message.id);
+              setMessageContextMenu(null);
+            }}
+            className="w-full flex items-center gap-2.5 px-3 py-2 rounded-xl hover:bg-black/5 dark:hover:bg-[#202b36] text-[#111827] dark:text-white cursor-pointer font-medium"
+          >
+            <Pin className="w-4 h-4 text-[#707579] dark:text-[#a0acb8]" />
+            <span>{messageContextMenu.message.isPinned ? '取消置顶' : '置顶消息'}</span>
+          </button>
+
+          {messageContextMenu.message.sender === 'me' && !messageContextMenu.message.isAudio && (
+            <button
+              type="button"
+              onClick={() => {
+                setEditingMessage(messageContextMenu.message);
+                setInputText(messageContextMenu.message.text);
+                setReplyingTo(null);
+                setMessageContextMenu(null);
+              }}
+              className="w-full flex items-center gap-2.5 px-3 py-2 rounded-xl hover:bg-black/5 dark:hover:bg-[#202b36] text-[#111827] dark:text-white cursor-pointer font-medium"
+            >
+              <Edit2 className="w-4 h-4 text-[#707579] dark:text-[#a0acb8]" />
+              <span>编辑消息</span>
+            </button>
+          )}
+
+          <div className="my-1 border-t border-black/5 dark:border-white/10" />
+
+          <button
+            type="button"
+            onClick={() => {
+              const target = messageContextMenu.message;
+              setMessageContextMenu(null);
+              setMessageToDelete(target);
+            }}
+            className="w-full flex items-center gap-2.5 px-3 py-2 rounded-xl hover:bg-red-500/10 text-red-500 dark:text-red-400 cursor-pointer font-medium"
+          >
+            <Trash2 className="w-4 h-4 text-red-500" />
+            <span>删除单条消息</span>
+          </button>
+        </div>
+      )}
+
+      {/* Telegram Confirmation Modal for Deleting Single Message */}
+      {messageToDelete && (
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-xs flex items-center justify-center z-50 p-4 animate-in fade-in duration-150">
+          <div className="bg-white dark:bg-[#1e2c3a] border border-[#e0e4e8] dark:border-[#2b3c4e] rounded-2xl p-5 max-w-sm w-full shadow-2xl space-y-4">
+            <div className="flex items-center gap-3">
+              <div className="w-10 h-10 rounded-full bg-red-500/10 dark:bg-red-500/20 text-red-500 flex items-center justify-center shrink-0">
+                <Trash2 className="w-5 h-5" />
+              </div>
+              <div className="min-w-0">
+                <h3 className="text-sm font-semibold text-[#111827] dark:text-white">
+                  删除此条消息？
+                </h3>
+                <p className="text-xs text-[#707579] dark:text-[#7f93a5] mt-0.5">
+                  {messageToDelete.sender === 'me'
+                    ? '确定从当前会话记录中彻底移除您发送的这条消息吗？'
+                    : '确定从当前会话记录中彻底移除客户发送的这条消息吗？'}
+                </p>
+              </div>
+            </div>
+
+            <div className="p-2.5 rounded-xl bg-black/5 dark:bg-black/20 text-xs text-[#707579] dark:text-[#a0acb8] truncate border border-black/5 dark:border-white/5">
+              “{messageToDelete.text || (messageToDelete.isAudio ? '🎤 语音消息' : messageToDelete.isVideo ? '🎬 视频消息' : messageToDelete.isImage ? '🖼️ 图片消息' : '消息内容')}”
+            </div>
+
+            <div className="flex items-center justify-end gap-2 pt-1">
+              <button
+                type="button"
+                onClick={() => setMessageToDelete(null)}
+                className="px-4 py-2 rounded-xl text-xs font-medium text-[#707579] dark:text-[#a0acb8] hover:bg-black/5 dark:hover:bg-white/10 transition-colors cursor-pointer"
+              >
+                取消
+              </button>
+              <button
+                type="button"
+                onClick={confirmDeleteMessage}
+                className="px-4 py-2 rounded-xl text-xs font-semibold bg-red-500 hover:bg-red-600 text-white shadow-sm transition-colors cursor-pointer flex items-center gap-1.5"
+              >
+                <Trash2 className="w-3.5 h-3.5" />
+                <span>确认删除</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
+

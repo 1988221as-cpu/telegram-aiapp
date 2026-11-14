@@ -1,0 +1,402 @@
+const { app, BrowserWindow, Menu, dialog, globalShortcut } = require('electron');
+const path = require('path');
+const fs = require('fs');
+const http = require('http');
+const net = require('net');
+const { pathToFileURL } = require('url');
+
+// Set application name explicitly
+app.setName('HumanSense');
+
+function resolveAppIcon() {
+  const candidates = [
+    path.join(__dirname, 'dist', 'app-icon.png'),
+    path.join(__dirname, 'public', 'app-icon.png'),
+    path.join(__dirname, 'dist', 'assets', 'aistudio', 'image_df23adce.png'),
+    path.join(__dirname, 'public', 'assets', 'aistudio', 'image_df23adce.png'),
+  ];
+  return candidates.find((p) => fs.existsSync(p));
+}
+
+// 1. Disable hardware acceleration to eliminate Windows GPU driver black screen issues
+app.disableHardwareAcceleration();
+
+// 2. Single-instance lock to prevent port collisions from multiple instances
+const gotTheLock = app.requestSingleInstanceLock();
+if (!gotTheLock) {
+  app.quit();
+  process.exit(0);
+}
+
+let mainWindow = null;
+let currentPort = 38271;
+
+// 3. Setup persistent file logging in %APPDATA%/HumanSense/logs/main.log
+let logFilePath = null;
+function getLogFilePath() {
+  if (!logFilePath) {
+    try {
+      const logsDir = path.join(app.getPath('userData'), 'logs');
+      if (!fs.existsSync(logsDir)) {
+        fs.mkdirSync(logsDir, { recursive: true });
+      }
+      logFilePath = path.join(logsDir, 'main.log');
+    } catch {
+      logFilePath = path.join(process.cwd(), 'main.log');
+    }
+  }
+  return logFilePath;
+}
+
+function writeLog(level, message, detail = '') {
+  const timestamp = new Date().toISOString();
+  const line = `[${timestamp}] [${level.toUpperCase()}] ${message}${detail ? ' ' + detail : ''}\n`;
+  try {
+    process.stdout.write(line);
+    const p = getLogFilePath();
+    fs.appendFileSync(p, line, 'utf8');
+  } catch {}
+}
+
+// 4. Port probing starting from 38271
+function isPortAvailable(port) {
+  return new Promise((resolve) => {
+    const server = net.createServer();
+    server.once('error', () => resolve(false));
+    server.once('listening', () => {
+      server.close(() => resolve(true));
+    });
+    server.listen(port, '127.0.0.1');
+  });
+}
+
+async function findAvailablePort(startPort = 38271, maxAttempts = 20) {
+  for (let i = 0; i < maxAttempts; i++) {
+    const candidate = startPort + i;
+    if (await isPortAvailable(candidate)) {
+      return candidate;
+    }
+  }
+  return startPort;
+}
+
+// 5. Strict health check polling (strictly requires statusCode === 200)
+function waitForHealth200(url, maxRetries = 60, interval = 300) {
+  return new Promise((resolve) => {
+    let attempts = 0;
+    const poll = () => {
+      attempts++;
+      const req = http.get(url, (res) => {
+        if (res.statusCode === 200) {
+          writeLog('info', `Server verified ready with HTTP 200 at ${url}`);
+          resolve(true);
+        } else if (attempts < maxRetries) {
+          setTimeout(poll, interval);
+        } else {
+          writeLog('warn', `Health check failed after ${attempts} attempts with status ${res.statusCode}`);
+          resolve(false);
+        }
+      });
+      req.on('error', (err) => {
+        if (attempts < maxRetries) {
+          setTimeout(poll, interval);
+        } else {
+          writeLog('warn', `Health check network error after ${attempts} attempts: ${err.message}`);
+          resolve(false);
+        }
+      });
+    };
+    poll();
+  });
+}
+
+// 6. Inline HTML templates for splash screen and visual error reporting
+const SPLASH_HTML = `data:text/html;charset=utf-8,` + encodeURIComponent(`
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <title>HumanSense</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      background: #0a111a;
+      color: #f5f7fa;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      height: 100vh;
+      user-select: none;
+    }
+    .card {
+      text-align: center;
+      padding: 36px 48px;
+      background: #121d28;
+      border: 1px solid #1e3145;
+      border-radius: 16px;
+      box-shadow: 0 12px 36px rgba(0,0,0,0.45);
+      max-width: 460px;
+    }
+    .spinner {
+      width: 42px;
+      height: 42px;
+      border: 3.5px solid #1e3145;
+      border-top-color: #2481cc;
+      border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+      margin: 0 auto 20px auto;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    h2 { font-size: 18px; font-weight: 600; color: #f5f7fa; margin-bottom: 8px; }
+    p { font-size: 13px; color: #7f93a5; line-height: 1.6; }
+    .badge {
+      display: inline-block;
+      margin-top: 16px;
+      font-size: 11px;
+      color: #2481cc;
+      background: rgba(36,129,204,0.12);
+      padding: 4px 12px;
+      border-radius: 20px;
+      border: 1px solid rgba(36,129,204,0.25);
+    }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="spinner"></div>
+    <h2>HumanSense 客户端启动中</h2>
+    <p>正在初始化本地加密通信与数据引擎，请稍候片刻...</p>
+    <div class="badge">AES-256-GCM 本地加密引擎已就绪</div>
+  </div>
+</body>
+</html>
+`);
+
+function renderErrorHtml(title, errorMsg, stack = '') {
+  return `data:text/html;charset=utf-8,` + encodeURIComponent(`
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <title>启动异常 - HumanSense</title>
+  <style>
+    body {
+      background: #0a111a;
+      color: #f5f7fa;
+      font-family: Consolas, monospace;
+      padding: 30px;
+      line-height: 1.5;
+    }
+    h2 { color: #ff5252; font-size: 20px; margin-bottom: 15px; }
+    .box {
+      background: #18222d;
+      border: 1px solid #ff5252;
+      border-radius: 8px;
+      padding: 20px;
+      white-space: pre-wrap;
+      word-break: break-all;
+      color: #ffb4b4;
+      font-size: 13px;
+      max-height: 65vh;
+      overflow-y: auto;
+    }
+    .hint {
+      margin-top: 15px;
+      font-size: 12px;
+      color: #7f93a5;
+    }
+    button {
+      margin-top: 16px;
+      background: #2481cc;
+      color: white;
+      border: none;
+      padding: 10px 20px;
+      border-radius: 6px;
+      cursor: pointer;
+      font-weight: 600;
+    }
+    button:hover { background: #1a6fb0; }
+  </style>
+</head>
+<body>
+  <h2>⚠️ ${title}</h2>
+  <div class="box">${errorMsg}\n\n${stack}</div>
+  <p class="hint">详细日志已保存至: ${getLogFilePath()}</p>
+  <button onclick="location.reload()">重新载入</button>
+</body>
+</html>
+`);
+}
+
+// 7. Load backend in main process
+async function startBackendServer(port) {
+  const appPath = __dirname;
+  let scriptPath = path.join(appPath, 'dist', 'server.js');
+  const isCompiled = fs.existsSync(scriptPath);
+  if (!isCompiled) {
+    scriptPath = path.join(appPath, 'server.ts');
+  }
+
+  const userDataDir = path.join(app.getPath('userData'), 'data');
+
+  // CRITICAL: NEVER set ELECTRON_RUN_AS_NODE in main process!
+  delete process.env.ELECTRON_RUN_AS_NODE;
+  process.env.NODE_ENV = 'production';
+  process.env.PORT = String(port);
+  process.env.HOST = '127.0.0.1';
+  process.env.DATA_DIR = userDataDir;
+
+  writeLog('info', `Starting backend server on 127.0.0.1:${port}`);
+  writeLog('info', `Backend script path: ${scriptPath}`);
+  writeLog('info', `User data directory: ${userDataDir}`);
+
+  if (isCompiled) {
+    // Production: Load precompiled server in main process
+    try {
+      writeLog('info', `Importing compiled backend: ${pathToFileURL(scriptPath).href}`);
+      await import(pathToFileURL(scriptPath).href);
+      writeLog('info', 'Compiled backend imported successfully in main process');
+    } catch (err) {
+      writeLog('fatal', `Failed to import backend server: ${err.message}`, err.stack);
+      throw err;
+    }
+  } else {
+    const { spawn } = require('child_process');
+    const isWin = process.platform === 'win32';
+    const localTsx = path.join(appPath, 'node_modules', '.bin', isWin ? 'tsx.cmd' : 'tsx');
+    const hasLocalTsx = fs.existsSync(localTsx);
+    const cmd = hasLocalTsx ? localTsx : isWin ? 'npx.cmd' : 'npx';
+    const rawArgs = hasLocalTsx ? [scriptPath] : ['tsx', scriptPath];
+    const quoteWinArg = (arg) => (/\s/.test(arg) ? `"${arg.replace(/"/g, '\\"')}"` : arg);
+    const spawnCmd = isWin ? quoteWinArg(cmd) : cmd;
+    const spawnArgs = isWin ? rawArgs.map(quoteWinArg) : rawArgs;
+
+    const child = spawn(spawnCmd, spawnArgs, {
+      cwd: appPath,
+      env: process.env,
+      stdio: 'pipe',
+      shell: isWin,
+      windowsHide: true,
+    });
+    child.stdout?.on('data', (d) => writeLog('backend', d.toString().trim()));
+    child.stderr?.on('data', (d) => writeLog('backend-err', d.toString().trim()));
+    child.on('error', (err) => writeLog('error', `Failed to spawn tsx: ${err.message}`));
+  }
+}
+
+async function createWindow() {
+  mainWindow = new BrowserWindow({
+    width: 1280,
+    height: 820,
+    minWidth: 900,
+    minHeight: 650,
+    title: 'HumanSense',
+    icon: resolveAppIcon(),
+    backgroundColor: '#0a111a',
+    autoHideMenuBar: true,
+    show: true,
+    webPreferences: {
+      nodeIntegration: false,
+      contextIsolation: true,
+    },
+  });
+
+  Menu.setApplicationMenu(null);
+
+  // Show splash immediately
+  mainWindow.loadURL(SPLASH_HTML);
+
+  // DevTools Shortcuts (Enabled in dev or when explicitly passed --devtools / LX_ENABLE_DEVTOOLS=1)
+  const allowDevTools =
+    !app.isPackaged ||
+    process.argv.includes('--devtools') ||
+    process.env.LX_ENABLE_DEVTOOLS === '1';
+  if (allowDevTools) {
+    mainWindow.webContents.on('before-input-event', (event, input) => {
+      if (input.key === 'F12' || (input.control && input.shift && (input.key === 'I' || input.key === 'i'))) {
+        mainWindow.webContents.toggleDevTools();
+        event.preventDefault();
+      }
+    });
+  }
+
+  // Track renderer crashes or load failures
+  mainWindow.webContents.on('render-process-gone', (_event, details) => {
+    writeLog('fatal', `Renderer process gone: ${details.reason} (exitCode: ${details.exitCode})`);
+  });
+
+  mainWindow.webContents.on('did-fail-load', (_event, errorCode, errorDescription, validatedURL) => {
+    writeLog('warn', `did-fail-load on ${validatedURL}: [${errorCode}] ${errorDescription}`);
+  });
+
+  // Find port and start
+  try {
+    currentPort = await findAvailablePort(38271);
+    writeLog('info', `Selected port: ${currentPort}`);
+
+    await startBackendServer(currentPort);
+
+    const healthUrl = `http://127.0.0.1:${currentPort}/api/health`;
+    const isHealthy = await waitForHealth200(healthUrl, 60, 250);
+
+    // Smoke Test mode (used by CI to verify startup)
+    if (process.argv.includes('--smoke-test')) {
+      if (isHealthy) {
+        writeLog('info', 'SMOKE_TEST_SUCCESS: Backend health check returned 200');
+        setTimeout(() => process.exit(0), 200);
+        return;
+      } else {
+        writeLog('fatal', 'SMOKE_TEST_FAILED: Backend failed to become healthy');
+        setTimeout(() => process.exit(1), 200);
+        return;
+      }
+    }
+
+    if (isHealthy && mainWindow && !mainWindow.isDestroyed()) {
+      writeLog('info', `Navigating window to http://127.0.0.1:${currentPort}`);
+      mainWindow.setTitle('HumanSense');
+      mainWindow.loadURL(`http://127.0.0.1:${currentPort}`);
+    } else if (mainWindow && !mainWindow.isDestroyed()) {
+      const msg = `后台服务启动超时：未能于 127.0.0.1:${currentPort}/api/health 取得正常状态响应。`;
+      writeLog('error', msg);
+      mainWindow.loadURL(renderErrorHtml('服务启动超时', msg));
+      dialog.showErrorBox('HumanSense 启动超时', `${msg}\n请查看日志文件: ${getLogFilePath()}`);
+    }
+  } catch (err) {
+    writeLog('fatal', `Fatal error during startup: ${err.message}`, err.stack);
+
+    if (process.argv.includes('--smoke-test')) {
+      app.exit(1);
+      return;
+    }
+
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.loadURL(renderErrorHtml('主进程异常崩溃', err.message, err.stack));
+    }
+    dialog.showErrorBox(
+      'HumanSense 致命启动错误',
+      `服务启动异常:\n${err.message}\n\n${err.stack || ''}\n\n日志路径:\n${getLogFilePath()}`
+    );
+  }
+
+  mainWindow.on('closed', () => {
+    mainWindow = null;
+  });
+}
+
+app.whenReady().then(createWindow);
+
+app.on('second-instance', () => {
+  if (mainWindow) {
+    if (mainWindow.isMinimized()) mainWindow.restore();
+    mainWindow.focus();
+  }
+});
+
+app.on('window-all-closed', () => {
+  if (process.platform !== 'darwin') {
+    app.quit();
+  }
+});
