@@ -345,7 +345,7 @@ export const ChatList: React.FC<ChatListProps> = ({
           {searchQuery && (
             <button
               onClick={() => setSearchQuery('')}
-              className="absolute right-2 text-[#64748b] dark:text-[#7f95ab] hover:text-[#0f172a] dark:hover:text-white transition-colors cursor-pointer"
+              className="absolute right-2 text-[#64748b] dark:text-[#7f95ab] aurora:text-[#7e9aa5] hover:text-[#0f172a] dark:hover:text-white aurora:hover:text-[#ecf6f8] transition-colors cursor-pointer"
             >
               <X className="w-3.5 h-3.5" />
             </button>
@@ -367,10 +367,10 @@ export const ChatList: React.FC<ChatListProps> = ({
 
       {/* Persistent Session Expired Banner */}
       {currentAccountStatus === 'expired' && (
-        <div className="mx-2 mt-2 px-3 py-2 rounded-xl bg-rose-500/10 border border-rose-500/30 flex items-center justify-between gap-2 shrink-0">
+        <div className="mx-2 mt-2 px-3 py-2 rounded-xl bg-rose-500/10 dark:bg-rose-950/50 aurora:bg-rose-950/50 border border-rose-500/30 aurora:border-rose-500/35 flex items-center justify-between gap-2 shrink-0">
           <div className="flex items-center gap-2 min-w-0">
             <AlertTriangle className="w-4 h-4 text-rose-500 shrink-0" />
-            <span className="text-[11.5px] font-medium text-rose-600 dark:text-rose-300 truncate">
+            <span className="text-[11.5px] font-medium text-rose-700 dark:text-rose-300 aurora:text-rose-200 truncate">
               当前账号会话已失效
             </span>
           </div>
@@ -388,10 +388,10 @@ export const ChatList: React.FC<ChatListProps> = ({
 
       {/* Offline / Reconnecting Banner with explicit reason and Reconnect button */}
       {(currentAccountStatus === 'offline' || currentAccountStatus === 'away') && (
-        <div className="mx-2 mt-2 px-3 py-2 rounded-xl bg-amber-500/10 border border-amber-500/30 flex items-center justify-between gap-2 shrink-0">
+        <div className="mx-2 mt-2 px-3 py-2 rounded-xl bg-amber-500/10 dark:bg-amber-950/45 aurora:bg-amber-950/45 border border-amber-500/30 aurora:border-amber-500/35 flex items-center justify-between gap-2 shrink-0">
           <div className="flex items-center gap-2 min-w-0" title={currentAccountOfflineReason || undefined}>
             <WifiOff className="w-3.5 h-3.5 text-amber-500 shrink-0" />
-            <span className="text-[11px] font-medium text-amber-700 dark:text-amber-300 truncate">
+            <span className="text-[11px] font-medium text-amber-700 dark:text-amber-300 aurora:text-amber-200 truncate">
               {currentAccountOfflineReason || (currentAccountStatus === 'away' ? 'MTProto 连接断开，正在重连...' : '当前账号未连接 MTProto')}
             </span>
           </div>
@@ -503,16 +503,16 @@ export const ChatList: React.FC<ChatListProps> = ({
         {activeFolder !== 'archived' && !searchQuery && archivedCount > 0 && (
           <div
             onClick={() => setActiveFolder('archived')}
-            className="mx-1.5 px-2.5 py-2 rounded-xl flex items-center cursor-pointer hover:bg-[#f1f5f9] dark:hover:bg-[#0e1726]/80 transition-colors group border border-transparent"
+            className="mx-1.5 px-2.5 py-2 rounded-xl flex items-center cursor-pointer hover:bg-[#f1f5f9] dark:hover:bg-[#0e1726]/80 aurora:hover:bg-[#132129]/80 transition-colors group border border-transparent"
           >
-            <div className="w-10 h-10 rounded-full bg-[#f1f5f9] dark:bg-[#132033] flex items-center justify-center mr-2.5 shrink-0 text-[#64748b] dark:text-[#7f95ab] group-hover:text-[#0284c7] dark:group-hover:text-[#2ba0ff] group-hover:bg-[#e8f3ff] dark:group-hover:bg-[#16283f] transition-all">
+            <div className="w-10 h-10 rounded-full bg-[#f1f5f9] dark:bg-[#132033] aurora:bg-[#13252e] flex items-center justify-center mr-2.5 shrink-0 text-[#64748b] dark:text-[#7f95ab] aurora:text-[#7e9aa5] group-hover:text-[#0284c7] dark:group-hover:text-[#2ba0ff] aurora:group-hover:text-[#5eead4] group-hover:bg-[#e8f3ff] dark:group-hover:bg-[#16283f] aurora:group-hover:bg-[#112e37] transition-all">
               <Archive className="w-4 h-4" />
             </div>
             <div className="flex-1 min-w-0 flex items-center justify-between">
-              <span className="text-[13px] font-semibold text-[#0f172a] dark:text-[#eef4fb] group-hover:text-[#0284c7] dark:group-hover:text-[#2ba0ff]">
+              <span className="text-[13px] font-semibold text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] group-hover:text-[#0284c7] dark:group-hover:text-[#2ba0ff] aurora:group-hover:text-[#5eead4]">
                 已归档对话
               </span>
-              <span className="text-[11px] text-[#64748b] dark:text-[#7f95ab] tabular-nums">
+              <span className="text-[11px] text-[#64748b] dark:text-[#7f95ab] aurora:text-[#7e9aa5] tabular-nums">
                 {archivedCount}
               </span>
             </div>
@@ -523,7 +523,7 @@ export const ChatList: React.FC<ChatListProps> = ({
         {activeFolder === 'archived' && (
           <div
             onClick={() => setActiveFolder('all')}
-            className="mx-1.5 px-3 py-2 rounded-xl bg-[#e8f3ff] dark:bg-[#13253b] text-[#0284c7] dark:text-[#2ba0ff] text-xs font-medium flex items-center gap-1.5 cursor-pointer hover:underline border border-[#bfdbfe]/60 dark:border-[#2ba0ff]/30"
+            className="mx-1.5 px-3 py-2 rounded-xl bg-[#e8f3ff] dark:bg-[#12263f] aurora:bg-[#112d36] text-[#0284c7] dark:text-[#2ba0ff] aurora:text-[#5eead4] text-xs font-medium flex items-center gap-1.5 cursor-pointer hover:underline border border-[#bfdbfe]/60 dark:border-[#2ba0ff]/35 aurora:border-[#2dd4bf]/35"
           >
             <ChevronLeft className="w-4 h-4" />
             <span>返回全部会话</span>
@@ -560,14 +560,14 @@ export const ChatList: React.FC<ChatListProps> = ({
                 <div className="relative shrink-0 mr-2.5">
                   <div
                     className={`w-10 h-10 rounded-full flex items-center justify-center font-bold text-xs overflow-hidden relative ${
-                      chat.isArchived ? 'bg-[#243547]' : ''
+                      chat.isArchived ? 'bg-[#64748b] dark:bg-[#1e3148] aurora:bg-[#203742]' : ''
                     }`}
                     style={{ backgroundColor: chat.avatarBg }}
                   >
                     {chat.isArchived ? (
                       <Archive className="w-4 h-4 text-white" />
                     ) : chat.isVerified ? (
-                      <div className="w-full h-full bg-[#2ba0ff] flex items-center justify-center text-white">
+                      <div className="w-full h-full bg-[#2481cc] dark:bg-[#2ba0ff] aurora:bg-[#14b8a6] flex items-center justify-center text-white">
                         <Check className="w-4 h-4 stroke-[2.5]" />
                       </div>
                     ) : (
@@ -598,7 +598,7 @@ export const ChatList: React.FC<ChatListProps> = ({
 
                   {/* Online indicator dot only when real MTProto UserStatus is Online */}
                   {!chat.isGroup && !chat.isChannel && !chat.isBot && !chat.isArchived && chat.isOnline && (
-                    <span className="absolute bottom-0 right-0 w-2.5 h-2.5 rounded-full bg-emerald-500 border-2 border-white dark:border-[#09111d]" />
+                    <span className="absolute bottom-0 right-0 w-2.5 h-2.5 rounded-full bg-emerald-500 border-2 border-white dark:border-[#09111d] aurora:border-[#0f171c]" />
                   )}
                 </div>
 
@@ -610,38 +610,48 @@ export const ChatList: React.FC<ChatListProps> = ({
                       {chat.isChannel ? (
                         <Megaphone
                           className={`w-3.5 h-3.5 shrink-0 ${
-                            isSelected ? 'text-[#0284c7] dark:text-[#2ba0ff]' : 'text-[#64748b] dark:text-[#7f95ab]'
+                            isSelected
+                              ? 'text-[#0284c7] dark:text-[#2ba0ff] aurora:text-[#5eead4]'
+                              : 'text-[#64748b] dark:text-[#7f95ab] aurora:text-[#7e9aa5]'
                           }`}
                         />
                       ) : chat.isBot ? (
                         <Bot
                           className={`w-3.5 h-3.5 shrink-0 ${
-                            isSelected ? 'text-[#0284c7] dark:text-[#2ba0ff]' : 'text-[#64748b] dark:text-[#7f95ab]'
+                            isSelected
+                              ? 'text-[#0284c7] dark:text-[#2ba0ff] aurora:text-[#5eead4]'
+                              : 'text-[#64748b] dark:text-[#7f95ab] aurora:text-[#7e9aa5]'
                           }`}
                         />
                       ) : chat.isGroup ? (
                         <Users
                           className={`w-3.5 h-3.5 shrink-0 ${
-                            isSelected ? 'text-[#0284c7] dark:text-[#2ba0ff]' : 'text-[#64748b] dark:text-[#7f95ab]'
+                            isSelected
+                              ? 'text-[#0284c7] dark:text-[#2ba0ff] aurora:text-[#5eead4]'
+                              : 'text-[#64748b] dark:text-[#7f95ab] aurora:text-[#7e9aa5]'
                           }`}
                         />
                       ) : null}
                       <span
                         className={`text-[13px] font-semibold truncate leading-tight ${
-                          isSelected ? 'text-[#0f172a] dark:text-white' : 'text-[#0f172a] dark:text-[#eef4fb]'
+                          isSelected
+                            ? 'text-[#0f172a] dark:text-white aurora:text-[#ecf6f8]'
+                            : 'text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8]'
                         }`}
                       >
                         {chat.title}
                       </span>
                       {chat.isVerified && (
-                        <span className="w-3.5 h-3.5 bg-[#2ba0ff] rounded-full flex items-center justify-center text-white shrink-0">
+                        <span className="w-3.5 h-3.5 bg-[#2481cc] dark:bg-[#2ba0ff] aurora:bg-[#14b8a6] rounded-full flex items-center justify-center text-white shrink-0">
                           <Check className="w-2.5 h-2.5 stroke-[3]" />
                         </span>
                       )}
                       {chat.isMuted && (
                         <BellOff
                           className={`w-3 h-3 shrink-0 ${
-                            isSelected ? 'text-[#64748b] dark:text-white/70' : 'text-[#64748b] dark:text-[#7f95ab]'
+                            isSelected
+                              ? 'text-[#64748b] dark:text-white/70 aurora:text-[#b7d0d8]'
+                              : 'text-[#64748b] dark:text-[#7f95ab] aurora:text-[#7e9aa5]'
                           }`}
                         />
                       )}
@@ -649,7 +659,9 @@ export const ChatList: React.FC<ChatListProps> = ({
 
                     <span
                       className={`text-[11px] shrink-0 font-normal tabular-nums ${
-                        isSelected ? 'text-[#0284c7] dark:text-[#7cc4ff] font-medium' : 'text-[#64748b] dark:text-[#7f95ab]'
+                        isSelected
+                          ? 'text-[#0284c7] dark:text-[#7cc4ff] aurora:text-[#5eead4] font-medium'
+                          : 'text-[#64748b] dark:text-[#7f95ab] aurora:text-[#7e9aa5]'
                       }`}
                     >
                       {chat.lastTime}
@@ -661,7 +673,9 @@ export const ChatList: React.FC<ChatListProps> = ({
                     <div className="flex items-center gap-1 min-w-0 pr-1.5">
                       <p
                         className={`text-[12px] truncate leading-tight ${
-                          isSelected ? 'text-[#475569] dark:text-[#cbd5e1]' : 'text-[#64748b] dark:text-[#7f95ab]'
+                          isSelected
+                            ? 'text-[#475569] dark:text-[#cbd5e1] aurora:text-[#b7d0d8]'
+                            : 'text-[#64748b] dark:text-[#7f95ab] aurora:text-[#7e9aa5]'
                         }`}
                       >
                         {chat.lastMessage}
@@ -698,8 +712,8 @@ export const ChatList: React.FC<ChatListProps> = ({
                         title="更多操作 (或右键点击)"
                         className={`p-0.5 rounded-full opacity-0 group-hover:opacity-100 transition-opacity cursor-pointer ${
                           isSelected
-                            ? 'text-[#475569] dark:text-white hover:bg-black/5 dark:hover:bg-white/20'
-                            : 'text-[#64748b] dark:text-[#7f95ab] hover:bg-black/10 dark:hover:bg-white/10'
+                            ? 'text-[#475569] dark:text-white aurora:text-[#ecf6f8] hover:bg-black/5 dark:hover:bg-white/20 aurora:hover:bg-[#1a333d]'
+                            : 'text-[#64748b] dark:text-[#7f95ab] aurora:text-[#7e9aa5] hover:bg-black/10 dark:hover:bg-white/10 aurora:hover:bg-[#1a2f3a]'
                         }`}
                       >
                         <MoreVertical className="w-3.5 h-3.5" />
@@ -729,11 +743,11 @@ export const ChatList: React.FC<ChatListProps> = ({
         />
       </div>
 
-      {/* 5. Official Telegram Right-Click Context Menu (Image 3 Style) */}
+      {/* 5. Official Telegram Right-Click Context Menu */}
       {contextMenu && (
         <div
           style={{ top: `${contextMenu.y}px`, left: `${contextMenu.x}px` }}
-          className="fixed z-50 w-52 bg-white dark:bg-[#1f2936] rounded-2xl shadow-2xl border border-[#e0e4e8] dark:border-[#2d3a4b] py-1.5 animate-in fade-in zoom-in-95 duration-100 text-xs text-[#111827] dark:text-[#f5f7fa] select-none"
+          className="fixed z-50 w-52 bg-white dark:bg-[#0e1726] aurora:bg-[#101c23] rounded-2xl shadow-2xl border border-[#e2e8f0] dark:border-[#1e3148] aurora:border-[#203742] py-1.5 animate-in fade-in zoom-in-95 duration-100 text-xs text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] select-none"
           onClick={(e) => e.stopPropagation()}
         >
           {/* Open in New Tab */}
@@ -743,9 +757,9 @@ export const ChatList: React.FC<ChatListProps> = ({
               onSelectChat(contextMenu.chat.id);
               setContextMenu(null);
             }}
-            className="w-full flex items-center gap-3 px-3.5 py-2 hover:bg-black/5 dark:hover:bg-white/10 transition-colors text-left cursor-pointer"
+            className="w-full flex items-center gap-3 px-3.5 py-2 hover:bg-[#f1f5f9] dark:hover:bg-[#152438] aurora:hover:bg-[#152934] transition-colors text-left cursor-pointer"
           >
-            <ExternalLink className="w-4 h-4 text-[#707579] dark:text-[#9aa7b5]" />
+            <ExternalLink className="w-4 h-4 text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5]" />
             <span className="font-medium">在新标签页打开</span>
           </button>
 
@@ -756,9 +770,9 @@ export const ChatList: React.FC<ChatListProps> = ({
               setPreviewChat(contextMenu.chat);
               setContextMenu(null);
             }}
-            className="w-full flex items-center gap-3 px-3.5 py-2 hover:bg-black/5 dark:hover:bg-white/10 transition-colors text-left cursor-pointer"
+            className="w-full flex items-center gap-3 px-3.5 py-2 hover:bg-[#f1f5f9] dark:hover:bg-[#152438] aurora:hover:bg-[#152934] transition-colors text-left cursor-pointer"
           >
-            <Eye className="w-4 h-4 text-[#707579] dark:text-[#9aa7b5]" />
+            <Eye className="w-4 h-4 text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5]" />
             <span className="font-medium">快速预览</span>
           </button>
 
@@ -769,9 +783,9 @@ export const ChatList: React.FC<ChatListProps> = ({
               onToggleMarkUnread?.(contextMenu.chat.id);
               setContextMenu(null);
             }}
-            className="w-full flex items-center gap-3 px-3.5 py-2 hover:bg-black/5 dark:hover:bg-white/10 transition-colors text-left cursor-pointer"
+            className="w-full flex items-center gap-3 px-3.5 py-2 hover:bg-[#f1f5f9] dark:hover:bg-[#152438] aurora:hover:bg-[#152934] transition-colors text-left cursor-pointer"
           >
-            <MessageSquare className="w-4 h-4 text-[#707579] dark:text-[#9aa7b5]" />
+            <MessageSquare className="w-4 h-4 text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5]" />
             <span className="font-medium">
               {contextMenu.chat.unreadCount > 0 ? '标为已读' : '标为未读'}
             </span>
@@ -784,9 +798,9 @@ export const ChatList: React.FC<ChatListProps> = ({
               onTogglePinChat?.(contextMenu.chat.id);
               setContextMenu(null);
             }}
-            className="w-full flex items-center gap-3 px-3.5 py-2 hover:bg-black/5 dark:hover:bg-white/10 transition-colors text-left cursor-pointer"
+            className="w-full flex items-center gap-3 px-3.5 py-2 hover:bg-[#f1f5f9] dark:hover:bg-[#152438] aurora:hover:bg-[#152934] transition-colors text-left cursor-pointer"
           >
-            <Pin className={`w-4 h-4 ${contextMenu.chat.isPinned ? 'fill-current text-[#2ba0ff]' : 'text-[#707579] dark:text-[#9aa7b5]'}`} />
+            <Pin className={`w-4 h-4 ${contextMenu.chat.isPinned ? 'fill-current text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#5eead4]' : 'text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5]'}`} />
             <span className="font-medium">
               {contextMenu.chat.isPinned ? '取消置顶' : '置顶'}
             </span>
@@ -799,16 +813,16 @@ export const ChatList: React.FC<ChatListProps> = ({
               onToggleMuteChat?.(contextMenu.chat.id);
               setContextMenu(null);
             }}
-            className="w-full flex items-center gap-3 px-3.5 py-2 hover:bg-black/5 dark:hover:bg-white/10 transition-colors text-left cursor-pointer"
+            className="w-full flex items-center gap-3 px-3.5 py-2 hover:bg-[#f1f5f9] dark:hover:bg-[#152438] aurora:hover:bg-[#152934] transition-colors text-left cursor-pointer"
           >
             {contextMenu.chat.isMuted ? (
               <>
-                <Bell className="w-4 h-4 text-[#2ba0ff]" />
+                <Bell className="w-4 h-4 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#5eead4]" />
                 <span className="font-medium">开启声音提醒</span>
               </>
             ) : (
               <>
-                <BellOff className="w-4 h-4 text-[#707579] dark:text-[#9aa7b5]" />
+                <BellOff className="w-4 h-4 text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5]" />
                 <span className="font-medium">静音通知</span>
               </>
             )}
@@ -821,22 +835,22 @@ export const ChatList: React.FC<ChatListProps> = ({
               onToggleArchiveChat?.(contextMenu.chat.id);
               setContextMenu(null);
             }}
-            className="w-full flex items-center gap-3 px-3.5 py-2 hover:bg-black/5 dark:hover:bg-white/10 transition-colors text-left cursor-pointer"
+            className="w-full flex items-center gap-3 px-3.5 py-2 hover:bg-[#f1f5f9] dark:hover:bg-[#152438] aurora:hover:bg-[#152934] transition-colors text-left cursor-pointer"
           >
             {contextMenu.chat.isArchived ? (
               <>
-                <ArchiveRestore className="w-4 h-4 text-[#2ba0ff]" />
+                <ArchiveRestore className="w-4 h-4 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#5eead4]" />
                 <span className="font-medium">移出归档</span>
               </>
             ) : (
               <>
-                <Archive className="w-4 h-4 text-[#707579] dark:text-[#9aa7b5]" />
+                <Archive className="w-4 h-4 text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5]" />
                 <span className="font-medium">归档对话</span>
               </>
             )}
           </button>
 
-          <div className="h-px bg-[#e0e4e8] dark:bg-[#2d3a4b] my-1" />
+          <div className="h-px bg-[#e2e8f0] dark:bg-[#18273a] aurora:bg-[#182b34] my-1" />
 
           {/* Delete Chat (Red) */}
           <button
@@ -846,7 +860,7 @@ export const ChatList: React.FC<ChatListProps> = ({
               setChatToDelete(contextMenu.chat);
               setContextMenu(null);
             }}
-            className="w-full flex items-center gap-3 px-3.5 py-2 hover:bg-red-500/10 text-red-500 transition-colors text-left cursor-pointer font-medium"
+            className="w-full flex items-center gap-3 px-3.5 py-2 hover:bg-rose-500/10 text-rose-600 dark:text-rose-400 transition-colors text-left cursor-pointer font-medium"
           >
             <Trash2 className="w-4 h-4" />
             <span>{contextMenu.chat.isGroup || contextMenu.chat.isChannel ? '退出并删除对话' : '删除对话'}</span>
@@ -856,8 +870,8 @@ export const ChatList: React.FC<ChatListProps> = ({
 
       {/* 6. Quick Preview Modal */}
       {previewChat && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-xs select-none">
-          <div className="bg-white dark:bg-[#17212b] border border-[#e0e4e8] dark:border-[#202b36] rounded-2xl w-full max-w-sm overflow-hidden shadow-2xl p-5 animate-in fade-in zoom-in-95 duration-150">
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/55 dark:bg-black/75 aurora:bg-black/80 backdrop-blur-xs select-none">
+          <div className="bg-white dark:bg-[#0b131f] aurora:bg-[#0c151b] border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] rounded-2xl w-full max-w-sm overflow-hidden shadow-2xl p-5 animate-in fade-in zoom-in-95 duration-150">
             <div className="flex items-start justify-between mb-4">
               <div className="flex items-center gap-3">
                 <div
@@ -885,29 +899,29 @@ export const ChatList: React.FC<ChatListProps> = ({
                   )}
                 </div>
                 <div>
-                  <h4 className="font-bold text-sm text-[#111827] dark:text-[#f5f7fa]">{previewChat.title}</h4>
-                  <p className="text-xs text-[#2481cc] dark:text-[#2ba0ff]">{formatChatSubtitle(previewChat)}</p>
+                  <h4 className="font-bold text-sm text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8]">{previewChat.title}</h4>
+                  <p className="text-xs text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#5eead4]">{formatChatSubtitle(previewChat)}</p>
                 </div>
               </div>
               <button
                 type="button"
                 onClick={() => setPreviewChat(null)}
-                className="p-1 rounded-lg text-[#707579] hover:text-[#111827] dark:text-[#7f93a5] dark:hover:text-white"
+                className="p-1 rounded-lg text-[#64748b] hover:text-[#0f172a] dark:text-[#7b93ad] dark:hover:text-white aurora:text-[#7e9aa5] aurora:hover:text-[#ecf6f8] cursor-pointer"
               >
                 <X className="w-4 h-4" />
               </button>
             </div>
 
-            <div className="p-3 bg-[#f0f2f5] dark:bg-[#202b36] rounded-xl text-xs mb-4">
-              <span className="text-[#707579] dark:text-[#7f93a5] block mb-1 font-semibold">最新消息:</span>
-              <p className="text-[#111827] dark:text-[#f5f7fa]">{previewChat.lastMessage}</p>
+            <div className="p-3 bg-[#f8fafc] dark:bg-[#0e1726] aurora:bg-[#101c23] border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] rounded-xl text-xs mb-4">
+              <span className="text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] block mb-1 font-semibold">最新消息:</span>
+              <p className="text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8]">{previewChat.lastMessage}</p>
             </div>
 
             <div className="flex items-center justify-end gap-2">
               <button
                 type="button"
                 onClick={() => setPreviewChat(null)}
-                className="px-3.5 py-1.5 rounded-xl text-xs text-[#707579] dark:text-[#7f93a5] hover:bg-black/5 dark:hover:bg-white/5 cursor-pointer"
+                className="px-3.5 py-1.5 rounded-xl text-xs text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] hover:bg-[#f1f5f9] dark:hover:bg-[#152438] aurora:hover:bg-[#152934] cursor-pointer"
               >
                 关闭
               </button>
@@ -917,7 +931,7 @@ export const ChatList: React.FC<ChatListProps> = ({
                   onSelectChat(previewChat.id);
                   setPreviewChat(null);
                 }}
-                className="px-4 py-1.5 rounded-xl text-xs bg-[#2481cc] hover:bg-[#2074b8] text-white font-medium cursor-pointer"
+                className="px-4 py-1.5 rounded-xl text-xs bg-[#2481cc] hover:bg-[#1d6fb3] dark:bg-[#2ba0ff] dark:hover:bg-[#1e8ee8] aurora:bg-[#0d9488] aurora:hover:bg-[#0f766e] text-white font-medium cursor-pointer"
               >
                 进入对话
               </button>
@@ -928,27 +942,27 @@ export const ChatList: React.FC<ChatListProps> = ({
 
       {/* 7. Delete Chat Confirmation Modal */}
       {chatToDelete && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-xs select-none">
-          <div className="bg-white dark:bg-[#17212b] border border-[#e0e4e8] dark:border-[#202b36] rounded-2xl w-full max-w-sm overflow-hidden shadow-2xl p-5 animate-in fade-in zoom-in-95 duration-150">
-            <h4 className="font-bold text-base text-[#111827] dark:text-[#f5f7fa] mb-2">
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/55 dark:bg-black/75 aurora:bg-black/80 backdrop-blur-xs select-none">
+          <div className="bg-white dark:bg-[#0b131f] aurora:bg-[#0c151b] border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] rounded-2xl w-full max-w-sm overflow-hidden shadow-2xl p-5 animate-in fade-in zoom-in-95 duration-150">
+            <h4 className="font-bold text-base text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] mb-2">
               {chatToDelete.isGroup || chatToDelete.isChannel
                 ? `退出并删除该${chatToDelete.isChannel ? '频道' : '群组'}？`
                 : '删除此对话？'}
             </h4>
-            <p className="text-xs text-[#707579] dark:text-[#7f93a5] leading-relaxed mb-4">
+            <p className="text-xs text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] leading-relaxed mb-4">
               {chatToDelete.isGroup || chatToDelete.isChannel
-                ? <>确定要退出并移除 <span className="font-semibold text-[#111827] dark:text-[#f5f7fa]">「{chatToDelete.title}」</span> 的会话记录吗？此操作无法撤销。</>
-                : <>确定要删除与 <span className="font-semibold text-[#111827] dark:text-[#f5f7fa]">「{chatToDelete.title}」</span> 的全部聊天记录吗？此操作无法撤销。</>}
+                ? <>确定要退出并移除 <span className="font-semibold text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8]">「{chatToDelete.title}」</span> 的会话记录吗？此操作无法撤销。</>
+                : <>确定要删除与 <span className="font-semibold text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8]">「{chatToDelete.title}」</span> 的全部聊天记录吗？此操作无法撤销。</>}
             </p>
             {!chatToDelete.isGroup && !chatToDelete.isChannel && chatToDelete.id.startsWith('tg_') && (
-              <label className="flex items-start gap-2.5 p-2.5 mb-4 rounded-xl bg-black/5 dark:bg-[#202b36] cursor-pointer text-xs">
+              <label className="flex items-start gap-2.5 p-2.5 mb-4 rounded-xl bg-[#f8fafc] dark:bg-[#0e1726] aurora:bg-[#101c23] border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] cursor-pointer text-xs">
                 <input
                   type="checkbox"
                   checked={revokeDeleteChat}
                   onChange={(e) => setRevokeDeleteChat(e.target.checked)}
-                  className="mt-0.5 rounded border-gray-300 text-[#2481cc] focus:ring-[#2481cc]"
+                  className="mt-0.5 rounded border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] text-[#2481cc] aurora:text-[#14b8a6] focus:ring-[#2481cc] aurora:focus:ring-[#2dd4bf]"
                 />
-                <span className="text-[#111827] dark:text-[#eef4fb] leading-snug">
+                <span className="text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] leading-snug">
                   同时为对方删除全部聊天记录（双向清除）
                 </span>
               </label>
@@ -960,7 +974,7 @@ export const ChatList: React.FC<ChatListProps> = ({
                   setChatToDelete(null);
                   setRevokeDeleteChat(false);
                 }}
-                className="px-4 py-2 rounded-xl text-xs text-[#707579] dark:text-[#7f93a5] hover:bg-black/5 dark:hover:bg-white/5 cursor-pointer font-medium"
+                className="px-4 py-2 rounded-xl text-xs text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] hover:bg-[#f1f5f9] dark:hover:bg-[#152438] aurora:hover:bg-[#152934] cursor-pointer font-medium"
               >
                 取消
               </button>
@@ -972,7 +986,7 @@ export const ChatList: React.FC<ChatListProps> = ({
                   setChatToDelete(null);
                   setRevokeDeleteChat(false);
                 }}
-                className="px-4 py-2 rounded-xl text-xs bg-red-500 hover:bg-red-600 text-white font-semibold cursor-pointer shadow-xs"
+                className="px-4 py-2 rounded-xl text-xs bg-rose-500 hover:bg-rose-600 text-white font-semibold cursor-pointer shadow-xs"
               >
                 {chatToDelete.isGroup || chatToDelete.isChannel ? '确认退出并删除' : '确认删除'}
               </button>

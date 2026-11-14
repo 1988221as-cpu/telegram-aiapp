@@ -250,25 +250,25 @@ export const MemberAuthModal: React.FC<MemberAuthModalProps> = ({
     (errorMsg ? /无法连接|超时|代理|network|fetch/i.test(errorMsg) : false);
 
   return (
-    <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/85 backdrop-blur-md select-none animate-in fade-in duration-200">
-      <div className="relative w-full max-w-md bg-[#111c28] border border-[#1e3145] rounded-3xl shadow-2xl flex flex-col overflow-hidden text-[#f5f7fa]">
+    <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/55 dark:bg-black/80 aurora:bg-black/85 backdrop-blur-md select-none animate-in fade-in duration-200">
+      <div className="relative w-full max-w-md bg-white dark:bg-[#0b131f] aurora:bg-[#0c151b] border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] rounded-3xl shadow-2xl flex flex-col overflow-hidden text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8]">
         {/* Top HumanSense Brand Header */}
-        <div className="p-6 pb-4 bg-gradient-to-b from-[#18293d] to-[#111c28] border-b border-[#1b2c3e] flex flex-col items-center text-center relative">
-          <div className="w-16 h-16 rounded-2xl overflow-hidden shadow-lg shadow-[#2481cc]/25 mb-3 ring-2 ring-[#2ba0ff]/40 bg-[#0d1620] flex items-center justify-center">
+        <div className="p-6 pb-4 bg-gradient-to-b from-[#f0f7ff] to-white dark:from-[#101c2d] dark:to-[#0b131f] aurora:from-[#10222b] aurora:to-[#0c151b] border-b border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] flex flex-col items-center text-center relative">
+          <div className="w-16 h-16 rounded-2xl overflow-hidden shadow-lg shadow-[#2481cc]/20 dark:shadow-[#2ba0ff]/25 aurora:shadow-[#0d9488]/25 mb-3 ring-2 ring-[#2481cc]/35 dark:ring-[#2ba0ff]/40 aurora:ring-[#2dd4bf]/40 bg-[#f8fafc] dark:bg-[#08101a] aurora:bg-[#081014] flex items-center justify-center">
             <img
               src="/app-icon.png"
               alt="HumanSense"
               className="w-full h-full object-cover"
             />
           </div>
-          <h2 className="text-lg font-bold text-white tracking-wide flex items-center gap-2">
+          <h2 className="text-lg font-bold text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] tracking-wide flex items-center gap-2">
             <span>HumanSense</span>
           </h2>
           {totalMembers > 0 && (
             <div className="mt-2.5 flex flex-wrap items-center justify-center gap-1.5">
-              <div className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-[#1b2f44] border border-[#26415d] text-[11px] text-[#2ba0ff]">
+              <div className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-[#e8f3ff] dark:bg-[#132234] aurora:bg-[#112d36] border border-[#bfdbfe] dark:border-[#1e3148] aurora:border-[#2dd4bf]/30 text-[11px] text-[#0284c7] dark:text-[#7cc4ff] aurora:text-[#5eead4]">
                 <Sparkles className="w-3 h-3" />
-                <span>已认证会员: <strong className="text-white tabular-nums">{totalMembers}</strong></span>
+                <span>已认证会员: <strong className="text-[#0f172a] dark:text-white aurora:text-[#ecf6f8] tabular-nums">{totalMembers}</strong></span>
               </div>
             </div>
           )}
@@ -276,16 +276,16 @@ export const MemberAuthModal: React.FC<MemberAuthModalProps> = ({
 
         {/* Sub-view navigation header (shown only after clicking into 卡密注册 or 卡密续费; front view keeps only 会员登录) */}
         {activeTab !== 'login' && (
-          <div className="flex items-center justify-between px-6 py-2.5 border-b border-[#1a2b3c] bg-[#0d1620]">
+          <div className="flex items-center justify-between px-6 py-2.5 border-b border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] bg-[#f8fafc] dark:bg-[#0d1726] aurora:bg-[#0e1920]">
             <button
               type="button"
               onClick={() => switchTab('login')}
-              className="inline-flex items-center gap-1.5 text-xs font-medium text-[#7e95ab] hover:text-white transition-colors cursor-pointer"
+              className="inline-flex items-center gap-1.5 text-xs font-medium text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] hover:text-[#0f172a] dark:hover:text-white aurora:hover:text-[#ecf6f8] transition-colors cursor-pointer"
             >
               <ArrowLeft className="w-3.5 h-3.5" />
               <span>返回会员登录</span>
             </button>
-            <div className="inline-flex items-center gap-1.5 text-xs font-semibold text-[#2ba0ff]">
+            <div className="inline-flex items-center gap-1.5 text-xs font-semibold text-[#0284c7] dark:text-[#2ba0ff] aurora:text-[#2dd4bf]">
               {activeTab === 'register' ? (
                 <>
                   <UserPlus className="w-3.5 h-3.5" />
@@ -304,7 +304,7 @@ export const MemberAuthModal: React.FC<MemberAuthModalProps> = ({
         {/* Form Body */}
         <form onSubmit={handleSubmit} className="p-6 space-y-3.5 max-h-[72vh] overflow-y-auto">
           {errorMsg && (
-            <div className="p-3 rounded-xl bg-rose-500/15 border border-rose-500/30 text-rose-400 text-xs flex flex-col gap-2 animate-in fade-in">
+            <div className="p-3 rounded-xl bg-rose-500/12 border border-rose-500/30 text-rose-700 dark:text-rose-400 text-xs flex flex-col gap-2 animate-in fade-in">
               <div className="flex items-start gap-2">
                 <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
                 <span>{errorMsg}</span>
@@ -313,7 +313,7 @@ export const MemberAuthModal: React.FC<MemberAuthModalProps> = ({
                 <button
                   type="button"
                   onClick={() => setIsProxyOpen(true)}
-                  className="self-start inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-rose-500/20 hover:bg-rose-500/30 text-rose-200 text-[11px] font-medium cursor-pointer transition-colors"
+                  className="self-start inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-rose-500/15 hover:bg-rose-500/25 text-rose-800 dark:text-rose-200 text-[11px] font-medium cursor-pointer transition-colors"
                 >
                   <Wifi className="w-3 h-3" />
                   <span>展开配置 SOCKS5 代理以连接云端授权</span>
@@ -323,7 +323,7 @@ export const MemberAuthModal: React.FC<MemberAuthModalProps> = ({
           )}
 
           {successMsg && (
-            <div className="p-3 rounded-xl bg-emerald-500/15 border border-emerald-500/30 text-emerald-400 text-xs flex items-center gap-2 animate-in fade-in">
+            <div className="p-3 rounded-xl bg-emerald-500/12 border border-emerald-500/30 text-emerald-700 dark:text-emerald-400 text-xs flex items-center gap-2 animate-in fade-in">
               <CheckCircle2 className="w-4 h-4 shrink-0" />
               <span>{successMsg}</span>
             </div>
@@ -331,8 +331,8 @@ export const MemberAuthModal: React.FC<MemberAuthModalProps> = ({
 
           {/* Username Input */}
           <div className="space-y-1.5">
-            <label className="text-xs font-medium text-[#7e95ab] flex items-center gap-1.5">
-              <User className="w-3.5 h-3.5 text-[#2ba0ff]" />
+            <label className="text-xs font-medium text-[#475569] dark:text-[#b4c6d8] aurora:text-[#b7d0d8] flex items-center gap-1.5">
+              <User className="w-3.5 h-3.5 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf]" />
               <span>{activeTab === 'register' ? '设置新会员账号' : '会员账号'}</span>
             </label>
             <input
@@ -340,7 +340,7 @@ export const MemberAuthModal: React.FC<MemberAuthModalProps> = ({
               value={username}
               onChange={(e) => setUsername(e.target.value)}
               placeholder="请输入您的会员账号名称"
-              className="w-full bg-[#0a121b] border border-[#1e3145] focus:border-[#2ba0ff] text-white rounded-xl px-3.5 py-2.5 text-xs focus:outline-none transition-colors"
+              className="w-full bg-[#f8fafc] dark:bg-[#08101a] aurora:bg-[#081014] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] focus:border-[#2481cc] dark:focus:border-[#2ba0ff] aurora:focus:border-[#2dd4bf] text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] placeholder-[#94a3b8] dark:placeholder-[#4e657e] aurora:placeholder-[#5a7782] rounded-xl px-3.5 py-2.5 text-xs focus:outline-none transition-colors"
               autoFocus
               required
             />
@@ -348,8 +348,8 @@ export const MemberAuthModal: React.FC<MemberAuthModalProps> = ({
 
           {/* Password Input */}
           <div className="space-y-1.5">
-            <label className="text-xs font-medium text-[#7e95ab] flex items-center gap-1.5">
-              <KeyRound className="w-3.5 h-3.5 text-[#2ba0ff]" />
+            <label className="text-xs font-medium text-[#475569] dark:text-[#b4c6d8] aurora:text-[#b7d0d8] flex items-center gap-1.5">
+              <KeyRound className="w-3.5 h-3.5 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf]" />
               <span>
                 {activeTab === 'register'
                   ? '设置登录密码'
@@ -361,7 +361,7 @@ export const MemberAuthModal: React.FC<MemberAuthModalProps> = ({
               value={password}
               onChange={(e) => setPassword(e.target.value)}
               placeholder="请输入登录密码"
-              className="w-full bg-[#0a121b] border border-[#1e3145] focus:border-[#2ba0ff] text-white rounded-xl px-3.5 py-2.5 text-xs focus:outline-none transition-colors"
+              className="w-full bg-[#f8fafc] dark:bg-[#08101a] aurora:bg-[#081014] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] focus:border-[#2481cc] dark:focus:border-[#2ba0ff] aurora:focus:border-[#2dd4bf] text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] placeholder-[#94a3b8] dark:placeholder-[#4e657e] aurora:placeholder-[#5a7782] rounded-xl px-3.5 py-2.5 text-xs focus:outline-none transition-colors"
               required={activeTab !== 'redeem'}
             />
           </div>
@@ -369,8 +369,8 @@ export const MemberAuthModal: React.FC<MemberAuthModalProps> = ({
           {/* Confirm Password (Only for register) */}
           {activeTab === 'register' && (
             <div className="space-y-1.5 animate-in fade-in duration-150">
-              <label className="text-xs font-medium text-[#7e95ab] flex items-center gap-1.5">
-                <CheckCircle2 className="w-3.5 h-3.5 text-[#2ba0ff]" />
+              <label className="text-xs font-medium text-[#475569] dark:text-[#b4c6d8] aurora:text-[#b7d0d8] flex items-center gap-1.5">
+                <CheckCircle2 className="w-3.5 h-3.5 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf]" />
                 <span>确认密码</span>
               </label>
               <input
@@ -378,7 +378,7 @@ export const MemberAuthModal: React.FC<MemberAuthModalProps> = ({
                 value={confirmPassword}
                 onChange={(e) => setConfirmPassword(e.target.value)}
                 placeholder="请再次输入密码以核对"
-                className="w-full bg-[#0a121b] border border-[#1e3145] focus:border-[#2ba0ff] text-white rounded-xl px-3.5 py-2.5 text-xs focus:outline-none transition-colors"
+                className="w-full bg-[#f8fafc] dark:bg-[#08101a] aurora:bg-[#081014] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] focus:border-[#2481cc] dark:focus:border-[#2ba0ff] aurora:focus:border-[#2dd4bf] text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] placeholder-[#94a3b8] dark:placeholder-[#4e657e] aurora:placeholder-[#5a7782] rounded-xl px-3.5 py-2.5 text-xs focus:outline-none transition-colors"
                 required
               />
             </div>
@@ -387,8 +387,8 @@ export const MemberAuthModal: React.FC<MemberAuthModalProps> = ({
           {/* Card Key Input (For register & redeem) */}
           {(activeTab === 'register' || activeTab === 'redeem') && (
             <div className="space-y-1.5 animate-in fade-in duration-150">
-              <label className="text-xs font-medium text-[#7e95ab] flex items-center gap-1.5">
-                <Ticket className="w-3.5 h-3.5 text-amber-400" />
+              <label className="text-xs font-medium text-[#475569] dark:text-[#b4c6d8] aurora:text-[#b7d0d8] flex items-center gap-1.5">
+                <Ticket className="w-3.5 h-3.5 text-amber-600 dark:text-amber-400" />
                 <span>会员卡密激活码</span>
               </label>
               <input
@@ -396,7 +396,7 @@ export const MemberAuthModal: React.FC<MemberAuthModalProps> = ({
                 value={cardKey}
                 onChange={(e) => setCardKey(e.target.value)}
                 placeholder="例如：LX3D-XXXX-XXXX 或 LX30D-XXXX-XXXX"
-                className="w-full bg-[#0a121b] border border-[#1e3145] focus:border-[#2ba0ff] text-white font-mono rounded-xl px-3.5 py-2.5 text-xs focus:outline-none transition-colors"
+                className="w-full bg-[#f8fafc] dark:bg-[#08101a] aurora:bg-[#081014] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] focus:border-[#2481cc] dark:focus:border-[#2ba0ff] aurora:focus:border-[#2dd4bf] text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] placeholder-[#94a3b8] dark:placeholder-[#4e657e] aurora:placeholder-[#5a7782] font-mono rounded-xl px-3.5 py-2.5 text-xs focus:outline-none transition-colors"
                 required
               />
             </div>
@@ -406,7 +406,7 @@ export const MemberAuthModal: React.FC<MemberAuthModalProps> = ({
           <button
             type="submit"
             disabled={isLoading}
-            className="w-full py-2.5 rounded-xl bg-gradient-to-r from-[#2481cc] to-[#2ba0ff] hover:opacity-95 text-white font-semibold text-xs transition-all shadow-md shadow-[#2481cc]/25 cursor-pointer flex items-center justify-center gap-2 disabled:opacity-50"
+            className="w-full py-2.5 rounded-xl bg-gradient-to-r from-[#2481cc] to-[#2ba0ff] aurora:from-[#0d9488] aurora:to-[#14b8a6] hover:opacity-95 text-white font-semibold text-xs transition-all shadow-md shadow-[#2481cc]/25 aurora:shadow-[#0d9488]/25 cursor-pointer flex items-center justify-center gap-2 disabled:opacity-50"
           >
             {isLoading ? (
               <span>正在加密校验与绑定设备...</span>
@@ -434,7 +434,7 @@ export const MemberAuthModal: React.FC<MemberAuthModalProps> = ({
               <button
                 type="button"
                 onClick={() => switchTab('register')}
-                className="inline-flex items-center gap-1.5 text-[#7e95ab] hover:text-[#2ba0ff] transition-colors cursor-pointer font-medium"
+                className="inline-flex items-center gap-1.5 text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] hover:text-[#2481cc] dark:hover:text-[#2ba0ff] aurora:hover:text-[#2dd4bf] transition-colors cursor-pointer font-medium"
               >
                 <UserPlus className="w-3.5 h-3.5" />
                 <span>卡密注册</span>
@@ -442,7 +442,7 @@ export const MemberAuthModal: React.FC<MemberAuthModalProps> = ({
               <button
                 type="button"
                 onClick={() => switchTab('redeem')}
-                className="inline-flex items-center gap-1.5 text-[#7e95ab] hover:text-[#2ba0ff] transition-colors cursor-pointer font-medium"
+                className="inline-flex items-center gap-1.5 text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] hover:text-[#2481cc] dark:hover:text-[#2ba0ff] aurora:hover:text-[#2dd4bf] transition-colors cursor-pointer font-medium"
               >
                 <RefreshCw className="w-3.5 h-3.5" />
                 <span>卡密续费</span>
@@ -453,7 +453,7 @@ export const MemberAuthModal: React.FC<MemberAuthModalProps> = ({
               <button
                 type="button"
                 onClick={() => switchTab('login')}
-                className="inline-flex items-center gap-1 text-[#7e95ab] hover:text-white transition-colors cursor-pointer"
+                className="inline-flex items-center gap-1 text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] hover:text-[#0f172a] dark:hover:text-white aurora:hover:text-[#ecf6f8] transition-colors cursor-pointer"
               >
                 <ArrowLeft className="w-3.5 h-3.5" />
                 <span>返回会员登录</span>
@@ -461,7 +461,7 @@ export const MemberAuthModal: React.FC<MemberAuthModalProps> = ({
               <button
                 type="button"
                 onClick={() => switchTab(activeTab === 'register' ? 'redeem' : 'register')}
-                className="inline-flex items-center gap-1.5 text-[#7e95ab] hover:text-[#2ba0ff] transition-colors cursor-pointer font-medium"
+                className="inline-flex items-center gap-1.5 text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] hover:text-[#2481cc] dark:hover:text-[#2ba0ff] aurora:hover:text-[#2dd4bf] transition-colors cursor-pointer font-medium"
               >
                 {activeTab === 'register' ? (
                   <>
@@ -479,17 +479,17 @@ export const MemberAuthModal: React.FC<MemberAuthModalProps> = ({
           )}
 
           {/* Pre-login Proxy Configuration Accordion */}
-          <div className="pt-2 border-t border-[#1a2b3c]">
+          <div className="pt-2 border-t border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34]">
             <button
               type="button"
               onClick={() => setIsProxyOpen((prev) => !prev)}
-              className="w-full flex items-center justify-between py-1.5 text-[11px] text-[#7e95ab] hover:text-white transition-colors cursor-pointer"
+              className="w-full flex items-center justify-between py-1.5 text-[11px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] hover:text-[#0f172a] dark:hover:text-white aurora:hover:text-[#ecf6f8] transition-colors cursor-pointer"
             >
               <span className="flex items-center gap-1.5">
-                <Wifi className={`w-3.5 h-3.5 ${proxyConfig.enabled ? 'text-emerald-400' : 'text-[#2ba0ff]'}`} />
+                <Wifi className={`w-3.5 h-3.5 ${proxyConfig.enabled ? 'text-emerald-600 dark:text-emerald-400' : 'text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf]'}`} />
                 <span>网络代理设置 (SOCKS5 / SOCKS4)</span>
                 {proxyConfig.enabled && (
-                  <span className="px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-400 text-[10px]">
+                  <span className="px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-700 dark:text-emerald-400 text-[10px]">
                     已启用 {proxyConfig.host}:{proxyConfig.port}
                   </span>
                 )}
@@ -498,14 +498,16 @@ export const MemberAuthModal: React.FC<MemberAuthModalProps> = ({
             </button>
 
             {isProxyOpen && (
-              <div className="mt-2 p-3 rounded-2xl bg-[#0a121b] border border-[#1e3145] space-y-2.5 text-xs animate-in fade-in duration-150">
+              <div className="mt-2 p-3 rounded-2xl bg-[#f8fafc] dark:bg-[#08101a] aurora:bg-[#081014] border border-[#e2e8f0] dark:border-[#1e3148] aurora:border-[#203742] space-y-2.5 text-xs animate-in fade-in duration-150">
                 <div className="flex items-center justify-between">
-                  <span className="text-[11px] text-[#a3b8cc]">启用本地/远程 SOCKS 代理转发授权与 Telegram</span>
+                  <span className="text-[11px] text-[#475569] dark:text-[#b4c6d8] aurora:text-[#b7d0d8]">启用本地/远程 SOCKS 代理转发授权与 Telegram</span>
                   <button
                     type="button"
                     onClick={() => setProxyConfig((prev) => ({ ...prev, enabled: !prev.enabled }))}
                     className={`w-9 h-5 rounded-full transition-colors cursor-pointer flex items-center px-0.5 ${
-                      proxyConfig.enabled ? 'bg-emerald-500 justify-end' : 'bg-[#23374d] justify-start'
+                      proxyConfig.enabled
+                        ? 'bg-emerald-500 justify-end'
+                        : 'bg-[#cbd5e1] dark:bg-[#1e3148] aurora:bg-[#203742] justify-start'
                     }`}
                   >
                     <span className="w-4 h-4 rounded-full bg-white shadow-sm" />
@@ -514,7 +516,7 @@ export const MemberAuthModal: React.FC<MemberAuthModalProps> = ({
 
                 <div className="grid grid-cols-3 gap-2">
                   <div>
-                    <label className="block text-[10px] text-[#7e95ab] mb-1">协议类型</label>
+                    <label className="block text-[10px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] mb-1">协议类型</label>
                     <select
                       value={proxyConfig.type}
                       onChange={(e) =>
@@ -523,24 +525,24 @@ export const MemberAuthModal: React.FC<MemberAuthModalProps> = ({
                           type: e.target.value === 'socks4' ? 'socks4' : 'socks5',
                         }))
                       }
-                      className="w-full bg-[#111c28] border border-[#1e3145] rounded-lg px-2 py-1.5 text-[11px] text-white focus:outline-none focus:border-[#2ba0ff]"
+                      className="w-full bg-white dark:bg-[#0e1726] aurora:bg-[#101c23] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] rounded-lg px-2 py-1.5 text-[11px] text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] focus:outline-none focus:border-[#2481cc] dark:focus:border-[#2ba0ff] aurora:focus:border-[#2dd4bf]"
                     >
                       <option value="socks5">SOCKS5</option>
                       <option value="socks4">SOCKS4</option>
                     </select>
                   </div>
                   <div>
-                    <label className="block text-[10px] text-[#7e95ab] mb-1">代理主机</label>
+                    <label className="block text-[10px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] mb-1">代理主机</label>
                     <input
                       type="text"
                       value={proxyConfig.host}
                       onChange={(e) => setProxyConfig((prev) => ({ ...prev, host: e.target.value }))}
                       placeholder="127.0.0.1"
-                      className="w-full bg-[#111c28] border border-[#1e3145] rounded-lg px-2.5 py-1.5 text-[11px] text-white font-mono focus:outline-none focus:border-[#2ba0ff]"
+                      className="w-full bg-white dark:bg-[#0e1726] aurora:bg-[#101c23] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] rounded-lg px-2.5 py-1.5 text-[11px] text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] placeholder-[#94a3b8] dark:placeholder-[#4e657e] aurora:placeholder-[#5a7782] font-mono focus:outline-none focus:border-[#2481cc] dark:focus:border-[#2ba0ff] aurora:focus:border-[#2dd4bf]"
                     />
                   </div>
                   <div>
-                    <label className="block text-[10px] text-[#7e95ab] mb-1">端口</label>
+                    <label className="block text-[10px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] mb-1">端口</label>
                     <input
                       type="number"
                       min={1}
@@ -548,40 +550,40 @@ export const MemberAuthModal: React.FC<MemberAuthModalProps> = ({
                       value={proxyConfig.port}
                       onChange={(e) => setProxyConfig((prev) => ({ ...prev, port: Number(e.target.value) || 0 }))}
                       placeholder="1080"
-                      className="w-full bg-[#111c28] border border-[#1e3145] rounded-lg px-2.5 py-1.5 text-[11px] text-white font-mono focus:outline-none focus:border-[#2ba0ff]"
+                      className="w-full bg-white dark:bg-[#0e1726] aurora:bg-[#101c23] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] rounded-lg px-2.5 py-1.5 text-[11px] text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] placeholder-[#94a3b8] dark:placeholder-[#4e657e] aurora:placeholder-[#5a7782] font-mono focus:outline-none focus:border-[#2481cc] dark:focus:border-[#2ba0ff] aurora:focus:border-[#2dd4bf]"
                     />
                   </div>
                 </div>
 
                 <div className="grid grid-cols-2 gap-2">
                   <div>
-                    <label className="block text-[10px] text-[#7e95ab] mb-1">用户名 (可选)</label>
+                    <label className="block text-[10px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] mb-1">用户名 (可选)</label>
                     <input
                       type="text"
                       value={proxyConfig.username || ''}
                       onChange={(e) => setProxyConfig((prev) => ({ ...prev, username: e.target.value }))}
                       placeholder="无认证可留空"
-                      className="w-full bg-[#111c28] border border-[#1e3145] rounded-lg px-2.5 py-1.5 text-[11px] text-white focus:outline-none focus:border-[#2ba0ff]"
+                      className="w-full bg-white dark:bg-[#0e1726] aurora:bg-[#101c23] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] rounded-lg px-2.5 py-1.5 text-[11px] text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] placeholder-[#94a3b8] dark:placeholder-[#4e657e] aurora:placeholder-[#5a7782] focus:outline-none focus:border-[#2481cc] dark:focus:border-[#2ba0ff] aurora:focus:border-[#2dd4bf]"
                     />
                   </div>
                   <div>
-                    <label className="block text-[10px] text-[#7e95ab] mb-1">密码 (可选)</label>
+                    <label className="block text-[10px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] mb-1">密码 (可选)</label>
                     <input
                       type="password"
                       value={proxyConfig.password || ''}
                       onChange={(e) => setProxyConfig((prev) => ({ ...prev, password: e.target.value }))}
                       placeholder={proxyConfig.hasPassword ? '已保存（留空保留原密码）' : '无认证可留空'}
-                      className="w-full bg-[#111c28] border border-[#1e3145] rounded-lg px-2.5 py-1.5 text-[11px] text-white focus:outline-none focus:border-[#2ba0ff]"
+                      className="w-full bg-white dark:bg-[#0e1726] aurora:bg-[#101c23] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] rounded-lg px-2.5 py-1.5 text-[11px] text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] placeholder-[#94a3b8] dark:placeholder-[#4e657e] aurora:placeholder-[#5a7782] focus:outline-none focus:border-[#2481cc] dark:focus:border-[#2ba0ff] aurora:focus:border-[#2dd4bf]"
                     />
                   </div>
                 </div>
 
                 {proxyNotice && (
                   <div
-                    className={`px-2.5 py-1.5 rounded-lg text-[11px] ${
+                    className={`px-2.5 py-1.5 rounded-lg text-[11px] border ${
                       proxyNotice.ok
-                        ? 'bg-emerald-500/15 text-emerald-300 border border-emerald-500/30'
-                        : 'bg-rose-500/15 text-rose-300 border border-rose-500/30'
+                        ? 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 border-emerald-500/30'
+                        : 'bg-rose-500/15 text-rose-700 dark:text-rose-300 border-rose-500/30'
                     }`}
                   >
                     {proxyNotice.text}
@@ -592,7 +594,7 @@ export const MemberAuthModal: React.FC<MemberAuthModalProps> = ({
                   type="button"
                   disabled={isSavingProxy}
                   onClick={handleSaveProxy}
-                  className="w-full py-1.5 rounded-lg bg-[#1a2c40] hover:bg-[#223952] border border-[#2a4563] text-[#8bc9ff] text-[11px] font-medium transition-colors cursor-pointer disabled:opacity-50"
+                  className="w-full py-1.5 rounded-lg bg-[#e8f3ff] hover:bg-[#dbeafe] dark:bg-[#132234] dark:hover:bg-[#1b2f47] aurora:bg-[#112d36] aurora:hover:bg-[#153842] border border-[#bfdbfe] dark:border-[#1e3148] aurora:border-[#2dd4bf]/35 text-[#0284c7] dark:text-[#7cc4ff] aurora:text-[#5eead4] text-[11px] font-medium transition-colors cursor-pointer disabled:opacity-50"
                 >
                   {isSavingProxy ? '正在保存并应用代理...' : '保存代理设置'}
                 </button>

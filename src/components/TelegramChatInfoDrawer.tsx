@@ -267,20 +267,20 @@ export const TelegramChatInfoDrawer: React.FC<TelegramChatInfoDrawerProps> = ({
     <div className="fixed inset-0 z-50 flex justify-end animate-in fade-in duration-200 select-none">
       {/* Backdrop */}
       <div
-        className="fixed inset-0 bg-black/40 backdrop-blur-xs cursor-pointer"
+        className="fixed inset-0 bg-black/45 dark:bg-black/65 aurora:bg-black/70 backdrop-blur-xs cursor-pointer"
         onClick={onClose}
       />
 
       {/* Drawer Body */}
-      <div className="relative w-80 sm:w-96 h-full bg-white dark:bg-[#17212b] border-l border-[#e0e4e8] dark:border-[#0e1621] shadow-2xl flex flex-col z-10 animate-in slide-in-from-right duration-250 text-[#111827] dark:text-[#f5f7fa]">
+      <div className="relative w-80 sm:w-96 h-full bg-white dark:bg-[#0b131f] aurora:bg-[#0c151b] border-l border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] shadow-2xl flex flex-col z-10 animate-in slide-in-from-right duration-250 text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8]">
         {/* Header */}
-        <div className="h-14 px-4 border-b border-[#e0e4e8] dark:border-[#0e1621] flex items-center justify-between shrink-0">
+        <div className="h-14 px-4 bg-[#f8fafc] dark:bg-[#0d1726] aurora:bg-[#0e1920] border-b border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] flex items-center justify-between shrink-0">
           <span className="font-semibold text-sm">
             {chat.isGroup ? '群组详情' : chat.isChannel ? '频道详情' : '联系人资料'}
           </span>
           <button
             onClick={onClose}
-            className="p-1 rounded-lg text-[#707579] hover:text-[#111827] dark:text-[#7f93a5] dark:hover:text-white hover:bg-black/5 dark:hover:bg-[#202b36] cursor-pointer"
+            className="p-1.5 rounded-lg text-[#64748b] hover:text-[#0f172a] dark:text-[#7b93ad] dark:hover:text-[#eef4fb] aurora:text-[#7e9aa5] aurora:hover:text-[#ecf6f8] hover:bg-[#e2e8f0]/60 dark:hover:bg-[#132234] aurora:hover:bg-[#13252e] transition-colors cursor-pointer"
           >
             <X className="w-5 h-5" />
           </button>
@@ -289,9 +289,9 @@ export const TelegramChatInfoDrawer: React.FC<TelegramChatInfoDrawerProps> = ({
         {/* Scrollable Content */}
         <div className="flex-1 overflow-y-auto">
           {/* Avatar & Title Section */}
-          <div className="p-6 flex flex-col items-center border-b border-[#e0e4e8] dark:border-[#0e1621] bg-[#f8fafc] dark:bg-[#131d27]">
+          <div className="p-6 flex flex-col items-center border-b border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] bg-[#f8fafc] dark:bg-[#0e1726]/85 aurora:bg-[#101c23]/90">
             <div
-              className="w-24 h-24 rounded-full flex items-center justify-center font-bold text-2xl text-white shadow-xl overflow-hidden mb-3 border-4 border-white dark:border-[#17212b] relative"
+              className="w-24 h-24 rounded-full flex items-center justify-center font-bold text-2xl text-white shadow-xl overflow-hidden mb-3 border-4 border-white dark:border-[#0b131f] aurora:border-[#0c151b] relative"
               style={{ backgroundColor: chat.avatarBg }}
             >
               <span className="font-bold select-none">{chat.avatarInitial}</span>
@@ -326,7 +326,7 @@ export const TelegramChatInfoDrawer: React.FC<TelegramChatInfoDrawerProps> = ({
                     onChange={(e) => setRemarkText(e.target.value)}
                     placeholder="输入好友备注名称..."
                     disabled={isSavingRemark}
-                    className="flex-1 px-2.5 py-1 text-xs rounded-lg border border-[#2481cc] bg-white dark:bg-[#17212b] text-[#111827] dark:text-white outline-none focus:ring-1 focus:ring-[#2481cc]"
+                    className="flex-1 px-2.5 py-1 text-xs rounded-lg border border-[#2481cc] dark:border-[#2ba0ff] aurora:border-[#2dd4bf] bg-white dark:bg-[#08101a] aurora:bg-[#081014] text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] placeholder-[#94a3b8] dark:placeholder-[#4e657e] aurora:placeholder-[#5a7782] outline-none focus:ring-1 focus:ring-[#2481cc] dark:focus:ring-[#2ba0ff] aurora:focus:ring-[#2dd4bf]"
                     autoFocus
                     onKeyDown={(e) => {
                       if (e.key === 'Enter') {
@@ -341,7 +341,7 @@ export const TelegramChatInfoDrawer: React.FC<TelegramChatInfoDrawerProps> = ({
                   <button
                     onClick={() => void handleSaveRemark()}
                     disabled={isSavingRemark}
-                    className="p-1 rounded-md bg-[#2481cc] text-white hover:bg-[#1e6cb0] disabled:opacity-50 cursor-pointer"
+                    className="p-1 rounded-md bg-[#2481cc] hover:bg-[#1d6fb3] dark:bg-[#2ba0ff] dark:hover:bg-[#1e8ee8] aurora:bg-[#0d9488] aurora:hover:bg-[#0f766e] text-white disabled:opacity-50 cursor-pointer transition-colors"
                     title="保存备注"
                   >
                     <Check className="w-3.5 h-3.5" />
@@ -353,14 +353,14 @@ export const TelegramChatInfoDrawer: React.FC<TelegramChatInfoDrawerProps> = ({
                       setIsEditingRemark(false);
                     }}
                     disabled={isSavingRemark}
-                    className="p-1 rounded-md bg-gray-200 dark:bg-[#202b36] text-[#707579] dark:text-[#7f93a5] hover:bg-gray-300 dark:hover:bg-[#2c3b4a] cursor-pointer"
+                    className="p-1 rounded-md bg-[#e2e8f0] dark:bg-[#132234] aurora:bg-[#13252e] text-[#475569] dark:text-[#b4c6d8] aurora:text-[#b7d0d8] hover:bg-[#cbd5e1] dark:hover:bg-[#1b2f47] aurora:hover:bg-[#1a3340] cursor-pointer transition-colors"
                     title="取消"
                   >
                     <X className="w-3.5 h-3.5" />
                   </button>
                 </div>
                 {actionError && (
-                  <p className="text-[11px] text-rose-500 text-center leading-snug">{actionError}</p>
+                  <p className="text-[11px] text-rose-600 dark:text-rose-400 aurora:text-rose-400 text-center leading-snug">{actionError}</p>
                 )}
               </div>
             ) : (
@@ -369,7 +369,7 @@ export const TelegramChatInfoDrawer: React.FC<TelegramChatInfoDrawerProps> = ({
                   {chat.title}
                 </h3>
                 {(fullInfo?.isBlocked ?? chat.isBlocked) && (
-                  <span className="px-1.5 py-0.5 rounded bg-red-500/15 text-red-500 text-[10px] font-medium shrink-0">
+                  <span className="px-1.5 py-0.5 rounded bg-rose-500/15 text-rose-700 dark:text-rose-400 aurora:text-rose-400 text-[10px] font-medium shrink-0">
                     已拉黑
                   </span>
                 )}
@@ -380,7 +380,7 @@ export const TelegramChatInfoDrawer: React.FC<TelegramChatInfoDrawerProps> = ({
                       setActionError(null);
                       setIsEditingRemark(true);
                     }}
-                    className="p-1 rounded-md text-[#707579] hover:text-[#2481cc] dark:text-[#7f93a5] dark:hover:text-[#2ba0ff] hover:bg-black/5 dark:hover:bg-white/5 cursor-pointer transition-colors"
+                    className="p-1 rounded-md text-[#64748b] hover:text-[#2481cc] dark:text-[#7b93ad] dark:hover:text-[#7cc4ff] aurora:text-[#7e9aa5] aurora:hover:text-[#5eead4] hover:bg-[#e2e8f0]/60 dark:hover:bg-[#132234] aurora:hover:bg-[#13252e] cursor-pointer transition-colors"
                     title="点击设置/修改好友备注"
                   >
                     <Edit3 className="w-3.5 h-3.5" />
@@ -389,7 +389,7 @@ export const TelegramChatInfoDrawer: React.FC<TelegramChatInfoDrawerProps> = ({
               </div>
             )}
 
-            <p className="text-xs text-[#707579] dark:text-[#7f93a5] text-center">
+            <p className="text-xs text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] text-center">
               {(() => {
                 const count = fullInfo?.memberCount ?? chat.memberCount;
                 const online = fullInfo?.onlineCount ?? chat.onlineCount;
@@ -406,7 +406,7 @@ export const TelegramChatInfoDrawer: React.FC<TelegramChatInfoDrawerProps> = ({
                 }
                 if (chat.isBot) return '机器人 (Bot)';
                 return (
-                  <span className={isOnline ? 'text-emerald-500 font-medium' : ''}>
+                  <span className={isOnline ? 'text-emerald-700 dark:text-emerald-400 aurora:text-emerald-400 font-medium' : ''}>
                     {statusText || (isOnline ? '在线' : '状态未知')}
                   </span>
                 );
@@ -415,30 +415,30 @@ export const TelegramChatInfoDrawer: React.FC<TelegramChatInfoDrawerProps> = ({
             {(fullInfo?.username || chat.username || fullInfo?.phone || chat.phone || fullInfo?.description || chat.description || fullInfo?.inviteLink || chat.inviteLink) && (
               <div className="mt-2.5 w-full text-center space-y-1">
                 {(fullInfo?.username || chat.username) && (
-                  <div className="text-[11px] text-[#2481cc] dark:text-[#2ba0ff] font-medium">
+                  <div className="text-[11px] text-[#2481cc] dark:text-[#7cc4ff] aurora:text-[#5eead4] font-medium">
                     {fullInfo?.username || chat.username}
                   </div>
                 )}
                 {(fullInfo?.phone || chat.phone) && (
-                  <div className="text-[11px] text-[#707579] dark:text-[#a0acb8] flex items-center justify-center gap-1 tabular-nums">
+                  <div className="text-[11px] text-[#475569] dark:text-[#b4c6d8] aurora:text-[#b7d0d8] flex items-center justify-center gap-1 tabular-nums">
                     <Phone className="w-3 h-3" />
                     <span>{fullInfo?.phone || chat.phone}</span>
                   </div>
                 )}
                 {(fullInfo?.description || chat.description) && (
-                  <div className="text-[11px] text-[#707579] dark:text-[#a0acb8] leading-relaxed px-2 break-words">
+                  <div className="text-[11px] text-[#475569] dark:text-[#b4c6d8] aurora:text-[#b7d0d8] leading-relaxed px-2 break-words">
                     {fullInfo?.description || chat.description}
                   </div>
                 )}
                 {(fullInfo?.inviteLink || chat.inviteLink) && (
-                  <div className="text-[11px] text-[#2481cc] dark:text-[#2ba0ff] truncate px-2">
+                  <div className="text-[11px] text-[#2481cc] dark:text-[#7cc4ff] aurora:text-[#5eead4] truncate px-2">
                     邀请链接: {fullInfo?.inviteLink || chat.inviteLink}
                   </div>
                 )}
               </div>
             )}
             {fullInfoError && (
-              <div className="mt-2 flex items-center gap-1.5 text-[11px] text-rose-500">
+              <div className="mt-2 flex items-center gap-1.5 text-[11px] text-rose-600 dark:text-rose-400 aurora:text-rose-400">
                 <AlertCircle className="w-3.5 h-3.5 shrink-0" />
                 <span>{fullInfoError}</span>
               </div>
@@ -446,50 +446,50 @@ export const TelegramChatInfoDrawer: React.FC<TelegramChatInfoDrawerProps> = ({
           </div>
 
           {/* Quick Actions (Remark, Mute, Pin, Block/Unblock) */}
-          <div className="p-3 border-b border-[#e0e4e8] dark:border-[#0e1621] space-y-1">
+          <div className="p-3 border-b border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] space-y-1">
             {!chat.isGroup && !chat.isChannel && (
               <button
                 onClick={() => {
                   setRemarkText(chat.title);
                   setIsEditingRemark(true);
                 }}
-                className="w-full flex items-center justify-between p-2.5 rounded-xl hover:bg-black/5 dark:hover:bg-[#202b36] transition-colors cursor-pointer text-xs"
+                className="w-full flex items-center justify-between p-2.5 rounded-xl hover:bg-[#f1f5f9] dark:hover:bg-[#132234] aurora:hover:bg-[#13252e] transition-colors cursor-pointer text-xs"
               >
                 <div className="flex items-center gap-3">
-                  <Edit3 className="w-4 h-4 text-[#707579] dark:text-[#7f93a5]" />
+                  <Edit3 className="w-4 h-4 text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5]" />
                   <span>设置好友备注</span>
                 </div>
-                <span className="text-[11px] text-[#2481cc] dark:text-[#2ba0ff]">
+                <span className="text-[11px] text-[#2481cc] dark:text-[#7cc4ff] aurora:text-[#5eead4]">
                   编辑
                 </span>
               </button>
             )}
             <button
               onClick={() => onToggleMute?.(chat.id)}
-              className="w-full flex items-center justify-between p-2.5 rounded-xl hover:bg-black/5 dark:hover:bg-[#202b36] transition-colors cursor-pointer text-xs"
+              className="w-full flex items-center justify-between p-2.5 rounded-xl hover:bg-[#f1f5f9] dark:hover:bg-[#132234] aurora:hover:bg-[#13252e] transition-colors cursor-pointer text-xs"
             >
               <div className="flex items-center gap-3">
                 {chat.isMuted ? (
-                  <BellOff className="w-4 h-4 text-amber-500" />
+                  <BellOff className="w-4 h-4 text-amber-600 dark:text-amber-400 aurora:text-amber-400" />
                 ) : (
-                  <Bell className="w-4 h-4 text-[#707579] dark:text-[#7f93a5]" />
+                  <Bell className="w-4 h-4 text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5]" />
                 )}
                 <span>{chat.isMuted ? '已静音' : '消息通知'}</span>
               </div>
-              <span className="text-[11px] text-[#2481cc] dark:text-[#2ba0ff]">
+              <span className="text-[11px] text-[#2481cc] dark:text-[#7cc4ff] aurora:text-[#5eead4]">
                 {chat.isMuted ? '取消静音' : '静音'}
               </span>
             </button>
 
             <button
               onClick={() => onTogglePin?.(chat.id)}
-              className="w-full flex items-center justify-between p-2.5 rounded-xl hover:bg-black/5 dark:hover:bg-[#202b36] transition-colors cursor-pointer text-xs"
+              className="w-full flex items-center justify-between p-2.5 rounded-xl hover:bg-[#f1f5f9] dark:hover:bg-[#132234] aurora:hover:bg-[#13252e] transition-colors cursor-pointer text-xs"
             >
               <div className="flex items-center gap-3">
-                <Pin className={`w-4 h-4 ${chat.isPinned ? 'text-[#2481cc] fill-current' : 'text-[#707579] dark:text-[#7f93a5]'}`} />
+                <Pin className={`w-4 h-4 ${chat.isPinned ? 'text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf] fill-current' : 'text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5]'}`} />
                 <span>{chat.isPinned ? '已置顶' : '置顶对话'}</span>
               </div>
-              <span className="text-[11px] text-[#2481cc] dark:text-[#2ba0ff]">
+              <span className="text-[11px] text-[#2481cc] dark:text-[#7cc4ff] aurora:text-[#5eead4]">
                 {chat.isPinned ? '取消置顶' : '置顶'}
               </span>
             </button>
@@ -498,7 +498,7 @@ export const TelegramChatInfoDrawer: React.FC<TelegramChatInfoDrawerProps> = ({
               const currentlyBlocked = Boolean(fullInfo?.isBlocked ?? chat.isBlocked);
               return confirmBlockToggle ? (
                 <div className="p-2.5 rounded-xl bg-amber-500/10 border border-amber-500/25 flex items-center justify-between gap-2 text-xs">
-                  <span className="text-[#111827] dark:text-white">
+                  <span className="text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8]">
                     {currentlyBlocked ? '确定将其移出黑名单？' : '确定加入黑名单并屏蔽对方消息？'}
                   </span>
                   <div className="flex items-center gap-1.5 shrink-0">
@@ -525,7 +525,7 @@ export const TelegramChatInfoDrawer: React.FC<TelegramChatInfoDrawerProps> = ({
                         }
                       }}
                       className={`px-2 py-1 rounded-lg text-[11px] font-medium text-white cursor-pointer disabled:opacity-50 ${
-                        currentlyBlocked ? 'bg-emerald-600 hover:bg-emerald-700' : 'bg-red-500 hover:bg-red-600'
+                        currentlyBlocked ? 'bg-emerald-600 hover:bg-emerald-700' : 'bg-rose-600 hover:bg-rose-700'
                       }`}
                     >
                       {isTogglingBlock ? '处理中' : '确认'}
@@ -534,7 +534,7 @@ export const TelegramChatInfoDrawer: React.FC<TelegramChatInfoDrawerProps> = ({
                       type="button"
                       disabled={isTogglingBlock}
                       onClick={() => setConfirmBlockToggle(false)}
-                      className="px-2 py-1 rounded-lg text-[11px] bg-black/5 dark:bg-white/10 text-[#707579] dark:text-gray-300 cursor-pointer"
+                      className="px-2 py-1 rounded-lg text-[11px] bg-[#e2e8f0] dark:bg-[#132234] aurora:bg-[#13252e] text-[#475569] dark:text-[#b4c6d8] aurora:text-[#b7d0d8] cursor-pointer"
                     >
                       取消
                     </button>
@@ -544,19 +544,19 @@ export const TelegramChatInfoDrawer: React.FC<TelegramChatInfoDrawerProps> = ({
                 <button
                   type="button"
                   onClick={() => setConfirmBlockToggle(true)}
-                  className="w-full flex items-center justify-between p-2.5 rounded-xl hover:bg-black/5 dark:hover:bg-[#202b36] transition-colors cursor-pointer text-xs"
+                  className="w-full flex items-center justify-between p-2.5 rounded-xl hover:bg-[#f1f5f9] dark:hover:bg-[#132234] aurora:hover:bg-[#13252e] transition-colors cursor-pointer text-xs"
                 >
                   <div className="flex items-center gap-3">
                     {currentlyBlocked ? (
-                      <ShieldCheck className="w-4 h-4 text-emerald-500" />
+                      <ShieldCheck className="w-4 h-4 text-emerald-600 dark:text-emerald-400 aurora:text-emerald-400" />
                     ) : (
-                      <ShieldAlert className="w-4 h-4 text-amber-500" />
+                      <ShieldAlert className="w-4 h-4 text-amber-600 dark:text-amber-400 aurora:text-amber-400" />
                     )}
-                    <span className={currentlyBlocked ? 'text-emerald-600 dark:text-emerald-400' : 'text-amber-600 dark:text-amber-400'}>
+                    <span className={currentlyBlocked ? 'text-emerald-700 dark:text-emerald-400 aurora:text-emerald-400' : 'text-amber-700 dark:text-amber-400 aurora:text-amber-400'}>
                       {currentlyBlocked ? '已加入黑名单' : '拉黑该联系人'}
                     </span>
                   </div>
-                  <span className={`text-[11px] ${currentlyBlocked ? 'text-emerald-500' : 'text-amber-500'}`}>
+                  <span className={`text-[11px] ${currentlyBlocked ? 'text-emerald-700 dark:text-emerald-400 aurora:text-emerald-400' : 'text-amber-700 dark:text-amber-400 aurora:text-amber-400'}`}>
                     {currentlyBlocked ? '解除拉黑' : '拉黑'}
                   </span>
                 </button>
@@ -575,8 +575,8 @@ export const TelegramChatInfoDrawer: React.FC<TelegramChatInfoDrawerProps> = ({
 
               if (!fullInfo.isContact) {
                 return confirmAddContact ? (
-                  <div className="p-2.5 rounded-xl bg-[#2481cc]/10 border border-[#2481cc]/25 space-y-2 text-xs">
-                    <div className="text-[#111827] dark:text-white font-medium">
+                  <div className="p-2.5 rounded-xl bg-[#e8f3ff] dark:bg-[#2ba0ff]/15 aurora:bg-[#112d36] border border-[#bfdbfe] dark:border-[#2ba0ff]/35 aurora:border-[#2dd4bf]/35 space-y-2 text-xs">
+                    <div className="text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] font-medium">
                       将该用户添加到 Telegram 云端通讯录
                     </div>
                     <input
@@ -584,14 +584,14 @@ export const TelegramChatInfoDrawer: React.FC<TelegramChatInfoDrawerProps> = ({
                       value={addContactName}
                       onChange={(e) => setAddContactName(e.target.value)}
                       placeholder="输入联系人备注名称"
-                      className="w-full px-2.5 py-1.5 rounded-lg bg-white dark:bg-[#17212b] border border-[#d6dde4] dark:border-[#2c3b4c] text-xs text-[#111827] dark:text-white outline-none focus:border-[#2481cc]"
+                      className="w-full px-2.5 py-1.5 rounded-lg bg-white dark:bg-[#08101a] aurora:bg-[#081014] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] text-xs text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] placeholder-[#94a3b8] dark:placeholder-[#4e657e] aurora:placeholder-[#5a7782] outline-none focus:border-[#2481cc] dark:focus:border-[#2ba0ff] aurora:focus:border-[#2dd4bf]"
                     />
                     <div className="flex items-center justify-end gap-1.5">
                       <button
                         type="button"
                         disabled={isAddingContact}
                         onClick={() => setConfirmAddContact(false)}
-                        className="px-2.5 py-1 rounded-lg text-[11px] bg-black/5 dark:bg-white/10 text-[#707579] dark:text-gray-300 cursor-pointer"
+                        className="px-2.5 py-1 rounded-lg text-[11px] bg-[#f1f5f9] dark:bg-[#132234] aurora:bg-[#13252e] text-[#475569] dark:text-[#b4c6d8] aurora:text-[#b7d0d8] cursor-pointer"
                       >
                         取消
                       </button>
@@ -640,7 +640,7 @@ export const TelegramChatInfoDrawer: React.FC<TelegramChatInfoDrawerProps> = ({
                             setIsAddingContact(false);
                           }
                         }}
-                        className="px-2.5 py-1 rounded-lg text-[11px] font-medium text-white bg-[#2481cc] hover:bg-[#1b6cb0] cursor-pointer disabled:opacity-50"
+                        className="px-2.5 py-1 rounded-lg text-[11px] font-medium text-white bg-[#2481cc] hover:bg-[#1d6fb3] dark:bg-[#2ba0ff] dark:hover:bg-[#1e8ee8] aurora:bg-[#0d9488] aurora:hover:bg-[#0f766e] cursor-pointer disabled:opacity-50"
                       >
                         {isAddingContact ? '添加中...' : '确认添加'}
                       </button>
@@ -654,20 +654,20 @@ export const TelegramChatInfoDrawer: React.FC<TelegramChatInfoDrawerProps> = ({
                       setAddContactName(fullInfo.title || chat.title || '');
                       setConfirmAddContact(true);
                     }}
-                    className="w-full flex items-center justify-between p-2.5 rounded-xl hover:bg-black/5 dark:hover:bg-[#202b36] transition-colors cursor-pointer text-xs"
+                    className="w-full flex items-center justify-between p-2.5 rounded-xl hover:bg-[#f1f5f9] dark:hover:bg-[#132234] aurora:hover:bg-[#13252e] transition-colors cursor-pointer text-xs"
                   >
                     <div className="flex items-center gap-3">
-                      <UserPlus className="w-4 h-4 text-[#2481cc] dark:text-[#2ba0ff]" />
-                      <span className="text-[#2481cc] dark:text-[#2ba0ff] font-medium">添加到通讯录</span>
+                      <UserPlus className="w-4 h-4 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf]" />
+                      <span className="text-[#2481cc] dark:text-[#7cc4ff] aurora:text-[#5eead4] font-medium">添加到通讯录</span>
                     </div>
-                    <span className="text-[11px] text-[#2481cc] dark:text-[#2ba0ff]">添加好友</span>
+                    <span className="text-[11px] text-[#2481cc] dark:text-[#7cc4ff] aurora:text-[#5eead4]">添加好友</span>
                   </button>
                 );
               }
 
               return confirmDeleteContact ? (
-                <div className="p-2.5 rounded-xl bg-red-500/10 border border-red-500/25 flex items-center justify-between gap-2 text-xs">
-                  <span className="text-[#111827] dark:text-white">
+                <div className="p-2.5 rounded-xl bg-rose-500/10 border border-rose-500/25 flex items-center justify-between gap-2 text-xs">
+                  <span className="text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8]">
                     从 Telegram 云端通讯录删除该好友？
                   </span>
                   <div className="flex items-center gap-1.5 shrink-0">
@@ -690,7 +690,7 @@ export const TelegramChatInfoDrawer: React.FC<TelegramChatInfoDrawerProps> = ({
                           setIsDeletingContact(false);
                         }
                       }}
-                      className="px-2 py-1 rounded-lg text-[11px] font-medium text-white bg-red-500 hover:bg-red-600 cursor-pointer disabled:opacity-50"
+                      className="px-2 py-1 rounded-lg text-[11px] font-medium text-white bg-rose-600 hover:bg-rose-700 cursor-pointer disabled:opacity-50"
                     >
                       {isDeletingContact ? '删除中' : '确认'}
                     </button>
@@ -698,7 +698,7 @@ export const TelegramChatInfoDrawer: React.FC<TelegramChatInfoDrawerProps> = ({
                       type="button"
                       disabled={isDeletingContact}
                       onClick={() => setConfirmDeleteContact(false)}
-                      className="px-2 py-1 rounded-lg text-[11px] bg-black/5 dark:bg-white/10 text-[#707579] dark:text-gray-300 cursor-pointer"
+                      className="px-2 py-1 rounded-lg text-[11px] bg-[#e2e8f0] dark:bg-[#132234] aurora:bg-[#13252e] text-[#475569] dark:text-[#b4c6d8] aurora:text-[#b7d0d8] cursor-pointer"
                     >
                       取消
                     </button>
@@ -708,26 +708,26 @@ export const TelegramChatInfoDrawer: React.FC<TelegramChatInfoDrawerProps> = ({
                 <button
                   type="button"
                   onClick={() => setConfirmDeleteContact(true)}
-                  className="w-full flex items-center justify-between p-2.5 rounded-xl hover:bg-black/5 dark:hover:bg-[#202b36] transition-colors cursor-pointer text-xs"
+                  className="w-full flex items-center justify-between p-2.5 rounded-xl hover:bg-[#f1f5f9] dark:hover:bg-[#132234] aurora:hover:bg-[#13252e] transition-colors cursor-pointer text-xs"
                 >
                   <div className="flex items-center gap-3">
-                    <UserMinus className="w-4 h-4 text-red-400" />
-                    <span className="text-red-500 dark:text-red-400">从通讯录删除好友</span>
+                    <UserMinus className="w-4 h-4 text-rose-600 dark:text-rose-400 aurora:text-rose-400" />
+                    <span className="text-rose-700 dark:text-rose-400 aurora:text-rose-400">从通讯录删除好友</span>
                   </div>
-                  <span className="text-[11px] text-red-400">删除</span>
+                  <span className="text-[11px] text-rose-600 dark:text-rose-400 aurora:text-rose-400">删除</span>
                 </button>
               );
             })()}
           </div>
 
           {/* Shared Media Tabs Header */}
-          <div className="flex items-center px-2 border-b border-[#e0e4e8] dark:border-[#0e1621] overflow-x-auto no-scrollbar text-xs font-medium tabular-nums">
+          <div className="flex items-center px-2 border-b border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] overflow-x-auto no-scrollbar text-xs font-medium tabular-nums">
             <button
               onClick={() => setActiveTab('media')}
               className={`px-3 py-2.5 border-b-2 cursor-pointer transition-colors whitespace-nowrap ${
                 activeTab === 'media'
-                  ? 'border-[#2481cc] text-[#2481cc] dark:text-[#2ba0ff] font-semibold'
-                  : 'border-transparent text-[#707579] dark:text-[#7f93a5]'
+                  ? 'border-[#2481cc] dark:border-[#2ba0ff] aurora:border-[#2dd4bf] text-[#2481cc] dark:text-[#7cc4ff] aurora:text-[#5eead4] font-semibold'
+                  : 'border-transparent text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] hover:text-[#0f172a] dark:hover:text-[#eef4fb] aurora:hover:text-[#ecf6f8]'
               }`}
             >
               媒体 ({mediaMessages.length})
@@ -736,8 +736,8 @@ export const TelegramChatInfoDrawer: React.FC<TelegramChatInfoDrawerProps> = ({
               onClick={() => setActiveTab('files')}
               className={`px-3 py-2.5 border-b-2 cursor-pointer transition-colors whitespace-nowrap ${
                 activeTab === 'files'
-                  ? 'border-[#2481cc] text-[#2481cc] dark:text-[#2ba0ff] font-semibold'
-                  : 'border-transparent text-[#707579] dark:text-[#7f93a5]'
+                  ? 'border-[#2481cc] dark:border-[#2ba0ff] aurora:border-[#2dd4bf] text-[#2481cc] dark:text-[#7cc4ff] aurora:text-[#5eead4] font-semibold'
+                  : 'border-transparent text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] hover:text-[#0f172a] dark:hover:text-[#eef4fb] aurora:hover:text-[#ecf6f8]'
               }`}
             >
               文件 ({fileMessages.length})
@@ -746,8 +746,8 @@ export const TelegramChatInfoDrawer: React.FC<TelegramChatInfoDrawerProps> = ({
               onClick={() => setActiveTab('voice')}
               className={`px-3 py-2.5 border-b-2 cursor-pointer transition-colors whitespace-nowrap ${
                 activeTab === 'voice'
-                  ? 'border-[#2481cc] text-[#2481cc] dark:text-[#2ba0ff] font-semibold'
-                  : 'border-transparent text-[#707579] dark:text-[#7f93a5]'
+                  ? 'border-[#2481cc] dark:border-[#2ba0ff] aurora:border-[#2dd4bf] text-[#2481cc] dark:text-[#7cc4ff] aurora:text-[#5eead4] font-semibold'
+                  : 'border-transparent text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] hover:text-[#0f172a] dark:hover:text-[#eef4fb] aurora:hover:text-[#ecf6f8]'
               }`}
             >
               语音 ({voiceMessages.length})
@@ -756,8 +756,8 @@ export const TelegramChatInfoDrawer: React.FC<TelegramChatInfoDrawerProps> = ({
               onClick={() => setActiveTab('links')}
               className={`px-3 py-2.5 border-b-2 cursor-pointer transition-colors whitespace-nowrap ${
                 activeTab === 'links'
-                  ? 'border-[#2481cc] text-[#2481cc] dark:text-[#2ba0ff] font-semibold'
-                  : 'border-transparent text-[#707579] dark:text-[#7f93a5]'
+                  ? 'border-[#2481cc] dark:border-[#2ba0ff] aurora:border-[#2dd4bf] text-[#2481cc] dark:text-[#7cc4ff] aurora:text-[#5eead4] font-semibold'
+                  : 'border-transparent text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] hover:text-[#0f172a] dark:hover:text-[#eef4fb] aurora:hover:text-[#ecf6f8]'
               }`}
             >
               链接 ({linkMessages.length})
@@ -767,8 +767,8 @@ export const TelegramChatInfoDrawer: React.FC<TelegramChatInfoDrawerProps> = ({
                 onClick={() => setActiveTab('members')}
                 className={`px-3 py-2.5 border-b-2 cursor-pointer transition-colors whitespace-nowrap ${
                   activeTab === 'members'
-                    ? 'border-[#2481cc] text-[#2481cc] dark:text-[#2ba0ff] font-semibold'
-                    : 'border-transparent text-[#707579] dark:text-[#7f93a5]'
+                    ? 'border-[#2481cc] dark:border-[#2ba0ff] aurora:border-[#2dd4bf] text-[#2481cc] dark:text-[#7cc4ff] aurora:text-[#5eead4] font-semibold'
+                    : 'border-transparent text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] hover:text-[#0f172a] dark:hover:text-[#eef4fb] aurora:hover:text-[#ecf6f8]'
                 }`}
               >
                 成员 ({fullInfo?.memberCount ?? chat.memberCount ?? fullInfo?.participants?.length ?? '-'})
@@ -781,7 +781,7 @@ export const TelegramChatInfoDrawer: React.FC<TelegramChatInfoDrawerProps> = ({
             {activeTab === 'media' && (
               <div>
                 {mediaMessages.length === 0 ? (
-                  <div className="py-12 text-center text-xs text-[#707579] dark:text-[#7f93a5]">
+                  <div className="py-12 text-center text-xs text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5]">
                     暂无共享照片或视频
                   </div>
                 ) : (
@@ -791,7 +791,7 @@ export const TelegramChatInfoDrawer: React.FC<TelegramChatInfoDrawerProps> = ({
                       const resolvedVideoSrc = isVid ? resolveDisplayUrl(m.videoUrl) : undefined;
                       const resolvedImageSrc = m.imageUrl ? resolveDisplayUrl(m.imageUrl) : undefined;
                       return (
-                        <div key={m.id} className="aspect-square rounded-lg overflow-hidden bg-black/10 dark:bg-white/10 relative group">
+                        <div key={m.id} className="aspect-square rounded-lg overflow-hidden bg-[#f1f5f9] dark:bg-[#132234] aurora:bg-[#13252e] relative group">
                           {isVid && resolvedVideoSrc ? (
                             <>
                               <video
@@ -826,7 +826,7 @@ export const TelegramChatInfoDrawer: React.FC<TelegramChatInfoDrawerProps> = ({
                               }}
                             />
                           ) : (
-                            <div className="w-full h-full flex flex-col items-center justify-center text-[10px] text-[#707579] dark:text-[#7f93a5] gap-1 p-1 text-center">
+                            <div className="w-full h-full flex flex-col items-center justify-center text-[10px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] gap-1 p-1 text-center">
                               <ImageIcon className="w-4 h-4 opacity-60" />
                               <span>媒体未缓存</span>
                             </div>
@@ -842,7 +842,7 @@ export const TelegramChatInfoDrawer: React.FC<TelegramChatInfoDrawerProps> = ({
             {activeTab === 'files' && (
               <div className="space-y-2">
                 {fileMessages.length === 0 ? (
-                  <div className="py-12 text-center text-xs text-[#707579] dark:text-[#7f93a5]">
+                  <div className="py-12 text-center text-xs text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5]">
                     暂无共享文件文档
                   </div>
                 ) : (
@@ -850,12 +850,12 @@ export const TelegramChatInfoDrawer: React.FC<TelegramChatInfoDrawerProps> = ({
                     const hasFileUrl = Boolean(m.fileUrl && m.fileUrl.trim() && m.fileUrl.trim() !== '#');
                     const resolvedFileHref = hasFileUrl ? resolveDisplayUrl(m.fileUrl) || '' : '';
                     return (
-                      <div key={m.id} className="p-2.5 rounded-xl bg-gray-50 dark:bg-[#202b36] flex items-center justify-between gap-2 text-xs">
+                      <div key={m.id} className="p-2.5 rounded-xl bg-[#f8fafc] dark:bg-[#0e1726]/85 aurora:bg-[#101c23]/90 border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] flex items-center justify-between gap-2 text-xs">
                         <div className="flex items-center gap-2 min-w-0">
-                          <FileText className="w-5 h-5 text-[#2481cc] shrink-0" />
+                          <FileText className="w-5 h-5 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf] shrink-0" />
                           <div className="min-w-0">
                             <div className="font-medium truncate">{m.fileName || '文档附件'}</div>
-                            <div className="text-[10px] text-[#707579] dark:text-[#7f93a5]">
+                            <div className="text-[10px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5]">
                               {m.fileSize || '未知大小'} · {m.timestamp}
                               {!hasFileUrl ? ' · 链接暂不可用' : ''}
                             </div>
@@ -879,14 +879,14 @@ export const TelegramChatInfoDrawer: React.FC<TelegramChatInfoDrawerProps> = ({
                               }
                             }}
                             title="下载文件"
-                            className="p-1.5 text-[#2481cc] hover:bg-[#2481cc]/10 rounded-lg shrink-0"
+                            className="p-1.5 text-[#2481cc] dark:text-[#7cc4ff] aurora:text-[#5eead4] hover:bg-[#e8f3ff] dark:hover:bg-[#2ba0ff]/15 aurora:hover:bg-[#112d36] rounded-lg shrink-0 transition-colors"
                           >
                             <Download className="w-4 h-4" />
                           </a>
                         ) : (
                           <span
                             title="该文件尚未同步云端下载链接"
-                            className="px-2 py-1 rounded-md bg-black/5 dark:bg-white/5 text-[10px] text-[#707579] dark:text-[#7f93a5] shrink-0 select-none"
+                            className="px-2 py-1 rounded-md bg-[#f1f5f9] dark:bg-[#132234] aurora:bg-[#13252e] text-[10px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] shrink-0 select-none"
                           >
                             未缓存
                           </span>
@@ -901,21 +901,21 @@ export const TelegramChatInfoDrawer: React.FC<TelegramChatInfoDrawerProps> = ({
             {activeTab === 'voice' && (
               <div className="space-y-2">
                 {voiceMessages.length === 0 ? (
-                  <div className="py-12 text-center text-xs text-[#707579] dark:text-[#7f93a5]">
+                  <div className="py-12 text-center text-xs text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5]">
                     暂无语音消息
                   </div>
                 ) : (
                   voiceMessages.map((m) => (
-                    <div key={m.id} className="p-2.5 rounded-xl bg-gray-50 dark:bg-[#202b36] flex items-center justify-between text-xs">
+                    <div key={m.id} className="p-2.5 rounded-xl bg-[#f8fafc] dark:bg-[#0e1726]/85 aurora:bg-[#101c23]/90 border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] flex items-center justify-between text-xs">
                       <div className="flex items-center gap-2">
-                        <Mic className="w-4 h-4 text-[#2481cc]" />
+                        <Mic className="w-4 h-4 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf]" />
                         <span>
                           {m.audioDuration && m.audioDuration > 0
                             ? `语音消息 (${m.audioDuration}")`
                             : '语音消息 (--)'}
                         </span>
                       </div>
-                      <span className="text-[10px] text-[#707579] dark:text-[#7f93a5]">{m.timestamp}</span>
+                      <span className="text-[10px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5]">{m.timestamp}</span>
                     </div>
                   ))
                 )}
@@ -925,14 +925,14 @@ export const TelegramChatInfoDrawer: React.FC<TelegramChatInfoDrawerProps> = ({
             {activeTab === 'links' && (
               <div className="space-y-2">
                 {linkMessages.length === 0 ? (
-                  <div className="py-12 text-center text-xs text-[#707579] dark:text-[#7f93a5]">
+                  <div className="py-12 text-center text-xs text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5]">
                     暂无网页链接
                   </div>
                 ) : (
                   linkMessages.map((m) => (
-                    <div key={m.id} className="p-2.5 rounded-xl bg-gray-50 dark:bg-[#202b36] flex items-center gap-2 text-xs">
-                      <Link2 className="w-4 h-4 text-[#2481cc] shrink-0" />
-                      <span className="truncate text-[#2481cc] dark:text-[#2ba0ff] underline">{m.text}</span>
+                    <div key={m.id} className="p-2.5 rounded-xl bg-[#f8fafc] dark:bg-[#0e1726]/85 aurora:bg-[#101c23]/90 border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] flex items-center gap-2 text-xs">
+                      <Link2 className="w-4 h-4 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf] shrink-0" />
+                      <span className="truncate text-[#2481cc] dark:text-[#7cc4ff] aurora:text-[#5eead4] underline">{m.text}</span>
                     </div>
                   ))
                 )}
@@ -941,7 +941,7 @@ export const TelegramChatInfoDrawer: React.FC<TelegramChatInfoDrawerProps> = ({
 
             {activeTab === 'members' && (chat.isGroup || chat.isChannel) && (
               <div className="space-y-1.5">
-                <div className="p-2 flex items-center justify-between text-[11px] text-[#707579] dark:text-[#7f93a5] font-semibold uppercase">
+                <div className="p-2 flex items-center justify-between text-[11px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] font-semibold uppercase">
                   <span className="tabular-nums">
                     成员列表 ({fullInfo?.memberCount ?? chat.memberCount ?? fullInfo?.participants?.length ?? 0})
                   </span>
@@ -949,7 +949,7 @@ export const TelegramChatInfoDrawer: React.FC<TelegramChatInfoDrawerProps> = ({
                     type="button"
                     onClick={() => void loadFullInfo()}
                     disabled={isLoadingFullInfo}
-                    className="text-[#2481cc] hover:underline flex items-center gap-1 font-normal normal-case cursor-pointer"
+                    className="text-[#2481cc] dark:text-[#7cc4ff] aurora:text-[#5eead4] hover:underline flex items-center gap-1 font-normal normal-case cursor-pointer"
                   >
                     <RefreshCw className={`w-3 h-3 ${isLoadingFullInfo ? 'animate-spin' : ''}`} />
                     刷新
@@ -957,30 +957,30 @@ export const TelegramChatInfoDrawer: React.FC<TelegramChatInfoDrawerProps> = ({
                 </div>
 
                 {isLoadingFullInfo ? (
-                  <div className="py-10 flex flex-col items-center justify-center text-xs text-[#707579] dark:text-[#7f93a5]">
-                    <Loader2 className="w-5 h-5 animate-spin text-[#2481cc] mb-2" />
+                  <div className="py-10 flex flex-col items-center justify-center text-xs text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5]">
+                    <Loader2 className="w-5 h-5 animate-spin text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf] mb-2" />
                     <span>正在从 Telegram 官方拉取真实成员列表...</span>
                   </div>
                 ) : fullInfoError ? (
-                  <div className="p-3 rounded-xl bg-rose-500/10 text-rose-500 text-xs text-center">
+                  <div className="p-3 rounded-xl bg-rose-500/10 text-rose-700 dark:text-rose-400 aurora:text-rose-400 text-xs text-center">
                     {fullInfoError}
                   </div>
                 ) : fullInfo?.participantsError && (!fullInfo?.participants || fullInfo.participants.length === 0) ? (
-                  <div className="p-3 rounded-xl bg-amber-500/10 text-amber-600 dark:text-amber-400 text-xs text-center">
+                  <div className="p-3 rounded-xl bg-amber-500/10 text-amber-800 dark:text-amber-300 aurora:text-amber-300 text-xs text-center">
                     {fullInfo.participantsError}
                   </div>
                 ) : !fullInfo?.participants || fullInfo.participants.length === 0 ? (
-                  <div className="py-10 text-center text-xs text-[#707579] dark:text-[#7f93a5]">
+                  <div className="py-10 text-center text-xs text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5]">
                     {chat.id.startsWith('tg_') ? '暂无可展示的成员列表数据' : '非 Telegram 云端群组，无云端成员列表'}
                   </div>
                 ) : (
                   fullInfo.participants.map((member) => (
                     <div
                       key={member.id}
-                      className="flex items-center justify-between p-2 rounded-xl hover:bg-black/5 dark:hover:bg-[#202b36]"
+                      className="flex items-center justify-between p-2 rounded-xl hover:bg-[#f1f5f9] dark:hover:bg-[#132234] aurora:hover:bg-[#13252e] transition-colors"
                     >
                       <div className="flex items-center gap-2.5 min-w-0">
-                        <div className="w-8 h-8 rounded-full bg-[#2481cc] text-white font-bold text-xs flex items-center justify-center relative overflow-hidden shrink-0">
+                        <div className="w-8 h-8 rounded-full bg-[#2481cc] dark:bg-[#2ba0ff] aurora:bg-[#0d9488] text-white font-bold text-xs flex items-center justify-center relative overflow-hidden shrink-0">
                           <span>{member.name.slice(0, 2).toUpperCase()}</span>
                           {member.avatarUrl && (
                             <img
@@ -1003,22 +1003,22 @@ export const TelegramChatInfoDrawer: React.FC<TelegramChatInfoDrawerProps> = ({
                         </div>
                         <div className="min-w-0">
                           <div className="text-xs font-semibold truncate">{member.name}</div>
-                          <div className={`text-[10px] truncate ${member.isOnline ? 'text-emerald-500 font-medium' : 'text-[#707579] dark:text-[#7f93a5]'}`}>
+                          <div className={`text-[10px] truncate ${member.isOnline ? 'text-emerald-700 dark:text-emerald-400 aurora:text-emerald-400 font-medium' : 'text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5]'}`}>
                             {member.username ? `${member.username} · ` : ''}
                             {member.statusText || (member.isBot ? 'Bot' : '状态未知')}
                           </div>
                         </div>
                       </div>
                       {member.role === 'creator' ? (
-                        <span className="text-[11px] text-[#2481cc] font-medium shrink-0">
+                        <span className="text-[11px] text-[#2481cc] dark:text-[#7cc4ff] aurora:text-[#5eead4] font-medium shrink-0">
                           群主
                         </span>
                       ) : member.role === 'admin' ? (
-                        <span className="text-[11px] text-amber-500 font-medium shrink-0">
+                        <span className="text-[11px] text-amber-700 dark:text-amber-400 aurora:text-amber-400 font-medium shrink-0">
                           管理员
                         </span>
                       ) : member.isBot ? (
-                        <span className="text-[11px] text-emerald-500 font-medium shrink-0">
+                        <span className="text-[11px] text-emerald-700 dark:text-emerald-400 aurora:text-emerald-400 font-medium shrink-0">
                           Bot
                         </span>
                       ) : null}
@@ -1030,9 +1030,9 @@ export const TelegramChatInfoDrawer: React.FC<TelegramChatInfoDrawerProps> = ({
           </div>
 
           {/* Danger Zone: Clear History */}
-          <div className="p-4 border-t border-[#e0e4e8] dark:border-[#0e1621] mt-4 space-y-2.5">
+          <div className="p-4 border-t border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] mt-4 space-y-2.5">
             {actionError && !isEditingRemark && (
-              <p className="text-[11px] text-rose-500 text-center leading-snug">{actionError}</p>
+              <p className="text-[11px] text-rose-600 dark:text-rose-400 aurora:text-rose-400 text-center leading-snug">{actionError}</p>
             )}
             {!showClearConfirm ? (
               <button
@@ -1042,29 +1042,29 @@ export const TelegramChatInfoDrawer: React.FC<TelegramChatInfoDrawerProps> = ({
                   setActionError(null);
                   setShowClearConfirm(true);
                 }}
-                className="w-full py-2.5 px-3 rounded-xl bg-red-500/10 hover:bg-red-500/20 disabled:opacity-50 text-red-500 text-xs font-medium flex items-center justify-center gap-2 cursor-pointer transition-colors"
+                className="w-full py-2.5 px-3 rounded-xl bg-rose-500/10 hover:bg-rose-500/20 disabled:opacity-50 text-rose-700 dark:text-rose-400 aurora:text-rose-400 text-xs font-medium flex items-center justify-center gap-2 cursor-pointer transition-colors"
               >
                 <Trash2 className="w-4 h-4" />
                 <span>清空聊天记录</span>
               </button>
             ) : (
-              <div className="p-3 rounded-xl bg-red-500/8 border border-red-500/25 space-y-2.5">
-                <p className="text-[11.5px] text-[#111827] dark:text-[#eef4fb] leading-relaxed">
+              <div className="p-3 rounded-xl bg-rose-500/10 border border-rose-500/25 space-y-2.5">
+                <p className="text-[11.5px] text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] leading-relaxed">
                   确定要清空与 <span className="font-semibold">【{chat.title}】</span> 的全部云端与本地聊天记录吗？
                 </p>
                 {!chat.isGroup && !chat.isChannel && chat.id.startsWith('tg_') && (
-                  <label className="flex items-start gap-2 text-[11px] text-[#707579] dark:text-[#9aa7b5] cursor-pointer">
+                  <label className="flex items-start gap-2 text-[11px] text-[#475569] dark:text-[#b4c6d8] aurora:text-[#b7d0d8] cursor-pointer">
                     <input
                       type="checkbox"
                       checked={revokeClearHistory}
                       onChange={(e) => setRevokeClearHistory(e.target.checked)}
-                      className="mt-0.5 rounded border-gray-300 text-red-500 focus:ring-red-500"
+                      className="mt-0.5 rounded border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] accent-rose-600 dark:accent-rose-500 aurora:accent-rose-500"
                     />
                     <span>同时为对方清空聊天记录（双向撤回）</span>
                   </label>
                 )}
                 {(chat.isGroup || chat.isChannel) && chat.id.startsWith('tg_') && (
-                  <p className="text-[11px] text-amber-600 dark:text-amber-400 leading-snug">
+                  <p className="text-[11px] text-amber-700 dark:text-amber-300 aurora:text-amber-300 leading-snug">
                     提示：频道与超级群组通常仅支持管理员或通过退群清理云端记录，无权限时将被服务端拒绝。
                   </p>
                 )}
@@ -1076,7 +1076,7 @@ export const TelegramChatInfoDrawer: React.FC<TelegramChatInfoDrawerProps> = ({
                       setShowClearConfirm(false);
                       setRevokeClearHistory(false);
                     }}
-                    className="px-3 py-1.5 rounded-lg text-xs text-[#707579] dark:text-[#9aa7b5] hover:bg-black/5 dark:hover:bg-white/10 cursor-pointer"
+                    className="px-3 py-1.5 rounded-lg text-xs text-[#475569] dark:text-[#b4c6d8] aurora:text-[#b7d0d8] hover:bg-[#e2e8f0]/60 dark:hover:bg-[#132234] aurora:hover:bg-[#13252e] cursor-pointer transition-colors"
                   >
                     取消
                   </button>
@@ -1099,7 +1099,7 @@ export const TelegramChatInfoDrawer: React.FC<TelegramChatInfoDrawerProps> = ({
                         setIsClearingHistory(false);
                       }
                     }}
-                    className="px-3 py-1.5 rounded-lg text-xs bg-red-500 hover:bg-red-600 disabled:opacity-50 text-white font-semibold cursor-pointer"
+                    className="px-3 py-1.5 rounded-lg text-xs bg-rose-600 hover:bg-rose-700 disabled:opacity-50 text-white font-semibold cursor-pointer"
                   >
                     {isClearingHistory ? '正在清空...' : '确认清空'}
                   </button>

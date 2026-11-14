@@ -4045,8 +4045,8 @@ export default function App() {
             <div
               className={`shrink-0 px-4 py-2 border-b flex items-center justify-between gap-3 text-xs ${
                 currentAccount.status === 'expired'
-                  ? 'bg-rose-50 dark:bg-rose-950/60 border-rose-200 dark:border-rose-800/60 text-rose-700 dark:text-rose-200'
-                  : 'bg-amber-50 dark:bg-amber-950/50 border-amber-200 dark:border-amber-800/60 text-amber-800 dark:text-amber-200'
+                  ? 'bg-rose-50 dark:bg-rose-950/60 aurora:bg-rose-950/60 border-rose-200 dark:border-rose-800/60 aurora:border-rose-700/60 text-rose-700 dark:text-rose-200 aurora:text-rose-200'
+                  : 'bg-amber-50 dark:bg-amber-950/50 aurora:bg-amber-950/55 border-amber-200 dark:border-amber-800/60 aurora:border-amber-700/55 text-amber-800 dark:text-amber-200 aurora:text-amber-200'
               }`}
             >
               <div className="flex items-center gap-2 min-w-0">
@@ -4056,7 +4056,7 @@ export default function App() {
                       ? 'bg-rose-500'
                       : currentAccount.status === 'away'
                         ? 'bg-amber-500 animate-pulse'
-                        : 'bg-slate-400'
+                        : 'bg-slate-400 aurora:bg-[#5a7782]'
                   }`}
                 />
                 <span className="truncate font-medium">
@@ -4076,7 +4076,7 @@ export default function App() {
                     type="button"
                     disabled={isReconnectingAccount}
                     onClick={handleReconnectTelegram}
-                    className="px-2.5 py-1 rounded-lg bg-[#2481cc] hover:bg-[#1e6fb0] text-white font-medium cursor-pointer transition-colors disabled:opacity-50"
+                    className="px-2.5 py-1 rounded-lg bg-[#2481cc] hover:bg-[#1e6fb0] dark:bg-[#2ba0ff] dark:hover:bg-[#1e8ee8] aurora:bg-[#0d9488] aurora:hover:bg-[#0f766e] text-white font-medium cursor-pointer transition-colors disabled:opacity-50"
                   >
                     {isReconnectingAccount ? '正在重连...' : '立即重连'}
                   </button>
@@ -4087,7 +4087,7 @@ export default function App() {
                     setReloginAccount(currentAccount);
                     setIsMultiAccountOpen(true);
                   }}
-                  className="px-2.5 py-1 rounded-lg bg-white/80 dark:bg-white/10 hover:bg-white dark:hover:bg-white/20 border border-current/20 font-medium cursor-pointer transition-colors"
+                  className="px-2.5 py-1 rounded-lg bg-white/80 dark:bg-white/10 aurora:bg-white/10 hover:bg-white dark:hover:bg-white/20 aurora:hover:bg-white/20 border border-current/20 font-medium cursor-pointer transition-colors"
                 >
                   重新扫码登录
                 </button>

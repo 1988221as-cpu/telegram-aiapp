@@ -753,14 +753,14 @@ export const MultiAccountModal: React.FC<MultiAccountModalProps> = ({
   };
 
   return (
-    <div className="fixed top-0 right-0 bottom-0 left-[54px] z-20 bg-[#17212b] text-[#f5f7fa] flex flex-col overflow-hidden select-none animate-in fade-in duration-150">
+    <div className="fixed top-0 right-0 bottom-0 left-[54px] z-20 bg-[#f4f7fa] dark:bg-[#05080f] aurora:bg-[#081116] text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] flex flex-col overflow-hidden select-none animate-in fade-in duration-150">
       {/* Top Minimal Header aligned with Window Edges */}
       <div className="h-12 px-5 flex items-center justify-between shrink-0">
         <button
           type="button"
           onClick={handleBackClose}
           title="返回"
-          className="p-2 -ml-2 rounded-lg text-[#7f93a5] hover:text-white hover:bg-white/5 transition-colors cursor-pointer"
+          className="p-2 -ml-2 rounded-lg text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] hover:text-[#0f172a] dark:hover:text-white aurora:hover:text-[#ecf6f8] hover:bg-[#e2e8f0] dark:hover:bg-[#152438] aurora:hover:bg-[#152934] transition-colors cursor-pointer"
         >
           <ArrowLeft className="w-5 h-5" />
         </button>
@@ -769,7 +769,7 @@ export const MultiAccountModal: React.FC<MultiAccountModalProps> = ({
           <button
             type="button"
             onClick={() => setShowAccountsPanel((v) => !v)}
-            className="flex items-center gap-1.5 text-xs text-[#40a7e3] hover:text-[#5cb8ed] cursor-pointer tabular-nums"
+            className="flex items-center gap-1.5 text-xs text-[#2481cc] hover:text-[#1d6fb3] dark:text-[#2ba0ff] dark:hover:text-[#7cc4ff] aurora:text-[#2dd4bf] aurora:hover:text-[#5eead4] cursor-pointer tabular-nums transition-colors"
           >
             <Users className="w-3.5 h-3.5" />
             <span>已关联账号 ({accounts.length}/20)</span>
@@ -780,7 +780,7 @@ export const MultiAccountModal: React.FC<MultiAccountModalProps> = ({
       {/* Optional Slide-Down Connected Accounts Manager */}
       {showAccountsPanel && accounts && accounts.length > 0 && (
         <div className="mx-auto w-full max-w-md px-5 pb-3 animate-in fade-in duration-150">
-          <div className="p-3 rounded-xl bg-[#0e1621] border border-[#223243] space-y-1.5 max-h-56 overflow-y-auto">
+          <div className="p-3 rounded-xl bg-white dark:bg-[#0e1726] aurora:bg-[#101c23] border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] shadow-sm space-y-1.5 max-h-56 overflow-y-auto">
             {accounts.map((acc) => {
               const isCurrent = acc.id === activeAccountId;
               const isConfirming = confirmingDeleteId === acc.id;
@@ -791,8 +791,8 @@ export const MultiAccountModal: React.FC<MultiAccountModalProps> = ({
                   key={acc.id}
                   className={`flex flex-col p-2 rounded-lg transition-colors ${
                     isCurrent
-                      ? 'bg-[#2481cc]/15 text-white'
-                      : 'hover:bg-white/5 text-[#cfdbe5]'
+                      ? 'bg-[#e8f3ff] dark:bg-[#2ba0ff]/15 aurora:bg-[#112d36] text-[#0f172a] dark:text-white aurora:text-[#ecf6f8]'
+                      : 'hover:bg-[#f1f5f9] dark:hover:bg-[#152438] aurora:hover:bg-[#152934] text-[#334155] dark:text-[#b4c6d8] aurora:text-[#b7d0d8]'
                   }`}
                 >
                   <div className="flex items-center justify-between gap-2">
@@ -812,7 +812,7 @@ export const MultiAccountModal: React.FC<MultiAccountModalProps> = ({
                           {acc.avatarInitial || 'TG'}
                         </div>
                         <span
-                          className={`absolute -bottom-0.5 -right-0.5 w-2.5 h-2.5 rounded-full border-2 border-[#0e1621] ${
+                          className={`absolute -bottom-0.5 -right-0.5 w-2.5 h-2.5 rounded-full border-2 border-white dark:border-[#0e1726] aurora:border-[#101c23] ${
                             acc.status === 'online'
                               ? 'bg-emerald-400'
                               : acc.status === 'away'
@@ -827,13 +827,13 @@ export const MultiAccountModal: React.FC<MultiAccountModalProps> = ({
                         <div className="text-xs font-medium truncate flex items-center gap-1.5">
                           <span className="truncate">{acc.name}</span>
                           {isCurrent && (
-                            <span className="text-[11px] text-emerald-400 font-normal shrink-0">· 当前</span>
+                            <span className="text-[11px] text-emerald-700 dark:text-emerald-400 font-normal shrink-0">· 当前</span>
                           )}
                           {acc.status === 'expired' && (
-                            <span className="text-[10px] text-rose-400 font-normal shrink-0">· 已失效</span>
+                            <span className="text-[10px] text-rose-600 dark:text-rose-400 font-normal shrink-0">· 已失效</span>
                           )}
                         </div>
-                        <div className="text-[11px] text-[#7f93a5] truncate">{acc.phone || acc.username}</div>
+                        <div className="text-[11px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] truncate">{acc.phone || acc.username}</div>
                       </div>
                     </div>
 
@@ -858,7 +858,7 @@ export const MultiAccountModal: React.FC<MultiAccountModalProps> = ({
                               });
                             }
                           }}
-                          className="px-2 py-1 rounded bg-rose-500 hover:bg-rose-600 disabled:opacity-50 text-white text-[11px] font-medium cursor-pointer"
+                          className="px-2 py-1 rounded bg-rose-500 hover:bg-rose-600 disabled:opacity-50 text-white text-[11px] font-medium cursor-pointer transition-colors"
                         >
                           {isDisconnecting ? '注销中...' : '确认退出'}
                         </button>
@@ -869,7 +869,7 @@ export const MultiAccountModal: React.FC<MultiAccountModalProps> = ({
                             setConfirmingDeleteId(null);
                             setDisconnectError(null);
                           }}
-                          className="px-2 py-1 rounded bg-white/10 hover:bg-white/15 text-[#cfdbe5] text-[11px] cursor-pointer"
+                          className="px-2 py-1 rounded bg-[#f1f5f9] hover:bg-[#e2e8f0] dark:bg-[#132234] dark:hover:bg-[#1b2f47] aurora:bg-[#13252e] aurora:hover:bg-[#1a3340] text-[#334155] dark:text-[#b4c6d8] aurora:text-[#b7d0d8] text-[11px] cursor-pointer transition-colors"
                         >
                           取消
                         </button>
@@ -889,7 +889,7 @@ export const MultiAccountModal: React.FC<MultiAccountModalProps> = ({
                                 void fetchQrToken();
                               }
                             }}
-                            className="px-2 py-1 rounded bg-rose-500/20 hover:bg-rose-500/30 text-rose-300 text-[11px] font-medium cursor-pointer"
+                            className="px-2 py-1 rounded bg-rose-500/15 hover:bg-rose-500/25 text-rose-700 dark:text-rose-300 text-[11px] font-medium cursor-pointer transition-colors"
                           >
                             重新登录
                           </button>
@@ -900,7 +900,7 @@ export const MultiAccountModal: React.FC<MultiAccountModalProps> = ({
                             setConfirmingDeleteId(acc.id);
                             setDisconnectError(null);
                           }}
-                          className="p-1.5 rounded-lg text-[#7f93a5] hover:text-red-400 hover:bg-red-500/10 transition-colors cursor-pointer"
+                          className="p-1.5 rounded-lg text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] hover:text-rose-600 dark:hover:text-rose-400 hover:bg-rose-500/10 transition-colors cursor-pointer"
                           title="断开并退出该账号"
                         >
                           <LogOut className="w-3.5 h-3.5" />
@@ -910,7 +910,7 @@ export const MultiAccountModal: React.FC<MultiAccountModalProps> = ({
                   </div>
 
                   {accError && (
-                    <div className="mt-1.5 flex items-center justify-between gap-2 text-[11px] text-rose-300 bg-rose-500/10 border border-rose-500/20 rounded-md px-2 py-1">
+                    <div className="mt-1.5 flex items-center justify-between gap-2 text-[11px] text-rose-700 dark:text-rose-300 bg-rose-500/10 border border-rose-500/25 rounded-md px-2 py-1">
                       <span className="truncate">{accError.message}</span>
                       {accError.canForceLocal && (
                         <button
@@ -926,7 +926,7 @@ export const MultiAccountModal: React.FC<MultiAccountModalProps> = ({
                               onDeleteAccount(acc.id);
                             }
                           }}
-                          className="text-amber-300 hover:underline shrink-0 cursor-pointer"
+                          className="text-amber-700 dark:text-amber-300 hover:underline shrink-0 cursor-pointer"
                         >
                           仅移除本地
                         </button>
@@ -943,8 +943,8 @@ export const MultiAccountModal: React.FC<MultiAccountModalProps> = ({
       {/* Main Centered Login Stage */}
       <div className="flex-1 overflow-y-auto flex flex-col items-center justify-center px-6 pb-10">
         {reloginAccount && (
-          <div className="w-full max-w-[340px] mb-4 flex items-center gap-2 p-2.5 rounded-xl bg-rose-500/10 border border-rose-500/30 text-rose-200 text-xs">
-            <AlertCircle className="w-4 h-4 shrink-0 text-rose-400" />
+          <div className="w-full max-w-[340px] mb-4 flex items-center gap-2 p-2.5 rounded-xl bg-rose-500/10 border border-rose-500/30 text-rose-700 dark:text-rose-200 text-xs">
+            <AlertCircle className="w-4 h-4 shrink-0 text-rose-600 dark:text-rose-400" />
             <span className="truncate">
               正在重新登录已失效账号：{reloginAccount.name} ({reloginAccount.phone || reloginAccount.username || reloginAccount.id})
             </span>
@@ -952,9 +952,9 @@ export const MultiAccountModal: React.FC<MultiAccountModalProps> = ({
         )}
 
         {credsStatus.checked && !credsStatus.configured && (
-          <div className="w-full max-w-[340px] mb-5 flex flex-col gap-2 p-3 rounded-xl bg-amber-500/10 border border-amber-500/30 text-amber-200 text-xs">
+          <div className="w-full max-w-[340px] mb-5 flex flex-col gap-2 p-3 rounded-xl bg-amber-500/10 border border-amber-500/30 text-amber-800 dark:text-amber-200 text-xs">
             <div className="flex items-start gap-2">
-              <AlertCircle className="w-4 h-4 shrink-0 mt-0.5 text-amber-400" />
+              <AlertCircle className="w-4 h-4 shrink-0 mt-0.5 text-amber-600 dark:text-amber-400" />
               <div className="flex-1 leading-relaxed">
                 {credsStatus.error || '云端 Telegram 接入凭据未同步，无法发起扫码或验证码登录。'}
               </div>
@@ -979,7 +979,7 @@ export const MultiAccountModal: React.FC<MultiAccountModalProps> = ({
                   });
                 }
               }}
-              className="self-end px-3 py-1 rounded-lg bg-amber-500 hover:bg-amber-600 disabled:opacity-50 text-white text-[11px] font-semibold flex items-center gap-1.5 cursor-pointer"
+              className="self-end px-3 py-1 rounded-lg bg-amber-500 hover:bg-amber-600 disabled:opacity-50 text-white text-[11px] font-semibold flex items-center gap-1.5 cursor-pointer transition-colors"
             >
               <RefreshCw className={`w-3 h-3 ${isSyncingCreds ? 'animate-spin' : ''}`} />
               <span>{isSyncingCreds ? '同步中...' : '重新同步授权凭据'}</span>
@@ -989,15 +989,15 @@ export const MultiAccountModal: React.FC<MultiAccountModalProps> = ({
 
         {/* Global Status Alerts (Phone mode or Success) */}
         {authSuccess && (
-          <div className="w-full max-w-[340px] mb-5 flex items-center gap-2.5 p-3 rounded-xl bg-emerald-500/10 border border-emerald-500/30 text-emerald-300 text-xs font-medium">
-            <CheckCircle2 className="w-4 h-4 shrink-0 text-emerald-400" />
+          <div className="w-full max-w-[340px] mb-5 flex items-center gap-2.5 p-3 rounded-xl bg-emerald-500/10 border border-emerald-500/30 text-emerald-700 dark:text-emerald-300 text-xs font-medium">
+            <CheckCircle2 className="w-4 h-4 shrink-0 text-emerald-600 dark:text-emerald-400" />
             <span>{authSuccess}</span>
           </div>
         )}
 
         {loginMethod === 'phone' && authError && (
-          <div className="w-full max-w-[340px] mb-5 flex items-start gap-2.5 p-3 rounded-xl bg-red-500/10 border border-red-500/30 text-red-300 text-xs">
-            <AlertCircle className="w-4 h-4 shrink-0 mt-0.5 text-red-400" />
+          <div className="w-full max-w-[340px] mb-5 flex items-start gap-2.5 p-3 rounded-xl bg-rose-500/10 border border-rose-500/30 text-rose-700 dark:text-rose-300 text-xs">
+            <AlertCircle className="w-4 h-4 shrink-0 mt-0.5 text-rose-600 dark:text-rose-400" />
             <div className="flex-1 leading-relaxed">{authError}</div>
           </div>
         )}
@@ -1008,19 +1008,19 @@ export const MultiAccountModal: React.FC<MultiAccountModalProps> = ({
             {qrNeeds2FA ? (
               <div className="w-full max-w-[340px] text-left flex flex-col gap-5">
                 <div>
-                  <h2 className="text-xl font-medium text-white mb-1.5">输入两步验证密码</h2>
-                  <p className="text-xs text-[#7f93a5]">手机扫码已确认，请输入您的云端两步验证密码。</p>
+                  <h2 className="text-xl font-medium text-[#0f172a] dark:text-white aurora:text-[#ecf6f8] mb-1.5">输入两步验证密码</h2>
+                  <p className="text-xs text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5]">手机扫码已确认，请输入您的云端两步验证密码。</p>
                 </div>
 
                 {qrError && (
-                  <div className="flex items-start gap-2 p-3 rounded-xl bg-red-500/10 border border-red-500/30 text-red-300 text-xs">
-                    <AlertCircle className="w-4 h-4 shrink-0 mt-0.5 text-red-400" />
+                  <div className="flex items-start gap-2 p-3 rounded-xl bg-rose-500/10 border border-rose-500/30 text-rose-700 dark:text-rose-300 text-xs">
+                    <AlertCircle className="w-4 h-4 shrink-0 mt-0.5 text-rose-600 dark:text-rose-400" />
                     <span>{qrError}</span>
                   </div>
                 )}
 
                 <div className="relative">
-                  <KeyRound className="absolute left-0 top-1/2 -translate-y-1/2 w-4 h-4 text-[#7f93a5]" />
+                  <KeyRound className="absolute left-0 top-1/2 -translate-y-1/2 w-4 h-4 text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5]" />
                   <input
                     type="password"
                     value={qrPasswordInput}
@@ -1032,7 +1032,7 @@ export const MultiAccountModal: React.FC<MultiAccountModalProps> = ({
                     }}
                     placeholder="两步验证密码"
                     autoFocus
-                    className="w-full pl-7 pr-3 pb-2.5 pt-1 bg-transparent border-b border-[#2b3c4d] focus:border-[#40a7e3] text-sm text-white placeholder-[#55687a] outline-none transition-colors"
+                    className="w-full pl-7 pr-3 pb-2.5 pt-1 bg-transparent border-b border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] focus:border-[#2481cc] dark:focus:border-[#2ba0ff] aurora:focus:border-[#2dd4bf] text-sm text-[#0f172a] dark:text-white aurora:text-[#ecf6f8] placeholder-[#94a3b8] dark:placeholder-[#4e657e] aurora:placeholder-[#5a7782] outline-none transition-colors"
                   />
                 </div>
 
@@ -1040,7 +1040,7 @@ export const MultiAccountModal: React.FC<MultiAccountModalProps> = ({
                   type="button"
                   onClick={handleQrSubmitPassword}
                   disabled={isSubmittingQrPassword || !qrPasswordInput.trim()}
-                  className="w-full py-3 rounded-lg bg-[#40a7e3] hover:bg-[#3596cf] disabled:opacity-50 text-white font-medium text-sm transition-colors cursor-pointer"
+                  className="w-full py-3 rounded-lg bg-[#2481cc] hover:bg-[#1d6fb3] dark:bg-[#2ba0ff] dark:hover:bg-[#1e8ee8] aurora:bg-[#0d9488] aurora:hover:bg-[#0f766e] disabled:opacity-50 text-white font-medium text-sm transition-colors cursor-pointer"
                 >
                   {isSubmittingQrPassword ? '正在验证...' : '提交并登录'}
                 </button>
@@ -1048,18 +1048,18 @@ export const MultiAccountModal: React.FC<MultiAccountModalProps> = ({
                 <button
                   type="button"
                   onClick={() => fetchQrToken(false)}
-                  className="text-sm text-[#40a7e3] hover:text-[#5cb8ed] cursor-pointer text-center"
+                  className="text-sm text-[#2481cc] hover:text-[#1d6fb3] dark:text-[#2ba0ff] dark:hover:text-[#7cc4ff] aurora:text-[#2dd4bf] aurora:hover:text-[#5eead4] cursor-pointer text-center transition-colors"
                 >
                   取消并重新扫码
                 </button>
               </div>
             ) : (
               <>
-                {/* White Rounded QR Card with Center Telegram Icon */}
-                <div className="bg-white p-3.5 rounded-2xl shadow-xl relative flex items-center justify-center w-[228px] h-[228px]">
+                {/* White Rounded QR Card with Center Telegram Icon (strictly pure white for scanning contrast) */}
+                <div className="bg-white p-3.5 rounded-2xl shadow-xl border border-[#e2e8f0] dark:border-transparent relative flex items-center justify-center w-[228px] h-[228px]">
                   {isLoadingQr ? (
-                    <div className="flex flex-col items-center justify-center gap-2 text-[#55687a]">
-                      <RefreshCw className="w-7 h-7 text-[#40a7e3] animate-spin" />
+                    <div className="flex flex-col items-center justify-center gap-2 text-[#64748b]">
+                      <RefreshCw className="w-7 h-7 text-[#2481cc] aurora:text-[#0d9488] animate-spin" />
                       <span className="text-xs">正在加载二维码...</span>
                     </div>
                   ) : qrDataUrl ? (
@@ -1070,39 +1070,39 @@ export const MultiAccountModal: React.FC<MultiAccountModalProps> = ({
                         className="w-full h-full block rounded-lg select-none"
                       />
                       {/* Official Centered Telegram Paper-Plane Badge */}
-                      <div className="absolute w-11 h-11 rounded-full bg-[#2ba0ff] flex items-center justify-center ring-4 ring-white shadow-sm pointer-events-none">
+                      <div className="absolute w-11 h-11 rounded-full bg-[#2481cc] dark:bg-[#2ba0ff] aurora:bg-[#0d9488] flex items-center justify-center ring-4 ring-white shadow-sm pointer-events-none">
                         <svg viewBox="0 0 24 24" className="w-5 h-5 text-white -translate-x-[1px] fill-current">
                           <path d="M9.78 18.65l.28-4.23 7.68-6.92c.34-.31-.07-.46-.52-.19L7.74 13.3 3.64 12c-.88-.25-.89-.86.2-1.3l15.97-6.16c.73-.33 1.43.18 1.15 1.3l-2.72 12.81c-.19.91-.74 1.13-1.5.71L12.6 16.3l-1.99 1.93c-.23.23-.42.42-.83.42z" />
                         </svg>
                       </div>
                     </>
                   ) : (
-                    <div className="flex flex-col items-center justify-center gap-2 text-[#55687a]">
-                      <RefreshCw className="w-6 h-6 text-[#40a7e3] animate-spin" />
+                    <div className="flex flex-col items-center justify-center gap-2 text-[#64748b]">
+                      <RefreshCw className="w-6 h-6 text-[#2481cc] aurora:text-[#0d9488] animate-spin" />
                       <span className="text-xs">正在生成二维码...</span>
                     </div>
                   )}
 
                   {/* Scanned Confirmation Overlay */}
                   {qrIsScanned && !qrError && (
-                    <div className="absolute inset-0 bg-[#0e1621]/92 backdrop-blur-xs rounded-2xl flex flex-col items-center justify-center gap-2 p-4 text-center animate-in fade-in">
-                      <div className="w-11 h-11 rounded-full bg-emerald-500/20 border border-emerald-500/40 flex items-center justify-center text-emerald-400">
+                    <div className="absolute inset-0 bg-white/95 dark:bg-[#0b131f]/92 aurora:bg-[#0c151b]/92 backdrop-blur-xs rounded-2xl flex flex-col items-center justify-center gap-2 p-4 text-center animate-in fade-in">
+                      <div className="w-11 h-11 rounded-full bg-emerald-500/15 border border-emerald-500/35 flex items-center justify-center text-emerald-600 dark:text-emerald-400">
                         <CheckCircle2 className="w-6 h-6" />
                       </div>
-                      <span className="text-sm font-semibold text-white">手机已扫码</span>
-                      <span className="text-xs text-emerald-300 leading-relaxed">请在手机 Telegram 上点击「确认连接」</span>
+                      <span className="text-sm font-semibold text-[#0f172a] dark:text-white aurora:text-[#ecf6f8]">手机已扫码</span>
+                      <span className="text-xs text-emerald-700 dark:text-emerald-300 leading-relaxed">请在手机 Telegram 上点击「确认连接」</span>
                     </div>
                   )}
 
                   {/* Expired / Error Overlay (always surfaces over stale QR or post-scan network error) */}
                   {!isLoadingQr && qrError && (
-                    <div className="absolute inset-0 bg-[#0e1621]/92 backdrop-blur-xs rounded-2xl flex flex-col items-center justify-center gap-3 p-4 text-center animate-in fade-in">
-                      <AlertCircle className="w-7 h-7 text-red-400" />
-                      <span className="text-xs text-red-200 leading-relaxed line-clamp-3">{qrError}</span>
+                    <div className="absolute inset-0 bg-white/95 dark:bg-[#0b131f]/92 aurora:bg-[#0c151b]/92 backdrop-blur-xs rounded-2xl flex flex-col items-center justify-center gap-3 p-4 text-center animate-in fade-in">
+                      <AlertCircle className="w-7 h-7 text-rose-600 dark:text-rose-400" />
+                      <span className="text-xs text-rose-700 dark:text-rose-200 leading-relaxed line-clamp-3">{qrError}</span>
                       <button
                         type="button"
                         onClick={() => fetchQrToken(false)}
-                        className="px-4 py-1.5 rounded-lg bg-[#40a7e3] hover:bg-[#3596cf] text-white text-xs font-medium cursor-pointer transition-colors"
+                        className="px-4 py-1.5 rounded-lg bg-[#2481cc] hover:bg-[#1d6fb3] dark:bg-[#2ba0ff] dark:hover:bg-[#1e8ee8] aurora:bg-[#0d9488] aurora:hover:bg-[#0f766e] text-white text-xs font-medium cursor-pointer transition-colors"
                       >
                         点击刷新
                       </button>
@@ -1111,11 +1111,11 @@ export const MultiAccountModal: React.FC<MultiAccountModalProps> = ({
                 </div>
 
                 {/* Title & Official 3 Steps */}
-                <h2 className="text-xl font-medium text-white mt-6 mb-4 tracking-wide">
+                <h2 className="text-xl font-medium text-[#0f172a] dark:text-white aurora:text-[#ecf6f8] mt-6 mb-4 tracking-wide">
                   从手机客户端扫描
                 </h2>
 
-                <ol className="text-[13px] text-[#dce5ee] space-y-2 text-left leading-relaxed">
+                <ol className="text-[13px] text-[#475569] dark:text-[#b4c6d8] aurora:text-[#b7d0d8] space-y-2 text-left leading-relaxed">
                   <li>1. 在您的手机上打开 Telegram</li>
                   <li>2. 到设置 &gt; 设备 &gt; 添加设备</li>
                   <li>3. 请使用扫描二维码以登录</li>
@@ -1123,13 +1123,13 @@ export const MultiAccountModal: React.FC<MultiAccountModalProps> = ({
 
                 {/* Subtle countdown + manual refresh */}
                 {qrUrl && !qrIsScanned && !qrError && (
-                  <div className="mt-4 flex items-center gap-2 text-[11px] text-[#6d7f90] tabular-nums">
+                  <div className="mt-4 flex items-center gap-2 text-[11px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] tabular-nums">
                     <span>{isSilentRefreshing ? '正在刷新二维码...' : `${qrExpiresIn}s 后自动刷新`}</span>
                     <span>·</span>
                     <button
                       type="button"
                       onClick={() => fetchQrToken(false)}
-                      className="text-[#40a7e3] hover:underline cursor-pointer"
+                      className="text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf] hover:underline cursor-pointer"
                     >
                       立即刷新
                     </button>
@@ -1140,7 +1140,7 @@ export const MultiAccountModal: React.FC<MultiAccountModalProps> = ({
                 <button
                   type="button"
                   onClick={() => handleSwitchLoginMethod('phone')}
-                  className="mt-6 text-sm text-[#40a7e3] hover:text-[#5cb8ed] hover:underline cursor-pointer"
+                  className="mt-6 text-sm text-[#2481cc] hover:text-[#1d6fb3] dark:text-[#2ba0ff] dark:hover:text-[#7cc4ff] aurora:text-[#2dd4bf] aurora:hover:text-[#5eead4] hover:underline cursor-pointer transition-colors"
                 >
                   使用电话号码登录
                 </button>
@@ -1154,13 +1154,13 @@ export const MultiAccountModal: React.FC<MultiAccountModalProps> = ({
           <div className="w-full max-w-[340px] flex flex-col">
             {!codeSent ? (
               <>
-                <h2 className="text-xl font-medium text-white mb-2">你的手机号码</h2>
-                <p className="text-xs text-[#7f93a5] leading-relaxed mb-7">
+                <h2 className="text-xl font-medium text-[#0f172a] dark:text-white aurora:text-[#ecf6f8] mb-2">你的手机号码</h2>
+                <p className="text-xs text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] leading-relaxed mb-7">
                   请确认您的国际电话区号并输入您的手机号码。
                 </p>
 
                 {/* Country Selector Dropdown (Bottom-border minimal style) */}
-                <div className="relative border-b border-[#2b3c4d] focus-within:border-[#40a7e3] transition-colors">
+                <div className="relative border-b border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] focus-within:border-[#2481cc] dark:focus-within:border-[#2ba0ff] aurora:focus-within:border-[#2dd4bf] transition-colors">
                   <select
                     value={selectedCountry ? selectedCountry.iso : 'custom'}
                     onChange={(e) => {
@@ -1173,20 +1173,20 @@ export const MultiAccountModal: React.FC<MultiAccountModalProps> = ({
                         }
                       }
                     }}
-                    className="w-full appearance-none bg-transparent py-2.5 pr-7 text-sm text-white outline-none cursor-pointer"
+                    className="w-full appearance-none bg-transparent py-2.5 pr-7 text-sm text-[#0f172a] dark:text-white aurora:text-[#ecf6f8] outline-none cursor-pointer"
                   >
                     {COMMON_COUNTRY_CODES.map((c) => (
-                      <option key={c.iso} value={c.iso} className="bg-[#17212b] text-white">
+                      <option key={c.iso} value={c.iso}>
                         {c.flag} {c.name} ({c.code})
                       </option>
                     ))}
                     {!selectedCountry && (
-                      <option value="custom" className="bg-[#17212b] text-white">
+                      <option value="custom">
                         其他国家/地区 ({normalizedDialCode})
                       </option>
                     )}
                   </select>
-                  <ChevronDown className="w-4 h-4 text-[#7f93a5] absolute right-0 top-1/2 -translate-y-1/2 pointer-events-none" />
+                  <ChevronDown className="w-4 h-4 text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] absolute right-0 top-1/2 -translate-y-1/2 pointer-events-none" />
                 </div>
 
                 {/* Dial Code + Phone Number Inputs */}
@@ -1203,7 +1203,7 @@ export const MultiAccountModal: React.FC<MultiAccountModalProps> = ({
                         setSelectedCountryIso(matched.iso);
                       }
                     }}
-                    className="w-16 pb-2 bg-transparent border-b border-[#2b3c4d] focus:border-[#40a7e3] text-sm text-white font-mono text-center outline-none transition-colors"
+                    className="w-16 pb-2 bg-transparent border-b border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] focus:border-[#2481cc] dark:focus:border-[#2ba0ff] aurora:focus:border-[#2dd4bf] text-sm text-[#0f172a] dark:text-white aurora:text-[#ecf6f8] font-mono text-center outline-none transition-colors"
                     maxLength={6}
                     aria-label="国际区号"
                   />
@@ -1218,7 +1218,7 @@ export const MultiAccountModal: React.FC<MultiAccountModalProps> = ({
                     }}
                     placeholder="--- --- ----"
                     autoFocus
-                    className="flex-1 pb-2 bg-transparent border-b border-[#2b3c4d] focus:border-[#40a7e3] text-sm text-white font-mono tracking-wider placeholder-[#55687a] outline-none transition-colors"
+                    className="flex-1 pb-2 bg-transparent border-b border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] focus:border-[#2481cc] dark:focus:border-[#2ba0ff] aurora:focus:border-[#2dd4bf] text-sm text-[#0f172a] dark:text-white aurora:text-[#ecf6f8] font-mono tracking-wider placeholder-[#94a3b8] dark:placeholder-[#4e657e] aurora:placeholder-[#5a7782] outline-none transition-colors"
                   />
                 </div>
 
@@ -1227,7 +1227,7 @@ export const MultiAccountModal: React.FC<MultiAccountModalProps> = ({
                   type="button"
                   onClick={handleSendCode}
                   disabled={isSendingCode || !localPhone.trim()}
-                  className="w-full flex items-center justify-center gap-2 py-3 rounded-lg bg-[#40a7e3] hover:bg-[#3596cf] disabled:opacity-50 text-white font-medium text-sm transition-colors cursor-pointer disabled:cursor-not-allowed"
+                  className="w-full flex items-center justify-center gap-2 py-3 rounded-lg bg-[#2481cc] hover:bg-[#1d6fb3] dark:bg-[#2ba0ff] dark:hover:bg-[#1e8ee8] aurora:bg-[#0d9488] aurora:hover:bg-[#0f766e] disabled:opacity-50 text-white font-medium text-sm transition-colors cursor-pointer disabled:cursor-not-allowed"
                 >
                   {isSendingCode ? (
                     <>
@@ -1243,7 +1243,7 @@ export const MultiAccountModal: React.FC<MultiAccountModalProps> = ({
                 <button
                   type="button"
                   onClick={() => handleSwitchLoginMethod('qr')}
-                  className="mt-6 text-sm text-[#40a7e3] hover:text-[#5cb8ed] hover:underline cursor-pointer text-center"
+                  className="mt-6 text-sm text-[#2481cc] hover:text-[#1d6fb3] dark:text-[#2ba0ff] dark:hover:text-[#7cc4ff] aurora:text-[#2dd4bf] aurora:hover:text-[#5eead4] hover:underline cursor-pointer text-center transition-colors"
                 >
                   使用二维码快速登录
                 </button>
@@ -1251,7 +1251,7 @@ export const MultiAccountModal: React.FC<MultiAccountModalProps> = ({
             ) : (
               <>
                 <div className="flex items-center justify-between mb-2">
-                  <h2 className="text-xl font-medium text-white font-mono tabular-nums">{getCombinedPhone()}</h2>
+                  <h2 className="text-xl font-medium text-[#0f172a] dark:text-white aurora:text-[#ecf6f8] font-mono tabular-nums">{getCombinedPhone()}</h2>
                   <button
                     type="button"
                     onClick={() => {
@@ -1271,7 +1271,7 @@ export const MultiAccountModal: React.FC<MultiAccountModalProps> = ({
                       setVerificationCode('');
                       setAuthError(null);
                     }}
-                    className="text-xs text-[#40a7e3] hover:underline cursor-pointer"
+                    className="text-xs text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf] hover:underline cursor-pointer"
                   >
                     修改号码
                   </button>
@@ -1279,34 +1279,34 @@ export const MultiAccountModal: React.FC<MultiAccountModalProps> = ({
 
                 {/* Delivery Channel Notice */}
                 {deliveryInfo?.channel === 'app' && (
-                  <p className="text-xs text-[#7f93a5] leading-relaxed mb-6 flex items-start gap-2">
-                    <Send className="w-3.5 h-3.5 text-[#40a7e3] shrink-0 mt-0.5" />
+                  <p className="text-xs text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] leading-relaxed mb-6 flex items-start gap-2">
+                    <Send className="w-3.5 h-3.5 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf] shrink-0 mt-0.5" />
                     <span>验证码已发送至您已登录的 Telegram 官方 App 服务通知对话，请注意查收。</span>
                   </p>
                 )}
 
                 {deliveryInfo?.channel === 'sms' && (
-                  <p className="text-xs text-[#7f93a5] leading-relaxed mb-6 flex items-start gap-2">
-                    <Smartphone className="w-3.5 h-3.5 text-emerald-400 shrink-0 mt-0.5" />
+                  <p className="text-xs text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] leading-relaxed mb-6 flex items-start gap-2">
+                    <Smartphone className="w-3.5 h-3.5 text-emerald-600 dark:text-emerald-400 shrink-0 mt-0.5" />
                     <span>验证码已通过国际短信发送至您的手机，可能存在 30~60 秒延迟。</span>
                   </p>
                 )}
 
                 {deliveryInfo?.channel === 'email' && (
-                  <p className="text-xs text-[#7f93a5] leading-relaxed mb-6 flex items-start gap-2">
-                    <Mail className="w-3.5 h-3.5 text-sky-400 shrink-0 mt-0.5" />
+                  <p className="text-xs text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] leading-relaxed mb-6 flex items-start gap-2">
+                    <Mail className="w-3.5 h-3.5 text-sky-600 dark:text-sky-400 shrink-0 mt-0.5" />
                     <span>验证码已发送至绑定邮箱 ({deliveryInfo.emailPattern || '关联邮箱'})。</span>
                   </p>
                 )}
 
                 {!deliveryInfo && (
-                  <p className="text-xs text-[#7f93a5] leading-relaxed mb-6">
+                  <p className="text-xs text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] leading-relaxed mb-6">
                     请输入您收到的 5 位 Telegram 官方验证码。
                   </p>
                 )}
 
                 {deliveryInfo?.warning && (
-                  <div className="mb-5 p-2.5 bg-amber-500/10 border border-amber-500/30 rounded-lg flex items-center justify-between text-xs text-amber-300 gap-2">
+                  <div className="mb-5 p-2.5 bg-amber-500/10 border border-amber-500/30 rounded-lg flex items-center justify-between text-xs text-amber-700 dark:text-amber-300 gap-2">
                     <span className="text-[11px]">未收到通知？</span>
                     <button
                       type="button"
@@ -1314,7 +1314,7 @@ export const MultiAccountModal: React.FC<MultiAccountModalProps> = ({
                         handleSwitchLoginMethod('qr');
                         fetchQrToken();
                       }}
-                      className="text-amber-200 hover:underline font-medium shrink-0 cursor-pointer"
+                      className="text-amber-800 dark:text-amber-200 hover:underline font-medium shrink-0 cursor-pointer"
                     >
                       改用扫码登录 →
                     </button>
@@ -1335,14 +1335,14 @@ export const MultiAccountModal: React.FC<MultiAccountModalProps> = ({
                     placeholder="验证码"
                     maxLength={10}
                     autoFocus
-                    className="w-full pb-2.5 bg-transparent border-b border-[#2b3c4d] focus:border-[#40a7e3] text-base text-white font-mono tracking-widest placeholder-[#55687a] outline-none transition-colors"
+                    className="w-full pb-2.5 bg-transparent border-b border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] focus:border-[#2481cc] dark:focus:border-[#2ba0ff] aurora:focus:border-[#2dd4bf] text-base text-[#0f172a] dark:text-white aurora:text-[#ecf6f8] font-mono tracking-widest placeholder-[#94a3b8] dark:placeholder-[#4e657e] aurora:placeholder-[#5a7782] outline-none transition-colors"
                   />
                 </div>
 
                 {/* 2FA Password Input */}
                 {needs2FA && (
                   <div className="mb-6 animate-in fade-in">
-                    <div className="flex items-center gap-1.5 text-xs text-amber-300 mb-2">
+                    <div className="flex items-center gap-1.5 text-xs text-amber-700 dark:text-amber-300 mb-2">
                       <Lock className="w-3.5 h-3.5" />
                       <span>两步验证密码</span>
                     </div>
@@ -1356,7 +1356,7 @@ export const MultiAccountModal: React.FC<MultiAccountModalProps> = ({
                         }
                       }}
                       placeholder="请输入云端两步验证密码"
-                      className="w-full pb-2.5 bg-transparent border-b border-[#2b3c4d] focus:border-amber-400 text-sm text-white placeholder-[#55687a] outline-none transition-colors"
+                      className="w-full pb-2.5 bg-transparent border-b border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] focus:border-amber-500 text-sm text-[#0f172a] dark:text-white aurora:text-[#ecf6f8] placeholder-[#94a3b8] dark:placeholder-[#4e657e] aurora:placeholder-[#5a7782] outline-none transition-colors"
                     />
                   </div>
                 )}
@@ -1366,7 +1366,7 @@ export const MultiAccountModal: React.FC<MultiAccountModalProps> = ({
                   type="button"
                   onClick={handleVerifyCode}
                   disabled={isVerifyingCode || !verificationCode.trim()}
-                  className="w-full flex items-center justify-center gap-2 py-3 rounded-lg bg-[#40a7e3] hover:bg-[#3596cf] disabled:opacity-50 text-white font-medium text-sm transition-colors cursor-pointer disabled:cursor-not-allowed"
+                  className="w-full flex items-center justify-center gap-2 py-3 rounded-lg bg-[#2481cc] hover:bg-[#1d6fb3] dark:bg-[#2ba0ff] dark:hover:bg-[#1e8ee8] aurora:bg-[#0d9488] aurora:hover:bg-[#0f766e] disabled:opacity-50 text-white font-medium text-sm transition-colors cursor-pointer disabled:cursor-not-allowed"
                 >
                   {isVerifyingCode ? (
                     <>
@@ -1383,7 +1383,7 @@ export const MultiAccountModal: React.FC<MultiAccountModalProps> = ({
                     type="button"
                     onClick={handleResendCode}
                     disabled={isResendingCode || resendCountdown > 0}
-                    className="text-[#40a7e3] hover:underline disabled:opacity-50 cursor-pointer disabled:cursor-not-allowed tabular-nums"
+                    className="text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf] hover:underline disabled:opacity-50 cursor-pointer disabled:cursor-not-allowed tabular-nums"
                   >
                     {isResendingCode
                       ? '重发中...'
@@ -1395,7 +1395,7 @@ export const MultiAccountModal: React.FC<MultiAccountModalProps> = ({
                   <button
                     type="button"
                     onClick={() => handleSwitchLoginMethod('qr')}
-                    className="text-[#40a7e3] hover:underline cursor-pointer"
+                    className="text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf] hover:underline cursor-pointer"
                   >
                     使用二维码快速登录
                   </button>

@@ -116,20 +116,20 @@ export const MasterVoiceprintModal: React.FC<MasterVoiceprintModalProps> = ({
     <>
       {/* Header (Standalone Modal Mode Only) */}
       {!embedded && (
-        <div className="flex items-center justify-between px-5 py-3.5 border-b border-[#e2e8f0] dark:border-[#18273a] shrink-0">
+        <div className="flex items-center justify-between px-5 py-3.5 border-b border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] bg-[#f8fafc] dark:bg-[#0d1726] aurora:bg-[#0e1920] shrink-0">
           <div className="flex items-center gap-2.5">
-            <div className="w-8 h-8 rounded-lg bg-[#2ba0ff]/12 border border-[#2ba0ff]/25 text-[#0284c7] dark:text-[#2ba0ff] flex items-center justify-center">
+            <div className="w-8 h-8 rounded-lg bg-[#2481cc]/12 dark:bg-[#2ba0ff]/12 aurora:bg-[#14b8a6]/15 border border-[#2481cc]/25 dark:border-[#2ba0ff]/25 aurora:border-[#2dd4bf]/30 text-[#0284c7] dark:text-[#2ba0ff] aurora:text-[#2dd4bf] flex items-center justify-center">
               <AudioWaveform className="w-4.5 h-4.5" />
             </div>
             <div>
-              <h2 className="text-sm font-semibold text-[#0f172a] dark:text-[#eef4fb] tracking-wide">
+              <h2 className="text-sm font-semibold text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] tracking-wide">
                 预设音色与语音合成配置
               </h2>
             </div>
           </div>
           <button
             onClick={onClose}
-            className="w-7 h-7 rounded-lg flex items-center justify-center text-[#64748b] dark:text-[#7f95ab] hover:text-[#0f172a] dark:hover:text-white hover:bg-black/5 dark:hover:bg-white/5 transition-colors cursor-pointer"
+            className="w-7 h-7 rounded-lg flex items-center justify-center text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] hover:text-[#0f172a] dark:hover:text-[#eef4fb] aurora:hover:text-[#ecf6f8] hover:bg-black/5 dark:hover:bg-[#152438] aurora:hover:bg-[#152934] transition-colors cursor-pointer"
           >
             <X className="w-4 h-4" />
           </button>
@@ -140,53 +140,53 @@ export const MasterVoiceprintModal: React.FC<MasterVoiceprintModalProps> = ({
       <div className={`${embedded ? 'p-4 space-y-3.5 flex-1' : 'p-5 space-y-4 max-h-[72vh]'} overflow-y-auto`}>
         {/* Status Alert */}
         {statusText && (
-          <div className="p-2.5 rounded-lg bg-[#2ba0ff]/10 border border-[#2ba0ff]/25 text-xs text-[#0284c7] dark:text-[#7cc4ff] flex items-center gap-2">
+          <div className="p-2.5 rounded-lg bg-[#e8f3ff] dark:bg-[#2ba0ff]/10 aurora:bg-[#112d36] border border-[#bfdbfe] dark:border-[#2ba0ff]/25 aurora:border-[#2dd4bf]/35 text-xs text-[#0284c7] dark:text-[#7cc4ff] aurora:text-[#5eead4] flex items-center gap-2">
             <AudioWaveform className="w-3.5 h-3.5 shrink-0" />
             <span className="truncate">{statusText}</span>
           </div>
         )}
 
         {/* Honest Capability Notice */}
-        <div className="p-3 rounded-xl bg-sky-500/8 border border-sky-500/25 text-[11px] text-[#334155] dark:text-[#9ec2e6] flex items-start gap-2 leading-relaxed">
-          <Info className="w-4 h-4 text-[#0284c7] dark:text-[#2ba0ff] shrink-0 mt-0.5" />
+        <div className="p-3 rounded-xl bg-[#e8f3ff]/75 dark:bg-[#2ba0ff]/10 aurora:bg-[#112d36]/80 border border-[#bfdbfe] dark:border-[#2ba0ff]/25 aurora:border-[#2dd4bf]/30 text-[11px] text-[#334155] dark:text-[#b4c6d8] aurora:text-[#b7d0d8] flex items-start gap-2 leading-relaxed">
+          <Info className="w-4 h-4 text-[#0284c7] dark:text-[#2ba0ff] aurora:text-[#2dd4bf] shrink-0 mt-0.5" />
           <span>
             当前使用官方/自有网关的<strong>预设音色库</strong>进行语音合成（不支持真人声音采样复刻）。下方设置的<strong>音高基线</strong>与<strong>语速倍率</strong>会在服务端通过本地 ffmpeg 真实处理导出音频，试听与发往 Telegram 的语音条保持完全一致。
           </span>
         </div>
 
         {/* Preset Summary Card */}
-        <div className="p-3.5 rounded-xl bg-[#f8fafc] dark:bg-[#0e1726]/85 border border-[#e2e8f0] dark:border-[#18273a] space-y-3">
+        <div className="p-3.5 rounded-xl bg-[#f8fafc] dark:bg-[#0e1726]/85 aurora:bg-[#101c23]/90 border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] space-y-3">
           <div className="flex-1 min-w-0">
             <input
               type="text"
               value={name}
               onChange={(e) => setName(e.target.value)}
-              className="bg-transparent text-xs font-semibold text-[#0f172a] dark:text-[#eef4fb] focus:outline-none border-b border-transparent focus:border-[#2ba0ff] w-full"
+              className="bg-transparent text-xs font-semibold text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] placeholder-[#94a3b8] dark:placeholder-[#4e657e] aurora:placeholder-[#5a7782] focus:outline-none border-b border-transparent focus:border-[#2481cc] dark:focus:border-[#2ba0ff] aurora:focus:border-[#2dd4bf] w-full"
               placeholder="输入预设音色档名称"
             />
-            <div className="text-[11px] text-[#64748b] dark:text-[#7f95ab] flex items-center gap-1.5 mt-0.5 truncate">
+            <div className="text-[11px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] flex items-center gap-1.5 mt-0.5 truncate">
               <span>预设音色 {baseVoice} (OpenAI 映射 {selectedPresetMeta.openaiHint})</span>
               <span>·</span>
-              <span className="font-mono text-[#0284c7] dark:text-[#7cc4ff]">{ttsModel.trim() || 'gemini-3.8-flash-tts'}</span>
+              <span className="font-mono text-[#0284c7] dark:text-[#7cc4ff] aurora:text-[#5eead4]">{ttsModel.trim() || 'gemini-3.8-flash-tts'}</span>
             </div>
           </div>
 
-          <div className="grid grid-cols-3 gap-2 pt-2.5 border-t border-[#e2e8f0] dark:border-[#152234] text-[11px]">
+          <div className="grid grid-cols-3 gap-2 pt-2.5 border-t border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] text-[11px]">
             <div className="text-center">
-              <div className="text-[#64748b] dark:text-[#7f95ab] text-[10px]">基础预设音色</div>
-              <div className="font-medium text-[#0f172a] dark:text-[#eef4fb] mt-0.5 truncate">
+              <div className="text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] text-[10px]">基础预设音色</div>
+              <div className="font-medium text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] mt-0.5 truncate">
                 {baseVoice}
               </div>
             </div>
             <div className="text-center">
-              <div className="text-[#64748b] dark:text-[#7f95ab] text-[10px]">语速 / 音高</div>
-              <div className="font-medium text-[#0f172a] dark:text-[#eef4fb] mt-0.5 tabular-nums">
+              <div className="text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] text-[10px]">语速 / 音高</div>
+              <div className="font-medium text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] mt-0.5 tabular-nums">
                 {rate.toFixed(2)}x / {pitch.toFixed(2)}x
               </div>
             </div>
             <div className="text-center">
-              <div className="text-[#64748b] dark:text-[#7f95ab] text-[10px]">应用状态</div>
-              <div className="font-medium text-[#0284c7] dark:text-[#2ba0ff] mt-0.5">
+              <div className="text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] text-[10px]">应用状态</div>
+              <div className="font-medium text-[#0284c7] dark:text-[#2ba0ff] aurora:text-[#2dd4bf] mt-0.5">
                 {voiceprint ? (enabledAsDefault ? '默认配置' : '已保存') : '待保存'}
               </div>
             </div>
@@ -194,13 +194,13 @@ export const MasterVoiceprintModal: React.FC<MasterVoiceprintModalProps> = ({
         </div>
 
         {/* TTS Model Selector */}
-        <div className="p-3.5 rounded-xl bg-[#f8fafc] dark:bg-[#0e1726]/85 border border-[#e2e8f0] dark:border-[#18273a] space-y-2.5">
+        <div className="p-3.5 rounded-xl bg-[#f8fafc] dark:bg-[#0e1726]/85 aurora:bg-[#101c23]/90 border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] space-y-2.5">
           <div className="flex items-center justify-between gap-2">
-            <span className="text-xs font-medium text-[#0f172a] dark:text-[#eef4fb] flex items-center gap-1.5">
-              <Cpu className="w-3.5 h-3.5 text-[#2ba0ff]" />
+            <span className="text-xs font-medium text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] flex items-center gap-1.5">
+              <Cpu className="w-3.5 h-3.5 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf]" />
               语音合成模型型号
             </span>
-            <span className="text-[10px] text-[#64748b] dark:text-[#7f95ab]">支持自由输入</span>
+            <span className="text-[10px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5]">支持自由输入</span>
           </div>
 
           <select
@@ -212,7 +212,7 @@ export const MasterVoiceprintModal: React.FC<MasterVoiceprintModalProps> = ({
                 setTtsModel('');
               }
             }}
-            className="w-full bg-white dark:bg-[#090f19] border border-[#cbd5e1] dark:border-[#1e3148] rounded-lg px-3 py-1.5 text-xs text-[#0f172a] dark:text-[#eef4fb] focus:outline-none focus:border-[#2ba0ff]"
+            className="w-full bg-white dark:bg-[#08101a] aurora:bg-[#081014] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] rounded-lg px-3 py-1.5 text-xs text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] focus:outline-none focus:border-[#2481cc] dark:focus:border-[#2ba0ff] aurora:focus:border-[#2dd4bf]"
           >
             {TTS_MODEL_PRESETS.map((m) => (
               <option key={m.value} value={m.value}>
@@ -227,27 +227,27 @@ export const MasterVoiceprintModal: React.FC<MasterVoiceprintModalProps> = ({
             value={ttsModel}
             onChange={(e) => setTtsModel(e.target.value)}
             placeholder="输入模型型号，例如：gemini-3.8-flash-tts / gpt-4o-mini-tts / tts-1"
-            className="w-full bg-white dark:bg-[#090f19] border border-[#cbd5e1] dark:border-[#1e3148] rounded-lg px-3 py-1.5 text-xs font-mono text-[#0284c7] dark:text-[#9ec2e6] placeholder-[#94a3b8] dark:placeholder-[#4e657e] focus:outline-none focus:border-[#2ba0ff]"
+            className="w-full bg-white dark:bg-[#08101a] aurora:bg-[#081014] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] rounded-lg px-3 py-1.5 text-xs font-mono text-[#0284c7] dark:text-[#7cc4ff] aurora:text-[#5eead4] placeholder-[#94a3b8] dark:placeholder-[#4e657e] aurora:placeholder-[#5a7782] focus:outline-none focus:border-[#2481cc] dark:focus:border-[#2ba0ff] aurora:focus:border-[#2dd4bf]"
           />
 
-          <p className="text-[10.5px] text-[#64748b] dark:text-[#7f95ab] flex items-center gap-1.5 leading-snug">
-            <Link className="w-3 h-3 text-[#2ba0ff] shrink-0" />
+          <p className="text-[10.5px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] flex items-center gap-1.5 leading-snug">
+            <Link className="w-3 h-3 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf] shrink-0" />
             <span>接入口与密钥统一走「模型 → 接入自有模型网关」配置的大模型接入网址与密钥，或使用官方云端引擎。</span>
           </p>
         </div>
 
         {/* Preset Voice & ffmpeg Audio Parameters */}
-        <div className="p-3.5 rounded-xl bg-[#f8fafc] dark:bg-[#0e1726]/85 border border-[#e2e8f0] dark:border-[#18273a] space-y-3 text-xs">
-          <span className="font-medium text-[#0f172a] dark:text-[#eef4fb] flex items-center gap-1.5">
-            <Sliders className="w-3.5 h-3.5 text-[#2ba0ff]" />
+        <div className="p-3.5 rounded-xl bg-[#f8fafc] dark:bg-[#0e1726]/85 aurora:bg-[#101c23]/90 border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] space-y-3 text-xs">
+          <span className="font-medium text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] flex items-center gap-1.5">
+            <Sliders className="w-3.5 h-3.5 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf]" />
             <span>预设音色与音频参数（ffmpeg 实效处理）</span>
           </span>
 
           {/* Base Voice Anchor */}
           <div className="space-y-1.5 pt-0.5">
-            <div className="flex justify-between text-[11px] text-[#64748b] dark:text-[#7f95ab]">
+            <div className="flex justify-between text-[11px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5]">
               <span>系统预设音色库 (Gemini / OpenAI 自动映射)</span>
-              <span className="text-[#0284c7] dark:text-[#2ba0ff] font-medium">
+              <span className="text-[#0284c7] dark:text-[#2ba0ff] aurora:text-[#2dd4bf] font-medium">
                 {selectedPresetMeta.desc}
               </span>
             </div>
@@ -259,11 +259,11 @@ export const MasterVoiceprintModal: React.FC<MasterVoiceprintModalProps> = ({
                   onClick={() => setBaseVoice(v.id)}
                   className={`py-1.5 px-1 rounded-lg text-center border transition-all cursor-pointer ${
                     baseVoice === v.id
-                      ? 'bg-[#2ba0ff] border-[#2ba0ff] text-white shadow-xs'
-                      : 'bg-white dark:bg-[#090f19] border-[#cbd5e1] dark:border-[#1e3148] text-[#64748b] dark:text-[#7f95ab] hover:text-[#0f172a] dark:hover:text-white'
+                      ? 'bg-[#2481cc] dark:bg-[#2ba0ff] aurora:bg-[#0d9488] border-[#2481cc] dark:border-[#2ba0ff] aurora:border-[#0d9488] text-white shadow-xs'
+                      : 'bg-white dark:bg-[#08101a] aurora:bg-[#081014] border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] text-[#475569] dark:text-[#7b93ad] aurora:text-[#7e9aa5] hover:text-[#0f172a] dark:hover:text-[#eef4fb] aurora:hover:text-[#ecf6f8] hover:bg-[#f1f5f9] dark:hover:bg-[#152438] aurora:hover:bg-[#152934]'
                   }`}
                 >
-                  <div className={`text-[10px] font-mono font-semibold ${baseVoice === v.id ? 'text-white/90' : 'text-[#2ba0ff]'}`}>
+                  <div className={`text-[10px] font-mono font-semibold ${baseVoice === v.id ? 'text-white/90' : 'text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf]'}`}>
                     {v.tag}
                   </div>
                   <div className="text-[10px] mt-0.5 truncate">{v.label}</div>
@@ -274,9 +274,9 @@ export const MasterVoiceprintModal: React.FC<MasterVoiceprintModalProps> = ({
 
           {/* Pitch */}
           <div className="space-y-1">
-            <div className="flex justify-between text-[11px] text-[#64748b] dark:text-[#7f95ab]">
+            <div className="flex justify-between text-[11px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5]">
               <span>音高基线 (ffmpeg 实效变调)</span>
-              <span className="text-[#0f172a] dark:text-[#eef4fb] font-medium tabular-nums">{pitch.toFixed(2)}x</span>
+              <span className="text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] font-medium tabular-nums">{pitch.toFixed(2)}x</span>
             </div>
             <input
               type="range"
@@ -285,15 +285,15 @@ export const MasterVoiceprintModal: React.FC<MasterVoiceprintModalProps> = ({
               step="0.05"
               value={pitch}
               onChange={(e) => setPitch(parseFloat(e.target.value))}
-              className="w-full h-1 bg-[#cbd5e1] dark:bg-[#1e3148] rounded-lg appearance-none cursor-pointer accent-[#2ba0ff]"
+              className="w-full h-1 bg-[#cbd5e1] dark:bg-[#1e3148] aurora:bg-[#203742] rounded-lg appearance-none cursor-pointer accent-[#2481cc] dark:accent-[#2ba0ff] aurora:accent-[#14b8a6]"
             />
           </div>
 
           {/* Rate */}
           <div className="space-y-1">
-            <div className="flex justify-between text-[11px] text-[#64748b] dark:text-[#7f95ab]">
+            <div className="flex justify-between text-[11px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5]">
               <span>语速节奏 (ffmpeg 实效变速)</span>
-              <span className="text-[#0f172a] dark:text-[#eef4fb] font-medium tabular-nums">{rate.toFixed(2)}x</span>
+              <span className="text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] font-medium tabular-nums">{rate.toFixed(2)}x</span>
             </div>
             <input
               type="range"
@@ -302,21 +302,21 @@ export const MasterVoiceprintModal: React.FC<MasterVoiceprintModalProps> = ({
               step="0.05"
               value={rate}
               onChange={(e) => setRate(parseFloat(e.target.value))}
-              className="w-full h-1 bg-[#cbd5e1] dark:bg-[#1e3148] rounded-lg appearance-none cursor-pointer accent-[#2ba0ff]"
+              className="w-full h-1 bg-[#cbd5e1] dark:bg-[#1e3148] aurora:bg-[#203742] rounded-lg appearance-none cursor-pointer accent-[#2481cc] dark:accent-[#2ba0ff] aurora:accent-[#14b8a6]"
             />
           </div>
         </div>
 
         {/* Global Default Toggle */}
-        <div className="p-3 rounded-xl bg-[#f8fafc] dark:bg-[#0e1726]/85 border border-[#e2e8f0] dark:border-[#18273a] flex items-center justify-between gap-3">
-          <div className="text-xs font-semibold text-[#0f172a] dark:text-[#eef4fb]">
+        <div className="p-3 rounded-xl bg-[#f8fafc] dark:bg-[#0e1726]/85 aurora:bg-[#101c23]/90 border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] flex items-center justify-between gap-3">
+          <div className="text-xs font-semibold text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8]">
             设为默认语音合成预设
           </div>
           <button
             type="button"
             onClick={() => setEnabledAsDefault(!enabledAsDefault)}
             className={`w-10 h-5.5 rounded-full transition-colors relative cursor-pointer shrink-0 ${
-              enabledAsDefault ? 'bg-[#2ba0ff]' : 'bg-[#cbd5e1] dark:bg-[#233247]'
+              enabledAsDefault ? 'bg-[#2481cc] dark:bg-[#2ba0ff] aurora:bg-[#0d9488]' : 'bg-[#cbd5e1] dark:bg-[#1e3148] aurora:bg-[#203742]'
             }`}
           >
             <div
@@ -329,17 +329,17 @@ export const MasterVoiceprintModal: React.FC<MasterVoiceprintModalProps> = ({
       </div>
 
       {/* Footer */}
-      <div className="flex items-center justify-between px-4 py-3 border-t border-[#e2e8f0] dark:border-[#18273a] bg-[#f8fafc] dark:bg-[#070d16] shrink-0">
+      <div className="flex items-center justify-between px-4 py-3 border-t border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] bg-[#f8fafc] dark:bg-[#0d1726] aurora:bg-[#0e1920] shrink-0">
         {!embedded ? (
           <button
             type="button"
             onClick={onClose}
-            className="px-3.5 py-1.5 rounded-lg text-xs font-medium text-[#64748b] dark:text-[#7f95ab] hover:text-[#0f172a] dark:hover:text-white hover:bg-black/5 dark:hover:bg-white/5 transition-colors cursor-pointer"
+            className="px-3.5 py-1.5 rounded-lg text-xs font-medium text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] hover:text-[#0f172a] dark:hover:text-[#eef4fb] aurora:hover:text-[#ecf6f8] hover:bg-black/5 dark:hover:bg-[#152438] aurora:hover:bg-[#152934] transition-colors cursor-pointer"
           >
             取消
           </button>
         ) : (
-          <span className="text-[11px] text-[#64748b] dark:text-[#7f95ab]">
+          <span className="text-[11px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5]">
             {voiceprint ? '已关联语音合成预设' : '选择预设与型号后保存'}
           </span>
         )}
@@ -347,7 +347,7 @@ export const MasterVoiceprintModal: React.FC<MasterVoiceprintModalProps> = ({
         <button
           type="button"
           onClick={handleSave}
-          className="px-4 py-2 rounded-lg bg-[#2ba0ff] hover:bg-[#1e8ee8] text-white font-medium text-xs flex items-center gap-1.5 shadow-xs transition-colors cursor-pointer"
+          className="px-4 py-2 rounded-lg bg-[#2481cc] hover:bg-[#1d6fb3] dark:bg-[#2ba0ff] dark:hover:bg-[#1e8ee8] aurora:bg-[#0d9488] aurora:hover:bg-[#0f766e] text-white font-medium text-xs flex items-center gap-1.5 shadow-xs transition-colors cursor-pointer"
         >
           <Check className="w-3.5 h-3.5" />
           <span>保存预设音色配置</span>
@@ -358,15 +358,15 @@ export const MasterVoiceprintModal: React.FC<MasterVoiceprintModalProps> = ({
 
   if (embedded) {
     return (
-      <div className="flex flex-col h-full min-h-0 select-none text-[#0f172a] dark:text-[#eef4fb]">
+      <div className="flex flex-col h-full min-h-0 select-none text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8]">
         {innerContent}
       </div>
     );
   }
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/75 backdrop-blur-xs animate-in fade-in duration-150 select-none">
-      <div className="relative w-full max-w-md bg-white dark:bg-[#0b121e] border border-[#e2e8f0] dark:border-[#1e3148] rounded-xl shadow-xl flex flex-col overflow-hidden text-[#0f172a] dark:text-[#eef4fb]">
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/55 dark:bg-black/75 aurora:bg-black/80 backdrop-blur-xs animate-in fade-in duration-150 select-none">
+      <div className="relative w-full max-w-md bg-white dark:bg-[#0b131f] aurora:bg-[#0c151b] border border-[#e2e8f0] dark:border-[#1e3148] aurora:border-[#203742] rounded-xl shadow-xl flex flex-col overflow-hidden text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8]">
         {innerContent}
       </div>
     </div>

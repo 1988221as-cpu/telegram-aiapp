@@ -99,18 +99,18 @@ export const TelegramMenuDrawer: React.FC<TelegramMenuDrawerProps> = ({
     <div className="fixed inset-0 z-50 flex animate-in fade-in duration-200">
       {/* Backdrop */}
       <div
-        className="fixed inset-0 bg-black/50 backdrop-blur-xs transition-opacity cursor-pointer"
+        className="fixed inset-0 bg-black/55 dark:bg-black/75 aurora:bg-black/80 backdrop-blur-xs transition-opacity cursor-pointer"
         onClick={onClose}
       />
 
       {/* Slide-out Drawer from Left */}
-      <div className="relative w-72 sm:w-80 h-full bg-white text-[#111827] dark:bg-[#17212b] dark:text-[#f5f7fa] aurora:bg-[#0d171d] aurora:text-[#ecf6f8] flex flex-col shadow-2xl z-10 animate-in slide-in-from-left duration-250 select-none border-r border-[#e0e4e8] dark:border-[#0e1621] aurora:border-[#182b34] transition-colors">
+      <div className="relative w-72 sm:w-80 h-full bg-white text-[#0f172a] dark:bg-[#0b131f] dark:text-[#eef4fb] aurora:bg-[#0c151b] aurora:text-[#ecf6f8] flex flex-col shadow-2xl z-10 animate-in slide-in-from-left duration-250 select-none border-r border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] transition-colors">
         {/* 1. Profile Header */}
-        <div className="p-4 bg-[#2481cc] aurora:bg-gradient-to-br aurora:from-[#0f3d47] aurora:to-[#0a232b] text-white flex flex-col justify-between shrink-0 relative overflow-hidden">
+        <div className="p-4 bg-[#2481cc] dark:bg-gradient-to-br dark:from-[#122943] dark:to-[#0b1829] aurora:bg-gradient-to-br aurora:from-[#0f3d47] aurora:to-[#0a232b] text-white flex flex-col justify-between shrink-0 relative overflow-hidden border-b border-transparent dark:border-[#18273a] aurora:border-[#182b34]">
           <div className="flex items-start justify-between mb-3">
             <div className="relative">
               <div
-                className="w-14 h-14 rounded-full flex items-center justify-center text-lg font-bold shadow-md border-2 border-white/20 overflow-hidden"
+                className="w-14 h-14 rounded-full flex items-center justify-center text-lg font-bold shadow-md border-2 border-white/25 overflow-hidden"
                 style={{ backgroundColor: safeAccount.avatarBg || '#2ba0ff' }}
               >
                 {safeAccount.avatarUrl ? (
@@ -125,7 +125,7 @@ export const TelegramMenuDrawer: React.FC<TelegramMenuDrawerProps> = ({
               </div>
               {safeAccount.id && (
                 <span
-                  className={`absolute bottom-0 right-0 w-3.5 h-3.5 rounded-full border-2 border-white ${
+                  className={`absolute bottom-0 right-0 w-3.5 h-3.5 rounded-full border-2 border-white dark:border-[#0b1829] aurora:border-[#0a232b] ${
                     safeAccount.status === 'online'
                       ? 'bg-emerald-400'
                       : safeAccount.status === 'away'
@@ -149,7 +149,7 @@ export const TelegramMenuDrawer: React.FC<TelegramMenuDrawerProps> = ({
 
             <button
               onClick={onClose}
-              className="p-1 rounded-lg text-white/80 hover:text-white hover:bg-white/10 transition-colors cursor-pointer"
+              className="p-1 rounded-lg text-white/80 hover:text-white hover:bg-white/15 transition-colors cursor-pointer"
             >
               <X className="w-5 h-5" />
             </button>
@@ -181,7 +181,7 @@ export const TelegramMenuDrawer: React.FC<TelegramMenuDrawerProps> = ({
 
         {/* Account Switcher Dropdown (Inside Header) */}
         {showAccountList && (
-          <div className="bg-[#f0f3f6] dark:bg-[#1e2c3a] border-b border-[#e2e6eb] dark:border-[#24374a] p-2 flex flex-col gap-1 max-h-48 overflow-y-auto no-scrollbar animate-in slide-in-from-top-2 duration-150">
+          <div className="bg-[#f8fafc] dark:bg-[#0e1726] aurora:bg-[#101c23] border-b border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] p-2 flex flex-col gap-1 max-h-48 overflow-y-auto no-scrollbar animate-in slide-in-from-top-2 duration-150">
             {accounts.map((acc) => {
               const isConfirming = confirmingDeleteId === acc.id;
               const isDisconnecting = disconnectingId === acc.id;
@@ -189,10 +189,10 @@ export const TelegramMenuDrawer: React.FC<TelegramMenuDrawerProps> = ({
               return (
                 <div
                   key={acc.id}
-                  className={`flex flex-col p-2 rounded-xl text-left transition-colors ${
+                  className={`flex flex-col p-2 rounded-xl text-left transition-colors border ${
                     acc.id === safeAccount.id
-                      ? 'bg-[#2481cc]/15 dark:bg-[#2481cc]/25 text-[#2481cc] dark:text-[#2ba0ff]'
-                      : 'hover:bg-black/5 dark:hover:bg-[#253748] text-[#222222] dark:text-white/90'
+                      ? 'bg-[#e8f3ff] border-[#bfdbfe] text-[#0284c7] dark:bg-[#2ba0ff]/15 dark:border-[#2ba0ff]/35 dark:text-[#7cc4ff] aurora:bg-[#112d36] aurora:border-[#2dd4bf]/35 aurora:text-[#5eead4]'
+                      : 'border-transparent hover:bg-[#f1f5f9] dark:hover:bg-[#132234] aurora:hover:bg-[#13252e] text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8]'
                   }`}
                 >
                   <div className="flex items-center justify-between">
@@ -212,7 +212,7 @@ export const TelegramMenuDrawer: React.FC<TelegramMenuDrawerProps> = ({
                           {acc.avatarInitial || 'TG'}
                         </div>
                         <span
-                          className={`absolute -bottom-0.5 -right-0.5 w-2.5 h-2.5 rounded-full border-2 border-[#f0f3f6] dark:border-[#1e2c3a] ${
+                          className={`absolute -bottom-0.5 -right-0.5 w-2.5 h-2.5 rounded-full border-2 border-[#f8fafc] dark:border-[#0e1726] aurora:border-[#101c23] ${
                             acc.status === 'online'
                               ? 'bg-emerald-500'
                               : acc.status === 'away'
@@ -227,10 +227,10 @@ export const TelegramMenuDrawer: React.FC<TelegramMenuDrawerProps> = ({
                         <div className="text-xs font-semibold truncate flex items-center gap-1">
                           <span className="truncate">{acc.name}</span>
                           {acc.status === 'expired' && (
-                            <span className="text-[10px] text-rose-500 font-normal shrink-0">已失效</span>
+                            <span className="text-[10px] text-rose-600 dark:text-rose-400 aurora:text-rose-400 font-normal shrink-0">已失效</span>
                           )}
                         </div>
-                        <div className="text-[10px] text-[#707579] dark:text-white/60 truncate">{acc.phone || acc.username}</div>
+                        <div className="text-[10px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] truncate">{acc.phone || acc.username}</div>
                       </div>
                     </button>
                     <div className="flex items-center gap-1.5 shrink-0 ml-1">
@@ -242,13 +242,13 @@ export const TelegramMenuDrawer: React.FC<TelegramMenuDrawerProps> = ({
                             onReloginAccount(acc);
                             onClose();
                           }}
-                          className="px-1.5 py-0.5 rounded bg-rose-500/15 text-rose-500 dark:text-rose-300 hover:bg-rose-500/25 text-[10px] font-medium cursor-pointer"
+                          className="px-1.5 py-0.5 rounded bg-rose-500/15 text-rose-700 dark:text-rose-300 aurora:text-rose-300 hover:bg-rose-500/25 text-[10px] font-medium cursor-pointer"
                         >
                           重新登录
                         </button>
                       )}
                       {!isConfirming && acc.id === safeAccount.id && (
-                        <Check className="w-4 h-4 text-[#2481cc] dark:text-[#2ba0ff]" />
+                        <Check className="w-4 h-4 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf]" />
                       )}
                       {isConfirming ? (
                         <>
@@ -273,7 +273,7 @@ export const TelegramMenuDrawer: React.FC<TelegramMenuDrawerProps> = ({
                                 });
                               }
                             }}
-                            className="px-2 py-0.5 rounded bg-rose-500 hover:bg-rose-600 disabled:opacity-50 text-white text-[10px] font-medium cursor-pointer"
+                            className="px-2 py-0.5 rounded bg-rose-600 hover:bg-rose-700 disabled:opacity-50 text-white text-[10px] font-medium cursor-pointer"
                           >
                             {isDisconnecting ? '注销中' : '确认退出'}
                           </button>
@@ -285,7 +285,7 @@ export const TelegramMenuDrawer: React.FC<TelegramMenuDrawerProps> = ({
                               setConfirmingDeleteId(null);
                               setDisconnectError(null);
                             }}
-                            className="px-1.5 py-0.5 rounded bg-black/10 dark:bg-white/10 text-[10px] cursor-pointer"
+                            className="px-1.5 py-0.5 rounded bg-[#e2e8f0] dark:bg-[#132234] aurora:bg-[#13252e] text-[#475569] dark:text-[#b4c6d8] aurora:text-[#b7d0d8] text-[10px] cursor-pointer"
                           >
                             取消
                           </button>
@@ -298,7 +298,7 @@ export const TelegramMenuDrawer: React.FC<TelegramMenuDrawerProps> = ({
                             setConfirmingDeleteId(acc.id);
                             setDisconnectError(null);
                           }}
-                          className="p-1 rounded-md text-gray-400 hover:text-red-400 hover:bg-red-500/10 cursor-pointer"
+                          className="p-1 rounded-md text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] hover:text-rose-600 dark:hover:text-rose-400 aurora:hover:text-rose-400 hover:bg-rose-500/10 cursor-pointer transition-colors"
                           title="断开直连并退出该账号"
                         >
                           <LogOut className="w-3.5 h-3.5" />
@@ -307,7 +307,7 @@ export const TelegramMenuDrawer: React.FC<TelegramMenuDrawerProps> = ({
                     </div>
                   </div>
                   {accError && (
-                    <div className="mt-1.5 flex items-center justify-between gap-2 text-[10px] text-rose-500 dark:text-rose-300 bg-rose-500/10 rounded-lg px-2 py-1">
+                    <div className="mt-1.5 flex items-center justify-between gap-2 text-[10px] text-rose-700 dark:text-rose-300 aurora:text-rose-300 bg-rose-500/10 rounded-lg px-2 py-1">
                       <span className="truncate">{accError.message}</span>
                       {accError.canForceLocal && (
                         <button
@@ -325,7 +325,7 @@ export const TelegramMenuDrawer: React.FC<TelegramMenuDrawerProps> = ({
                               showToast(`已移除本地账号 ${acc.name}`);
                             }
                           }}
-                          className="text-amber-600 dark:text-amber-300 hover:underline shrink-0 cursor-pointer"
+                          className="text-amber-700 dark:text-amber-300 aurora:text-amber-300 hover:underline shrink-0 cursor-pointer"
                         >
                           仅移除本地
                         </button>
@@ -341,7 +341,7 @@ export const TelegramMenuDrawer: React.FC<TelegramMenuDrawerProps> = ({
                 onOpenAddAccount();
                 onClose();
               }}
-              className="flex items-center gap-2.5 p-2 rounded-xl hover:bg-black/5 dark:hover:bg-[#253748] text-[#2481cc] dark:text-[#2ba0ff] text-xs font-medium transition-colors cursor-pointer mt-1 border-t border-black/5 dark:border-white/5"
+              className="flex items-center gap-2.5 p-2 rounded-xl hover:bg-[#f1f5f9] dark:hover:bg-[#132234] aurora:hover:bg-[#13252e] text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf] text-xs font-medium transition-colors cursor-pointer mt-1 border-t border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34]"
             >
               <UserPlus className="w-4 h-4 shrink-0" />
               <span>添加新账号 / 扫码登录 ({accounts.length}/20)</span>
@@ -358,9 +358,9 @@ export const TelegramMenuDrawer: React.FC<TelegramMenuDrawerProps> = ({
               else showToast('请在主界面创建群组');
               onClose();
             }}
-            className="flex items-center gap-4 px-3 py-2.5 rounded-xl text-[#222222] dark:text-[#cfdbe5] hover:text-[#2481cc] dark:hover:text-white hover:bg-black/5 dark:hover:bg-[#243444] transition-colors cursor-pointer w-full text-left"
+            className="flex items-center gap-4 px-3 py-2.5 rounded-xl text-[#0f172a] dark:text-[#b4c6d8] aurora:text-[#b7d0d8] hover:text-[#2481cc] dark:hover:text-[#eef4fb] aurora:hover:text-[#5eead4] hover:bg-[#f1f5f9] dark:hover:bg-[#132234] aurora:hover:bg-[#13252e] transition-colors cursor-pointer w-full text-left"
           >
-            <Users className="w-5 h-5 text-[#707579] dark:text-[#7f93a5]" />
+            <Users className="w-5 h-5 text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5]" />
             <span>新建群组</span>
           </button>
 
@@ -371,9 +371,9 @@ export const TelegramMenuDrawer: React.FC<TelegramMenuDrawerProps> = ({
               else showToast('请在主界面创建频道');
               onClose();
             }}
-            className="flex items-center gap-4 px-3 py-2.5 rounded-xl text-[#222222] dark:text-[#cfdbe5] hover:text-[#2481cc] dark:hover:text-white hover:bg-black/5 dark:hover:bg-[#243444] transition-colors cursor-pointer w-full text-left"
+            className="flex items-center gap-4 px-3 py-2.5 rounded-xl text-[#0f172a] dark:text-[#b4c6d8] aurora:text-[#b7d0d8] hover:text-[#2481cc] dark:hover:text-[#eef4fb] aurora:hover:text-[#5eead4] hover:bg-[#f1f5f9] dark:hover:bg-[#132234] aurora:hover:bg-[#13252e] transition-colors cursor-pointer w-full text-left"
           >
-            <Megaphone className="w-5 h-5 text-[#707579] dark:text-[#7f93a5]" />
+            <Megaphone className="w-5 h-5 text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5]" />
             <span>新建频道</span>
           </button>
 
@@ -384,9 +384,9 @@ export const TelegramMenuDrawer: React.FC<TelegramMenuDrawerProps> = ({
               else showToast('联系人列表已更新同步');
               onClose();
             }}
-            className="flex items-center gap-4 px-3 py-2.5 rounded-xl text-[#222222] dark:text-[#cfdbe5] hover:text-[#2481cc] dark:hover:text-white hover:bg-black/5 dark:hover:bg-[#243444] transition-colors cursor-pointer w-full text-left"
+            className="flex items-center gap-4 px-3 py-2.5 rounded-xl text-[#0f172a] dark:text-[#b4c6d8] aurora:text-[#b7d0d8] hover:text-[#2481cc] dark:hover:text-[#eef4fb] aurora:hover:text-[#5eead4] hover:bg-[#f1f5f9] dark:hover:bg-[#132234] aurora:hover:bg-[#13252e] transition-colors cursor-pointer w-full text-left"
           >
-            <User className="w-5 h-5 text-[#707579] dark:text-[#7f93a5]" />
+            <User className="w-5 h-5 text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5]" />
             <span>联系人</span>
           </button>
 
@@ -397,9 +397,9 @@ export const TelegramMenuDrawer: React.FC<TelegramMenuDrawerProps> = ({
               else showToast('暂无未接来电');
               onClose();
             }}
-            className="flex items-center gap-4 px-3 py-2.5 rounded-xl text-[#222222] dark:text-[#cfdbe5] hover:text-[#2481cc] dark:hover:text-white hover:bg-black/5 dark:hover:bg-[#243444] transition-colors cursor-pointer w-full text-left"
+            className="flex items-center gap-4 px-3 py-2.5 rounded-xl text-[#0f172a] dark:text-[#b4c6d8] aurora:text-[#b7d0d8] hover:text-[#2481cc] dark:hover:text-[#eef4fb] aurora:hover:text-[#5eead4] hover:bg-[#f1f5f9] dark:hover:bg-[#132234] aurora:hover:bg-[#13252e] transition-colors cursor-pointer w-full text-left"
           >
-            <PhoneCall className="w-5 h-5 text-[#707579] dark:text-[#7f93a5]" />
+            <PhoneCall className="w-5 h-5 text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5]" />
             <span>通话记录</span>
           </button>
 
@@ -409,9 +409,9 @@ export const TelegramMenuDrawer: React.FC<TelegramMenuDrawerProps> = ({
               if (onSelectChat) onSelectChat('chat_saved_messages');
               onClose();
             }}
-            className="flex items-center gap-4 px-3 py-2.5 rounded-xl text-[#222222] dark:text-[#cfdbe5] hover:text-[#2481cc] dark:hover:text-white hover:bg-black/5 dark:hover:bg-[#243444] transition-colors cursor-pointer w-full text-left"
+            className="flex items-center gap-4 px-3 py-2.5 rounded-xl text-[#0f172a] dark:text-[#b4c6d8] aurora:text-[#b7d0d8] hover:text-[#2481cc] dark:hover:text-[#eef4fb] aurora:hover:text-[#5eead4] hover:bg-[#f1f5f9] dark:hover:bg-[#132234] aurora:hover:bg-[#13252e] transition-colors cursor-pointer w-full text-left"
           >
-            <Bookmark className="w-5 h-5 text-[#707579] dark:text-[#7f93a5]" />
+            <Bookmark className="w-5 h-5 text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5]" />
             <span>收藏夹 (Saved Messages)</span>
           </button>
 
@@ -423,20 +423,20 @@ export const TelegramMenuDrawer: React.FC<TelegramMenuDrawerProps> = ({
               }
               onClose();
             }}
-            className="flex items-center gap-4 px-3 py-2.5 rounded-xl text-[#222222] dark:text-[#cfdbe5] hover:text-[#2481cc] dark:hover:text-white hover:bg-black/5 dark:hover:bg-[#243444] transition-colors cursor-pointer w-full text-left"
+            className="flex items-center gap-4 px-3 py-2.5 rounded-xl text-[#0f172a] dark:text-[#b4c6d8] aurora:text-[#b7d0d8] hover:text-[#2481cc] dark:hover:text-[#eef4fb] aurora:hover:text-[#5eead4] hover:bg-[#f1f5f9] dark:hover:bg-[#132234] aurora:hover:bg-[#13252e] transition-colors cursor-pointer w-full text-left"
           >
-            <Settings className="w-5 h-5 text-[#707579] dark:text-[#7f93a5] shrink-0" />
+            <Settings className="w-5 h-5 text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] shrink-0" />
             <span>电报偏好设置</span>
           </button>
 
           {/* 当前会员账号信息 */}
           {currentMember && (
-            <div className="px-3 py-2 border-t border-[#e0e4e8] dark:border-[#202e3d] mt-1 text-[11px] flex items-center justify-between gap-2 text-[#707579] dark:text-[#7f93a5]">
-              <span className="truncate font-medium text-[#111827] dark:text-white/90">
+            <div className="px-3 py-2 border-t border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] mt-1 text-[11px] flex items-center justify-between gap-2 text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5]">
+              <span className="truncate font-medium text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8]">
                 {currentMember.username} · {currentMember.plan === 'trial_3d' ? '试用版' : currentMember.plan === 'monthly_30d' ? '包月版' : 'VIP'}
                 {currentMember.vipExpiresAt ? ` · ${new Date(currentMember.vipExpiresAt).toLocaleDateString()}到期` : ''}
               </span>
-              <span className="font-mono tabular-nums text-[#2481cc] dark:text-[#2ba0ff] shrink-0">
+              <span className="font-mono tabular-nums text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf] shrink-0">
                 {accounts.length}/20
               </span>
             </div>
@@ -446,14 +446,14 @@ export const TelegramMenuDrawer: React.FC<TelegramMenuDrawerProps> = ({
           {onMemberLogout && (
             confirmingMemberLogout ? (
               <div className="p-2.5 rounded-xl bg-rose-500/10 border border-rose-500/30 space-y-2">
-                <p className="text-[11px] text-rose-500 dark:text-rose-300 leading-relaxed">
+                <p className="text-[11px] text-rose-700 dark:text-rose-300 aurora:text-rose-300 leading-relaxed">
                   确认退出登录？将同时注销已连接的 Telegram 云端会话并清空本机缓存。
                 </p>
                 <div className="flex items-center justify-end gap-2">
                   <button
                     type="button"
                     onClick={() => setConfirmingMemberLogout(false)}
-                    className="px-2.5 py-1 rounded-lg bg-black/5 dark:bg-white/10 text-[11px] text-[#546778] dark:text-[#cfdbe5] cursor-pointer"
+                    className="px-2.5 py-1 rounded-lg bg-[#f1f5f9] dark:bg-[#132234] aurora:bg-[#13252e] text-[11px] text-[#475569] dark:text-[#b4c6d8] aurora:text-[#b7d0d8] cursor-pointer"
                   >
                     取消
                   </button>
@@ -464,7 +464,7 @@ export const TelegramMenuDrawer: React.FC<TelegramMenuDrawerProps> = ({
                       onMemberLogout();
                       onClose();
                     }}
-                    className="px-2.5 py-1 rounded-lg bg-rose-500 hover:bg-rose-600 text-white text-[11px] font-medium cursor-pointer"
+                    className="px-2.5 py-1 rounded-lg bg-rose-600 hover:bg-rose-700 text-white text-[11px] font-medium cursor-pointer"
                   >
                     确认退出并注销
                   </button>
@@ -474,7 +474,7 @@ export const TelegramMenuDrawer: React.FC<TelegramMenuDrawerProps> = ({
               <button
                 type="button"
                 onClick={() => setConfirmingMemberLogout(true)}
-                className="flex items-center gap-4 px-3 py-2.5 rounded-xl text-rose-500 hover:bg-rose-500/10 transition-colors cursor-pointer w-full text-left"
+                className="flex items-center gap-4 px-3 py-2.5 rounded-xl text-rose-600 dark:text-rose-400 aurora:text-rose-400 hover:bg-rose-500/10 transition-colors cursor-pointer w-full text-left"
               >
                 <LogOut className="w-5 h-5 shrink-0" />
                 <span className="truncate">
@@ -484,27 +484,27 @@ export const TelegramMenuDrawer: React.FC<TelegramMenuDrawerProps> = ({
             )
           )}
 
-          <div className="h-px bg-[#e0e4e8] dark:bg-[#202e3d] my-2 mx-1" />
+          <div className="h-px bg-[#e2e8f0] dark:bg-[#18273a] aurora:bg-[#182b34] my-2 mx-1" />
 
           {/* 3. 外观色调模式切换 (亮白 / 夜间 / 极光青暗) */}
-          <div className="px-3 py-2.5 rounded-xl text-[#222222] dark:text-[#cfdbe5] aurora:text-[#d5ebee] space-y-2">
+          <div className="px-3 py-2.5 rounded-xl text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] space-y-2">
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-3">
                 {theme === 'aurora' ? (
                   <Sparkles className="w-5 h-5 text-[#2dd4bf]" />
                 ) : theme === 'dark' ? (
-                  <Moon className="w-5 h-5 text-[#2481cc] dark:text-[#2ba0ff]" />
+                  <Moon className="w-5 h-5 text-[#2ba0ff]" />
                 ) : (
-                  <Sun className="w-5 h-5 text-amber-500" />
+                  <Sun className="w-5 h-5 text-amber-600" />
                 )}
                 <span className="font-medium">界面色调模式</span>
               </div>
-              <span className="text-[11px] text-[#707579] dark:text-[#7f93a5] aurora:text-[#7e9aa5]">
+              <span className="text-[11px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5]">
                 {theme === 'aurora' ? '青夜' : theme === 'dark' ? '夜间' : '亮白'}
               </span>
             </div>
 
-            <div className="grid grid-cols-3 gap-1 p-1 rounded-lg bg-[#f1f5f9] dark:bg-[#0f1722] aurora:bg-[#081014] border border-[#e2e8f0] dark:border-[#202e3d] aurora:border-[#182b34]">
+            <div className="grid grid-cols-3 gap-1 p-1 rounded-lg bg-[#f8fafc] dark:bg-[#08101a] aurora:bg-[#081014] border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34]">
               {(
                 [
                   { id: 'light', label: '亮白' },
@@ -528,8 +528,10 @@ export const TelegramMenuDrawer: React.FC<TelegramMenuDrawerProps> = ({
                       active
                         ? opt.id === 'aurora'
                           ? 'bg-[#112d36] text-[#5eead4] border border-[#2dd4bf]/45 shadow-xs'
-                          : 'bg-white dark:bg-[#2481cc] text-[#2481cc] dark:text-white shadow-xs'
-                        : 'text-[#64748b] dark:text-[#8ea4ba] aurora:text-[#7e9aa5] hover:text-[#111827] dark:hover:text-white'
+                          : opt.id === 'dark'
+                          ? 'bg-[#2ba0ff] text-white shadow-xs'
+                          : 'bg-white text-[#2481cc] border border-[#bfdbfe] shadow-xs'
+                        : 'text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] hover:text-[#0f172a] dark:hover:text-[#eef4fb] aurora:hover:text-[#ecf6f8]'
                     }`}
                   >
                     {opt.label}
@@ -542,15 +544,15 @@ export const TelegramMenuDrawer: React.FC<TelegramMenuDrawerProps> = ({
 
         {/* Toast Popup */}
         {toastMessage && (
-          <div className="absolute bottom-16 left-1/2 -translate-x-1/2 px-4 py-2 bg-slate-900/90 text-white text-xs font-semibold rounded-xl shadow-xl border border-white/10 animate-in fade-in zoom-in-95 duration-150 whitespace-nowrap">
+          <div className="absolute bottom-16 left-1/2 -translate-x-1/2 px-4 py-2 bg-[#0f172a]/95 dark:bg-[#132234]/95 aurora:bg-[#102630]/95 text-white text-xs font-semibold rounded-xl shadow-xl border border-white/15 aurora:border-[#2dd4bf]/30 animate-in fade-in zoom-in-95 duration-150 whitespace-nowrap">
             {toastMessage}
           </div>
         )}
 
         {/* 4. Drawer Footer */}
-        <div className="p-3 border-t border-[#e0e4e8] dark:border-[#1e2c3a] flex items-center justify-center gap-2 text-[11px] text-[#707579] dark:text-[#637587]">
+        <div className="p-3 bg-[#f8fafc] dark:bg-[#0d1726] aurora:bg-[#0e1920] border-t border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] flex items-center justify-center gap-2 text-[11px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5]">
           <img src="/app-icon.png" alt="HumanSense" className="w-4 h-4 rounded-sm object-cover" />
-          <span className="font-medium text-[#546778] dark:text-[#8ea4ba]">HumanSense Desktop</span>
+          <span className="font-medium text-[#475569] dark:text-[#b4c6d8] aurora:text-[#b7d0d8]">HumanSense Desktop</span>
           <span className="font-bold">·</span>
           <span>v{APP_VERSION}</span>
         </div>

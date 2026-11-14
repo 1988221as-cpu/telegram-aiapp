@@ -210,7 +210,7 @@ export const LeftSidebar: React.FC<LeftSidebarProps> = ({
                       ? 'bg-amber-400'
                       : acc.status === 'expired'
                       ? 'bg-rose-500 animate-pulse'
-                      : 'bg-slate-400 dark:bg-slate-500'
+                      : 'bg-slate-400 dark:bg-slate-500 aurora:bg-[#5a7782]'
                   }`}
                 />
               </button>

@@ -284,17 +284,17 @@ export const CustomerMemoryDrawer: React.FC<CustomerMemoryDrawerProps> = ({
   const bodyContent = (
     <>
       {!embedded && (
-        <div className="px-5 py-4 border-b border-[#e2e8f0] dark:border-[#18273a] flex items-center justify-between bg-[#f8fafc] dark:bg-[#0b1523]">
+        <div className="px-5 py-4 border-b border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] flex items-center justify-between bg-[#f8fafc] dark:bg-[#0d1726] aurora:bg-[#0e1920]">
           <div className="flex items-center gap-3">
-            <div className="w-9 h-9 rounded-xl bg-[#2481cc]/15 dark:bg-[#2ba0ff]/15 border border-[#2481cc]/25 dark:border-[#2ba0ff]/30 flex items-center justify-center text-[#2481cc] dark:text-[#2ba0ff] shrink-0">
+            <div className="w-9 h-9 rounded-xl bg-[#2481cc]/12 dark:bg-[#2ba0ff]/12 aurora:bg-[#14b8a6]/15 border border-[#2481cc]/25 dark:border-[#2ba0ff]/30 aurora:border-[#2dd4bf]/30 flex items-center justify-center text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf] shrink-0">
               <Brain className="w-5 h-5" />
             </div>
             <div className="min-w-0">
               <div className="flex items-center gap-1.5">
-                <h2 className="text-sm font-bold text-[#0f172a] dark:text-white truncate">
+                <h2 className="text-sm font-bold text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] truncate">
                   {chatTitle || '当前联系人'} · 全息记忆
                 </h2>
-                <span className="text-[11px] text-[#64748b] dark:text-[#7b93ad] shrink-0">
+                <span className="text-[11px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] shrink-0">
                   · {currentProfile.relationshipStage || '尚未分析'}
                 </span>
               </div>
@@ -302,7 +302,7 @@ export const CustomerMemoryDrawer: React.FC<CustomerMemoryDrawerProps> = ({
           </div>
           <button
             onClick={onClose}
-            className="w-8 h-8 rounded-lg text-[#64748b] dark:text-[#7b93ad] hover:text-[#0f172a] dark:hover:text-white hover:bg-black/5 dark:hover:bg-white/10 flex items-center justify-center transition-colors cursor-pointer shrink-0"
+            className="w-8 h-8 rounded-lg text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] hover:text-[#0f172a] dark:hover:text-[#eef4fb] aurora:hover:text-[#ecf6f8] hover:bg-black/5 dark:hover:bg-[#152438] aurora:hover:bg-[#152934] flex items-center justify-center transition-colors cursor-pointer shrink-0"
           >
             <X className="w-4 h-4" />
           </button>
@@ -310,15 +310,15 @@ export const CustomerMemoryDrawer: React.FC<CustomerMemoryDrawerProps> = ({
       )}
 
       {/* AI Deep Analysis Bar */}
-      <div className="px-4 py-2.5 bg-[#f8fafc]/90 dark:bg-[#0d1726]/90 border-b border-[#e2e8f0] dark:border-[#162436] flex items-center justify-between gap-3 shrink-0">
-        <div className="text-xs font-semibold text-[#0f172a] dark:text-[#eef4fb] flex items-center gap-1.5">
-          <Sparkles className="w-3.5 h-3.5 text-[#2481cc] dark:text-[#2ba0ff]" />
+      <div className="px-4 py-2.5 bg-[#f8fafc]/90 dark:bg-[#0d1726]/90 aurora:bg-[#0e1920]/90 border-b border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] flex items-center justify-between gap-3 shrink-0">
+        <div className="text-xs font-semibold text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] flex items-center gap-1.5">
+          <Sparkles className="w-3.5 h-3.5 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf]" />
           <span>AI 对话画像提炼</span>
         </div>
           <button
             onClick={handleTriggerAnalysis}
             disabled={isAnalyzing}
-            className="px-3 py-1.5 rounded-lg bg-[#2481cc] hover:bg-[#2074b8] text-white text-xs font-medium flex items-center gap-1.5 shadow-sm cursor-pointer transition-colors disabled:opacity-50 shrink-0"
+            className="px-3 py-1.5 rounded-lg bg-[#2481cc] hover:bg-[#1d6fb3] dark:bg-[#2ba0ff] dark:hover:bg-[#1e8ee8] aurora:bg-[#0d9488] aurora:hover:bg-[#0f766e] text-white text-xs font-medium flex items-center gap-1.5 shadow-sm cursor-pointer transition-colors disabled:opacity-50 shrink-0"
           >
             {isAnalyzing ? (
               <>
@@ -335,21 +335,21 @@ export const CustomerMemoryDrawer: React.FC<CustomerMemoryDrawerProps> = ({
         </div>
 
         {saveSuccessMsg && (
-          <div className="px-5 py-2 bg-emerald-500/10 border-b border-emerald-500/25 text-emerald-300 text-xs flex items-center gap-2">
-            <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+          <div className="px-5 py-2 bg-emerald-500/10 border-b border-emerald-500/25 text-emerald-700 dark:text-emerald-300 text-xs flex items-center gap-2">
+            <CheckCircle2 className="w-4 h-4 text-emerald-600 dark:text-emerald-400 shrink-0" />
             <span>已成功从历史记录更新客户全息画像与记忆！</span>
           </div>
         )}
 
         {errorMessage && (
-          <div className="px-5 py-2.5 bg-rose-500/15 border-b border-rose-500/30 text-rose-300 text-xs flex items-center justify-between gap-2">
+          <div className="px-5 py-2.5 bg-rose-500/10 dark:bg-rose-500/15 border-b border-rose-500/30 text-rose-700 dark:text-rose-300 text-xs flex items-center justify-between gap-2">
             <div className="flex items-center gap-2">
-              <ShieldAlert className="w-4 h-4 text-rose-400 shrink-0" />
+              <ShieldAlert className="w-4 h-4 text-rose-600 dark:text-rose-400 shrink-0" />
               <span>{errorMessage}</span>
             </div>
             <button
               onClick={() => setErrorMessage(null)}
-              className="text-rose-400 hover:text-white p-0.5 rounded cursor-pointer"
+              className="text-rose-600 dark:text-rose-400 hover:text-rose-800 dark:hover:text-white p-0.5 rounded cursor-pointer transition-colors"
             >
               <X className="w-3.5 h-3.5" />
             </button>
@@ -359,16 +359,16 @@ export const CustomerMemoryDrawer: React.FC<CustomerMemoryDrawerProps> = ({
         {/* Scrollable Content */}
         <div className="flex-1 overflow-y-auto p-4 space-y-3.5">
           {/* 1. Basic Stats & Attributes */}
-          <div className="bg-[#f8fafc] dark:bg-[#0e1726]/85 p-3.5 rounded-xl border border-[#e2e8f0] dark:border-[#18273a] space-y-2.5">
-            <div className="flex items-center justify-between text-xs font-semibold text-[#0f172a] dark:text-[#eef4fb]">
+          <div className="bg-[#f8fafc] dark:bg-[#0e1726]/85 aurora:bg-[#101c23]/90 p-3.5 rounded-xl border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] space-y-2.5">
+            <div className="flex items-center justify-between text-xs font-semibold text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8]">
               <span className="flex items-center gap-1.5">
-                <User className="w-3.5 h-3.5 text-[#2481cc] dark:text-[#2ba0ff]" />
+                <User className="w-3.5 h-3.5 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf]" />
                 <span>基础属性与特征</span>
               </span>
               <div className="flex items-center gap-2">
                 <button
                   onClick={() => (isEditingAttributes ? handleSaveAttributes() : handleStartEdit())}
-                  className="text-[11px] text-[#2481cc] dark:text-[#2ba0ff] hover:opacity-80 flex items-center gap-1 cursor-pointer transition-colors"
+                  className="text-[11px] text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf] hover:opacity-80 flex items-center gap-1 cursor-pointer transition-colors"
                 >
                   <Edit3 className="w-3 h-3" />
                   <span>{isEditingAttributes ? '保存修改' : '手动修改'}</span>
@@ -376,12 +376,12 @@ export const CustomerMemoryDrawer: React.FC<CustomerMemoryDrawerProps> = ({
                 {isEditingAttributes && (
                   <button
                     onClick={() => setIsEditingAttributes(false)}
-                    className="text-[11px] text-[#64748b] dark:text-[#7b93ad] hover:text-[#0f172a] dark:hover:text-white cursor-pointer"
+                    className="text-[11px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] hover:text-[#0f172a] dark:hover:text-[#eef4fb] aurora:hover:text-[#ecf6f8] cursor-pointer"
                   >
                     取消
                   </button>
                 )}
-                <span className="text-[11px] text-[#64748b] dark:text-[#7b93ad] font-mono tabular-nums">
+                <span className="text-[11px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] font-mono tabular-nums">
                   {currentProfile.totalMessagesCount} 条消息
                 </span>
               </div>
@@ -391,50 +391,50 @@ export const CustomerMemoryDrawer: React.FC<CustomerMemoryDrawerProps> = ({
               <div className="space-y-2 text-xs">
                 <div className="grid grid-cols-2 gap-2">
                   <div>
-                    <label className="text-[10px] text-[#64748b] dark:text-[#7b93ad] block mb-0.5">年龄 / 生日</label>
+                    <label className="text-[10px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] block mb-0.5">年龄 / 生日</label>
                     <input
                       type="text"
                       value={editAge}
                       onChange={(e) => setEditAge(e.target.value)}
                       placeholder="如: 28岁 / 6月"
-                      className="w-full bg-white dark:bg-[#08101a] border border-[#cbd5e1] dark:border-[#1d2e44] rounded-lg px-2.5 py-1.5 text-xs text-[#0f172a] dark:text-white focus:outline-none focus:border-[#2481cc] dark:focus:border-[#2ba0ff]"
+                      className="w-full bg-white dark:bg-[#08101a] aurora:bg-[#081014] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] rounded-lg px-2.5 py-1.5 text-xs text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] placeholder-[#94a3b8] dark:placeholder-[#4e657e] aurora:placeholder-[#5a7782] focus:outline-none focus:border-[#2481cc] dark:focus:border-[#2ba0ff] aurora:focus:border-[#2dd4bf]"
                     />
                   </div>
                   <div>
-                    <label className="text-[10px] text-[#64748b] dark:text-[#7b93ad] block mb-0.5">所在地 / 时区</label>
+                    <label className="text-[10px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] block mb-0.5">所在地 / 时区</label>
                     <input
                       type="text"
                       value={editLocation}
                       onChange={(e) => setEditLocation(e.target.value)}
                       placeholder="如: 伦敦 (UTC+0)"
-                      className="w-full bg-white dark:bg-[#08101a] border border-[#cbd5e1] dark:border-[#1d2e44] rounded-lg px-2.5 py-1.5 text-xs text-[#0f172a] dark:text-white focus:outline-none focus:border-[#2481cc] dark:focus:border-[#2ba0ff]"
+                      className="w-full bg-white dark:bg-[#08101a] aurora:bg-[#081014] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] rounded-lg px-2.5 py-1.5 text-xs text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] placeholder-[#94a3b8] dark:placeholder-[#4e657e] aurora:placeholder-[#5a7782] focus:outline-none focus:border-[#2481cc] dark:focus:border-[#2ba0ff] aurora:focus:border-[#2dd4bf]"
                     />
                   </div>
                 </div>
                 <div>
-                  <label className="text-[10px] text-[#64748b] dark:text-[#7b93ad] block mb-0.5">职业 / 身份</label>
+                  <label className="text-[10px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] block mb-0.5">职业 / 身份</label>
                   <input
                     type="text"
                     value={editOccupation}
                     onChange={(e) => setEditOccupation(e.target.value)}
                     placeholder="如: 外贸采购经理 / 投资人"
-                    className="w-full bg-white dark:bg-[#08101a] border border-[#cbd5e1] dark:border-[#1d2e44] rounded-lg px-2.5 py-1.5 text-xs text-[#0f172a] dark:text-white focus:outline-none focus:border-[#2481cc] dark:focus:border-[#2ba0ff]"
+                    className="w-full bg-white dark:bg-[#08101a] aurora:bg-[#081014] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] rounded-lg px-2.5 py-1.5 text-xs text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] placeholder-[#94a3b8] dark:placeholder-[#4e657e] aurora:placeholder-[#5a7782] focus:outline-none focus:border-[#2481cc] dark:focus:border-[#2ba0ff] aurora:focus:border-[#2dd4bf]"
                   />
                 </div>
                 <div>
-                  <label className="text-[10px] text-[#64748b] dark:text-[#7b93ad] block mb-0.5">沟通习惯与语气偏好</label>
+                  <label className="text-[10px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] block mb-0.5">沟通习惯与语气偏好</label>
                   <input
                     type="text"
                     value={editTone}
                     onChange={(e) => setEditTone(e.target.value)}
                     placeholder="如: 讲究效率、干脆利落"
-                    className="w-full bg-white dark:bg-[#08101a] border border-[#cbd5e1] dark:border-[#1d2e44] rounded-lg px-2.5 py-1.5 text-xs text-[#0f172a] dark:text-white focus:outline-none focus:border-[#2481cc] dark:focus:border-[#2ba0ff]"
+                    className="w-full bg-white dark:bg-[#08101a] aurora:bg-[#081014] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] rounded-lg px-2.5 py-1.5 text-xs text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] placeholder-[#94a3b8] dark:placeholder-[#4e657e] aurora:placeholder-[#5a7782] focus:outline-none focus:border-[#2481cc] dark:focus:border-[#2ba0ff] aurora:focus:border-[#2dd4bf]"
                   />
                 </div>
                 <div className="flex justify-end pt-1">
                   <button
                     onClick={handleSaveAttributes}
-                    className="px-3 py-1.5 bg-[#2481cc] hover:bg-[#1e70b5] text-white rounded-lg text-xs font-medium cursor-pointer"
+                    className="px-3 py-1.5 bg-[#2481cc] hover:bg-[#1d6fb3] dark:bg-[#2ba0ff] dark:hover:bg-[#1e8ee8] aurora:bg-[#0d9488] aurora:hover:bg-[#0f766e] text-white rounded-lg text-xs font-medium cursor-pointer transition-colors"
                   >
                     保存客情特征
                   </button>
@@ -444,28 +444,28 @@ export const CustomerMemoryDrawer: React.FC<CustomerMemoryDrawerProps> = ({
               <div className="space-y-2.5 pt-1 text-xs">
                 <div className="grid grid-cols-2 gap-3">
                   <div>
-                    <span className="text-[10px] text-[#64748b] dark:text-[#7b93ad] block">年龄 / 生日</span>
-                    <span className="font-medium text-[#0f172a] dark:text-white text-xs mt-0.5 block truncate">
+                    <span className="text-[10px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] block">年龄 / 生日</span>
+                    <span className="font-medium text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] text-xs mt-0.5 block truncate">
                       {currentProfile.ageEstimate || '待确认'}
                     </span>
                   </div>
                   <div>
-                    <span className="text-[10px] text-[#64748b] dark:text-[#7b93ad] block">所在地 / 时区</span>
-                    <span className="font-medium text-[#0f172a] dark:text-white text-xs mt-0.5 block truncate">
+                    <span className="text-[10px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] block">所在地 / 时区</span>
+                    <span className="font-medium text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] text-xs mt-0.5 block truncate">
                       {currentProfile.locationTimezone || '待确认'}
                     </span>
                   </div>
-                  <div className="col-span-2 pt-1.5 border-t border-[#e2e8f0] dark:border-[#18273a]">
-                    <span className="text-[10px] text-[#64748b] dark:text-[#7b93ad] block">职业 / 身份</span>
-                    <span className="font-medium text-[#0f172a] dark:text-white text-xs mt-0.5 block truncate">
+                  <div className="col-span-2 pt-1.5 border-t border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34]">
+                    <span className="text-[10px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] block">职业 / 身份</span>
+                    <span className="font-medium text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] text-xs mt-0.5 block truncate">
                       {currentProfile.occupation || '待确认'}
                     </span>
                   </div>
                 </div>
 
-                <div className="pt-1.5 border-t border-[#e2e8f0] dark:border-[#18273a]">
-                  <span className="text-[10px] text-[#64748b] dark:text-[#7b93ad] block mb-0.5">沟通习惯与语气偏好</span>
-                  <p className="text-xs text-[#475569] dark:text-[#9bb3c9] leading-relaxed">
+                <div className="pt-1.5 border-t border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34]">
+                  <span className="text-[10px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] block mb-0.5">沟通习惯与语气偏好</span>
+                  <p className="text-xs text-[#475569] dark:text-[#b4c6d8] aurora:text-[#b7d0d8] leading-relaxed">
                     {currentProfile.toneStyle || '待提炼'}
                   </p>
                 </div>
@@ -474,27 +474,27 @@ export const CustomerMemoryDrawer: React.FC<CustomerMemoryDrawerProps> = ({
           </div>
 
           {/* 2. Likes & Topics */}
-          <div className="bg-[#f8fafc] dark:bg-[#0e1726]/85 p-3.5 rounded-xl border border-[#e2e8f0] dark:border-[#18273a] space-y-2.5">
-            <div className="flex items-center justify-between text-xs font-semibold text-[#0f172a] dark:text-[#eef4fb]">
+          <div className="bg-[#f8fafc] dark:bg-[#0e1726]/85 aurora:bg-[#101c23]/90 p-3.5 rounded-xl border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] space-y-2.5">
+            <div className="flex items-center justify-between text-xs font-semibold text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8]">
               <span className="flex items-center gap-1.5">
-                <Tag className="w-3.5 h-3.5 text-[#2481cc] dark:text-[#2ba0ff]" />
+                <Tag className="w-3.5 h-3.5 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf]" />
                 <span className="tabular-nums">爱好与关注话题 ({currentProfile.likesInterests.length})</span>
               </span>
             </div>
 
             <div className="flex flex-wrap gap-1.5 min-h-[24px]">
               {currentProfile.likesInterests.length === 0 ? (
-                <span className="text-[11px] text-[#64748b] dark:text-[#7b93ad]">暂无记录</span>
+                <span className="text-[11px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5]">暂无记录</span>
               ) : (
                 currentProfile.likesInterests.map((like, i) => (
                   <span
                     key={i}
-                    className="px-2.5 py-1 rounded-lg bg-[#e8f3ff] dark:bg-[#2ba0ff]/12 border border-[#bfdbfe] dark:border-[#2ba0ff]/25 text-[#0f172a] dark:text-[#dbeafe] text-xs flex items-center gap-1.5"
+                    className="px-2.5 py-1 rounded-lg bg-[#e8f3ff] dark:bg-[#2ba0ff]/12 aurora:bg-[#112d36] border border-[#bfdbfe] dark:border-[#2ba0ff]/25 aurora:border-[#2dd4bf]/35 text-[#0f172a] dark:text-[#dbeafe] aurora:text-[#ccfbf1] text-xs flex items-center gap-1.5"
                   >
                     <span>{like}</span>
                     <button
                       onClick={() => handleRemoveLike(i)}
-                      className="text-[#64748b] dark:text-[#7b93ad] hover:text-[#0f172a] dark:hover:text-white cursor-pointer transition-colors"
+                      className="text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] hover:text-[#0f172a] dark:hover:text-white aurora:hover:text-white cursor-pointer transition-colors"
                     >
                       ×
                     </button>
@@ -510,11 +510,11 @@ export const CustomerMemoryDrawer: React.FC<CustomerMemoryDrawerProps> = ({
                 onChange={(e) => setNewLikeInput(e.target.value)}
                 onKeyDown={(e) => e.key === 'Enter' && handleAddLike()}
                 placeholder="添加关注话题或偏好..."
-                className="flex-1 bg-white dark:bg-[#08101a] border border-[#cbd5e1] dark:border-[#1d2e44] focus:border-[#2481cc] dark:focus:border-[#2ba0ff] rounded-lg px-2.5 py-1.5 text-xs text-[#0f172a] dark:text-white placeholder-[#94a3b8] dark:placeholder-[#5b7490] focus:outline-none transition-colors"
+                className="flex-1 bg-white dark:bg-[#08101a] aurora:bg-[#081014] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] focus:border-[#2481cc] dark:focus:border-[#2ba0ff] aurora:focus:border-[#2dd4bf] rounded-lg px-2.5 py-1.5 text-xs text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] placeholder-[#94a3b8] dark:placeholder-[#4e657e] aurora:placeholder-[#5a7782] focus:outline-none transition-colors"
               />
               <button
                 onClick={handleAddLike}
-                className="px-3 py-1.5 rounded-lg bg-[#e8f3ff] dark:bg-[#162538] hover:bg-[#dbeafe] dark:hover:bg-[#1e334d] text-[#2481cc] dark:text-[#2ba0ff] text-xs font-medium cursor-pointer transition-colors shrink-0 border border-[#bfdbfe]/60 dark:border-[#243952]"
+                className="px-3 py-1.5 rounded-lg bg-[#e8f3ff] dark:bg-[#12263f] aurora:bg-[#112d36] hover:bg-[#dbeafe] dark:hover:bg-[#183354] aurora:hover:bg-[#153a44] text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#5eead4] text-xs font-medium cursor-pointer transition-colors shrink-0 border border-[#bfdbfe] dark:border-[#2ba0ff]/30 aurora:border-[#2dd4bf]/35"
               >
                 添加
               </button>
@@ -522,17 +522,17 @@ export const CustomerMemoryDrawer: React.FC<CustomerMemoryDrawerProps> = ({
           </div>
 
           {/* 3. Dislikes & Taboos */}
-          <div className="bg-[#f8fafc] dark:bg-[#0e1726]/85 p-3.5 rounded-xl border border-[#e2e8f0] dark:border-[#18273a] space-y-2.5">
-            <div className="flex items-center justify-between text-xs font-semibold text-[#0f172a] dark:text-[#eef4fb]">
+          <div className="bg-[#f8fafc] dark:bg-[#0e1726]/85 aurora:bg-[#101c23]/90 p-3.5 rounded-xl border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] space-y-2.5">
+            <div className="flex items-center justify-between text-xs font-semibold text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8]">
               <span className="flex items-center gap-1.5">
-                <ShieldAlert className="w-3.5 h-3.5 text-rose-500 dark:text-rose-400" />
+                <ShieldAlert className="w-3.5 h-3.5 text-rose-600 dark:text-rose-400" />
                 <span className="tabular-nums">避讳与敏感雷区 ({currentProfile.dislikesTaboos.length})</span>
               </span>
             </div>
 
             <div className="flex flex-wrap gap-1.5 min-h-[24px]">
               {currentProfile.dislikesTaboos.length === 0 ? (
-                <span className="text-[11px] text-[#64748b] dark:text-[#7b93ad]">暂无记录</span>
+                <span className="text-[11px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5]">暂无记录</span>
               ) : (
                 currentProfile.dislikesTaboos.map((taboo, i) => (
                   <span
@@ -542,7 +542,7 @@ export const CustomerMemoryDrawer: React.FC<CustomerMemoryDrawerProps> = ({
                     <span>{taboo}</span>
                     <button
                       onClick={() => handleRemoveTaboo(i)}
-                      className="text-rose-400 hover:text-rose-600 dark:hover:text-rose-200 cursor-pointer transition-colors"
+                      className="text-rose-500 dark:text-rose-400 hover:text-rose-700 dark:hover:text-rose-200 cursor-pointer transition-colors"
                     >
                       ×
                     </button>
@@ -558,11 +558,11 @@ export const CustomerMemoryDrawer: React.FC<CustomerMemoryDrawerProps> = ({
                 onChange={(e) => setNewTabooInput(e.target.value)}
                 onKeyDown={(e) => e.key === 'Enter' && handleAddTaboo()}
                 placeholder="添加避讳要点..."
-                className="flex-1 bg-white dark:bg-[#08101a] border border-[#cbd5e1] dark:border-[#1d2e44] focus:border-[#2481cc] dark:focus:border-[#2ba0ff] rounded-lg px-2.5 py-1.5 text-xs text-[#0f172a] dark:text-white placeholder-[#94a3b8] dark:placeholder-[#5b7490] focus:outline-none transition-colors"
+                className="flex-1 bg-white dark:bg-[#08101a] aurora:bg-[#081014] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] focus:border-[#2481cc] dark:focus:border-[#2ba0ff] aurora:focus:border-[#2dd4bf] rounded-lg px-2.5 py-1.5 text-xs text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] placeholder-[#94a3b8] dark:placeholder-[#4e657e] aurora:placeholder-[#5a7782] focus:outline-none transition-colors"
               />
               <button
                 onClick={handleAddTaboo}
-                className="px-3 py-1.5 rounded-lg bg-[#e8f3ff] dark:bg-[#162538] hover:bg-[#dbeafe] dark:hover:bg-[#1e334d] text-[#2481cc] dark:text-[#2ba0ff] text-xs font-medium cursor-pointer transition-colors shrink-0 border border-[#bfdbfe]/60 dark:border-[#243952]"
+                className="px-3 py-1.5 rounded-lg bg-[#e8f3ff] dark:bg-[#12263f] aurora:bg-[#112d36] hover:bg-[#dbeafe] dark:hover:bg-[#183354] aurora:hover:bg-[#153a44] text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#5eead4] text-xs font-medium cursor-pointer transition-colors shrink-0 border border-[#bfdbfe] dark:border-[#2ba0ff]/30 aurora:border-[#2dd4bf]/35"
               >
                 添加
               </button>
@@ -571,24 +571,24 @@ export const CustomerMemoryDrawer: React.FC<CustomerMemoryDrawerProps> = ({
 
           {/* 4. Emotional Needs */}
           {currentProfile.emotionalNeeds && currentProfile.emotionalNeeds !== '暂无特定记录' && currentProfile.emotionalNeeds !== '暂无记录' && (
-            <div className="bg-[#f8fafc] dark:bg-[#0e1726]/85 p-3.5 rounded-xl border border-[#e2e8f0] dark:border-[#18273a] space-y-1.5">
-              <span className="text-xs font-semibold text-[#0f172a] dark:text-[#eef4fb] block">核心诉求分析</span>
-              <p className="text-xs text-[#475569] dark:text-[#9bb3c9] bg-white dark:bg-[#08101a] p-2.5 rounded-lg border border-[#e2e8f0] dark:border-[#18273a] leading-relaxed">
+            <div className="bg-[#f8fafc] dark:bg-[#0e1726]/85 aurora:bg-[#101c23]/90 p-3.5 rounded-xl border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] space-y-1.5">
+              <span className="text-xs font-semibold text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] block">核心诉求分析</span>
+              <p className="text-xs text-[#475569] dark:text-[#b4c6d8] aurora:text-[#b7d0d8] bg-white dark:bg-[#08101a] aurora:bg-[#081014] p-2.5 rounded-lg border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] leading-relaxed">
                 {currentProfile.emotionalNeeds}
               </p>
             </div>
           )}
 
           {/* 5. Key Shared Memories */}
-          <div className="bg-[#f8fafc] dark:bg-[#0e1726]/85 p-3.5 rounded-xl border border-[#e2e8f0] dark:border-[#18273a] space-y-2.5">
-            <div className="flex items-center justify-between text-xs font-semibold text-[#0f172a] dark:text-[#eef4fb]">
+          <div className="bg-[#f8fafc] dark:bg-[#0e1726]/85 aurora:bg-[#101c23]/90 p-3.5 rounded-xl border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] space-y-2.5">
+            <div className="flex items-center justify-between text-xs font-semibold text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8]">
               <span className="flex items-center gap-1.5">
-                <Calendar className="w-3.5 h-3.5 text-[#2481cc] dark:text-[#2ba0ff]" />
+                <Calendar className="w-3.5 h-3.5 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf]" />
                 <span className="tabular-nums">重要约定与关键事件 ({currentProfile.keyMemories.length})</span>
               </span>
               <button
                 onClick={() => setIsAddingMemory(!isAddingMemory)}
-                className="text-[11px] text-[#2481cc] dark:text-[#2ba0ff] hover:underline flex items-center gap-1 cursor-pointer"
+                className="text-[11px] text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf] hover:underline flex items-center gap-1 cursor-pointer"
               >
                 <Plus className="w-3 h-3" />
                 <span>{isAddingMemory ? '收起' : '手动补录'}</span>
@@ -596,20 +596,20 @@ export const CustomerMemoryDrawer: React.FC<CustomerMemoryDrawerProps> = ({
             </div>
 
             {isAddingMemory && (
-              <div className="p-3 bg-white dark:bg-[#08101a] rounded-lg border border-[#e2e8f0] dark:border-[#18273a] space-y-2">
+              <div className="p-3 bg-white dark:bg-[#08101a] aurora:bg-[#081014] rounded-lg border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] space-y-2">
                 <div className="grid grid-cols-2 gap-2">
                   <input
                     type="date"
                     value={memDate}
                     onChange={(e) => setMemDate(e.target.value)}
-                    className="bg-[#f8fafc] dark:bg-[#0e1726] border border-[#cbd5e1] dark:border-[#1d2e44] rounded-lg px-2 py-1.5 text-xs text-[#0f172a] dark:text-white"
+                    className="bg-[#f8fafc] dark:bg-[#0e1726] aurora:bg-[#101c23] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] rounded-lg px-2 py-1.5 text-xs text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8]"
                   />
                   <input
                     type="text"
                     value={memTopic}
                     onChange={(e) => setMemTopic(e.target.value)}
                     placeholder="事件主题 (如: 方案交付约定)"
-                    className="bg-[#f8fafc] dark:bg-[#0e1726] border border-[#cbd5e1] dark:border-[#1d2e44] rounded-lg px-2 py-1.5 text-xs text-[#0f172a] dark:text-white"
+                    className="bg-[#f8fafc] dark:bg-[#0e1726] aurora:bg-[#101c23] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] rounded-lg px-2 py-1.5 text-xs text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] placeholder-[#94a3b8] dark:placeholder-[#4e657e] aurora:placeholder-[#5a7782]"
                   />
                 </div>
                 <textarea
@@ -617,18 +617,18 @@ export const CustomerMemoryDrawer: React.FC<CustomerMemoryDrawerProps> = ({
                   onChange={(e) => setMemSummary(e.target.value)}
                   placeholder="详情与约定事项..."
                   rows={2}
-                  className="w-full bg-[#f8fafc] dark:bg-[#0e1726] border border-[#cbd5e1] dark:border-[#1d2e44] focus:border-[#2481cc] dark:focus:border-[#2ba0ff] rounded-lg p-2 text-xs text-[#0f172a] dark:text-white placeholder-[#94a3b8] dark:placeholder-[#5b7490] focus:outline-none resize-none"
+                  className="w-full bg-[#f8fafc] dark:bg-[#0e1726] aurora:bg-[#101c23] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] focus:border-[#2481cc] dark:focus:border-[#2ba0ff] aurora:focus:border-[#2dd4bf] rounded-lg p-2 text-xs text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] placeholder-[#94a3b8] dark:placeholder-[#4e657e] aurora:placeholder-[#5a7782] focus:outline-none resize-none"
                 />
                 <div className="flex justify-end gap-2 pt-1">
                   <button
                     onClick={() => setIsAddingMemory(false)}
-                    className="px-2.5 py-1 text-xs text-[#64748b] dark:text-[#7b93ad] hover:text-[#0f172a] dark:hover:text-white cursor-pointer"
+                    className="px-2.5 py-1 text-xs text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] hover:text-[#0f172a] dark:hover:text-[#eef4fb] aurora:hover:text-[#ecf6f8] cursor-pointer"
                   >
                     取消
                   </button>
                   <button
                     onClick={handleSaveNewMemory}
-                    className="px-3 py-1 bg-[#2481cc] hover:bg-[#1e70b5] text-white rounded-lg text-xs font-medium cursor-pointer transition-colors"
+                    className="px-3 py-1 bg-[#2481cc] hover:bg-[#1d6fb3] dark:bg-[#2ba0ff] dark:hover:bg-[#1e8ee8] aurora:bg-[#0d9488] aurora:hover:bg-[#0f766e] text-white rounded-lg text-xs font-medium cursor-pointer transition-colors"
                   >
                     保存记忆
                   </button>
@@ -638,35 +638,35 @@ export const CustomerMemoryDrawer: React.FC<CustomerMemoryDrawerProps> = ({
 
             <div className="space-y-2">
               {currentProfile.keyMemories.length === 0 ? (
-                <div className="text-center py-3 text-xs text-[#64748b] dark:text-[#7b93ad]">
+                <div className="text-center py-3 text-xs text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5]">
                   暂无事件记录
                 </div>
               ) : (
                 currentProfile.keyMemories.map((mem) => (
                   <div
                     key={mem.id}
-                    className="p-2.5 bg-white dark:bg-[#08101a] rounded-lg border border-[#e2e8f0] dark:border-[#18273a] hover:border-[#2481cc]/40 dark:hover:border-[#2ba0ff]/40 transition-colors relative group"
+                    className="p-2.5 bg-white dark:bg-[#08101a] aurora:bg-[#081014] rounded-lg border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] hover:border-[#2481cc]/40 dark:hover:border-[#2ba0ff]/40 aurora:hover:border-[#2dd4bf]/40 transition-colors relative group"
                   >
                     <div className="flex items-center justify-between mb-1">
                       <div className="flex items-center gap-2">
-                        <span className="font-medium text-xs text-[#0f172a] dark:text-white">{mem.topic}</span>
+                        <span className="font-medium text-xs text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8]">{mem.topic}</span>
                         {mem.emotion && (
-                          <span className="text-[#64748b] dark:text-[#7b93ad] text-[10px]">
+                          <span className="text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] text-[10px]">
                             · {mem.emotion}
                           </span>
                         )}
                       </div>
                       <div className="flex items-center gap-2">
-                        <span className="text-[10px] text-[#64748b] dark:text-[#7b93ad] font-mono tabular-nums">{mem.date}</span>
+                        <span className="text-[10px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] font-mono tabular-nums">{mem.date}</span>
                         <button
                           onClick={() => handleRemoveMemory(mem.id)}
-                          className="opacity-0 group-hover:opacity-100 text-[#64748b] dark:text-[#7b93ad] hover:text-rose-500 dark:hover:text-rose-400 p-0.5 cursor-pointer transition-opacity"
+                          className="opacity-0 group-hover:opacity-100 text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] hover:text-rose-600 dark:hover:text-rose-400 p-0.5 cursor-pointer transition-opacity"
                         >
                           <Trash2 className="w-3 h-3" />
                         </button>
                       </div>
                     </div>
-                    <p className="text-xs text-[#475569] dark:text-[#9bb3c9] leading-relaxed">{mem.summary}</p>
+                    <p className="text-xs text-[#475569] dark:text-[#b4c6d8] aurora:text-[#b7d0d8] leading-relaxed">{mem.summary}</p>
                   </div>
                 ))
               )}
@@ -675,17 +675,17 @@ export const CustomerMemoryDrawer: React.FC<CustomerMemoryDrawerProps> = ({
         </div>
 
         {/* Footer */}
-        <div className="px-4 py-3 border-t border-[#e2e8f0] dark:border-[#162436] bg-[#f8fafc]/90 dark:bg-[#0b1523]/90 flex items-center justify-between shrink-0">
+        <div className="px-4 py-3 border-t border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] bg-[#f8fafc]/90 dark:bg-[#0d1726]/90 aurora:bg-[#0e1920]/90 flex items-center justify-between shrink-0">
           <button
             onClick={handleExportData}
-            className="flex items-center gap-1.5 text-xs text-[#64748b] dark:text-[#7b93ad] hover:text-[#0f172a] dark:hover:text-white transition-colors cursor-pointer"
+            className="flex items-center gap-1.5 text-xs text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] hover:text-[#0f172a] dark:hover:text-[#eef4fb] aurora:hover:text-[#ecf6f8] transition-colors cursor-pointer"
           >
             <Download className="w-3.5 h-3.5" />
             <span>导出 JSON 档案</span>
           </button>
           <button
             onClick={onClose}
-            className="px-4 py-1.5 rounded-lg bg-[#2481cc] hover:bg-[#1e70b5] text-white text-xs font-medium shadow-xs cursor-pointer transition-colors"
+            className="px-4 py-1.5 rounded-lg bg-[#2481cc] hover:bg-[#1d6fb3] dark:bg-[#2ba0ff] dark:hover:bg-[#1e8ee8] aurora:bg-[#0d9488] aurora:hover:bg-[#0f766e] text-white text-xs font-medium shadow-xs cursor-pointer transition-colors"
           >
             {embedded ? '收起面板' : '完成'}
           </button>
@@ -695,15 +695,15 @@ export const CustomerMemoryDrawer: React.FC<CustomerMemoryDrawerProps> = ({
 
   if (embedded) {
     return (
-      <div className="flex-1 flex flex-col min-h-0 overflow-hidden text-[#0f172a] dark:text-[#eef4fb]">
+      <div className="flex-1 flex flex-col min-h-0 overflow-hidden text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8]">
         {bodyContent}
       </div>
     );
   }
 
   return (
-    <div className="fixed inset-0 bg-black/70 backdrop-blur-xs flex justify-end z-50 select-none">
-      <div className="bg-white dark:bg-[#09111b] border-l border-[#e2e8f0] dark:border-[#18273a] w-full max-w-md h-full shadow-2xl flex flex-col overflow-hidden animate-in slide-in-from-right duration-200 text-[#0f172a] dark:text-[#eef4fb]">
+    <div className="fixed inset-0 bg-black/55 dark:bg-black/75 aurora:bg-black/80 backdrop-blur-xs flex justify-end z-50 select-none">
+      <div className="bg-white dark:bg-[#0b131f] aurora:bg-[#0c151b] border-l border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] w-full max-w-md h-full shadow-2xl flex flex-col overflow-hidden animate-in slide-in-from-right duration-200 text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8]">
         {bodyContent}
       </div>
     </div>

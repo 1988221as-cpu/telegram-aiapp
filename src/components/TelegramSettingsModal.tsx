@@ -724,7 +724,7 @@ export const TelegramSettingsModal: React.FC<TelegramSettingsModalProps> = ({
   const renderCloudStatusBanner = () => {
     if (isLoadingCloud) {
       return (
-        <div className="mb-4 p-3 rounded-xl bg-blue-500/10 border border-blue-500/20 text-xs text-[#2481cc] dark:text-[#2ba0ff] flex items-center gap-2">
+        <div className="mb-4 p-3 rounded-xl bg-[#e8f3ff] dark:bg-[#2ba0ff]/15 aurora:bg-[#112d36] border border-[#bfdbfe] dark:border-[#2ba0ff]/35 aurora:border-[#2dd4bf]/35 text-xs text-[#0284c7] dark:text-[#7cc4ff] aurora:text-[#5eead4] flex items-center gap-2">
           <Loader2 className="w-4 h-4 animate-spin shrink-0" />
           <span>正在从 Telegram 官方 MTProto 服务器实时拉取账号设置...</span>
         </div>
@@ -732,7 +732,7 @@ export const TelegramSettingsModal: React.FC<TelegramSettingsModalProps> = ({
     }
     if (cloudError) {
       return (
-        <div className="mb-4 p-3 rounded-xl bg-red-500/10 border border-red-500/25 text-xs text-red-500 flex items-start justify-between gap-3">
+        <div className="mb-4 p-3 rounded-xl bg-rose-500/10 border border-rose-500/25 text-xs text-rose-700 dark:text-rose-400 aurora:text-rose-400 flex items-start justify-between gap-3">
           <div className="flex items-start gap-2">
             <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
             <div>
@@ -743,7 +743,7 @@ export const TelegramSettingsModal: React.FC<TelegramSettingsModalProps> = ({
           <button
             type="button"
             onClick={loadOfficialCloudSettings}
-            className="px-2.5 py-1 rounded-lg bg-red-500/15 hover:bg-red-500/25 text-red-500 text-[11px] font-medium shrink-0 cursor-pointer flex items-center gap-1"
+            className="px-2.5 py-1 rounded-lg bg-rose-500/15 hover:bg-rose-500/25 text-rose-700 dark:text-rose-300 aurora:text-rose-300 text-[11px] font-medium shrink-0 cursor-pointer flex items-center gap-1 transition-colors"
           >
             <RefreshCw className="w-3 h-3" />
             <span>重试</span>
@@ -769,11 +769,11 @@ export const TelegramSettingsModal: React.FC<TelegramSettingsModalProps> = ({
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-xs select-none">
-      <div className="relative w-full max-w-2xl bg-white dark:bg-[#17212b] rounded-2xl shadow-2xl border border-[#e0e4e8] dark:border-[#202b36] overflow-hidden flex flex-col md:flex-row max-h-[85vh]">
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/55 dark:bg-black/75 aurora:bg-black/80 backdrop-blur-xs select-none">
+      <div className="relative w-full max-w-2xl bg-white dark:bg-[#0b131f] aurora:bg-[#0c151b] rounded-2xl shadow-2xl border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] overflow-hidden flex flex-col md:flex-row max-h-[85vh]">
         {/* Left Settings Sidebar */}
-        <div className="w-full md:w-56 bg-gray-50/70 dark:bg-[#131d27] border-b md:border-b-0 md:border-r border-[#e0e4e8] dark:border-[#202b36] p-3 flex flex-col shrink-0">
-          <div className="px-3 py-2 text-xs font-bold text-[#707579] dark:text-[#7f93a5] uppercase tracking-wider mb-1">
+        <div className="w-full md:w-56 bg-[#f8fafc] dark:bg-[#0d1726] aurora:bg-[#0e1920] border-b md:border-b-0 md:border-r border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] p-3 flex flex-col shrink-0">
+          <div className="px-3 py-2 text-xs font-bold text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] uppercase tracking-wider mb-1">
             电报设置
           </div>
 
@@ -782,8 +782,8 @@ export const TelegramSettingsModal: React.FC<TelegramSettingsModalProps> = ({
               onClick={() => { setActiveTab('profile'); setActionFeedback(null); }}
               className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-left cursor-pointer transition-colors ${
                 activeTab === 'profile'
-                  ? 'bg-[#2481cc] text-white shadow-xs'
-                  : 'text-[#111827] dark:text-[#d3e2ef] hover:bg-black/5 dark:hover:bg-[#202b36]'
+                  ? 'bg-[#2481cc] dark:bg-[#2ba0ff] aurora:bg-[#0d9488] text-white shadow-xs'
+                  : 'text-[#0f172a] dark:text-[#b4c6d8] aurora:text-[#b7d0d8] hover:bg-[#e2e8f0]/60 dark:hover:bg-[#132234] aurora:hover:bg-[#13252e]'
               }`}
             >
               <User className="w-4 h-4 shrink-0" />
@@ -794,8 +794,8 @@ export const TelegramSettingsModal: React.FC<TelegramSettingsModalProps> = ({
               onClick={() => { setActiveTab('privacy'); setActionFeedback(null); }}
               className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-left cursor-pointer transition-colors ${
                 activeTab === 'privacy'
-                  ? 'bg-[#2481cc] text-white shadow-xs'
-                  : 'text-[#111827] dark:text-[#d3e2ef] hover:bg-black/5 dark:hover:bg-[#202b36]'
+                  ? 'bg-[#2481cc] dark:bg-[#2ba0ff] aurora:bg-[#0d9488] text-white shadow-xs'
+                  : 'text-[#0f172a] dark:text-[#b4c6d8] aurora:text-[#b7d0d8] hover:bg-[#e2e8f0]/60 dark:hover:bg-[#132234] aurora:hover:bg-[#13252e]'
               }`}
             >
               <Shield className="w-4 h-4 shrink-0" />
@@ -806,8 +806,8 @@ export const TelegramSettingsModal: React.FC<TelegramSettingsModalProps> = ({
               onClick={() => { setActiveTab('notifications'); setActionFeedback(null); }}
               className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-left cursor-pointer transition-colors ${
                 activeTab === 'notifications'
-                  ? 'bg-[#2481cc] text-white shadow-xs'
-                  : 'text-[#111827] dark:text-[#d3e2ef] hover:bg-black/5 dark:hover:bg-[#202b36]'
+                  ? 'bg-[#2481cc] dark:bg-[#2ba0ff] aurora:bg-[#0d9488] text-white shadow-xs'
+                  : 'text-[#0f172a] dark:text-[#b4c6d8] aurora:text-[#b7d0d8] hover:bg-[#e2e8f0]/60 dark:hover:bg-[#132234] aurora:hover:bg-[#13252e]'
               }`}
             >
               <Bell className="w-4 h-4 shrink-0" />
@@ -818,8 +818,8 @@ export const TelegramSettingsModal: React.FC<TelegramSettingsModalProps> = ({
               onClick={() => { setActiveTab('appearance'); setActionFeedback(null); }}
               className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-left cursor-pointer transition-colors ${
                 activeTab === 'appearance'
-                  ? 'bg-[#2481cc] text-white shadow-xs'
-                  : 'text-[#111827] dark:text-[#d3e2ef] hover:bg-black/5 dark:hover:bg-[#202b36]'
+                  ? 'bg-[#2481cc] dark:bg-[#2ba0ff] aurora:bg-[#0d9488] text-white shadow-xs'
+                  : 'text-[#0f172a] dark:text-[#b4c6d8] aurora:text-[#b7d0d8] hover:bg-[#e2e8f0]/60 dark:hover:bg-[#132234] aurora:hover:bg-[#13252e]'
               }`}
             >
               <Palette className="w-4 h-4 shrink-0" />
@@ -830,8 +830,8 @@ export const TelegramSettingsModal: React.FC<TelegramSettingsModalProps> = ({
               onClick={() => { setActiveTab('folders'); setActionFeedback(null); }}
               className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-left cursor-pointer transition-colors ${
                 activeTab === 'folders'
-                  ? 'bg-[#2481cc] text-white shadow-xs'
-                  : 'text-[#111827] dark:text-[#d3e2ef] hover:bg-black/5 dark:hover:bg-[#202b36]'
+                  ? 'bg-[#2481cc] dark:bg-[#2ba0ff] aurora:bg-[#0d9488] text-white shadow-xs'
+                  : 'text-[#0f172a] dark:text-[#b4c6d8] aurora:text-[#b7d0d8] hover:bg-[#e2e8f0]/60 dark:hover:bg-[#132234] aurora:hover:bg-[#13252e]'
               }`}
             >
               <Folder className="w-4 h-4 shrink-0" />
@@ -840,13 +840,13 @@ export const TelegramSettingsModal: React.FC<TelegramSettingsModalProps> = ({
           </div>
 
           {onOpenSystemAdmin && (
-            <div className="mt-auto pt-4 border-t border-black/5 dark:border-white/5">
+            <div className="mt-auto pt-4 border-t border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34]">
               <button
                 onClick={() => {
                   onClose();
                   onOpenSystemAdmin();
                 }}
-                className="w-full flex items-center gap-2.5 px-3 py-2 rounded-xl text-left text-xs text-[#2481cc] dark:text-[#2ba0ff] hover:bg-black/5 dark:hover:bg-white/5 cursor-pointer font-medium"
+                className="w-full flex items-center gap-2.5 px-3 py-2 rounded-xl text-left text-xs text-[#2481cc] dark:text-[#7cc4ff] aurora:text-[#5eead4] hover:bg-[#e2e8f0]/60 dark:hover:bg-[#132234] aurora:hover:bg-[#13252e] cursor-pointer font-medium transition-colors"
               >
                 <Sliders className="w-3.5 h-3.5" />
                 <span>工作台系统管理</span>
@@ -856,10 +856,10 @@ export const TelegramSettingsModal: React.FC<TelegramSettingsModalProps> = ({
         </div>
 
         {/* Right Settings Content */}
-        <div className="flex-1 flex flex-col min-w-0 bg-white dark:bg-[#17212b]">
+        <div className="flex-1 flex flex-col min-w-0 bg-white dark:bg-[#0b131f] aurora:bg-[#0c151b]">
           {/* Header */}
-          <div className="h-14 px-6 border-b border-[#e0e4e8] dark:border-[#202b36] flex items-center justify-between shrink-0">
-            <h3 className="font-semibold text-sm text-[#111827] dark:text-[#f5f7fa]">
+          <div className="h-14 px-6 bg-[#f8fafc] dark:bg-[#0d1726] aurora:bg-[#0e1920] border-b border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] flex items-center justify-between shrink-0">
+            <h3 className="font-semibold text-sm text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8]">
               {activeTab === 'profile' && '个人资料'}
               {activeTab === 'privacy' && '隐私与安全'}
               {activeTab === 'notifications' && '通知与声音'}
@@ -872,13 +872,13 @@ export const TelegramSettingsModal: React.FC<TelegramSettingsModalProps> = ({
                 onClick={loadOfficialCloudSettings}
                 disabled={isLoadingCloud}
                 title="从 Telegram 云端刷新最新设置"
-                className="p-1.5 rounded-lg text-[#707579] hover:text-[#111827] dark:text-[#7f93a5] dark:hover:text-white hover:bg-black/5 dark:hover:bg-[#202b36] cursor-pointer disabled:opacity-50"
+                className="p-1.5 rounded-lg text-[#64748b] hover:text-[#0f172a] dark:text-[#7b93ad] dark:hover:text-[#eef4fb] aurora:text-[#7e9aa5] aurora:hover:text-[#ecf6f8] hover:bg-[#e2e8f0]/60 dark:hover:bg-[#132234] aurora:hover:bg-[#13252e] transition-colors cursor-pointer disabled:opacity-50"
               >
                 <RefreshCw className={`w-4 h-4 ${isLoadingCloud ? 'animate-spin' : ''}`} />
               </button>
               <button
                 onClick={onClose}
-                className="p-1 rounded-lg text-[#707579] hover:text-[#111827] dark:text-[#7f93a5] dark:hover:text-white hover:bg-black/5 dark:hover:bg-[#202b36] cursor-pointer"
+                className="p-1.5 rounded-lg text-[#64748b] hover:text-[#0f172a] dark:text-[#7b93ad] dark:hover:text-[#eef4fb] aurora:text-[#7e9aa5] aurora:hover:text-[#ecf6f8] hover:bg-[#e2e8f0]/60 dark:hover:bg-[#132234] aurora:hover:bg-[#13252e] transition-colors cursor-pointer"
               >
                 <X className="w-5 h-5" />
               </button>
@@ -893,8 +893,8 @@ export const TelegramSettingsModal: React.FC<TelegramSettingsModalProps> = ({
               <div
                 className={`mb-4 p-2.5 rounded-xl text-xs font-medium flex items-center gap-2 ${
                   actionFeedback.type === 'ok'
-                    ? 'bg-emerald-500/10 border border-emerald-500/25 text-emerald-500'
-                    : 'bg-red-500/10 border border-red-500/25 text-red-500'
+                    ? 'bg-emerald-500/10 border border-emerald-500/25 text-emerald-700 dark:text-emerald-400 aurora:text-emerald-400'
+                    : 'bg-rose-500/10 border border-rose-500/25 text-rose-700 dark:text-rose-400 aurora:text-rose-400'
                 }`}
               >
                 {actionFeedback.type === 'ok' ? <Check className="w-4 h-4 shrink-0" /> : <AlertCircle className="w-4 h-4 shrink-0" />}
@@ -926,7 +926,7 @@ export const TelegramSettingsModal: React.FC<TelegramSettingsModalProps> = ({
                       disabled={isUploadingAvatar || Boolean(cloudError)}
                       onClick={() => avatarInputRef.current?.click()}
                       title="上传新的 Telegram 官方头像"
-                      className="absolute -bottom-1 -right-1 w-7 h-7 rounded-full bg-[#2481cc] hover:bg-[#1e6fb3] disabled:opacity-50 text-white flex items-center justify-center shadow-md border-2 border-white dark:border-[#17212b] cursor-pointer"
+                      className="absolute -bottom-1 -right-1 w-7 h-7 rounded-full bg-[#2481cc] hover:bg-[#1d6fb3] dark:bg-[#2ba0ff] dark:hover:bg-[#1e8ee8] aurora:bg-[#0d9488] aurora:hover:bg-[#0f766e] disabled:opacity-50 text-white flex items-center justify-center shadow-md border-2 border-white dark:border-[#0b131f] aurora:border-[#0c151b] cursor-pointer transition-colors"
                     >
                       <Camera className="w-3.5 h-3.5" />
                     </button>
@@ -939,52 +939,52 @@ export const TelegramSettingsModal: React.FC<TelegramSettingsModalProps> = ({
                     />
                   </div>
                   <div className="min-w-0 flex-1">
-                    <div className="font-semibold text-sm text-[#111827] dark:text-white truncate">{name}</div>
-                    <div className="text-xs text-[#707579] dark:text-[#7f93a5] truncate">
+                    <div className="font-semibold text-sm text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] truncate">{name}</div>
+                    <div className="text-xs text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] truncate">
                       {phone || username || '未绑定号码'}
                     </div>
                   </div>
                 </div>
 
                 <div>
-                  <label className="block text-xs font-medium text-[#707579] dark:text-[#7f93a5] mb-1">显示昵称</label>
+                  <label className="block text-xs font-medium text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] mb-1">显示昵称</label>
                   <input
                     type="text"
                     value={name}
                     onChange={(e) => setName(e.target.value)}
                     disabled={Boolean(cloudError)}
-                    className="w-full px-3 py-2 text-xs rounded-xl bg-[#f0f2f5] dark:bg-[#242f3d] text-[#111827] dark:text-white border border-transparent focus:border-[#2ba0ff] focus:outline-none disabled:opacity-60"
+                    className="w-full px-3 py-2 text-xs rounded-xl bg-[#f8fafc] dark:bg-[#08101a] aurora:bg-[#081014] text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] focus:border-[#2481cc] dark:focus:border-[#2ba0ff] aurora:focus:border-[#2dd4bf] focus:outline-none disabled:opacity-60 transition-colors"
                   />
                 </div>
 
                 <div>
-                  <label className="block text-xs font-medium text-[#707579] dark:text-[#7f93a5] mb-1">用户名 (@username)</label>
+                  <label className="block text-xs font-medium text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] mb-1">用户名 (@username)</label>
                   <input
                     type="text"
                     value={username}
                     onChange={(e) => setUsername(e.target.value)}
                     placeholder="@your_username"
                     disabled={Boolean(cloudError)}
-                    className="w-full px-3 py-2 text-xs rounded-xl bg-[#f0f2f5] dark:bg-[#242f3d] text-[#111827] dark:text-white border border-transparent focus:border-[#2ba0ff] focus:outline-none disabled:opacity-60"
+                    className="w-full px-3 py-2 text-xs rounded-xl bg-[#f8fafc] dark:bg-[#08101a] aurora:bg-[#081014] text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] placeholder-[#94a3b8] dark:placeholder-[#4e657e] aurora:placeholder-[#5a7782] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] focus:border-[#2481cc] dark:focus:border-[#2ba0ff] aurora:focus:border-[#2dd4bf] focus:outline-none disabled:opacity-60 transition-colors"
                   />
                 </div>
 
                 <div>
-                  <label className="block text-xs font-medium text-[#707579] dark:text-[#7f93a5] mb-1">个人简介</label>
+                  <label className="block text-xs font-medium text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] mb-1">个人简介</label>
                   <textarea
                     rows={2}
                     value={bio}
                     onChange={(e) => setBio(e.target.value)}
                     placeholder="个人简介..."
                     disabled={Boolean(cloudError)}
-                    className="w-full px-3 py-2 text-xs rounded-xl bg-[#f0f2f5] dark:bg-[#242f3d] text-[#111827] dark:text-white border border-transparent focus:border-[#2ba0ff] focus:outline-none resize-none disabled:opacity-60"
+                    className="w-full px-3 py-2 text-xs rounded-xl bg-[#f8fafc] dark:bg-[#08101a] aurora:bg-[#081014] text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] placeholder-[#94a3b8] dark:placeholder-[#4e657e] aurora:placeholder-[#5a7782] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] focus:border-[#2481cc] dark:focus:border-[#2ba0ff] aurora:focus:border-[#2dd4bf] focus:outline-none resize-none disabled:opacity-60 transition-colors"
                   />
                 </div>
 
-                <div className="p-3 rounded-xl bg-gray-50 dark:bg-[#1e2a38] space-y-2.5">
+                <div className="p-3 rounded-xl bg-[#f8fafc] dark:bg-[#0e1726]/85 aurora:bg-[#101c23]/90 border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] space-y-2.5">
                   <div className="flex items-center justify-between">
-                    <div className="text-xs font-medium text-[#111827] dark:text-white flex items-center gap-1.5 tabular-nums">
-                      <Phone className="w-3.5 h-3.5 text-[#2481cc]" />
+                    <div className="text-xs font-medium text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] flex items-center gap-1.5 tabular-nums">
+                      <Phone className="w-3.5 h-3.5 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf]" />
                       <span>绑定手机号：{phone || '未知'}</span>
                     </div>
                     <button
@@ -994,27 +994,27 @@ export const TelegramSettingsModal: React.FC<TelegramSettingsModalProps> = ({
                         setIsEditingPhone((v) => !v);
                         setPhoneFeedback('');
                       }}
-                      className="px-2.5 py-1 rounded-lg bg-[#2481cc]/15 text-[#2481cc] dark:text-[#2ba0ff] text-[11px] font-semibold cursor-pointer disabled:opacity-50"
+                      className="px-2.5 py-1 rounded-lg bg-[#e8f3ff] border border-[#bfdbfe] text-[#0284c7] dark:bg-[#2ba0ff]/15 dark:border-[#2ba0ff]/35 dark:text-[#7cc4ff] aurora:bg-[#112d36] aurora:border-[#2dd4bf]/35 aurora:text-[#5eead4] text-[11px] font-semibold cursor-pointer disabled:opacity-50"
                     >
                       {isEditingPhone ? '取消换绑' : '更换号码'}
                     </button>
                   </div>
 
                   {isEditingPhone && (
-                    <div className="pt-2 border-t border-black/5 dark:border-white/5 space-y-2">
+                    <div className="pt-2 border-t border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] space-y-2">
                       <div className="flex gap-2">
                         <input
                           type="text"
                           value={newPhoneInput}
                           onChange={(e) => setNewPhoneInput(e.target.value)}
                           placeholder="输入新手机号（如 +8613800000000）"
-                          className="flex-1 px-2.5 py-1.5 text-xs rounded-lg bg-white dark:bg-[#131d27] border border-[#d6dce3] dark:border-[#2b3947] focus:outline-none focus:border-[#2ba0ff]"
+                          className="flex-1 px-2.5 py-1.5 text-xs rounded-lg bg-white dark:bg-[#08101a] aurora:bg-[#081014] text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] placeholder-[#94a3b8] dark:placeholder-[#4e657e] aurora:placeholder-[#5a7782] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] focus:outline-none focus:border-[#2481cc] dark:focus:border-[#2ba0ff] aurora:focus:border-[#2dd4bf]"
                         />
                         <button
                           type="button"
                           disabled={isPhoneLoading || !newPhoneInput.trim()}
                           onClick={handleSendChangePhoneCode}
-                          className="px-3 py-1.5 rounded-lg bg-[#2481cc] text-white text-xs font-medium cursor-pointer disabled:opacity-50"
+                          className="px-3 py-1.5 rounded-lg bg-[#2481cc] hover:bg-[#1d6fb3] dark:bg-[#2ba0ff] dark:hover:bg-[#1e8ee8] aurora:bg-[#0d9488] aurora:hover:bg-[#0f766e] text-white text-xs font-medium cursor-pointer disabled:opacity-50 transition-colors"
                         >
                           {isPhoneLoading ? '发送中...' : '发送验证码'}
                         </button>
@@ -1026,19 +1026,19 @@ export const TelegramSettingsModal: React.FC<TelegramSettingsModalProps> = ({
                             value={changePhoneCode}
                             onChange={(e) => setChangePhoneCode(e.target.value)}
                             placeholder="输入官方换绑验证码"
-                            className="flex-1 px-2.5 py-1.5 text-xs rounded-lg bg-white dark:bg-[#131d27] border border-[#d6dce3] dark:border-[#2b3947] focus:outline-none focus:border-[#2ba0ff]"
+                            className="flex-1 px-2.5 py-1.5 text-xs rounded-lg bg-white dark:bg-[#08101a] aurora:bg-[#081014] text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] placeholder-[#94a3b8] dark:placeholder-[#4e657e] aurora:placeholder-[#5a7782] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] focus:outline-none focus:border-[#2481cc] dark:focus:border-[#2ba0ff] aurora:focus:border-[#2dd4bf]"
                           />
                           <button
                             type="button"
                             disabled={isPhoneLoading || !changePhoneCode.trim()}
                             onClick={handleConfirmChangePhone}
-                            className="px-3 py-1.5 rounded-lg bg-emerald-600 text-white text-xs font-medium cursor-pointer disabled:opacity-50"
+                            className="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-medium cursor-pointer disabled:opacity-50"
                           >
                             确认换绑
                           </button>
                         </div>
                       )}
-                      {phoneFeedback && <div className="text-[11px] text-emerald-500">{phoneFeedback}</div>}
+                      {phoneFeedback && <div className="text-[11px] text-emerald-700 dark:text-emerald-400 aurora:text-emerald-400">{phoneFeedback}</div>}
                     </div>
                   )}
                 </div>
@@ -1047,18 +1047,18 @@ export const TelegramSettingsModal: React.FC<TelegramSettingsModalProps> = ({
                   <button
                     type="submit"
                     disabled={isSavingProfile || Boolean(cloudError)}
-                    className="px-5 py-2 rounded-xl bg-[#2481cc] hover:bg-[#2074b8] disabled:opacity-60 text-white text-xs font-semibold cursor-pointer shadow-sm transition-colors"
+                    className="px-5 py-2 rounded-xl bg-[#2481cc] hover:bg-[#1d6fb3] dark:bg-[#2ba0ff] dark:hover:bg-[#1e8ee8] aurora:bg-[#0d9488] aurora:hover:bg-[#0f766e] disabled:opacity-60 text-white text-xs font-semibold cursor-pointer shadow-sm transition-colors"
                   >
                     {isSavingProfile ? '正在同步至云端...' : '保存并同步至云端'}
                   </button>
                   {isSavedNotice && (
-                    <span className="text-xs text-emerald-500 font-medium flex items-center gap-1 animate-in fade-in">
+                    <span className="text-xs text-emerald-700 dark:text-emerald-400 aurora:text-emerald-400 font-medium flex items-center gap-1 animate-in fade-in">
                       <Check className="w-4 h-4" /> {saveNoticeText}
                     </span>
                   )}
                 </div>
                 {saveError && (
-                  <div className="text-xs text-red-500 font-medium pt-1">
+                  <div className="text-xs text-rose-600 dark:text-rose-400 aurora:text-rose-400 font-medium pt-1">
                     {saveError}
                   </div>
                 )}
@@ -1068,18 +1068,18 @@ export const TelegramSettingsModal: React.FC<TelegramSettingsModalProps> = ({
             {activeTab === 'privacy' && (
               <div className="space-y-4 max-w-xl text-xs">
                 {/* 2FA Section */}
-                <div className="p-4 rounded-xl bg-gray-50 dark:bg-[#1e2a38] space-y-3 border border-black/5 dark:border-white/5">
+                <div className="p-4 rounded-xl bg-[#f8fafc] dark:bg-[#0e1726]/85 aurora:bg-[#101c23]/90 space-y-3 border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34]">
                   <div className="flex items-start justify-between gap-3">
                     <div>
-                      <div className="font-semibold text-[#111827] dark:text-white flex items-center gap-1.5 flex-wrap">
-                        <Lock className="w-3.5 h-3.5 text-[#2481cc]" />
+                      <div className="font-semibold text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] flex items-center gap-1.5 flex-wrap">
+                        <Lock className="w-3.5 h-3.5 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf]" />
                         <span>云端两步验证密码 (2FA)</span>
                         {cloudSettings?.twoFactor && (
                           <span
                             className={`text-[11px] font-medium ${
                               cloudSettings.twoFactor.hasPassword
-                                ? 'text-emerald-500'
-                                : 'text-amber-500'
+                                ? 'text-emerald-700 dark:text-emerald-400 aurora:text-emerald-400'
+                                : 'text-amber-700 dark:text-amber-400 aurora:text-amber-400'
                             }`}
                           >
                             · {cloudSettings.twoFactor.hasPassword ? '已开启' : '未设置'}
@@ -1087,18 +1087,18 @@ export const TelegramSettingsModal: React.FC<TelegramSettingsModalProps> = ({
                         )}
                       </div>
                       {!cloudSettings?.twoFactor && !isLoadingCloud && (
-                        <div className="text-[11px] text-[#707579] dark:text-[#7f93a5] mt-1">
+                        <div className="text-[11px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] mt-1">
                           暂未连接 Telegram 云端状态。请确保已登录在线 Telegram 账号，或点击右侧刷新拉取。
                         </div>
                       )}
                       {cloudSettings?.twoFactor?.hasPassword && (
-                        <div className="text-[11px] text-[#707579] dark:text-[#7f93a5] mt-1">
+                        <div className="text-[11px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] mt-1">
                           提示语：{cloudSettings.twoFactor.hint || '无'}
                           {cloudSettings.twoFactor.hasRecovery ? ' · 已绑定恢复邮箱' : ' · 未绑定恢复邮箱'}
                         </div>
                       )}
                       {Boolean(cloudSettings?.twoFactor?.pendingResetDate) && (
-                        <div className="mt-1.5 px-2.5 py-1.5 rounded-lg bg-amber-500/10 border border-amber-500/25 text-amber-500 text-[11px]">
+                        <div className="mt-1.5 px-2.5 py-1.5 rounded-lg bg-amber-500/10 border border-amber-500/25 text-amber-800 dark:text-amber-300 aurora:text-amber-300 text-[11px]">
                           官方 2FA 密码重置冷却中：预计于 {formatUnixTimestamp(cloudSettings?.twoFactor?.pendingResetDate)} 自动生效
                         </div>
                       )}
@@ -1109,7 +1109,7 @@ export const TelegramSettingsModal: React.FC<TelegramSettingsModalProps> = ({
                         type="button"
                         disabled={isLoadingCloud}
                         onClick={loadOfficialCloudSettings}
-                        className="px-2.5 py-1.5 rounded-lg bg-[#2481cc]/15 hover:bg-[#2481cc]/25 text-[#2481cc] dark:text-[#2ba0ff] text-[11px] font-medium shrink-0 cursor-pointer disabled:opacity-50 flex items-center gap-1"
+                        className="px-2.5 py-1.5 rounded-lg bg-[#e8f3ff] border border-[#bfdbfe] text-[#0284c7] hover:bg-[#dbeafe] dark:bg-[#2ba0ff]/15 dark:border-[#2ba0ff]/35 dark:text-[#7cc4ff] dark:hover:bg-[#2ba0ff]/25 aurora:bg-[#112d36] aurora:border-[#2dd4bf]/35 aurora:text-[#5eead4] aurora:hover:bg-[#153944] text-[11px] font-medium shrink-0 cursor-pointer disabled:opacity-50 flex items-center gap-1 transition-colors"
                       >
                         <RefreshCw className={`w-3 h-3 ${isLoadingCloud ? 'animate-spin' : ''}`} />
                         <span>刷新状态</span>
@@ -1130,7 +1130,7 @@ export const TelegramSettingsModal: React.FC<TelegramSettingsModalProps> = ({
                                 setEmail2fa('');
                                 setTwoFactorMode('enable');
                               }}
-                              className="px-2.5 py-1.5 rounded-lg bg-[#2481cc] hover:bg-[#1e6fb3] text-white text-[11px] font-medium cursor-pointer"
+                              className="px-2.5 py-1.5 rounded-lg bg-[#2481cc] hover:bg-[#1d6fb3] dark:bg-[#2ba0ff] dark:hover:bg-[#1e8ee8] aurora:bg-[#0d9488] aurora:hover:bg-[#0f766e] text-white text-[11px] font-medium cursor-pointer transition-colors"
                             >
                               开启 2FA
                             </button>
@@ -1148,7 +1148,7 @@ export const TelegramSettingsModal: React.FC<TelegramSettingsModalProps> = ({
                                   setEmail2fa('');
                                   setTwoFactorMode('change');
                                 }}
-                                className="px-2.5 py-1.5 rounded-lg bg-[#2481cc] hover:bg-[#1e6fb3] text-white text-[11px] font-medium cursor-pointer"
+                                className="px-2.5 py-1.5 rounded-lg bg-[#2481cc] hover:bg-[#1d6fb3] dark:bg-[#2ba0ff] dark:hover:bg-[#1e8ee8] aurora:bg-[#0d9488] aurora:hover:bg-[#0f766e] text-white text-[11px] font-medium cursor-pointer transition-colors"
                               >
                                 修改密码
                               </button>
@@ -1162,14 +1162,14 @@ export const TelegramSettingsModal: React.FC<TelegramSettingsModalProps> = ({
                                   setConfirm2faPwd('');
                                   setTwoFactorMode('disable');
                                 }}
-                                className="px-2.5 py-1.5 rounded-lg bg-red-500/15 hover:bg-red-500/25 text-red-500 text-[11px] font-medium cursor-pointer"
+                                className="px-2.5 py-1.5 rounded-lg bg-rose-500/15 hover:bg-rose-500/25 text-rose-700 dark:text-rose-400 aurora:text-rose-400 text-[11px] font-medium cursor-pointer transition-colors"
                               >
                                 关闭
                               </button>
                               <button
                                 type="button"
                                 onClick={() => setShowResetConfirm((v) => !v)}
-                                className="px-2 py-1.5 rounded-lg bg-black/5 dark:bg-white/10 text-[#707579] dark:text-[#9eb1c2] hover:text-[#111827] dark:hover:text-white text-[11px] cursor-pointer"
+                                className="px-2 py-1.5 rounded-lg bg-[#f1f5f9] dark:bg-[#132234] aurora:bg-[#13252e] text-[#475569] dark:text-[#b4c6d8] aurora:text-[#b7d0d8] hover:text-[#0f172a] dark:hover:text-[#eef4fb] aurora:hover:text-[#ecf6f8] text-[11px] cursor-pointer transition-colors"
                                 title="忘记原两步验证密码？可向 Telegram 申请官方重置"
                               >
                                 忘记密码
@@ -1184,7 +1184,7 @@ export const TelegramSettingsModal: React.FC<TelegramSettingsModalProps> = ({
                   {/* Unconfirmed Recovery Email Inline Verification */}
                   {cloudSettings?.twoFactor?.emailUnconfirmedPattern && (
                     <div className="p-3 rounded-lg bg-amber-500/10 border border-amber-500/25 space-y-2">
-                      <div className="flex items-center gap-1.5 text-amber-600 dark:text-amber-400 font-medium text-[11px]">
+                      <div className="flex items-center gap-1.5 text-amber-800 dark:text-amber-300 aurora:text-amber-300 font-medium text-[11px]">
                         <Mail className="w-3.5 h-3.5 shrink-0" />
                         <span>待确认恢复邮箱：{cloudSettings.twoFactor.emailUnconfirmedPattern}</span>
                       </div>
@@ -1194,13 +1194,13 @@ export const TelegramSettingsModal: React.FC<TelegramSettingsModalProps> = ({
                           value={emailConfirmCode}
                           onChange={(e) => setEmailConfirmCode(e.target.value)}
                           placeholder="输入邮箱收到的 6 位验证码"
-                          className="flex-1 px-2.5 py-1.5 text-xs rounded-lg bg-white dark:bg-[#131d27] border border-[#d6dce3] dark:border-[#2b3947] focus:outline-none focus:border-[#2ba0ff]"
+                          className="flex-1 px-2.5 py-1.5 text-xs rounded-lg bg-white dark:bg-[#08101a] aurora:bg-[#081014] text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] placeholder-[#94a3b8] dark:placeholder-[#4e657e] aurora:placeholder-[#5a7782] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] focus:outline-none focus:border-[#2481cc] dark:focus:border-[#2ba0ff] aurora:focus:border-[#2dd4bf]"
                         />
                         <button
                           type="button"
                           disabled={actionBusy || !emailConfirmCode.trim()}
                           onClick={() => handleTwoFactorAction('confirm_email', emailConfirmCode)}
-                          className="px-2.5 py-1.5 rounded-lg bg-[#2481cc] text-white text-[11px] font-medium cursor-pointer disabled:opacity-50"
+                          className="px-2.5 py-1.5 rounded-lg bg-[#2481cc] hover:bg-[#1d6fb3] dark:bg-[#2ba0ff] dark:hover:bg-[#1e8ee8] aurora:bg-[#0d9488] aurora:hover:bg-[#0f766e] text-white text-[11px] font-medium cursor-pointer disabled:opacity-50 transition-colors"
                         >
                           确认邮箱
                         </button>
@@ -1210,7 +1210,7 @@ export const TelegramSettingsModal: React.FC<TelegramSettingsModalProps> = ({
                           type="button"
                           disabled={actionBusy}
                           onClick={() => handleTwoFactorAction('resend_email')}
-                          className="text-[#2481cc] dark:text-[#2ba0ff] hover:underline cursor-pointer disabled:opacity-50"
+                          className="text-[#2481cc] dark:text-[#7cc4ff] aurora:text-[#5eead4] hover:underline cursor-pointer disabled:opacity-50"
                         >
                           重新发送验证邮件
                         </button>
@@ -1218,7 +1218,7 @@ export const TelegramSettingsModal: React.FC<TelegramSettingsModalProps> = ({
                           type="button"
                           disabled={actionBusy}
                           onClick={() => handleTwoFactorAction('cancel_email')}
-                          className="text-red-500 hover:underline cursor-pointer disabled:opacity-50"
+                          className="text-rose-600 dark:text-rose-400 aurora:text-rose-400 hover:underline cursor-pointer disabled:opacity-50"
                         >
                           取消绑定此邮箱
                         </button>
@@ -1228,19 +1228,19 @@ export const TelegramSettingsModal: React.FC<TelegramSettingsModalProps> = ({
 
                   {/* Official 7-Day Forgot Password Reset Confirmation */}
                   {showResetConfirm && cloudSettings?.twoFactor?.hasPassword && twoFactorMode === 'idle' && (
-                    <div className="p-3 rounded-lg bg-red-500/10 border border-red-500/25 space-y-2">
-                      <div className="text-[11px] text-red-500 font-medium flex items-center gap-1.5">
+                    <div className="p-3 rounded-lg bg-rose-500/10 border border-rose-500/25 space-y-2">
+                      <div className="text-[11px] text-rose-700 dark:text-rose-400 aurora:text-rose-400 font-medium flex items-center gap-1.5">
                         <KeyRound className="w-3.5 h-3.5 shrink-0" />
                         <span>忘记原云端两步验证密码？申请官方安全重置</span>
                       </div>
-                      <div className="text-[11px] text-[#707579] dark:text-[#9eb1c2] leading-relaxed">
-                        调用 Telegram 官方 <code className="px-1 rounded bg-black/10 dark:bg-white/10">account.ResetPassword</code>。通常需等待 7 天安全冷却期后生效（若账号当前满足免等条件则立即清除）。
+                      <div className="text-[11px] text-[#475569] dark:text-[#b4c6d8] aurora:text-[#b7d0d8] leading-relaxed">
+                        调用 Telegram 官方 <code className="px-1 rounded bg-[#e2e8f0] dark:bg-[#132234] aurora:bg-[#13252e]">account.ResetPassword</code>。通常需等待 7 天安全冷却期后生效（若账号当前满足免等条件则立即清除）。
                       </div>
                       <div className="flex items-center justify-end gap-2">
                         <button
                           type="button"
                           onClick={() => setShowResetConfirm(false)}
-                          className="px-2.5 py-1 rounded-lg bg-black/5 dark:bg-white/10 text-[11px] cursor-pointer"
+                          className="px-2.5 py-1 rounded-lg bg-[#f1f5f9] dark:bg-[#132234] aurora:bg-[#13252e] text-[#475569] dark:text-[#b4c6d8] aurora:text-[#b7d0d8] text-[11px] cursor-pointer"
                         >
                           取消
                         </button>
@@ -1248,7 +1248,7 @@ export const TelegramSettingsModal: React.FC<TelegramSettingsModalProps> = ({
                           type="button"
                           disabled={actionBusy}
                           onClick={() => handleTwoFactorAction('reset_password')}
-                          className="px-2.5 py-1 rounded-lg bg-red-500 text-white text-[11px] font-medium cursor-pointer disabled:opacity-50"
+                          className="px-2.5 py-1 rounded-lg bg-rose-600 hover:bg-rose-700 text-white text-[11px] font-medium cursor-pointer disabled:opacity-50"
                         >
                           {actionBusy ? '提交中...' : '确认提交官方重置申请'}
                         </button>
@@ -1257,7 +1257,7 @@ export const TelegramSettingsModal: React.FC<TelegramSettingsModalProps> = ({
                   )}
 
                   {twoFactorMode !== 'idle' && (
-                    <form onSubmit={handleSubmitTwoFactor} className="pt-3 border-t border-black/5 dark:border-white/5 space-y-2.5">
+                    <form onSubmit={handleSubmitTwoFactor} className="pt-3 border-t border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] space-y-2.5">
                       {cloudSettings?.twoFactor?.hasPassword && (
                         <div className="relative">
                           <input
@@ -1266,12 +1266,12 @@ export const TelegramSettingsModal: React.FC<TelegramSettingsModalProps> = ({
                             value={cur2faPwd}
                             onChange={(e) => setCur2faPwd(e.target.value)}
                             placeholder="输入当前云端 2FA 密码"
-                            className="w-full px-3 py-2 pr-9 text-xs rounded-lg bg-white dark:bg-[#131d27] border border-[#d6dce3] dark:border-[#2b3947] focus:outline-none focus:border-[#2ba0ff]"
+                            className="w-full px-3 py-2 pr-9 text-xs rounded-lg bg-white dark:bg-[#08101a] aurora:bg-[#081014] text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] placeholder-[#94a3b8] dark:placeholder-[#4e657e] aurora:placeholder-[#5a7782] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] focus:outline-none focus:border-[#2481cc] dark:focus:border-[#2ba0ff] aurora:focus:border-[#2dd4bf]"
                           />
                           <button
                             type="button"
                             onClick={() => setShowCur2faPwd((v) => !v)}
-                            className="absolute right-2.5 top-1/2 -translate-y-1/2 text-[#707579] hover:text-[#111827] dark:hover:text-white cursor-pointer"
+                            className="absolute right-2.5 top-1/2 -translate-y-1/2 text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] hover:text-[#0f172a] dark:hover:text-[#eef4fb] aurora:hover:text-[#ecf6f8] cursor-pointer"
                             title={showCur2faPwd ? '隐藏密码' : '显示密码'}
                           >
                             {showCur2faPwd ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
@@ -1287,12 +1287,12 @@ export const TelegramSettingsModal: React.FC<TelegramSettingsModalProps> = ({
                               value={new2faPwd}
                               onChange={(e) => setNew2faPwd(e.target.value)}
                               placeholder="输入新的两步验证密码"
-                              className="w-full px-3 py-2 pr-9 text-xs rounded-lg bg-white dark:bg-[#131d27] border border-[#d6dce3] dark:border-[#2b3947] focus:outline-none focus:border-[#2ba0ff]"
+                              className="w-full px-3 py-2 pr-9 text-xs rounded-lg bg-white dark:bg-[#08101a] aurora:bg-[#081014] text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] placeholder-[#94a3b8] dark:placeholder-[#4e657e] aurora:placeholder-[#5a7782] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] focus:outline-none focus:border-[#2481cc] dark:focus:border-[#2ba0ff] aurora:focus:border-[#2dd4bf]"
                             />
                             <button
                               type="button"
                               onClick={() => setShowNew2faPwd((v) => !v)}
-                              className="absolute right-2.5 top-1/2 -translate-y-1/2 text-[#707579] hover:text-[#111827] dark:hover:text-white cursor-pointer"
+                              className="absolute right-2.5 top-1/2 -translate-y-1/2 text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] hover:text-[#0f172a] dark:hover:text-[#eef4fb] aurora:hover:text-[#ecf6f8] cursor-pointer"
                               title={showNew2faPwd ? '隐藏密码' : '显示密码'}
                             >
                               {showNew2faPwd ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
@@ -1304,7 +1304,7 @@ export const TelegramSettingsModal: React.FC<TelegramSettingsModalProps> = ({
                             value={confirm2faPwd}
                             onChange={(e) => setConfirm2faPwd(e.target.value)}
                             placeholder="再次输入以确认新密码"
-                            className="w-full px-3 py-2 text-xs rounded-lg bg-white dark:bg-[#131d27] border border-[#d6dce3] dark:border-[#2b3947] focus:outline-none focus:border-[#2ba0ff]"
+                            className="w-full px-3 py-2 text-xs rounded-lg bg-white dark:bg-[#08101a] aurora:bg-[#081014] text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] placeholder-[#94a3b8] dark:placeholder-[#4e657e] aurora:placeholder-[#5a7782] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] focus:outline-none focus:border-[#2481cc] dark:focus:border-[#2ba0ff] aurora:focus:border-[#2dd4bf]"
                           />
                           <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
                             <input
@@ -1312,14 +1312,14 @@ export const TelegramSettingsModal: React.FC<TelegramSettingsModalProps> = ({
                               value={hint2fa}
                               onChange={(e) => setHint2fa(e.target.value)}
                               placeholder="密码提示语（可选）"
-                              className="px-3 py-2 text-xs rounded-lg bg-white dark:bg-[#131d27] border border-[#d6dce3] dark:border-[#2b3947] focus:outline-none focus:border-[#2ba0ff]"
+                              className="px-3 py-2 text-xs rounded-lg bg-white dark:bg-[#08101a] aurora:bg-[#081014] text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] placeholder-[#94a3b8] dark:placeholder-[#4e657e] aurora:placeholder-[#5a7782] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] focus:outline-none focus:border-[#2481cc] dark:focus:border-[#2ba0ff] aurora:focus:border-[#2dd4bf]"
                             />
                             <input
                               type="email"
                               value={email2fa}
                               onChange={(e) => setEmail2fa(e.target.value)}
                               placeholder={twoFactorMode === 'change' ? '新恢复邮箱（留空保留原邮箱）' : '找回邮箱（可选，需验证）'}
-                              className="px-3 py-2 text-xs rounded-lg bg-white dark:bg-[#131d27] border border-[#d6dce3] dark:border-[#2b3947] focus:outline-none focus:border-[#2ba0ff]"
+                              className="px-3 py-2 text-xs rounded-lg bg-white dark:bg-[#08101a] aurora:bg-[#081014] text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] placeholder-[#94a3b8] dark:placeholder-[#4e657e] aurora:placeholder-[#5a7782] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] focus:outline-none focus:border-[#2481cc] dark:focus:border-[#2ba0ff] aurora:focus:border-[#2dd4bf]"
                             />
                           </div>
                         </>
@@ -1328,15 +1328,17 @@ export const TelegramSettingsModal: React.FC<TelegramSettingsModalProps> = ({
                         <button
                           type="button"
                           onClick={() => setTwoFactorMode('idle')}
-                          className="px-3 py-1.5 rounded-lg bg-black/5 dark:bg-white/10 text-xs cursor-pointer"
+                          className="px-3 py-1.5 rounded-lg bg-[#f1f5f9] dark:bg-[#132234] aurora:bg-[#13252e] text-[#475569] dark:text-[#b4c6d8] aurora:text-[#b7d0d8] text-xs cursor-pointer transition-colors"
                         >
                           取消
                         </button>
                         <button
                           type="submit"
                           disabled={actionBusy}
-                          className={`px-3 py-1.5 rounded-lg text-white text-xs font-medium cursor-pointer disabled:opacity-50 ${
-                            twoFactorMode === 'disable' ? 'bg-red-500' : 'bg-[#2481cc]'
+                          className={`px-3 py-1.5 rounded-lg text-white text-xs font-medium cursor-pointer disabled:opacity-50 transition-colors ${
+                            twoFactorMode === 'disable'
+                              ? 'bg-rose-600 hover:bg-rose-700'
+                              : 'bg-[#2481cc] hover:bg-[#1d6fb3] dark:bg-[#2ba0ff] dark:hover:bg-[#1e8ee8] aurora:bg-[#0d9488] aurora:hover:bg-[#0f766e]'
                           }`}
                         >
                           {actionBusy ? '提交至云端...' : twoFactorMode === 'disable' ? '确认关闭 2FA' : '保存至云端'}
@@ -1347,18 +1349,18 @@ export const TelegramSettingsModal: React.FC<TelegramSettingsModalProps> = ({
                 </div>
 
                 {/* Granular Individual Telegram Privacy & Security Settings (MTProto Real Controls) */}
-                <div className="p-4 rounded-xl bg-gray-50 dark:bg-[#1e2a38] space-y-3 border border-black/5 dark:border-white/5">
+                <div className="p-4 rounded-xl bg-[#f8fafc] dark:bg-[#0e1726]/85 aurora:bg-[#101c23]/90 space-y-3 border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34]">
                   <div className="flex items-center justify-between gap-2">
-                    <div className="font-semibold text-[#111827] dark:text-white flex items-center gap-1.5">
-                      <Shield className="w-3.5 h-3.5 text-[#2481cc]" />
+                    <div className="font-semibold text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] flex items-center gap-1.5">
+                      <Shield className="w-3.5 h-3.5 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf]" />
                       <span>个人隐私与自定义安全权限</span>
                     </div>
-                    <span className="text-[10px] text-[#707579] dark:text-[#7f93a5]">
+                    <span className="text-[10px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5]">
                       每项均可独立设置 + 自定义例外用户
                     </span>
                   </div>
 
-                  <div className="divide-y divide-black/5 dark:divide-white/5">
+                  <div className="divide-y divide-[#e2e8f0] dark:divide-[#18273a] aurora:divide-[#182b34]">
                     {([
                       { key: 'status', title: '最后上线时间与在线状态', supportsNobody: true },
                       { key: 'phone', title: '谁可以看到我的手机号码', supportsNobody: true },
@@ -1385,8 +1387,8 @@ export const TelegramSettingsModal: React.FC<TelegramSettingsModalProps> = ({
                         <div key={item.key} className="py-2.5 first:pt-1 last:pb-1 space-y-2">
                           <div className="flex items-start justify-between gap-2">
                             <div className="min-w-0">
-                              <div className="font-medium text-[#111827] dark:text-white">{item.title}</div>
-                              <div className="text-[11px] text-[#707579] dark:text-[#7f93a5]">
+                              <div className="font-medium text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8]">{item.title}</div>
+                              <div className="text-[11px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5]">
                                 {rule ? `当前：${rule.summary}` : item.note || '未连接或未获取'}
                                 {rule && item.note ? ` · ${item.note}` : ''}
                               </div>
@@ -1408,8 +1410,8 @@ export const TelegramSettingsModal: React.FC<TelegramSettingsModalProps> = ({
                               }}
                               className={`px-2 py-1 rounded-md text-[10px] font-medium shrink-0 flex items-center gap-1 cursor-pointer disabled:opacity-40 transition-colors ${
                                 excCount > 0
-                                  ? 'bg-[#2481cc]/15 text-[#2481cc] dark:text-[#2ba0ff]'
-                                  : 'bg-black/5 dark:bg-white/5 text-[#707579] dark:text-[#9eb1c2] hover:text-[#111827] dark:hover:text-white'
+                                  ? 'bg-[#e8f3ff] dark:bg-[#2ba0ff]/15 aurora:bg-[#112d36] text-[#0284c7] dark:text-[#7cc4ff] aurora:text-[#5eead4]'
+                                  : 'bg-[#f1f5f9] dark:bg-[#132234] aurora:bg-[#13252e] text-[#475569] dark:text-[#b4c6d8] aurora:text-[#b7d0d8] hover:text-[#0f172a] dark:hover:text-[#eef4fb] aurora:hover:text-[#ecf6f8]'
                               }`}
                             >
                               <UserPlus className="w-3 h-3" />
@@ -1431,8 +1433,8 @@ export const TelegramSettingsModal: React.FC<TelegramSettingsModalProps> = ({
                                 onClick={() => handleChangePrivacy(item.key, opt.id)}
                                 className={`py-1.5 px-2 rounded-lg text-[11px] font-medium border cursor-pointer disabled:opacity-50 transition-colors ${
                                   rule?.mode === opt.id
-                                    ? 'bg-[#2481cc] text-white border-[#2481cc]'
-                                    : 'bg-white dark:bg-[#131d27] text-[#111827] dark:text-[#d3e2ef] border-[#d6dce3] dark:border-[#2b3947] hover:border-[#2481cc]/60'
+                                    ? 'bg-[#2481cc] dark:bg-[#2ba0ff] aurora:bg-[#0d9488] text-white border-[#2481cc] dark:border-[#2ba0ff] aurora:border-[#0d9488]'
+                                    : 'bg-white dark:bg-[#08101a] aurora:bg-[#081014] text-[#334155] dark:text-[#b4c6d8] aurora:text-[#b7d0d8] border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] hover:border-[#2481cc]/60 dark:hover:border-[#2ba0ff]/60 aurora:hover:border-[#2dd4bf]/60'
                                 }`}
                               >
                                 {opt.label}
@@ -1441,28 +1443,28 @@ export const TelegramSettingsModal: React.FC<TelegramSettingsModalProps> = ({
                           </div>
 
                           {isExpanded && rule && (
-                            <div className="p-3 rounded-lg bg-white dark:bg-[#131d27] border border-black/10 dark:border-white/10 space-y-2.5">
+                            <div className="p-3 rounded-lg bg-white dark:bg-[#0b131f] aurora:bg-[#0c151b] border border-[#e2e8f0] dark:border-[#1e3148] aurora:border-[#203742] space-y-2.5">
                               {/* Always Allow Users */}
                               <div className="space-y-1.5">
-                                <div className="text-[11px] font-medium text-emerald-500">
+                                <div className="text-[11px] font-medium text-emerald-700 dark:text-emerald-300 aurora:text-emerald-300">
                                   始终允许的用户（填 @username 或 Telegram 数字 ID）
                                 </div>
                                 <div className="flex flex-wrap gap-1.5">
                                   {privacyAllowDraft.length === 0 ? (
-                                    <span className="text-[10px] text-[#707579] dark:text-[#7f93a5]">无始终允许例外</span>
+                                    <span className="text-[10px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5]">无始终允许例外</span>
                                   ) : (
                                     privacyAllowDraft.map((ref) => {
                                       const matched = rule.allowUsers.find((u) => u.username === ref || u.id === ref);
                                       return (
                                         <span
                                           key={ref}
-                                          className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-emerald-500/10 text-emerald-500 text-[10px] border border-emerald-500/20"
+                                          className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-emerald-500/10 text-emerald-700 dark:text-emerald-300 aurora:text-emerald-300 text-[10px] border border-emerald-500/25"
                                         >
                                           <span>{matched ? `${matched.name} (${ref})` : ref}</span>
                                           <button
                                             type="button"
                                             onClick={() => setPrivacyAllowDraft((prev) => prev.filter((r) => r !== ref))}
-                                            className="hover:text-red-500 cursor-pointer"
+                                            className="hover:text-rose-600 dark:hover:text-rose-400 aurora:hover:text-rose-400 cursor-pointer"
                                           >
                                             <X className="w-3 h-3" />
                                           </button>
@@ -1477,7 +1479,7 @@ export const TelegramSettingsModal: React.FC<TelegramSettingsModalProps> = ({
                                     value={allowUserInput}
                                     onChange={(e) => setAllowUserInput(e.target.value)}
                                     placeholder="例如 @alice 或 123456789"
-                                    className="flex-1 px-2.5 py-1 text-[11px] rounded-md bg-[#f0f2f5] dark:bg-[#1e2a38] border border-transparent focus:border-[#2ba0ff] focus:outline-none"
+                                    className="flex-1 px-2.5 py-1 text-[11px] rounded-md bg-[#f8fafc] dark:bg-[#08101a] aurora:bg-[#081014] text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] placeholder-[#94a3b8] dark:placeholder-[#4e657e] aurora:placeholder-[#5a7782] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] focus:border-[#2481cc] dark:focus:border-[#2ba0ff] aurora:focus:border-[#2dd4bf] focus:outline-none"
                                   />
                                   <button
                                     type="button"
@@ -1489,7 +1491,7 @@ export const TelegramSettingsModal: React.FC<TelegramSettingsModalProps> = ({
                                       }
                                       setAllowUserInput('');
                                     }}
-                                    className="px-2.5 py-1 rounded-md bg-emerald-600/20 text-emerald-500 text-[11px] font-medium cursor-pointer disabled:opacity-40"
+                                    className="px-2.5 py-1 rounded-md bg-emerald-500/15 hover:bg-emerald-500/25 text-emerald-700 dark:text-emerald-300 aurora:text-emerald-300 text-[11px] font-medium cursor-pointer disabled:opacity-40 transition-colors"
                                   >
                                     添加
                                   </button>
@@ -1497,26 +1499,26 @@ export const TelegramSettingsModal: React.FC<TelegramSettingsModalProps> = ({
                               </div>
 
                               {/* Never Allow Users */}
-                              <div className="space-y-1.5 pt-2 border-t border-black/5 dark:border-white/5">
-                                <div className="text-[11px] font-medium text-red-500">
+                              <div className="space-y-1.5 pt-2 border-t border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34]">
+                                <div className="text-[11px] font-medium text-rose-600 dark:text-rose-300 aurora:text-rose-300">
                                   永不允许的用户（填 @username 或 Telegram 数字 ID）
                                 </div>
                                 <div className="flex flex-wrap gap-1.5">
                                   {privacyDisallowDraft.length === 0 ? (
-                                    <span className="text-[10px] text-[#707579] dark:text-[#7f93a5]">无永不允许例外</span>
+                                    <span className="text-[10px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5]">无永不允许例外</span>
                                   ) : (
                                     privacyDisallowDraft.map((ref) => {
                                       const matched = rule.disallowUsers.find((u) => u.username === ref || u.id === ref);
                                       return (
                                         <span
                                           key={ref}
-                                          className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-red-500/10 text-red-500 text-[10px] border border-red-500/20"
+                                          className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-rose-500/10 text-rose-600 dark:text-rose-300 aurora:text-rose-300 text-[10px] border border-rose-500/25"
                                         >
                                           <span>{matched ? `${matched.name} (${ref})` : ref}</span>
                                           <button
                                             type="button"
                                             onClick={() => setPrivacyDisallowDraft((prev) => prev.filter((r) => r !== ref))}
-                                            className="hover:text-red-400 cursor-pointer"
+                                            className="hover:text-rose-700 dark:hover:text-rose-200 aurora:hover:text-rose-200 cursor-pointer"
                                           >
                                             <X className="w-3 h-3" />
                                           </button>
@@ -1531,7 +1533,7 @@ export const TelegramSettingsModal: React.FC<TelegramSettingsModalProps> = ({
                                     value={disallowUserInput}
                                     onChange={(e) => setDisallowUserInput(e.target.value)}
                                     placeholder="例如 @spammer 或 987654321"
-                                    className="flex-1 px-2.5 py-1 text-[11px] rounded-md bg-[#f0f2f5] dark:bg-[#1e2a38] border border-transparent focus:border-[#2ba0ff] focus:outline-none"
+                                    className="flex-1 px-2.5 py-1 text-[11px] rounded-md bg-[#f8fafc] dark:bg-[#08101a] aurora:bg-[#081014] text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] placeholder-[#94a3b8] dark:placeholder-[#4e657e] aurora:placeholder-[#5a7782] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] focus:border-[#2481cc] dark:focus:border-[#2ba0ff] aurora:focus:border-[#2dd4bf] focus:outline-none"
                                   />
                                   <button
                                     type="button"
@@ -1543,7 +1545,7 @@ export const TelegramSettingsModal: React.FC<TelegramSettingsModalProps> = ({
                                       }
                                       setDisallowUserInput('');
                                     }}
-                                    className="px-2.5 py-1 rounded-md bg-red-500/15 text-red-500 text-[11px] font-medium cursor-pointer disabled:opacity-40"
+                                    className="px-2.5 py-1 rounded-md bg-rose-500/15 hover:bg-rose-500/25 text-rose-600 dark:text-rose-300 aurora:text-rose-300 text-[11px] font-medium cursor-pointer disabled:opacity-40 transition-colors"
                                   >
                                     添加
                                   </button>
@@ -1554,7 +1556,7 @@ export const TelegramSettingsModal: React.FC<TelegramSettingsModalProps> = ({
                                 <button
                                   type="button"
                                   onClick={() => setExpandedPrivacyKey(null)}
-                                  className="px-2.5 py-1 rounded-md bg-black/5 dark:bg-white/10 text-[11px] cursor-pointer"
+                                  className="px-2.5 py-1 rounded-md bg-[#f1f5f9] hover:bg-[#e2e8f0] dark:bg-[#132234] dark:hover:bg-[#1b2f47] aurora:bg-[#13252e] aurora:hover:bg-[#1a3340] text-[#475569] dark:text-[#b4c6d8] aurora:text-[#b7d0d8] text-[11px] cursor-pointer transition-colors"
                                 >
                                   收起
                                 </button>
@@ -1567,7 +1569,7 @@ export const TelegramSettingsModal: React.FC<TelegramSettingsModalProps> = ({
                                       disallowUserRefs: privacyDisallowDraft,
                                     })
                                   }
-                                  className="px-3 py-1 rounded-md bg-[#2481cc] text-white text-[11px] font-medium cursor-pointer disabled:opacity-50"
+                                  className="px-3 py-1 rounded-md bg-[#2481cc] hover:bg-[#1d6fb3] dark:bg-[#2ba0ff] dark:hover:bg-[#1e8ee8] aurora:bg-[#0d9488] aurora:hover:bg-[#0f766e] text-white text-[11px] font-medium cursor-pointer disabled:opacity-50 transition-colors"
                                 >
                                   {actionBusy ? '同步中...' : '保存例外规则到云端'}
                                 </button>
@@ -1581,9 +1583,9 @@ export const TelegramSettingsModal: React.FC<TelegramSettingsModalProps> = ({
                 </div>
 
                 {/* Global Anti-Harassment & Read Privacy */}
-                <div className="p-4 rounded-xl bg-gray-50 dark:bg-[#1e2a38] space-y-2.5 border border-black/5 dark:border-white/5">
-                  <div className="font-semibold text-[#111827] dark:text-white flex items-center gap-1.5">
-                    <Shield className="w-3.5 h-3.5 text-[#2481cc]" />
+                <div className="p-4 rounded-xl bg-[#f8fafc] dark:bg-[#0e1726]/85 aurora:bg-[#101c23]/90 space-y-2.5 border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34]">
+                  <div className="font-semibold text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] flex items-center gap-1.5">
+                    <Shield className="w-3.5 h-3.5 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf]" />
                     <span>全局防骚扰与已读隐私</span>
                   </div>
                   {([
@@ -1618,29 +1620,29 @@ export const TelegramSettingsModal: React.FC<TelegramSettingsModalProps> = ({
                       className="flex items-start justify-between gap-3 py-1.5 cursor-pointer select-none"
                     >
                       <div className="min-w-0">
-                        <div className="font-medium text-[#111827] dark:text-white">{gpItem.label}</div>
-                        <div className="text-[10px] text-[#707579] dark:text-[#7f93a5]">{gpItem.desc}</div>
+                        <div className="font-medium text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8]">{gpItem.label}</div>
+                        <div className="text-[10px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5]">{gpItem.desc}</div>
                       </div>
                       <input
                         type="checkbox"
                         disabled={actionBusy || !cloudSettings?.globalPrivacy}
                         checked={Boolean(cloudSettings?.globalPrivacy?.[gpItem.field])}
                         onChange={(e) => handleToggleGlobalPrivacyField(gpItem.field, e.target.checked)}
-                        className="w-4 h-4 mt-0.5 text-[#2481cc] rounded cursor-pointer disabled:opacity-40 shrink-0"
+                        className="w-4 h-4 mt-0.5 accent-[#2481cc] dark:accent-[#2ba0ff] aurora:accent-[#14b8a6] rounded cursor-pointer disabled:opacity-40 shrink-0"
                       />
                     </label>
                   ))}
                 </div>
 
                 {/* Account Self-Destruct Inactivity TTL */}
-                <div className="p-4 rounded-xl bg-gray-50 dark:bg-[#1e2a38] space-y-2.5 border border-black/5 dark:border-white/5">
+                <div className="p-4 rounded-xl bg-[#f8fafc] dark:bg-[#0e1726]/85 aurora:bg-[#101c23]/90 space-y-2.5 border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34]">
                   <div className="flex items-center justify-between gap-2">
-                    <div className="font-semibold text-[#111827] dark:text-white flex items-center gap-1.5">
-                      <Clock className="w-3.5 h-3.5 text-[#2481cc]" />
+                    <div className="font-semibold text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] flex items-center gap-1.5">
+                      <Clock className="w-3.5 h-3.5 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf]" />
                       <span>账号长期未登录自动注销期限</span>
                     </div>
                     {typeof cloudSettings?.accountTtlDays === 'number' && (
-                      <span className="text-[11px] text-[#2481cc] dark:text-[#2ba0ff] font-medium tabular-nums">
+                      <span className="text-[11px] text-[#0284c7] dark:text-[#7cc4ff] aurora:text-[#5eead4] font-medium tabular-nums">
                         当前：{cloudSettings.accountTtlDays} 天
                       </span>
                     )}
@@ -1659,8 +1661,8 @@ export const TelegramSettingsModal: React.FC<TelegramSettingsModalProps> = ({
                         onClick={() => handleUpdateAccountTtl(opt.days)}
                         className={`py-1.5 px-1.5 rounded-lg text-[11px] font-medium border cursor-pointer disabled:opacity-50 transition-colors tabular-nums ${
                           cloudSettings?.accountTtlDays === opt.days
-                            ? 'bg-[#2481cc] text-white border-[#2481cc]'
-                            : 'bg-white dark:bg-[#131d27] text-[#111827] dark:text-[#d3e2ef] border-[#d6dce3] dark:border-[#2b3947] hover:border-[#2481cc]/60'
+                            ? 'bg-[#2481cc] dark:bg-[#2ba0ff] aurora:bg-[#0d9488] text-white border-[#2481cc] dark:border-[#2ba0ff] aurora:border-[#0d9488]'
+                            : 'bg-white dark:bg-[#08101a] aurora:bg-[#081014] text-[#334155] dark:text-[#b4c6d8] aurora:text-[#b7d0d8] border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] hover:border-[#2481cc]/60 dark:hover:border-[#2ba0ff]/60 aurora:hover:border-[#2dd4bf]/60'
                         }`}
                       >
                         {opt.label}
@@ -1670,10 +1672,10 @@ export const TelegramSettingsModal: React.FC<TelegramSettingsModalProps> = ({
                 </div>
 
                 {/* Official Telegram Blacklist / Blocked Users (contacts.GetBlocked + contacts.Unblock) */}
-                <div className="p-4 rounded-xl bg-gray-50 dark:bg-[#1e2a38] space-y-3 border border-black/5 dark:border-white/5">
+                <div className="p-4 rounded-xl bg-[#f8fafc] dark:bg-[#0e1726]/85 aurora:bg-[#101c23]/90 space-y-3 border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34]">
                   <div className="flex items-center justify-between">
-                    <div className="font-semibold text-[#111827] dark:text-white flex items-center gap-1.5 tabular-nums">
-                      <ShieldAlert className="w-3.5 h-3.5 text-amber-500" />
+                    <div className="font-semibold text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] flex items-center gap-1.5 tabular-nums">
+                      <ShieldAlert className="w-3.5 h-3.5 text-amber-600 dark:text-amber-400 aurora:text-amber-400" />
                       <span>黑名单管理 ({blockedUsers.length})</span>
                     </div>
                     <button
@@ -1688,14 +1690,14 @@ export const TelegramSettingsModal: React.FC<TelegramSettingsModalProps> = ({
                           })
                           .finally(() => setIsLoadingBlocked(false));
                       }}
-                      className="text-[11px] text-[#2481cc] dark:text-[#2ba0ff] hover:underline flex items-center gap-1 cursor-pointer disabled:opacity-40"
+                      className="text-[11px] text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf] hover:underline flex items-center gap-1 cursor-pointer disabled:opacity-40"
                     >
                       <RefreshCw className={`w-3 h-3 ${isLoadingBlocked ? 'animate-spin' : ''}`} />
                       <span>刷新</span>
                     </button>
                   </div>
                   {blockedUsers.length === 0 ? (
-                    <div className="text-[11px] text-[#707579] dark:text-[#7f93a5]">
+                    <div className="text-[11px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5]">
                       {isLoadingBlocked ? '正在同步 Telegram 云端黑名单...' : '当前暂无已拉黑用户'}
                     </div>
                   ) : (
@@ -1703,11 +1705,11 @@ export const TelegramSettingsModal: React.FC<TelegramSettingsModalProps> = ({
                       {blockedUsers.map((bu) => (
                         <div
                           key={bu.id}
-                          className="p-2 rounded-lg bg-white dark:bg-[#131d27] border border-black/5 dark:border-white/5 flex items-center justify-between gap-2"
+                          className="p-2 rounded-lg bg-white dark:bg-[#0b131f] aurora:bg-[#0c151b] border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] flex items-center justify-between gap-2"
                         >
                           <div className="min-w-0">
-                            <div className="font-medium text-[#111827] dark:text-white truncate">{bu.name}</div>
-                            <div className="text-[10.5px] text-[#707579] dark:text-[#7f93a5] truncate">
+                            <div className="font-medium text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] truncate">{bu.name}</div>
+                            <div className="text-[10.5px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] truncate">
                               {[bu.username, bu.phone].filter(Boolean).join(' · ') || bu.id}
                             </div>
                           </div>
@@ -1734,7 +1736,7 @@ export const TelegramSettingsModal: React.FC<TelegramSettingsModalProps> = ({
                                 setActionBusy(false);
                               }
                             }}
-                            className="px-2.5 py-1 rounded-md bg-emerald-500/15 hover:bg-emerald-600 text-emerald-600 dark:text-emerald-400 hover:text-white text-[11px] font-medium flex items-center gap-1 shrink-0 cursor-pointer disabled:opacity-50 transition-colors"
+                            className="px-2.5 py-1 rounded-md bg-emerald-500/15 hover:bg-emerald-600 text-emerald-700 dark:text-emerald-300 aurora:text-emerald-300 hover:text-white text-[11px] font-medium flex items-center gap-1 shrink-0 cursor-pointer disabled:opacity-50 transition-colors"
                           >
                             <ShieldCheck className="w-3 h-3" />
                             <span>解除拉黑</span>
@@ -1746,10 +1748,10 @@ export const TelegramSettingsModal: React.FC<TelegramSettingsModalProps> = ({
                 </div>
 
                 {/* Official Active Sessions */}
-                <div className="p-4 rounded-xl bg-gray-50 dark:bg-[#1e2a38] space-y-3">
+                <div className="p-4 rounded-xl bg-[#f8fafc] dark:bg-[#0e1726]/85 aurora:bg-[#101c23]/90 border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] space-y-3">
                   <div className="flex items-center justify-between">
-                    <div className="font-semibold text-[#111827] dark:text-white flex items-center gap-1.5 tabular-nums">
-                      <Smartphone className="w-3.5 h-3.5 text-[#2481cc]" />
+                    <div className="font-semibold text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] flex items-center gap-1.5 tabular-nums">
+                      <Smartphone className="w-3.5 h-3.5 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf]" />
                       <span>活跃登录设备 ({cloudSettings?.sessions?.length || 0})</span>
                     </div>
                     {cloudSettings?.sessions && cloudSettings.sessions.length > 1 && (
@@ -1757,7 +1759,7 @@ export const TelegramSettingsModal: React.FC<TelegramSettingsModalProps> = ({
                         type="button"
                         disabled={actionBusy}
                         onClick={() => handleTerminateSession({ terminateAllOthers: true })}
-                        className="text-[11px] text-red-500 hover:underline font-medium cursor-pointer disabled:opacity-50"
+                        className="text-[11px] text-rose-600 dark:text-rose-400 aurora:text-rose-400 hover:underline font-medium cursor-pointer disabled:opacity-50"
                       >
                         注销其他所有设备
                       </button>
@@ -1765,27 +1767,27 @@ export const TelegramSettingsModal: React.FC<TelegramSettingsModalProps> = ({
                   </div>
 
                   {!cloudSettings?.sessions ? (
-                    <div className="text-[11px] text-[#707579] dark:text-[#7f93a5]">暂未拉取到活跃设备列表</div>
+                    <div className="text-[11px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5]">暂未拉取到活跃设备列表</div>
                   ) : (
                     <div className="space-y-2 max-h-56 overflow-y-auto pr-1">
                       {cloudSettings.sessions.map((sess) => (
                         <div
                           key={sess.hash}
-                          className="p-2.5 rounded-lg bg-white dark:bg-[#131d27] border border-black/5 dark:border-white/5 flex items-center justify-between gap-2"
+                          className="p-2.5 rounded-lg bg-white dark:bg-[#0b131f] aurora:bg-[#0c151b] border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] flex items-center justify-between gap-2"
                         >
                           <div className="min-w-0">
-                            <div className="font-medium text-[#111827] dark:text-white flex items-center gap-1.5 truncate">
+                            <div className="font-medium text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] flex items-center gap-1.5 truncate">
                               <span>{sess.deviceModel}</span>
                               {sess.current && (
-                                <span className="text-emerald-500 text-[11px] font-medium">
+                                <span className="text-emerald-700 dark:text-emerald-300 aurora:text-emerald-300 text-[11px] font-medium">
                                   · 当前连接
                                 </span>
                               )}
                             </div>
-                            <div className="text-[11px] text-[#707579] dark:text-[#7f93a5] truncate">
+                            <div className="text-[11px] text-[#475569] dark:text-[#b4c6d8] aurora:text-[#b7d0d8] truncate">
                               {sess.appName} {sess.appVersion} · {sess.platform} {sess.systemVersion}
                             </div>
-                            <div className="text-[10px] text-[#707579] dark:text-[#7f93a5] truncate tabular-nums">
+                            <div className="text-[10px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] truncate tabular-nums">
                               IP: {sess.ip} ({[sess.country, sess.region].filter(Boolean).join(', ') || '未知地区'}) · 活跃: {formatUnixTimestamp(sess.dateActive)}
                             </div>
                           </div>
@@ -1794,7 +1796,7 @@ export const TelegramSettingsModal: React.FC<TelegramSettingsModalProps> = ({
                               type="button"
                               disabled={actionBusy}
                               onClick={() => handleTerminateSession({ hash: sess.hash })}
-                              className="px-2 py-1 rounded-md bg-red-500/10 hover:bg-red-500/20 text-red-500 text-[11px] font-medium shrink-0 cursor-pointer disabled:opacity-50"
+                              className="px-2 py-1 rounded-md bg-rose-500/10 hover:bg-rose-500/20 text-rose-600 dark:text-rose-300 aurora:text-rose-300 text-[11px] font-medium shrink-0 cursor-pointer disabled:opacity-50 transition-colors"
                             >
                               下线
                             </button>
@@ -1809,8 +1811,8 @@ export const TelegramSettingsModal: React.FC<TelegramSettingsModalProps> = ({
 
             {activeTab === 'notifications' && (
               <div className="space-y-3 max-w-md text-xs">
-                <div className="p-3.5 rounded-xl bg-gray-50 dark:bg-[#1e2a38] flex items-center justify-between">
-                  <div className="font-semibold text-[#111827] dark:text-white">私聊新消息通知</div>
+                <div className="p-3.5 rounded-xl bg-[#f8fafc] dark:bg-[#0e1726]/85 aurora:bg-[#101c23]/90 border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] flex items-center justify-between">
+                  <div className="font-semibold text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8]">私聊新消息通知</div>
                   <input
                     type="checkbox"
                     disabled={actionBusy || !cloudSettings?.notifications}
@@ -1822,12 +1824,12 @@ export const TelegramSettingsModal: React.FC<TelegramSettingsModalProps> = ({
                         Boolean(cloudSettings?.notifications?.users?.showPreviews)
                       )
                     }
-                    className="w-4 h-4 text-[#2481cc] rounded cursor-pointer disabled:opacity-40"
+                    className="w-4 h-4 accent-[#2481cc] dark:accent-[#2ba0ff] aurora:accent-[#14b8a6] rounded cursor-pointer disabled:opacity-40"
                   />
                 </div>
 
-                <div className="p-3.5 rounded-xl bg-gray-50 dark:bg-[#1e2a38] flex items-center justify-between">
-                  <div className="font-semibold text-[#111827] dark:text-white">群组与频道通知</div>
+                <div className="p-3.5 rounded-xl bg-[#f8fafc] dark:bg-[#0e1726]/85 aurora:bg-[#101c23]/90 border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] flex items-center justify-between">
+                  <div className="font-semibold text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8]">群组与频道通知</div>
                   <input
                     type="checkbox"
                     disabled={actionBusy || !cloudSettings?.notifications}
@@ -1839,12 +1841,12 @@ export const TelegramSettingsModal: React.FC<TelegramSettingsModalProps> = ({
                         Boolean(cloudSettings?.notifications?.chats?.showPreviews)
                       )
                     }
-                    className="w-4 h-4 text-[#2481cc] rounded cursor-pointer disabled:opacity-40"
+                    className="w-4 h-4 accent-[#2481cc] dark:accent-[#2ba0ff] aurora:accent-[#14b8a6] rounded cursor-pointer disabled:opacity-40"
                   />
                 </div>
 
-                <div className="p-3.5 rounded-xl bg-gray-50 dark:bg-[#1e2a38] flex items-center justify-between">
-                  <div className="font-semibold text-[#111827] dark:text-white">消息内容预览</div>
+                <div className="p-3.5 rounded-xl bg-[#f8fafc] dark:bg-[#0e1726]/85 aurora:bg-[#101c23]/90 border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] flex items-center justify-between">
+                  <div className="font-semibold text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8]">消息内容预览</div>
                   <input
                     type="checkbox"
                     disabled={actionBusy || !cloudSettings?.notifications}
@@ -1856,7 +1858,7 @@ export const TelegramSettingsModal: React.FC<TelegramSettingsModalProps> = ({
                         e.target.checked
                       )
                     }
-                    className="w-4 h-4 text-[#2481cc] rounded cursor-pointer disabled:opacity-40"
+                    className="w-4 h-4 accent-[#2481cc] dark:accent-[#2ba0ff] aurora:accent-[#14b8a6] rounded cursor-pointer disabled:opacity-40"
                   />
                 </div>
               </div>
@@ -1864,10 +1866,10 @@ export const TelegramSettingsModal: React.FC<TelegramSettingsModalProps> = ({
 
             {activeTab === 'appearance' && (
               <div className="space-y-4 max-w-md text-xs">
-                <div className="p-3.5 rounded-xl bg-gray-50 dark:bg-[#1e2a38] aurora:bg-[#101c23] space-y-3 border border-transparent aurora:border-[#182b34]">
+                <div className="p-3.5 rounded-xl bg-[#f8fafc] dark:bg-[#0e1726]/85 aurora:bg-[#101c23]/90 space-y-3 border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34]">
                   <div>
-                    <div className="font-semibold text-[#111827] dark:text-white">界面色调模式</div>
-                    <div className="text-[11px] text-[#707579] dark:text-[#7f93a5]">
+                    <div className="font-semibold text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8]">界面色调模式</div>
+                    <div className="text-[11px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5]">
                       当前主题: {theme === 'aurora' ? '极光青暗模式' : theme === 'dark' ? '深夜暗色主题' : '经典亮白主题'}
                     </div>
                   </div>
@@ -1895,8 +1897,8 @@ export const TelegramSettingsModal: React.FC<TelegramSettingsModalProps> = ({
                             isActive
                               ? opt.id === 'aurora'
                                 ? 'bg-[#112d36] border-[#2dd4bf] text-[#5eead4] font-semibold'
-                                : 'bg-[#2481cc]/10 border-[#2481cc] text-[#2481cc] dark:text-[#2ba0ff] font-semibold'
-                              : 'bg-white/70 dark:bg-[#16212e] border-[#e2e8f0] dark:border-[#2a394a] text-[#475569] dark:text-[#b7c7d6] hover:border-[#94a3b8]'
+                                : 'bg-[#e8f3ff] dark:bg-[#2ba0ff]/15 border-[#2481cc] dark:border-[#2ba0ff] text-[#0284c7] dark:text-[#7cc4ff] font-semibold'
+                              : 'bg-white dark:bg-[#0b131f] aurora:bg-[#0c151b] border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] text-[#475569] dark:text-[#b4c6d8] aurora:text-[#b7d0d8] hover:border-[#94a3b8] dark:hover:border-[#2ba0ff]/40 aurora:hover:border-[#2dd4bf]/40'
                           }`}
                         >
                           <span className={`w-3.5 h-3.5 rounded-full border shrink-0 ${opt.swatch}`} />
@@ -1907,10 +1909,10 @@ export const TelegramSettingsModal: React.FC<TelegramSettingsModalProps> = ({
                   </div>
                 </div>
 
-                <div className="p-3.5 rounded-xl bg-gray-50 dark:bg-[#1e2a38] flex items-center justify-between">
+                <div className="p-3.5 rounded-xl bg-[#f8fafc] dark:bg-[#0e1726]/85 aurora:bg-[#101c23]/90 border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] flex items-center justify-between">
                   <div>
-                    <div className="font-semibold text-[#111827] dark:text-white">回车发送消息</div>
-                    <div className="text-[11px] text-[#707579] dark:text-[#7f93a5]">
+                    <div className="font-semibold text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8]">回车发送消息</div>
+                    <div className="text-[11px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5]">
                       {effectivePrefs.sendWithEnter ? '按 Enter 发送，Shift+Enter 换行' : '按 Ctrl+Enter 发送'}
                     </div>
                   </div>
@@ -1918,7 +1920,7 @@ export const TelegramSettingsModal: React.FC<TelegramSettingsModalProps> = ({
                     type="checkbox"
                     checked={effectivePrefs.sendWithEnter}
                     onChange={(e) => updatePref({ sendWithEnter: e.target.checked })}
-                    className="w-4 h-4 text-[#2481cc] rounded cursor-pointer"
+                    className="w-4 h-4 accent-[#2481cc] dark:accent-[#2ba0ff] aurora:accent-[#14b8a6] rounded cursor-pointer"
                   />
                 </div>
               </div>
@@ -1927,7 +1929,7 @@ export const TelegramSettingsModal: React.FC<TelegramSettingsModalProps> = ({
             {activeTab === 'folders' && (
               <div className="space-y-3 max-w-lg text-xs">
                 <div className="flex items-center justify-between">
-                  <div className="text-[11px] text-[#707579] dark:text-[#7f93a5]">
+                  <div className="text-[11px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5]">
                     对话分组文件夹（最多 12 字标题）
                   </div>
                   {cloudSettings && !editingFolder && (
@@ -1946,7 +1948,7 @@ export const TelegramSettingsModal: React.FC<TelegramSettingsModalProps> = ({
                           excludeArchived: true,
                         })
                       }
-                      className="px-2.5 py-1.5 rounded-lg bg-[#2481cc] text-white text-[11px] font-medium flex items-center gap-1 cursor-pointer shrink-0"
+                      className="px-2.5 py-1.5 rounded-lg bg-[#2481cc] hover:bg-[#1d6fb3] dark:bg-[#2ba0ff] dark:hover:bg-[#1e8ee8] aurora:bg-[#0d9488] aurora:hover:bg-[#0f766e] text-white text-[11px] font-medium flex items-center gap-1 cursor-pointer shrink-0 transition-colors"
                     >
                       <Plus className="w-3.5 h-3.5" />
                       <span>新建文件夹</span>
@@ -1955,8 +1957,8 @@ export const TelegramSettingsModal: React.FC<TelegramSettingsModalProps> = ({
                 </div>
 
                 {editingFolder && (
-                  <form onSubmit={handleSaveFolder} className="p-3.5 rounded-xl bg-gray-50 dark:bg-[#1e2a38] space-y-3 border border-[#2481cc]/30">
-                    <div className="font-semibold text-[#111827] dark:text-white">
+                  <form onSubmit={handleSaveFolder} className="p-3.5 rounded-xl bg-[#f8fafc] dark:bg-[#0e1726]/85 aurora:bg-[#101c23]/90 space-y-3 border border-[#2481cc]/35 dark:border-[#2ba0ff]/35 aurora:border-[#2dd4bf]/35">
+                    <div className="font-semibold text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8]">
                       {editingFolder.id ? '编辑云端文件夹' : '新建云端文件夹'}
                     </div>
                     <input
@@ -1966,9 +1968,9 @@ export const TelegramSettingsModal: React.FC<TelegramSettingsModalProps> = ({
                       value={editingFolder.title}
                       onChange={(e) => setEditingFolder({ ...editingFolder, title: e.target.value })}
                       placeholder="文件夹名称（最多 12 个字符）"
-                      className="w-full px-3 py-2 text-xs rounded-lg bg-white dark:bg-[#131d27] border border-[#d6dce3] dark:border-[#2b3947] focus:outline-none focus:border-[#2ba0ff]"
+                      className="w-full px-3 py-2 text-xs rounded-lg bg-white dark:bg-[#08101a] aurora:bg-[#081014] text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] placeholder-[#94a3b8] dark:placeholder-[#4e657e] aurora:placeholder-[#5a7782] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] focus:outline-none focus:border-[#2481cc] dark:focus:border-[#2ba0ff] aurora:focus:border-[#2dd4bf]"
                     />
-                    <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 text-[11px]">
+                    <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 text-[11px] text-[#334155] dark:text-[#b4c6d8] aurora:text-[#b7d0d8]">
                       {([
                         ['contacts', '包含联系人'],
                         ['nonContacts', '包含非联系人'],
@@ -1984,7 +1986,7 @@ export const TelegramSettingsModal: React.FC<TelegramSettingsModalProps> = ({
                             type="checkbox"
                             checked={editingFolder[field]}
                             onChange={(e) => setEditingFolder({ ...editingFolder, [field]: e.target.checked })}
-                            className="w-3.5 h-3.5 text-[#2481cc] rounded"
+                            className="w-3.5 h-3.5 accent-[#2481cc] dark:accent-[#2ba0ff] aurora:accent-[#14b8a6] rounded"
                           />
                           <span>{label}</span>
                         </label>
@@ -1994,14 +1996,14 @@ export const TelegramSettingsModal: React.FC<TelegramSettingsModalProps> = ({
                       <button
                         type="button"
                         onClick={() => setEditingFolder(null)}
-                        className="px-3 py-1.5 rounded-lg bg-black/5 dark:bg-white/10 text-xs cursor-pointer"
+                        className="px-3 py-1.5 rounded-lg bg-[#f1f5f9] hover:bg-[#e2e8f0] dark:bg-[#132234] dark:hover:bg-[#1b2f47] aurora:bg-[#13252e] aurora:hover:bg-[#1a3340] text-[#475569] dark:text-[#b4c6d8] aurora:text-[#b7d0d8] text-xs cursor-pointer transition-colors"
                       >
                         取消
                       </button>
                       <button
                         type="submit"
                         disabled={actionBusy}
-                        className="px-3 py-1.5 rounded-lg bg-[#2481cc] text-white text-xs font-medium cursor-pointer disabled:opacity-50"
+                        className="px-3 py-1.5 rounded-lg bg-[#2481cc] hover:bg-[#1d6fb3] dark:bg-[#2ba0ff] dark:hover:bg-[#1e8ee8] aurora:bg-[#0d9488] aurora:hover:bg-[#0f766e] text-white text-xs font-medium cursor-pointer disabled:opacity-50 transition-colors"
                       >
                         {actionBusy ? '同步中...' : '保存至云端'}
                       </button>
@@ -2010,21 +2012,21 @@ export const TelegramSettingsModal: React.FC<TelegramSettingsModalProps> = ({
                 )}
 
                 {!cloudSettings?.folders ? (
-                  <div className="text-[11px] text-[#707579] dark:text-[#7f93a5]">请先在线连接 Telegram 账号以同步官方文件夹</div>
+                  <div className="text-[11px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5]">请先在线连接 Telegram 账号以同步官方文件夹</div>
                 ) : cloudSettings.folders.length === 0 ? (
-                  <div className="p-4 rounded-xl bg-gray-50 dark:bg-[#1e2a38] text-center text-[#707579] dark:text-[#7f93a5]">
+                  <div className="p-4 rounded-xl bg-[#f8fafc] dark:bg-[#0e1726]/85 aurora:bg-[#101c23]/90 border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] text-center text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5]">
                     暂无自定义对话文件夹
                   </div>
                 ) : (
                   <div className="space-y-2">
                     {cloudSettings.folders.map((folder) => (
-                      <div key={folder.id} className="p-3 rounded-xl bg-gray-50 dark:bg-[#1e2a38] flex items-center justify-between gap-2">
+                      <div key={folder.id} className="p-3 rounded-xl bg-[#f8fafc] dark:bg-[#0e1726]/85 aurora:bg-[#101c23]/90 border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] flex items-center justify-between gap-2">
                         <div className="min-w-0">
-                          <div className="flex items-center gap-2 font-medium text-[#111827] dark:text-white">
-                            <Folder className="w-4 h-4 text-[#2481cc] shrink-0" />
+                          <div className="flex items-center gap-2 font-medium text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8]">
+                            <Folder className="w-4 h-4 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf] shrink-0" />
                             <span className="truncate">{folder.title}</span>
                           </div>
-                          <div className="text-[11px] text-[#707579] dark:text-[#7f93a5] mt-0.5 truncate">
+                          <div className="text-[11px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] mt-0.5 truncate">
                             {summarizeFolderRules(folder)}
                           </div>
                         </div>
@@ -2047,7 +2049,7 @@ export const TelegramSettingsModal: React.FC<TelegramSettingsModalProps> = ({
                               })
                             }
                             title="编辑文件夹规则"
-                            className="p-1.5 rounded-lg text-[#707579] hover:text-[#2481cc] hover:bg-black/5 dark:hover:bg-white/5 cursor-pointer"
+                            className="p-1.5 rounded-lg text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] hover:text-[#2481cc] dark:hover:text-[#2ba0ff] aurora:hover:text-[#2dd4bf] hover:bg-[#e2e8f0]/60 dark:hover:bg-[#1b2f47]/60 aurora:hover:bg-[#1a3340]/60 cursor-pointer transition-colors"
                           >
                             <Edit3 className="w-3.5 h-3.5" />
                           </button>
@@ -2056,7 +2058,7 @@ export const TelegramSettingsModal: React.FC<TelegramSettingsModalProps> = ({
                             disabled={actionBusy}
                             onClick={() => handleDeleteFolder(folder.id)}
                             title="从 Telegram 云端删除此文件夹"
-                            className="p-1.5 rounded-lg text-[#707579] hover:text-red-500 hover:bg-red-500/10 cursor-pointer"
+                            className="p-1.5 rounded-lg text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] hover:text-rose-600 dark:hover:text-rose-400 aurora:hover:text-rose-400 hover:bg-rose-500/10 cursor-pointer transition-colors"
                           >
                             <Trash2 className="w-3.5 h-3.5" />
                           </button>

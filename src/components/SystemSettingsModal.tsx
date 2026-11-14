@@ -123,21 +123,21 @@ export const SystemSettingsModal: React.FC<SystemSettingsModalProps> = ({
   const cryptoInfo = getCryptoStorageSecurityInfo();
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/75 backdrop-blur-xs animate-in fade-in duration-200 select-none">
-      <div className="relative w-full max-w-lg bg-[#0e1621] border border-[#1e2f42] rounded-2xl shadow-2xl flex flex-col overflow-hidden text-[#f5f7fa] max-h-[92vh]">
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/55 dark:bg-black/75 aurora:bg-black/80 backdrop-blur-xs animate-in fade-in duration-200 select-none">
+      <div className="relative w-full max-w-lg bg-white dark:bg-[#0b131f] aurora:bg-[#0c151b] border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] rounded-2xl shadow-2xl flex flex-col overflow-hidden text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] max-h-[92vh]">
         {/* Header */}
-        <div className="flex items-center justify-between px-6 py-4 border-b border-[#17212b] bg-[#121c27] shrink-0">
+        <div className="flex items-center justify-between px-6 py-4 border-b border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] bg-[#f8fafc] dark:bg-[#0d1726] aurora:bg-[#0e1920] shrink-0">
           <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-xl bg-[#2481cc]/20 border border-[#2481cc]/40 flex items-center justify-center text-[#2ba0ff]">
-              <Settings className="w-5 h-5 text-[#2ba0ff]" />
+            <div className="w-10 h-10 rounded-xl bg-[#e8f3ff] dark:bg-[#2ba0ff]/15 aurora:bg-[#112d36] border border-[#bfdbfe] dark:border-[#2ba0ff]/35 aurora:border-[#2dd4bf]/35 flex items-center justify-center text-[#0284c7] dark:text-[#2ba0ff] aurora:text-[#2dd4bf]">
+              <Settings className="w-5 h-5" />
             </div>
             <div>
-              <h2 className="text-base font-bold text-white tracking-wide">工作台系统管理</h2>
+              <h2 className="text-base font-bold text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] tracking-wide">工作台系统管理</h2>
             </div>
           </div>
           <button
             onClick={onClose}
-            className="p-1.5 rounded-lg text-[#7f93a5] hover:text-white hover:bg-[#1a2838] transition-colors cursor-pointer"
+            className="p-1.5 rounded-lg text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] hover:text-[#0f172a] dark:hover:text-white aurora:hover:text-[#ecf6f8] hover:bg-[#e2e8f0] dark:hover:bg-[#152438] aurora:hover:bg-[#152934] transition-colors cursor-pointer"
           >
             <X className="w-5 h-5" />
           </button>
@@ -146,23 +146,25 @@ export const SystemSettingsModal: React.FC<SystemSettingsModalProps> = ({
         {/* Content Body */}
         <div className="p-6 space-y-4 overflow-y-auto flex-1">
           {/* Section 1: Storage Security & Auth Isolation */}
-          <div className="bg-[#121c27] border border-[#1e2f42] rounded-xl p-4 space-y-3">
+          <div className="bg-[#f8fafc] dark:bg-[#0e1726]/85 aurora:bg-[#101c23]/90 border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] rounded-xl p-4 space-y-3">
             <div className="flex items-center gap-2">
               <ShieldCheck
                 className={`w-4 h-4 ${
-                  cryptoInfo.mode === 'fallback_stream' ? 'text-amber-400' : 'text-emerald-400'
+                  cryptoInfo.mode === 'fallback_stream'
+                    ? 'text-amber-600 dark:text-amber-400'
+                    : 'text-emerald-600 dark:text-emerald-400'
                 }`}
               />
-              <span className="text-sm font-semibold text-white">系统安全与加密状态</span>
+              <span className="text-sm font-semibold text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8]">系统安全与加密状态</span>
             </div>
             <div className="grid grid-cols-2 gap-2 text-xs">
-              <div className="p-2.5 rounded-lg bg-[#0c131c] border border-[#1e2f42]/60">
-                <div className="text-[10px] text-[#7f93a5]">会话安全存储</div>
+              <div className="p-2.5 rounded-lg bg-white dark:bg-[#08101a] aurora:bg-[#081014] border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34]">
+                <div className="text-[10px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5]">会话安全存储</div>
                 <div
                   className={`font-medium mt-0.5 flex items-center gap-1 ${
                     cryptoInfo.mode === 'fallback_stream'
-                      ? 'text-amber-400'
-                      : 'text-emerald-400'
+                      ? 'text-amber-700 dark:text-amber-400'
+                      : 'text-emerald-700 dark:text-emerald-400'
                   }`}
                 >
                   {cryptoInfo.mode === 'fallback_stream' ? (
@@ -172,12 +174,12 @@ export const SystemSettingsModal: React.FC<SystemSettingsModalProps> = ({
                   )}
                   <span>{cryptoInfo.label}</span>
                 </div>
-                <p className="text-[10px] text-[#7f93a5] mt-1 leading-snug">{cryptoInfo.detail}</p>
+                <p className="text-[10px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] mt-1 leading-snug">{cryptoInfo.detail}</p>
               </div>
-              <div className="p-2.5 rounded-lg bg-[#0c131c] border border-[#1e2f42]/60">
-                <div className="text-[10px] text-[#7f93a5]">运行隔离与鉴权</div>
-                <div className="text-[#2ba0ff] font-medium mt-0.5 flex items-center gap-1">
-                  <Server className="w-3 h-3" />
+              <div className="p-2.5 rounded-lg bg-white dark:bg-[#08101a] aurora:bg-[#081014] border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34]">
+                <div className="text-[10px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5]">运行隔离与鉴权</div>
+                <div className="text-[#0284c7] dark:text-[#2ba0ff] aurora:text-[#2dd4bf] font-medium mt-0.5 flex items-center gap-1">
+                  <Server className="w-3 h-3 shrink-0" />
                   <span>
                     {jwtMode === 'asymmetric'
                       ? 'JWT RS256 非对称公钥验签'
@@ -192,7 +194,7 @@ export const SystemSettingsModal: React.FC<SystemSettingsModalProps> = ({
             </div>
 
             {(onOpenDatabase || onOpenTranslation) && (
-              <div className="pt-2 border-t border-[#1e2f42] flex items-center justify-between gap-3 flex-wrap">
+              <div className="pt-2 border-t border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] flex items-center justify-between gap-3 flex-wrap">
                 {onOpenDatabase && (
                   <button
                     type="button"
@@ -200,7 +202,7 @@ export const SystemSettingsModal: React.FC<SystemSettingsModalProps> = ({
                       onClose();
                       onOpenDatabase();
                     }}
-                    className="flex items-center gap-1.5 text-xs text-[#2ba0ff] hover:underline cursor-pointer"
+                    className="flex items-center gap-1.5 text-xs text-[#0284c7] dark:text-[#2ba0ff] aurora:text-[#2dd4bf] hover:underline cursor-pointer"
                   >
                     <Database className="w-3.5 h-3.5" />
                     <span>打开本地数据中心</span>
@@ -213,7 +215,7 @@ export const SystemSettingsModal: React.FC<SystemSettingsModalProps> = ({
                       onClose();
                       onOpenTranslation();
                     }}
-                    className="flex items-center gap-1.5 text-xs text-[#2ba0ff] hover:underline cursor-pointer"
+                    className="flex items-center gap-1.5 text-xs text-[#0284c7] dark:text-[#2ba0ff] aurora:text-[#2dd4bf] hover:underline cursor-pointer"
                   >
                     <Globe className="w-3.5 h-3.5" />
                     <span>双向翻译设置</span>
@@ -224,18 +226,18 @@ export const SystemSettingsModal: React.FC<SystemSettingsModalProps> = ({
           </div>
 
           {/* Section 2: Telegram MTProto Built-in SOCKS Proxy */}
-          <div className="bg-[#121c27] border border-[#1e2f42] rounded-xl p-4 space-y-3">
+          <div className="bg-[#f8fafc] dark:bg-[#0e1726]/85 aurora:bg-[#101c23]/90 border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] rounded-xl p-4 space-y-3">
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-2">
-                <Network className="w-4 h-4 text-[#2ba0ff]" />
-                <span className="text-sm font-semibold text-white">Telegram MTProto 代理网络</span>
+                <Network className="w-4 h-4 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf]" />
+                <span className="text-sm font-semibold text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8]">Telegram MTProto 代理网络</span>
               </div>
-              <label className="flex items-center gap-2 text-xs text-[#cfdbe5] cursor-pointer">
+              <label className="flex items-center gap-2 text-xs text-[#334155] dark:text-[#b4c6d8] aurora:text-[#b7d0d8] cursor-pointer">
                 <input
                   type="checkbox"
                   checked={proxyEnabled}
                   onChange={(e) => setProxyEnabled(e.target.checked)}
-                  className="accent-[#2481cc] w-3.5 h-3.5 cursor-pointer"
+                  className="accent-[#2481cc] dark:accent-[#2ba0ff] aurora:accent-[#14b8a6] w-3.5 h-3.5 cursor-pointer"
                 />
                 <span>启用 SOCKS 代理</span>
               </label>
@@ -243,28 +245,28 @@ export const SystemSettingsModal: React.FC<SystemSettingsModalProps> = ({
 
             <div className={`grid grid-cols-3 gap-2.5 text-xs ${!proxyEnabled ? 'opacity-60' : ''}`}>
               <div>
-                <label className="block text-[10px] text-[#7f93a5] mb-1">协议类型</label>
+                <label className="block text-[10px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] mb-1">协议类型</label>
                 <select
                   value={proxyType}
                   onChange={(e) => setProxyType(e.target.value === 'socks4' ? 'socks4' : 'socks5')}
-                  className="w-full px-2.5 py-2 rounded-lg bg-[#0c131c] border border-[#1e2f42] text-white outline-none focus:border-[#2ba0ff]"
+                  className="w-full px-2.5 py-2 rounded-lg bg-white dark:bg-[#08101a] aurora:bg-[#081014] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] outline-none focus:border-[#2481cc] dark:focus:border-[#2ba0ff] aurora:focus:border-[#2dd4bf]"
                 >
                   <option value="socks5">SOCKS5</option>
                   <option value="socks4">SOCKS4</option>
                 </select>
               </div>
               <div>
-                <label className="block text-[10px] text-[#7f93a5] mb-1">代理地址 (Host)</label>
+                <label className="block text-[10px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] mb-1">代理地址 (Host)</label>
                 <input
                   type="text"
                   value={proxyHost}
                   onChange={(e) => setProxyHost(e.target.value)}
                   placeholder="127.0.0.1"
-                  className="w-full px-2.5 py-2 rounded-lg bg-[#0c131c] border border-[#1e2f42] text-white outline-none focus:border-[#2ba0ff]"
+                  className="w-full px-2.5 py-2 rounded-lg bg-white dark:bg-[#08101a] aurora:bg-[#081014] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] placeholder-[#94a3b8] dark:placeholder-[#4e657e] aurora:placeholder-[#5a7782] outline-none focus:border-[#2481cc] dark:focus:border-[#2ba0ff] aurora:focus:border-[#2dd4bf]"
                 />
               </div>
               <div>
-                <label className="block text-[10px] text-[#7f93a5] mb-1">端口 (Port)</label>
+                <label className="block text-[10px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] mb-1">端口 (Port)</label>
                 <input
                   type="number"
                   min={1}
@@ -272,30 +274,30 @@ export const SystemSettingsModal: React.FC<SystemSettingsModalProps> = ({
                   value={proxyPort}
                   onChange={(e) => setProxyPort(e.target.value)}
                   placeholder="7890"
-                  className="w-full px-2.5 py-2 rounded-lg bg-[#0c131c] border border-[#1e2f42] text-white outline-none focus:border-[#2ba0ff]"
+                  className="w-full px-2.5 py-2 rounded-lg bg-white dark:bg-[#08101a] aurora:bg-[#081014] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] placeholder-[#94a3b8] dark:placeholder-[#4e657e] aurora:placeholder-[#5a7782] outline-none focus:border-[#2481cc] dark:focus:border-[#2ba0ff] aurora:focus:border-[#2dd4bf]"
                 />
               </div>
             </div>
 
             <div className={`grid grid-cols-2 gap-2.5 text-xs ${!proxyEnabled ? 'opacity-60' : ''}`}>
               <div>
-                <label className="block text-[10px] text-[#7f93a5] mb-1">用户名（可选）</label>
+                <label className="block text-[10px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] mb-1">用户名（可选）</label>
                 <input
                   type="text"
                   value={proxyUsername}
                   onChange={(e) => setProxyUsername(e.target.value)}
                   placeholder="无认证可留空"
-                  className="w-full px-2.5 py-2 rounded-lg bg-[#0c131c] border border-[#1e2f42] text-white outline-none focus:border-[#2ba0ff]"
+                  className="w-full px-2.5 py-2 rounded-lg bg-white dark:bg-[#08101a] aurora:bg-[#081014] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] placeholder-[#94a3b8] dark:placeholder-[#4e657e] aurora:placeholder-[#5a7782] outline-none focus:border-[#2481cc] dark:focus:border-[#2ba0ff] aurora:focus:border-[#2dd4bf]"
                 />
               </div>
               <div>
-                <label className="block text-[10px] text-[#7f93a5] mb-1">密码（可选）</label>
+                <label className="block text-[10px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] mb-1">密码（可选）</label>
                 <input
                   type="password"
                   value={proxyPassword}
                   onChange={(e) => setProxyPassword(e.target.value)}
                   placeholder={hasExistingPassword ? '已保存密码（留空则保持不变）' : '无认证可留空'}
-                  className="w-full px-2.5 py-2 rounded-lg bg-[#0c131c] border border-[#1e2f42] text-white outline-none focus:border-[#2ba0ff]"
+                  className="w-full px-2.5 py-2 rounded-lg bg-white dark:bg-[#08101a] aurora:bg-[#081014] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] placeholder-[#94a3b8] dark:placeholder-[#4e657e] aurora:placeholder-[#5a7782] outline-none focus:border-[#2481cc] dark:focus:border-[#2ba0ff] aurora:focus:border-[#2dd4bf]"
                 />
               </div>
             </div>
@@ -304,8 +306,8 @@ export const SystemSettingsModal: React.FC<SystemSettingsModalProps> = ({
               <div
                 className={`p-2.5 rounded-lg text-[11px] flex items-start gap-2 border ${
                   proxyFeedback.ok
-                    ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-300'
-                    : 'bg-rose-500/10 border-rose-500/30 text-rose-300'
+                    ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-700 dark:text-emerald-300'
+                    : 'bg-rose-500/10 border-rose-500/30 text-rose-700 dark:text-rose-300'
                 }`}
               >
                 {proxyFeedback.ok ? (
@@ -322,7 +324,7 @@ export const SystemSettingsModal: React.FC<SystemSettingsModalProps> = ({
                 type="button"
                 disabled={isSavingProxy}
                 onClick={() => handleSaveProxy(false)}
-                className="px-3 py-1.5 rounded-lg bg-[#1a2838] hover:bg-[#23364b] disabled:opacity-50 text-xs text-[#dce5ee] font-medium cursor-pointer transition-colors"
+                className="px-3 py-1.5 rounded-lg bg-[#f1f5f9] hover:bg-[#e2e8f0] dark:bg-[#132234] dark:hover:bg-[#1b2f47] aurora:bg-[#13252e] aurora:hover:bg-[#1a3340] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] disabled:opacity-50 text-xs text-[#334155] dark:text-[#b4c6d8] aurora:text-[#b7d0d8] font-medium cursor-pointer transition-colors"
               >
                 {isSavingProxy ? '保存中...' : '仅保存配置'}
               </button>
@@ -330,7 +332,7 @@ export const SystemSettingsModal: React.FC<SystemSettingsModalProps> = ({
                 type="button"
                 disabled={isSavingProxy}
                 onClick={() => handleSaveProxy(true)}
-                className="px-3 py-1.5 rounded-lg bg-[#2481cc] hover:bg-[#1d6fae] disabled:opacity-50 text-xs text-white font-semibold flex items-center gap-1.5 cursor-pointer transition-colors"
+                className="px-3 py-1.5 rounded-lg bg-[#2481cc] hover:bg-[#1d6fb3] dark:bg-[#2ba0ff] dark:hover:bg-[#1e8ee8] aurora:bg-[#0d9488] aurora:hover:bg-[#0f766e] disabled:opacity-50 text-xs text-white font-semibold flex items-center gap-1.5 cursor-pointer transition-colors"
               >
                 <RefreshCw className={`w-3.5 h-3.5 ${isSavingProxy ? 'animate-spin' : ''}`} />
                 <span>保存并重连 Telegram</span>
@@ -340,11 +342,11 @@ export const SystemSettingsModal: React.FC<SystemSettingsModalProps> = ({
         </div>
 
         {/* Footer */}
-        <div className="px-6 py-3 border-t border-[#17212b] bg-[#121c27] flex items-center justify-between shrink-0">
-          <span className="text-[11px] text-[#55697d]">HumanSense Internal Settings · v{APP_VERSION}</span>
+        <div className="px-6 py-3 border-t border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] bg-[#f8fafc] dark:bg-[#0d1726] aurora:bg-[#0e1920] flex items-center justify-between shrink-0">
+          <span className="text-[11px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5]">HumanSense Internal Settings · v{APP_VERSION}</span>
           <button
             onClick={onClose}
-            className="px-4 py-2 rounded-lg bg-[#2481cc] hover:bg-[#1d6fae] text-white text-xs font-semibold shadow-xs cursor-pointer transition-colors"
+            className="px-4 py-2 rounded-lg bg-[#2481cc] hover:bg-[#1d6fb3] dark:bg-[#2ba0ff] dark:hover:bg-[#1e8ee8] aurora:bg-[#0d9488] aurora:hover:bg-[#0f766e] text-white text-xs font-semibold shadow-xs cursor-pointer transition-colors"
           >
             完成并关闭
           </button>

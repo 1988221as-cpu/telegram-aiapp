@@ -151,7 +151,7 @@ export const UnifiedRightDock: React.FC<UnifiedRightDockProps> = ({
               type="button"
               onClick={onClose}
               title="收起右侧面板 (Esc)"
-              className="w-7 h-7 rounded-lg flex items-center justify-center text-[#64748b] dark:text-[#7b93ad] hover:text-[#0f172a] dark:hover:text-white hover:bg-[#e2e8f0]/70 dark:hover:bg-[#172638] transition-colors cursor-pointer shrink-0"
+              className="w-7 h-7 rounded-lg flex items-center justify-center text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] hover:text-[#0f172a] dark:hover:text-white aurora:hover:text-[#ecf6f8] hover:bg-[#e2e8f0]/70 dark:hover:bg-[#172638] aurora:hover:bg-[#152934] transition-colors cursor-pointer shrink-0"
             >
               <X className="w-4 h-4" />
             </button>

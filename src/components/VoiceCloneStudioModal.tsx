@@ -375,24 +375,24 @@ export const VoiceCloneStudioModal: React.FC<VoiceCloneStudioModalProps> = ({
 
   return (
     <>
-      <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm animate-in fade-in duration-200 select-none">
-        <div className="relative w-full max-w-lg bg-[#0e1621] border border-[#1e2c3c] rounded-2xl shadow-2xl flex flex-col overflow-hidden text-[#f5f7fa]">
+      <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/55 dark:bg-black/75 aurora:bg-black/80 backdrop-blur-sm animate-in fade-in duration-200 select-none">
+        <div className="relative w-full max-w-lg bg-white dark:bg-[#0b131f] aurora:bg-[#0c151b] border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] rounded-2xl shadow-2xl flex flex-col overflow-hidden text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8]">
           {/* Header */}
-          <div className="flex items-center justify-between px-6 py-4 border-b border-[#17212b] bg-[#121c27]">
+          <div className="flex items-center justify-between px-6 py-4 border-b border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] bg-[#f8fafc] dark:bg-[#0d1726] aurora:bg-[#0e1920]">
             <div className="flex items-center gap-3">
-              <div className="w-10 h-10 rounded-xl bg-[#2481cc]/20 border border-[#2481cc]/40 flex items-center justify-center text-[#2ba0ff]">
+              <div className="w-10 h-10 rounded-xl bg-[#e8f3ff] dark:bg-[#2ba0ff]/15 aurora:bg-[#112d36] border border-[#bfdbfe] dark:border-[#2ba0ff]/35 aurora:border-[#2dd4bf]/35 flex items-center justify-center text-[#0284c7] dark:text-[#2ba0ff] aurora:text-[#2dd4bf]">
                 <AudioWaveform className="w-5 h-5" />
               </div>
               <div>
-                <h2 className="text-base font-bold text-white tracking-wide">AI 预设音色语音合成台</h2>
-                <p className="text-[11px] text-[#7f93a5] mt-0.5">
+                <h2 className="text-base font-bold text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] tracking-wide">AI 预设音色语音合成台</h2>
+                <p className="text-[11px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] mt-0.5">
                   官方预设音色库 · 服务端 ffmpeg 真实变速变调（非真人声纹克隆）
                 </p>
               </div>
             </div>
             <button
               onClick={onClose}
-              className="w-8 h-8 rounded-full flex items-center justify-center text-[#7f93a5] hover:text-white hover:bg-white/10 transition-colors cursor-pointer"
+              className="w-8 h-8 rounded-full flex items-center justify-center text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] hover:text-[#0f172a] dark:hover:text-white aurora:hover:text-[#ecf6f8] hover:bg-[#e2e8f0] dark:hover:bg-[#152438] aurora:hover:bg-[#152934] transition-colors cursor-pointer"
             >
               <X className="w-5 h-5" />
             </button>
@@ -404,8 +404,8 @@ export const VoiceCloneStudioModal: React.FC<VoiceCloneStudioModalProps> = ({
               <div
                 className={`p-2.5 rounded-xl border text-xs leading-relaxed ${
                   /失败|未配置|不足|尚未|请先|中止|错误/.test(statusNotice)
-                    ? 'bg-rose-500/10 border-rose-500/30 text-rose-300'
-                    : 'bg-[#2481cc]/15 border-[#2481cc]/30 text-[#7cc4ff]'
+                    ? 'bg-rose-500/10 border-rose-500/30 text-rose-700 dark:text-rose-300'
+                    : 'bg-[#e8f3ff] dark:bg-[#2ba0ff]/15 aurora:bg-[#112d36] border-[#bfdbfe] dark:border-[#2ba0ff]/30 aurora:border-[#2dd4bf]/30 text-[#0284c7] dark:text-[#7cc4ff] aurora:text-[#5eead4]'
                 }`}
               >
                 {statusNotice}
@@ -415,10 +415,10 @@ export const VoiceCloneStudioModal: React.FC<VoiceCloneStudioModalProps> = ({
             {/* 1. Text Input to synthesize */}
             <div>
               <div className="flex items-center justify-between mb-1.5">
-                <label className="text-xs font-semibold text-[#7f93a5]">
+                <label className="text-xs font-semibold text-[#475569] dark:text-[#b4c6d8] aurora:text-[#b7d0d8]">
                   语音朗读文本 (支持中文及翻译外语)
                 </label>
-                <span className="text-[11px] text-[#7f93a5] tabular-nums">
+                <span className="text-[11px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] tabular-nums">
                   {audioUrl && realAudioDuration
                     ? `${text.length} 字 · 实测 ${realAudioDuration} 秒`
                     : `${text.length} 字 · 待合成后读取实测时长`}
@@ -432,14 +432,14 @@ export const VoiceCloneStudioModal: React.FC<VoiceCloneStudioModalProps> = ({
                 }}
                 rows={3}
                 placeholder="请输入要合成语音的消息内容..."
-                className="w-full bg-[#152230] border border-[#1e2f42] focus:border-[#2ba0ff] focus:outline-none rounded-xl p-3 text-xs text-white placeholder-[#7f93a5] leading-relaxed resize-none transition-colors"
+                className="w-full bg-[#f8fafc] dark:bg-[#08101a] aurora:bg-[#081014] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] focus:border-[#2481cc] dark:focus:border-[#2ba0ff] aurora:focus:border-[#2dd4bf] focus:outline-none rounded-xl p-3 text-xs text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] placeholder-[#94a3b8] dark:placeholder-[#4e657e] aurora:placeholder-[#5a7782] leading-relaxed resize-none transition-colors"
               />
 
               {/* Quick Switch to Translated Text */}
               {translatedText && translatedText !== text && (
-                <div className="mt-1.5 flex items-center justify-between p-2 rounded-lg bg-[#14202d] border border-[#1e2f42] text-xs">
-                  <span className="text-[#9bb3c9] truncate max-w-[70%]">
-                    译文 ({targetLangName || '目标语言'}): <strong className="text-white">{translatedText}</strong>
+                <div className="mt-1.5 flex items-center justify-between p-2 rounded-lg bg-[#f8fafc] dark:bg-[#0e1726]/85 aurora:bg-[#101c23]/90 border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] text-xs">
+                  <span className="text-[#475569] dark:text-[#b4c6d8] aurora:text-[#b7d0d8] truncate max-w-[70%]">
+                    译文 ({targetLangName || '目标语言'}): <strong className="text-[#0f172a] dark:text-white aurora:text-[#ecf6f8]">{translatedText}</strong>
                   </span>
                   <button
                     type="button"
@@ -447,7 +447,7 @@ export const VoiceCloneStudioModal: React.FC<VoiceCloneStudioModalProps> = ({
                       setText(translatedText);
                       invalidateSynthesizedAudio();
                     }}
-                    className="px-2 py-0.5 rounded bg-[#2481cc]/20 hover:bg-[#2481cc]/30 text-[#2ba0ff] text-[11px] font-semibold transition-colors cursor-pointer shrink-0"
+                    className="px-2 py-0.5 rounded bg-[#e8f3ff] hover:bg-[#dbeafe] dark:bg-[#2ba0ff]/20 dark:hover:bg-[#2ba0ff]/30 aurora:bg-[#112d36] aurora:hover:bg-[#153842] text-[#0284c7] dark:text-[#7cc4ff] aurora:text-[#5eead4] text-[11px] font-semibold transition-colors cursor-pointer shrink-0"
                   >
                     填入译文合成 →
                   </button>
@@ -456,14 +456,14 @@ export const VoiceCloneStudioModal: React.FC<VoiceCloneStudioModalProps> = ({
             </div>
 
             {/* TTS Engine Switcher */}
-            <div className="flex items-center justify-between gap-2 p-2.5 rounded-xl bg-[#14202d] border border-[#1e2f42]">
+            <div className="flex items-center justify-between gap-2 p-2.5 rounded-xl bg-[#f8fafc] dark:bg-[#0e1726]/85 aurora:bg-[#101c23]/90 border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34]">
               <div className="flex items-center gap-2 min-w-0">
-                <Sparkles className="w-4 h-4 text-amber-400 shrink-0" />
+                <Sparkles className="w-4 h-4 text-amber-600 dark:text-amber-400 shrink-0" />
                 <div className="min-w-0">
-                  <span className="text-xs font-semibold text-white block">
+                  <span className="text-xs font-semibold text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] block">
                     {isCustomOpenAiGateway ? '自有网关语音合成模型 (OpenAI 协议)' : '语音合成模型'}
                   </span>
-                  <span className="text-[10px] font-mono text-[#7cc4ff] truncate block">{ttsEngine}</span>
+                  <span className="text-[10px] font-mono text-[#0284c7] dark:text-[#7cc4ff] aurora:text-[#5eead4] truncate block">{ttsEngine}</span>
                 </div>
               </div>
               {isCustomOpenAiGateway ? (
@@ -482,8 +482,8 @@ export const VoiceCloneStudioModal: React.FC<VoiceCloneStudioModalProps> = ({
                       }}
                       className={`px-2 py-1 rounded-lg text-[11px] font-medium transition-colors cursor-pointer ${
                         ttsEngine === opt.id
-                          ? 'bg-[#2481cc] text-white shadow-xs'
-                          : 'bg-[#152230] text-[#7f93a5] hover:text-white'
+                          ? 'bg-[#2481cc] dark:bg-[#2ba0ff] aurora:bg-[#0d9488] text-white shadow-xs'
+                          : 'bg-white dark:bg-[#08101a] aurora:bg-[#081014] border border-[#e2e8f0] dark:border-[#1e3148] aurora:border-[#203742] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] hover:text-[#0f172a] dark:hover:text-white aurora:hover:text-[#ecf6f8]'
                       }`}
                     >
                       {opt.label}
@@ -500,8 +500,8 @@ export const VoiceCloneStudioModal: React.FC<VoiceCloneStudioModalProps> = ({
                     }}
                     className={`px-2 py-1 rounded-lg text-[11px] font-medium transition-colors cursor-pointer ${
                       ttsEngine === 'gemini-3.8-flash-tts'
-                        ? 'bg-[#2481cc] text-white shadow-xs'
-                        : 'bg-[#152230] text-[#7f93a5] hover:text-white'
+                        ? 'bg-[#2481cc] dark:bg-[#2ba0ff] aurora:bg-[#0d9488] text-white shadow-xs'
+                        : 'bg-white dark:bg-[#08101a] aurora:bg-[#081014] border border-[#e2e8f0] dark:border-[#1e3148] aurora:border-[#203742] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] hover:text-[#0f172a] dark:hover:text-white aurora:hover:text-[#ecf6f8]'
                     }`}
                   >
                     3.8 Flash
@@ -514,8 +514,8 @@ export const VoiceCloneStudioModal: React.FC<VoiceCloneStudioModalProps> = ({
                     }}
                     className={`px-2 py-1 rounded-lg text-[11px] font-medium transition-colors cursor-pointer ${
                       ttsEngine === 'gemini-3.8-flash-lite-tts'
-                        ? 'bg-[#2481cc] text-white shadow-xs'
-                        : 'bg-[#152230] text-[#7f93a5] hover:text-white'
+                        ? 'bg-[#2481cc] dark:bg-[#2ba0ff] aurora:bg-[#0d9488] text-white shadow-xs'
+                        : 'bg-white dark:bg-[#08101a] aurora:bg-[#081014] border border-[#e2e8f0] dark:border-[#1e3148] aurora:border-[#203742] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] hover:text-[#0f172a] dark:hover:text-white aurora:hover:text-[#ecf6f8]'
                     }`}
                   >
                     3.8 Lite
@@ -527,14 +527,14 @@ export const VoiceCloneStudioModal: React.FC<VoiceCloneStudioModalProps> = ({
             {/* 2. SAVED PRESET & OFFICIAL VOICE PROFILES */}
             <div className="space-y-2.5">
               <div className="flex items-center justify-between">
-                <label className="text-xs font-semibold text-white flex items-center gap-1.5">
-                  <AudioWaveform className="w-3.5 h-3.5 text-[#2ba0ff]" />
+                <label className="text-xs font-semibold text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] flex items-center gap-1.5">
+                  <AudioWaveform className="w-3.5 h-3.5 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf]" />
                   选择预设合成音色
                 </label>
                 <button
                   type="button"
                   onClick={() => setIsMasterModalOpen(true)}
-                  className="text-[11px] text-[#2ba0ff] hover:underline flex items-center gap-1 cursor-pointer"
+                  className="text-[11px] text-[#0284c7] dark:text-[#2ba0ff] aurora:text-[#2dd4bf] hover:underline flex items-center gap-1 cursor-pointer"
                 >
                   <Settings className="w-3 h-3" />
                   <span>配置预设音色与参数</span>
@@ -553,25 +553,25 @@ export const VoiceCloneStudioModal: React.FC<VoiceCloneStudioModalProps> = ({
                   }}
                   className={`p-3 rounded-xl border text-left transition-all cursor-pointer flex items-center justify-between gap-3 ${
                     isMasterSelected
-                      ? 'bg-[#2481cc]/15 border-[#2481cc] ring-1 ring-[#2481cc]'
-                      : 'bg-[#152230] border-[#1e2f42] hover:border-[#2481cc]/40'
+                      ? 'bg-[#e8f3ff] dark:bg-[#2ba0ff]/15 aurora:bg-[#112d36] border-[#2481cc] dark:border-[#2ba0ff] aurora:border-[#2dd4bf] ring-1 ring-[#2481cc] dark:ring-[#2ba0ff] aurora:ring-[#2dd4bf]'
+                      : 'bg-[#f8fafc] dark:bg-[#0e1726]/85 aurora:bg-[#101c23]/90 border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] hover:border-[#2481cc]/40 dark:hover:border-[#2ba0ff]/40 aurora:hover:border-[#2dd4bf]/40'
                   }`}
                 >
                   <div className="flex items-center gap-3 min-w-0">
-                    <div className="w-9 h-9 rounded-lg bg-[#2481cc]/20 text-[#2ba0ff] flex items-center justify-center shrink-0">
+                    <div className="w-9 h-9 rounded-lg bg-[#2481cc]/15 dark:bg-[#2ba0ff]/20 aurora:bg-[#0d9488]/20 text-[#0284c7] dark:text-[#2ba0ff] aurora:text-[#2dd4bf] flex items-center justify-center shrink-0">
                       <AudioWaveform className="w-5 h-5" />
                     </div>
                     <div className="min-w-0">
-                      <div className="text-xs font-bold text-white truncate">
+                      <div className="text-xs font-bold text-[#0f172a] dark:text-white aurora:text-[#ecf6f8] truncate">
                         {masterVoiceprint?.name || '个人预设音色档'}
                       </div>
-                      <p className="text-[11px] text-[#7f93a5] mt-0.5 truncate tabular-nums">
+                      <p className="text-[11px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] mt-0.5 truncate tabular-nums">
                         {masterVoiceprint?.baseVoice || 'Kore'} · 语速 {(masterVoiceprint?.rate || 1.0).toFixed(2)}x · 音高 {(masterVoiceprint?.pitch || 1.0).toFixed(2)}x
                       </p>
                     </div>
                   </div>
                   {isMasterSelected && (
-                    <div className="w-5 h-5 rounded-full bg-[#2481cc] flex items-center justify-center text-white shrink-0">
+                    <div className="w-5 h-5 rounded-full bg-[#2481cc] dark:bg-[#2ba0ff] aurora:bg-[#0d9488] flex items-center justify-center text-white shrink-0">
                       <Check className="w-3 h-3" />
                     </div>
                   )}
@@ -591,19 +591,19 @@ export const VoiceCloneStudioModal: React.FC<VoiceCloneStudioModalProps> = ({
                       }}
                       className={`p-2.5 rounded-xl border text-left transition-all cursor-pointer flex items-center justify-between gap-2 ${
                         isSel
-                          ? 'bg-[#2481cc]/15 border-[#2481cc] ring-1 ring-[#2481cc]'
-                          : 'bg-[#152230] border-[#1e2f42] hover:border-[#2481cc]/40'
+                          ? 'bg-[#e8f3ff] dark:bg-[#2ba0ff]/15 aurora:bg-[#112d36] border-[#2481cc] dark:border-[#2ba0ff] aurora:border-[#2dd4bf] ring-1 ring-[#2481cc] dark:ring-[#2ba0ff] aurora:ring-[#2dd4bf]'
+                          : 'bg-[#f8fafc] dark:bg-[#0e1726]/85 aurora:bg-[#101c23]/90 border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] hover:border-[#2481cc]/40 dark:hover:border-[#2ba0ff]/40 aurora:hover:border-[#2dd4bf]/40'
                       }`}
                     >
                       <div className="flex items-center gap-2.5 min-w-0">
                         <span className="text-base shrink-0">{profile.avatar}</span>
                         <div className="min-w-0">
-                          <div className="text-xs font-semibold text-white truncate">{profile.name}</div>
-                          <div className="text-[10.5px] text-[#7f93a5] truncate">{profile.tag}</div>
+                          <div className="text-xs font-semibold text-[#0f172a] dark:text-white aurora:text-[#ecf6f8] truncate">{profile.name}</div>
+                          <div className="text-[10.5px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] truncate">{profile.tag}</div>
                         </div>
                       </div>
                       {isSel && (
-                        <div className="w-4 h-4 rounded-full bg-[#2481cc] flex items-center justify-center text-white shrink-0">
+                        <div className="w-4 h-4 rounded-full bg-[#2481cc] dark:bg-[#2ba0ff] aurora:bg-[#0d9488] flex items-center justify-center text-white shrink-0">
                           <Check className="w-2.5 h-2.5" />
                         </div>
                       )}
@@ -616,11 +616,11 @@ export const VoiceCloneStudioModal: React.FC<VoiceCloneStudioModalProps> = ({
             {/* 3. Tone Style & Emotion Presets */}
             <div>
               <div className="flex items-center justify-between gap-2 mb-2">
-                <label className="text-xs font-semibold text-[#7f93a5]">
+                <label className="text-xs font-semibold text-[#475569] dark:text-[#b4c6d8] aurora:text-[#b7d0d8]">
                   情绪与语气风格 (Emotion & Tone)
                 </label>
                 {!supportsEmotionInstructions && (
-                  <span className="text-[10.5px] text-amber-400">
+                  <span className="text-[10.5px] text-amber-700 dark:text-amber-400">
                     当前模型 ({ttsEngine}) 不支持语气指令，仅 gpt-4o-mini-tts / Gemini 生效
                   </span>
                 )}
@@ -639,10 +639,10 @@ export const VoiceCloneStudioModal: React.FC<VoiceCloneStudioModalProps> = ({
                       }}
                       className={`px-3 py-1.5 rounded-xl text-xs font-medium transition-all border ${
                         !supportsEmotionInstructions
-                          ? 'opacity-45 cursor-not-allowed bg-[#152230] border-[#1e2f42] text-[#7f93a5]'
+                          ? 'opacity-45 cursor-not-allowed bg-[#f8fafc] dark:bg-[#0e1726]/85 aurora:bg-[#101c23]/90 border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5]'
                           : isSelected
-                          ? 'bg-[#2481cc] text-white border-[#2481cc] shadow-sm cursor-pointer'
-                          : 'bg-[#152230] border-[#1e2f42] text-[#7f93a5] hover:text-white hover:border-[#2ba0ff]/40 cursor-pointer'
+                          ? 'bg-[#2481cc] dark:bg-[#2ba0ff] aurora:bg-[#0d9488] text-white border-[#2481cc] dark:border-[#2ba0ff] aurora:border-[#0d9488] shadow-sm cursor-pointer'
+                          : 'bg-[#f8fafc] dark:bg-[#0e1726]/85 aurora:bg-[#101c23]/90 border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] text-[#475569] dark:text-[#b4c6d8] aurora:text-[#b7d0d8] hover:text-[#0f172a] dark:hover:text-white aurora:hover:text-[#ecf6f8] hover:border-[#2481cc]/40 dark:hover:border-[#2ba0ff]/40 aurora:hover:border-[#2dd4bf]/40 cursor-pointer'
                       }`}
                     >
                       {em.label}
@@ -653,12 +653,12 @@ export const VoiceCloneStudioModal: React.FC<VoiceCloneStudioModalProps> = ({
             </div>
 
             {/* 4. Server-side ffmpeg Speed & Pitch Controls */}
-            <div className="space-y-3 pt-1 text-xs p-3 rounded-xl bg-[#14202d] border border-[#1e2f42]">
+            <div className="space-y-3 pt-1 text-xs p-3 rounded-xl bg-[#f8fafc] dark:bg-[#0e1726]/85 aurora:bg-[#101c23]/90 border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34]">
               <div className="space-y-1.5">
                 <div className="flex items-center justify-between gap-2 flex-wrap">
-                  <span className="text-[#9bb3c9] font-medium flex items-center gap-1.5">
-                    <Sliders className="w-3.5 h-3.5 text-[#2ba0ff]" /> 语速节奏：
-                    <span className="text-white font-mono tabular-nums">{speedRate.toFixed(2)}x</span>
+                  <span className="text-[#475569] dark:text-[#b4c6d8] aurora:text-[#b7d0d8] font-medium flex items-center gap-1.5">
+                    <Sliders className="w-3.5 h-3.5 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf]" /> 语速节奏：
+                    <span className="text-[#0f172a] dark:text-white aurora:text-[#ecf6f8] font-mono tabular-nums">{speedRate.toFixed(2)}x</span>
                   </span>
                   <div className="flex items-center gap-1.5">
                     {[0.8, 1.0, 1.2].map((rate) => (
@@ -671,8 +671,8 @@ export const VoiceCloneStudioModal: React.FC<VoiceCloneStudioModalProps> = ({
                         }}
                         className={`px-2.5 py-1 rounded-lg text-xs font-semibold transition-all cursor-pointer ${
                           Math.abs(speedRate - rate) < 0.015
-                            ? 'bg-[#2481cc] text-white'
-                            : 'bg-[#152230] text-[#7f93a5] hover:text-white'
+                            ? 'bg-[#2481cc] dark:bg-[#2ba0ff] aurora:bg-[#0d9488] text-white'
+                            : 'bg-white dark:bg-[#08101a] aurora:bg-[#081014] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] hover:text-[#0f172a] dark:hover:text-white aurora:hover:text-[#ecf6f8]'
                         }`}
                       >
                         {rate === 0.8 ? '0.8x 慢速' : rate === 1.0 ? '1.0x 标准' : '1.2x 轻快'}
@@ -690,15 +690,15 @@ export const VoiceCloneStudioModal: React.FC<VoiceCloneStudioModalProps> = ({
                     setSpeedRate(parseFloat(e.target.value));
                     invalidateSynthesizedAudio();
                   }}
-                  className="w-full h-1 bg-[#1e2f42] rounded-lg appearance-none cursor-pointer accent-[#2ba0ff]"
+                  className="w-full h-1 bg-[#e2e8f0] dark:bg-[#1e3148] aurora:bg-[#203742] rounded-lg appearance-none cursor-pointer accent-[#2481cc] dark:accent-[#2ba0ff] aurora:accent-[#14b8a6]"
                 />
               </div>
 
               <div className="space-y-1.5">
                 <div className="flex items-center justify-between gap-2 flex-wrap">
-                  <span className="text-[#9bb3c9] font-medium flex items-center gap-1.5">
-                    <AudioWaveform className="w-3.5 h-3.5 text-[#2ba0ff]" /> 音高基线：
-                    <span className="text-white font-mono tabular-nums">{pitchRate.toFixed(2)}x</span>
+                  <span className="text-[#475569] dark:text-[#b4c6d8] aurora:text-[#b7d0d8] font-medium flex items-center gap-1.5">
+                    <AudioWaveform className="w-3.5 h-3.5 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf]" /> 音高基线：
+                    <span className="text-[#0f172a] dark:text-white aurora:text-[#ecf6f8] font-mono tabular-nums">{pitchRate.toFixed(2)}x</span>
                   </span>
                   <div className="flex items-center gap-1.5">
                     {[0.9, 1.0, 1.15].map((p) => (
@@ -711,8 +711,8 @@ export const VoiceCloneStudioModal: React.FC<VoiceCloneStudioModalProps> = ({
                         }}
                         className={`px-2.5 py-1 rounded-lg text-xs font-semibold transition-all cursor-pointer ${
                           Math.abs(pitchRate - p) < 0.015
-                            ? 'bg-[#2481cc] text-white'
-                            : 'bg-[#152230] text-[#7f93a5] hover:text-white'
+                            ? 'bg-[#2481cc] dark:bg-[#2ba0ff] aurora:bg-[#0d9488] text-white'
+                            : 'bg-white dark:bg-[#08101a] aurora:bg-[#081014] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] hover:text-[#0f172a] dark:hover:text-white aurora:hover:text-[#ecf6f8]'
                         }`}
                       >
                         {p === 0.9 ? '0.9x 低沉' : p === 1.0 ? '1.0x 原声调' : '1.15x 清亮'}
@@ -730,14 +730,14 @@ export const VoiceCloneStudioModal: React.FC<VoiceCloneStudioModalProps> = ({
                     setPitchRate(parseFloat(e.target.value));
                     invalidateSynthesizedAudio();
                   }}
-                  className="w-full h-1 bg-[#1e2f42] rounded-lg appearance-none cursor-pointer accent-[#2ba0ff]"
+                  className="w-full h-1 bg-[#e2e8f0] dark:bg-[#1e3148] aurora:bg-[#203742] rounded-lg appearance-none cursor-pointer accent-[#2481cc] dark:accent-[#2ba0ff] aurora:accent-[#14b8a6]"
                 />
               </div>
             </div>
           </div>
 
           {/* Modal Footer */}
-          <div className="flex items-center justify-between px-6 py-4 border-t border-[#17212b] bg-[#121c27]">
+          <div className="flex items-center justify-between px-6 py-4 border-t border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] bg-[#f8fafc] dark:bg-[#0d1726] aurora:bg-[#0e1920]">
             {/* Audition Button */}
             <button
               type="button"
@@ -745,13 +745,13 @@ export const VoiceCloneStudioModal: React.FC<VoiceCloneStudioModalProps> = ({
               disabled={isGenerating || isSending || !text.trim()}
               className={`px-4 py-2.5 rounded-xl text-xs font-medium flex items-center gap-2 border transition-all cursor-pointer ${
                 isPlayingPreview
-                  ? 'bg-rose-500/20 border-rose-500/40 text-rose-400 animate-pulse'
-                  : 'bg-[#152230] hover:bg-[#1a2938] border-[#1e2f42] text-white'
+                  ? 'bg-rose-500/15 border-rose-500/35 text-rose-700 dark:text-rose-400 animate-pulse'
+                  : 'bg-white hover:bg-[#f1f5f9] dark:bg-[#132234] dark:hover:bg-[#1b2f47] aurora:bg-[#13252e] aurora:hover:bg-[#1a3340] border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8]'
               }`}
             >
               {isGenerating ? (
                 <>
-                  <RefreshCw className="w-4 h-4 animate-spin text-[#2ba0ff]" />
+                  <RefreshCw className="w-4 h-4 animate-spin text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf]" />
                   <span>合成中...</span>
                 </>
               ) : isPlayingPreview ? (
@@ -772,7 +772,7 @@ export const VoiceCloneStudioModal: React.FC<VoiceCloneStudioModalProps> = ({
               type="button"
               onClick={() => void handleSendVoiceMessage()}
               disabled={isGenerating || isSending || !text.trim() || !audioUrl}
-              className="px-6 py-2.5 rounded-xl bg-[#2481cc] hover:bg-[#2074b8] text-white font-medium text-xs flex items-center gap-2 shadow-md hover:scale-102 transition-all cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+              className="px-6 py-2.5 rounded-xl bg-[#2481cc] hover:bg-[#1d6fb3] dark:bg-[#2ba0ff] dark:hover:bg-[#1e8ee8] aurora:bg-[#0d9488] aurora:hover:bg-[#0f766e] text-white font-medium text-xs flex items-center gap-2 shadow-md hover:scale-102 transition-all cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
             >
               <Send className="w-4 h-4" />
               <span className="tabular-nums">
