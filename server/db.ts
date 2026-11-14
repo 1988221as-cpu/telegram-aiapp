@@ -230,7 +230,11 @@ export async function initDatabase() {
       timestamp TEXT NOT NULL,
       created_at INTEGER NOT NULL,
       delivery_status TEXT DEFAULT 'delivered',
-      telegram_message_id INTEGER
+      telegram_message_id INTEGER,
+      reply_to_json TEXT,
+      is_edited INTEGER DEFAULT 0,
+      is_pinned INTEGER DEFAULT 0,
+      forward_from TEXT
     );
 
     CREATE INDEX IF NOT EXISTS idx_messages_chat_created ON messages (chat_id, created_at);
@@ -373,6 +377,19 @@ export async function initDatabase() {
   } catch {
     // Column already exists
   }
+
+  try {
+    await db.exec(`ALTER TABLE messages ADD COLUMN reply_to_json TEXT`);
+  } catch {}
+  try {
+    await db.exec(`ALTER TABLE messages ADD COLUMN is_edited INTEGER DEFAULT 0`);
+  } catch {}
+  try {
+    await db.exec(`ALTER TABLE messages ADD COLUMN is_pinned INTEGER DEFAULT 0`);
+  } catch {}
+  try {
+    await db.exec(`ALTER TABLE messages ADD COLUMN forward_from TEXT`);
+  } catch {}
 
   // Ensure telegram_user_sessions exists and has api_id/api_hash columns
   try {

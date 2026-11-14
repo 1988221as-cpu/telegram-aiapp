@@ -1241,6 +1241,37 @@ export function recordDeletedMessageId(messageId: string): void {
   } catch {}
 }
 
+const APP_BOOT_TIMESTAMP = Date.now();
+
+export function resolveClientTelegramMessageId(msg?: Partial<Message> | null): number | undefined {
+  if (!msg) return undefined;
+  if (typeof msg.telegramMessageId === 'number' && Number.isInteger(msg.telegramMessageId) && msg.telegramMessageId > 0) {
+    return msg.telegramMessageId;
+  }
+  const rawId = String(msg.id || '').trim();
+  const cloudMatch = rawId.match(/^tg_cloud_(\d+)(?:_|$)/);
+  if (cloudMatch) return Number(cloudMatch[1]);
+  const msgTgMatch = rawId.match(/^msg_tg_(?:\d+_)?(\d+)$/);
+  if (msgTgMatch) return Number(msgTgMatch[1]);
+  const tgNumericMatch = rawId.match(/^tg_(\d+)_\d+$/);
+  if (tgNumericMatch) return Number(tgNumericMatch[1]);
+  return undefined;
+}
+
+export function normalizeStalePendingMessages(list: Message[]): Message[] {
+  if (!Array.isArray(list)) return [];
+  const now = Date.now();
+  return list.map((m) => {
+    if (
+      (m.deliveryStatus === 'pending' || m.deliveryStatus === 'retrying') &&
+      (!m.createdAt || m.createdAt < APP_BOOT_TIMESTAMP || now - m.createdAt > 120000)
+    ) {
+      return { ...m, deliveryStatus: 'failed' as const };
+    }
+    return m;
+  });
+}
+
 export function getLocalMessages(chatId: string, accountId?: string): Message[] {
   try {
     const acc = accountId || currentActiveAccountId;
@@ -1258,10 +1289,12 @@ export function getLocalMessages(chatId: string, accountId?: string): Message[] 
       }
     }
     if (Array.isArray(list)) {
-      return list.filter(
-        (m) =>
-          !isMessageDeleted(m.id) &&
-          (!acc || !m.accountId || m.accountId === acc)
+      return normalizeStalePendingMessages(
+        list.filter(
+          (m) =>
+            !isMessageDeleted(m.id) &&
+            (!acc || !m.accountId || m.accountId === acc)
+        )
       );
     }
     return [];
@@ -1321,7 +1354,8 @@ export async function deleteMessageFromDb(
   messageId: string,
   accountId?: string,
   chatId?: string,
-  telegramMessageId?: number
+  telegramMessageId?: number,
+  options?: { revoke?: boolean; localOnly?: boolean }
 ): Promise<{ ok: boolean; error?: string }> {
   try {
     const query = new URLSearchParams();
@@ -1329,6 +1363,12 @@ export async function deleteMessageFromDb(
     if (accountId) query.set('accountId', accountId);
     if (telegramMessageId !== undefined && telegramMessageId !== null) {
       query.set('telegramMessageId', String(telegramMessageId));
+    }
+    if (typeof options?.revoke === 'boolean') {
+      query.set('revoke', options.revoke ? 'true' : 'false');
+    }
+    if (options?.localOnly) {
+      query.set('localOnly', 'true');
     }
     const qs = query.toString() ? `?${query.toString()}` : '';
     const res = await fetch(`/api/messages/${encodeURIComponent(messageId)}${qs}`, {
@@ -1351,15 +1391,26 @@ export function saveLocalMessage(chatId: string, message: Message, accountId?: s
     const acc = accountId || message.accountId || currentActiveAccountId;
     const scopedKey = acc ? `tg_desktop_msgs_${acc}_${chatId}` : `tg_desktop_msgs_${chatId}`;
     const existing = getLocalMessages(chatId, acc);
+    const incomingTgId = resolveClientTelegramMessageId(message);
     const existingIdx = existing.findIndex((m) => {
       if (m.id === message.id) return true;
+      const existingTgId = resolveClientTelegramMessageId(m);
+      if (existingTgId !== undefined && incomingTgId !== undefined) {
+        return existingTgId === incomingTgId;
+      }
+      // Only text-match when at least one side is an unsynced optimistic local record
       if (
         m.sender === message.sender &&
         m.text &&
         message.text &&
         m.text.trim() === message.text.trim()
       ) {
-        if (message.sender === 'me' || m.timestamp === message.timestamp) return true;
+        const sameMinute = m.timestamp === message.timestamp;
+        const closeInTime =
+          typeof m.createdAt === 'number' &&
+          typeof message.createdAt === 'number' &&
+          Math.abs(m.createdAt - message.createdAt) < 120000;
+        if (sameMinute || closeInTime) return true;
       }
       return false;
     });
@@ -1367,9 +1418,19 @@ export function saveLocalMessage(chatId: string, message: Message, accountId?: s
     if (existingIdx === -1) {
       existing.push(message);
       secureSetItemSync(scopedKey, existing);
-    } else if (message.translatedText && !existing[existingIdx].translatedText) {
-      existing[existingIdx].translatedText = message.translatedText;
-      secureSetItemSync(scopedKey, existing);
+    } else {
+      let changed = false;
+      if (message.translatedText && !existing[existingIdx].translatedText) {
+        existing[existingIdx].translatedText = message.translatedText;
+        changed = true;
+      }
+      if (incomingTgId !== undefined && !existing[existingIdx].telegramMessageId) {
+        existing[existingIdx].telegramMessageId = incomingTgId;
+        changed = true;
+      }
+      if (changed) {
+        secureSetItemSync(scopedKey, existing);
+      }
     }
   } catch (e) {
     console.error('Failed to save encrypted message to local storage', e);
@@ -1483,19 +1544,55 @@ export function purgeAllLocalChatData(): void {
 
 // ==================== TELEGRAM CLOUD SYNC & AUTOPILOT HELPERS ====================
 
-export async function syncTelegramCloudMessages(chatId: string, accountId?: string): Promise<Message[]> {
+export async function fetchTelegramCloudMessagesApi(
+  chatId: string,
+  accountId?: string,
+  options?: { limit?: number; offsetId?: number; search?: string }
+): Promise<{
+  ok: boolean;
+  messages: Message[];
+  hasMore: boolean;
+  readOutboxMaxId?: number;
+  error?: string;
+  code?: string;
+}> {
   try {
-    const res = await fetch(`/api/telegram/user/messages/${chatId}?limit=40`, {
+    const query = new URLSearchParams();
+    query.set('limit', String(options?.limit || 40));
+    if (options?.offsetId && options.offsetId > 0) {
+      query.set('offsetId', String(options.offsetId));
+    }
+    if (options?.search && options.search.trim()) {
+      query.set('search', options.search.trim());
+    }
+    const res = await fetch(`/api/telegram/user/messages/${encodeURIComponent(chatId)}?${query.toString()}`, {
       headers: getAuthHeaders(accountId),
     });
     const data = await res.json().catch(() => ({}));
     if (res.ok && data?.ok && Array.isArray(data.messages)) {
-      return data.messages;
+      return {
+        ok: true,
+        messages: data.messages,
+        hasMore: Boolean(data.hasMore),
+        readOutboxMaxId: typeof data.readOutboxMaxId === 'number' ? data.readOutboxMaxId : undefined,
+      };
     }
-  } catch (err) {
+    return {
+      ok: false,
+      messages: [],
+      hasMore: false,
+      code: data?.code,
+      error: data?.error || data?.message || `拉取云端消息失败 (HTTP ${res.status})`,
+    };
+  } catch (err: any) {
     console.warn('[Sync Cloud Messages Error]:', err);
+    return { ok: false, messages: [], hasMore: false, error: err?.message || '网络连接异常' };
   }
-  return [];
+}
+
+export async function syncTelegramCloudMessages(chatId: string, accountId?: string): Promise<Message[]> {
+  const res = await fetchTelegramCloudMessagesApi(chatId, accountId, { limit: 40 });
+  return res.messages;
 }
 
 export async function disconnectTelegramAccount(
@@ -1973,6 +2070,7 @@ export async function editTelegramMessageApi(payload: {
   messageId: string;
   telegramMessageId?: number;
   newText: string;
+  translatedText?: string;
 }): Promise<{ ok: boolean; cloudSynced?: boolean; telegramMessageId?: number; error?: string }> {
   try {
     const res = await fetch('/api/telegram/user/messages/edit', {
@@ -2127,6 +2225,61 @@ export async function deleteTelegramDialogApi(payload: {
   }
 }
 
+export async function markTelegramDialogReadApi(payload: {
+  accountId?: string;
+  chatId: string;
+  maxId?: number;
+}): Promise<{ ok: boolean; cloudSynced?: boolean; error?: string }> {
+  try {
+    const res = await fetch('/api/telegram/user/dialogs/read', {
+      method: 'POST',
+      headers: getAuthHeaders(payload.accountId),
+      body: JSON.stringify(payload),
+    });
+    return await res.json();
+  } catch (err: any) {
+    return { ok: false, error: err?.message || '同步云端已读状态失败' };
+  }
+}
+
+export async function batchDeleteTelegramMessagesApi(payload: {
+  accountId?: string;
+  chatId: string;
+  items: Array<{ id: string; telegramMessageId?: number; localOnly?: boolean }>;
+  revoke?: boolean;
+}): Promise<{ ok: boolean; cloudSynced?: boolean; deletedCount?: number; deletedIds?: string[]; error?: string }> {
+  try {
+    const res = await fetch('/api/telegram/user/messages/batch-delete', {
+      method: 'POST',
+      headers: getAuthHeaders(payload.accountId),
+      body: JSON.stringify(payload),
+    });
+    return await res.json();
+  } catch (err: any) {
+    return { ok: false, error: err?.message || '批量删除消息失败' };
+  }
+}
+
+export async function forwardTelegramMessagesApi(payload: {
+  accountId?: string;
+  fromChatId: string;
+  toChatId: string;
+  messageIds?: string[];
+  telegramMessageIds?: number[];
+  dropAuthor?: boolean;
+}): Promise<{ ok: boolean; cloudSynced?: boolean; forwardedCount?: number; error?: string }> {
+  try {
+    const res = await fetch('/api/telegram/user/messages/forward', {
+      method: 'POST',
+      headers: getAuthHeaders(payload.accountId),
+      body: JSON.stringify(payload),
+    });
+    return await res.json();
+  } catch (err: any) {
+    return { ok: false, error: err?.message || '转发消息失败' };
+  }
+}
+
 export async function renameTelegramContactApi(payload: {
   accountId?: string;
   chatId: string;
@@ -2182,6 +2335,123 @@ export async function addTelegramUserContactApi(payload: {
   } catch (err: any) {
     return { ok: false, error: err?.message || '网络连接异常' };
   }
+}
+
+export async function deleteTelegramUserContactApi(payload: {
+  accountId?: string;
+  chatId: string;
+}): Promise<{ ok: boolean; cloudSynced?: boolean; error?: string }> {
+  try {
+    const res = await fetch('/api/telegram/user/contacts/delete', {
+      method: 'POST',
+      headers: getAuthHeaders(payload.accountId),
+      body: JSON.stringify(payload),
+    });
+    return await res.json();
+  } catch (err: any) {
+    return { ok: false, error: err?.message || '网络连接异常' };
+  }
+}
+
+export async function blockTelegramUserContactApi(payload: {
+  accountId?: string;
+  chatId: string;
+}): Promise<{ ok: boolean; cloudSynced?: boolean; error?: string }> {
+  try {
+    const res = await fetch('/api/telegram/user/contacts/block', {
+      method: 'POST',
+      headers: getAuthHeaders(payload.accountId),
+      body: JSON.stringify(payload),
+    });
+    return await res.json();
+  } catch (err: any) {
+    return { ok: false, error: err?.message || '网络连接异常' };
+  }
+}
+
+export async function unblockTelegramUserContactApi(payload: {
+  accountId?: string;
+  chatId: string;
+}): Promise<{ ok: boolean; cloudSynced?: boolean; error?: string }> {
+  try {
+    const res = await fetch('/api/telegram/user/contacts/unblock', {
+      method: 'POST',
+      headers: getAuthHeaders(payload.accountId),
+      body: JSON.stringify(payload),
+    });
+    return await res.json();
+  } catch (err: any) {
+    return { ok: false, error: err?.message || '网络连接异常' };
+  }
+}
+
+export async function searchTelegramGlobalContactsApi(
+  query: string,
+  accountId?: string
+): Promise<{
+  ok: boolean;
+  cloudSynced?: boolean;
+  contacts: TelegramContact[];
+  error?: string;
+}> {
+  try {
+    const clean = query.trim();
+    if (!clean) return { ok: true, contacts: [] };
+    const params = new URLSearchParams({ q: clean });
+    if (accountId) params.set('accountId', accountId);
+    const res = await fetch(`/api/telegram/user/contacts/search?${params.toString()}`, {
+      headers: getAuthHeaders(accountId),
+    });
+    return await res.json();
+  } catch (err: any) {
+    return { ok: false, contacts: [], error: err?.message || '网络连接异常' };
+  }
+}
+
+export async function fetchTelegramBlockedContactsApi(accountId?: string): Promise<{
+  ok: boolean;
+  cloudSynced?: boolean;
+  blocked: TelegramContact[];
+  error?: string;
+}> {
+  try {
+    const query = accountId ? `?accountId=${encodeURIComponent(accountId)}` : '';
+    const res = await fetch(`/api/telegram/user/contacts/blocked${query}`, {
+      headers: getAuthHeaders(accountId),
+    });
+    return await res.json();
+  } catch (err: any) {
+    return { ok: false, blocked: [], error: err?.message || '网络连接异常' };
+  }
+}
+
+export function getScopedContacts(accountId?: string): TelegramContact[] {
+  try {
+    const acc = accountId || currentActiveAccountId || '';
+    if (!acc) return [];
+    const scopedKey = `tg_desktop_contacts_${acc}`;
+    const list = secureGetItemSync<TelegramContact[]>(scopedKey);
+    if (Array.isArray(list)) {
+      return list.filter((c) => c && c.id && !c.id.startsWith('contact_'));
+    }
+    return [];
+  } catch {
+    return [];
+  }
+}
+
+export function saveScopedContacts(contacts: TelegramContact[], accountId?: string): void {
+  try {
+    const acc = accountId || currentActiveAccountId || '';
+    if (!acc) return;
+    const cleaned = (Array.isArray(contacts) ? contacts : []).filter(
+      (c) => c && c.id && !c.id.startsWith('contact_')
+    );
+    secureSetItemSync(`tg_desktop_contacts_${acc}`, cleaned);
+    try {
+      localStorage.removeItem('tg_pro_contacts');
+    } catch {}
+  } catch {}
 }
 
 export async function createTelegramGroupApi(payload: {

@@ -15,9 +15,18 @@ import {
   Loader2,
   AlertCircle,
   RefreshCw,
+  ShieldAlert,
+  ShieldCheck,
+  Phone,
+  UserMinus,
 } from 'lucide-react';
 import { Chat, Message, TelegramChatFullInfo } from '../types';
-import { fetchTelegramChatFullInfoApi } from '../services/apiService';
+import {
+  fetchTelegramChatFullInfoApi,
+  blockTelegramUserContactApi,
+  unblockTelegramUserContactApi,
+  deleteTelegramUserContactApi,
+} from '../services/apiService';
 
 interface TelegramChatInfoDrawerProps {
   isOpen: boolean;
@@ -26,10 +35,11 @@ interface TelegramChatInfoDrawerProps {
   accountId?: string;
   messages: Message[];
   onToggleMute?: (chatId: string) => void | Promise<any>;
-  onClearHistory?: (chatId: string) => void | Promise<{ ok: boolean; error?: string } | void>;
+  onClearHistory?: (chatId: string, options?: { revoke?: boolean }) => void | Promise<{ ok: boolean; error?: string } | void>;
   onTogglePin?: (chatId: string) => void | Promise<any>;
   onUpdateTitle?: (chatId: string, newTitle: string) => void | Promise<{ ok: boolean; error?: string } | void>;
   onChatInfoUpdated?: (chatId: string, patch: Partial<Chat>) => void;
+  onRemoveContact?: (contactId: string) => void;
 }
 
 export const TelegramChatInfoDrawer: React.FC<TelegramChatInfoDrawerProps> = ({
@@ -43,6 +53,7 @@ export const TelegramChatInfoDrawer: React.FC<TelegramChatInfoDrawerProps> = ({
   onTogglePin,
   onUpdateTitle,
   onChatInfoUpdated,
+  onRemoveContact,
 }) => {
   const [activeTab, setActiveTab] = useState<'media' | 'files' | 'voice' | 'links' | 'members'>('media');
   const [isEditingRemark, setIsEditingRemark] = useState(false);
@@ -50,15 +61,23 @@ export const TelegramChatInfoDrawer: React.FC<TelegramChatInfoDrawerProps> = ({
   const [isSavingRemark, setIsSavingRemark] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
   const [isClearingHistory, setIsClearingHistory] = useState(false);
+  const [showClearConfirm, setShowClearConfirm] = useState(false);
+  const [revokeClearHistory, setRevokeClearHistory] = useState(false);
   const [fullInfo, setFullInfo] = useState<TelegramChatFullInfo | null>(null);
   const [isLoadingFullInfo, setIsLoadingFullInfo] = useState(false);
   const [fullInfoError, setFullInfoError] = useState<string | null>(null);
+  const [confirmBlockToggle, setConfirmBlockToggle] = useState(false);
+  const [isTogglingBlock, setIsTogglingBlock] = useState(false);
+  const [confirmDeleteContact, setConfirmDeleteContact] = useState(false);
+  const [isDeletingContact, setIsDeletingContact] = useState(false);
 
   useEffect(() => {
     if (chat?.title) {
       setRemarkText(chat.title);
       setIsEditingRemark(false);
       setActionError(null);
+      setShowClearConfirm(false);
+      setRevokeClearHistory(false);
     }
   }, [chat?.id, chat?.title]);
 
@@ -75,10 +94,13 @@ export const TelegramChatInfoDrawer: React.FC<TelegramChatInfoDrawerProps> = ({
     }
     setFullInfo(info);
     onChatInfoUpdated?.(chat.id, {
+      ...(!chat.isGroup && !chat.isChannel && info.title ? { title: info.title } : {}),
       ...(typeof info.memberCount === 'number' ? { memberCount: info.memberCount } : {}),
       ...(typeof info.onlineCount === 'number' ? { onlineCount: info.onlineCount } : {}),
       ...(typeof info.isOnline === 'boolean' ? { isOnline: info.isOnline } : {}),
       ...(info.statusText ? { statusText: info.statusText } : {}),
+      ...(info.phone !== undefined ? { phone: info.phone } : {}),
+      ...(typeof info.isBlocked === 'boolean' ? { isBlocked: info.isBlocked } : {}),
       ...(info.description !== undefined ? { description: info.description } : {}),
       ...(info.username !== undefined ? { username: info.username } : {}),
       ...(info.inviteLink !== undefined ? { inviteLink: info.inviteLink } : {}),
@@ -92,6 +114,8 @@ export const TelegramChatInfoDrawer: React.FC<TelegramChatInfoDrawerProps> = ({
     }
     setFullInfo(null);
     setFullInfoError(null);
+    setConfirmBlockToggle(false);
+    setConfirmDeleteContact(false);
     if (chat.id.startsWith('tg_')) {
       void loadFullInfo();
     }
@@ -219,17 +243,24 @@ export const TelegramChatInfoDrawer: React.FC<TelegramChatInfoDrawerProps> = ({
                 <h3 className="font-bold text-base text-center leading-tight">
                   {chat.title}
                 </h3>
-                <button
-                  onClick={() => {
-                    setRemarkText(chat.title);
-                    setActionError(null);
-                    setIsEditingRemark(true);
-                  }}
-                  className="p-1 rounded-md text-[#707579] hover:text-[#2481cc] dark:text-[#7f93a5] dark:hover:text-[#2ba0ff] hover:bg-black/5 dark:hover:bg-white/5 cursor-pointer transition-colors"
-                  title="点击设置/修改好友备注"
-                >
-                  <Edit3 className="w-3.5 h-3.5" />
-                </button>
+                {(fullInfo?.isBlocked ?? chat.isBlocked) && (
+                  <span className="px-1.5 py-0.5 rounded bg-red-500/15 text-red-500 text-[10px] font-medium shrink-0">
+                    已拉黑
+                  </span>
+                )}
+                {!chat.isGroup && !chat.isChannel && (
+                  <button
+                    onClick={() => {
+                      setRemarkText(chat.title);
+                      setActionError(null);
+                      setIsEditingRemark(true);
+                    }}
+                    className="p-1 rounded-md text-[#707579] hover:text-[#2481cc] dark:text-[#7f93a5] dark:hover:text-[#2ba0ff] hover:bg-black/5 dark:hover:bg-white/5 cursor-pointer transition-colors"
+                    title="点击设置/修改好友备注"
+                  >
+                    <Edit3 className="w-3.5 h-3.5" />
+                  </button>
+                )}
               </div>
             )}
 
@@ -256,11 +287,17 @@ export const TelegramChatInfoDrawer: React.FC<TelegramChatInfoDrawerProps> = ({
                 );
               })()}
             </p>
-            {(fullInfo?.username || chat.username || fullInfo?.description || chat.description || fullInfo?.inviteLink || chat.inviteLink) && (
+            {(fullInfo?.username || chat.username || fullInfo?.phone || chat.phone || fullInfo?.description || chat.description || fullInfo?.inviteLink || chat.inviteLink) && (
               <div className="mt-2.5 w-full text-center space-y-1">
                 {(fullInfo?.username || chat.username) && (
                   <div className="text-[11px] text-[#2481cc] dark:text-[#2ba0ff] font-medium">
                     {fullInfo?.username || chat.username}
+                  </div>
+                )}
+                {(fullInfo?.phone || chat.phone) && (
+                  <div className="text-[11px] text-[#707579] dark:text-[#a0acb8] flex items-center justify-center gap-1 tabular-nums">
+                    <Phone className="w-3 h-3" />
+                    <span>{fullInfo?.phone || chat.phone}</span>
                   </div>
                 )}
                 {(fullInfo?.description || chat.description) && (
@@ -283,23 +320,25 @@ export const TelegramChatInfoDrawer: React.FC<TelegramChatInfoDrawerProps> = ({
             )}
           </div>
 
-          {/* Quick Actions (Remark, Mute, Pin) */}
+          {/* Quick Actions (Remark, Mute, Pin, Block/Unblock) */}
           <div className="p-3 border-b border-[#e0e4e8] dark:border-[#0e1621] space-y-1">
-            <button
-              onClick={() => {
-                setRemarkText(chat.title);
-                setIsEditingRemark(true);
-              }}
-              className="w-full flex items-center justify-between p-2.5 rounded-xl hover:bg-black/5 dark:hover:bg-[#202b36] transition-colors cursor-pointer text-xs"
-            >
-              <div className="flex items-center gap-3">
-                <Edit3 className="w-4 h-4 text-[#707579] dark:text-[#7f93a5]" />
-                <span>设置好友备注</span>
-              </div>
-              <span className="text-[11px] text-[#2481cc] dark:text-[#2ba0ff]">
-                编辑
-              </span>
-            </button>
+            {!chat.isGroup && !chat.isChannel && (
+              <button
+                onClick={() => {
+                  setRemarkText(chat.title);
+                  setIsEditingRemark(true);
+                }}
+                className="w-full flex items-center justify-between p-2.5 rounded-xl hover:bg-black/5 dark:hover:bg-[#202b36] transition-colors cursor-pointer text-xs"
+              >
+                <div className="flex items-center gap-3">
+                  <Edit3 className="w-4 h-4 text-[#707579] dark:text-[#7f93a5]" />
+                  <span>设置好友备注</span>
+                </div>
+                <span className="text-[11px] text-[#2481cc] dark:text-[#2ba0ff]">
+                  编辑
+                </span>
+              </button>
+            )}
             <button
               onClick={() => onToggleMute?.(chat.id)}
               className="w-full flex items-center justify-between p-2.5 rounded-xl hover:bg-black/5 dark:hover:bg-[#202b36] transition-colors cursor-pointer text-xs"
@@ -329,6 +368,130 @@ export const TelegramChatInfoDrawer: React.FC<TelegramChatInfoDrawerProps> = ({
                 {chat.isPinned ? '取消置顶' : '置顶'}
               </span>
             </button>
+
+            {chat.id.startsWith('tg_') && !chat.isGroup && !chat.isChannel && accountId !== 'acc_telegram_bot' && (() => {
+              const currentlyBlocked = Boolean(fullInfo?.isBlocked ?? chat.isBlocked);
+              return confirmBlockToggle ? (
+                <div className="p-2.5 rounded-xl bg-amber-500/10 border border-amber-500/25 flex items-center justify-between gap-2 text-xs">
+                  <span className="text-[#111827] dark:text-white">
+                    {currentlyBlocked ? '确定将其移出黑名单？' : '确定加入黑名单并屏蔽对方消息？'}
+                  </span>
+                  <div className="flex items-center gap-1.5 shrink-0">
+                    <button
+                      type="button"
+                      disabled={isTogglingBlock}
+                      onClick={async () => {
+                        setActionError(null);
+                        setIsTogglingBlock(true);
+                        try {
+                          const res = currentlyBlocked
+                            ? await unblockTelegramUserContactApi({ accountId, chatId: chat.id })
+                            : await blockTelegramUserContactApi({ accountId, chatId: chat.id });
+                          if (!res.ok) {
+                            setActionError(res.error || (currentlyBlocked ? '解除拉黑失败' : '拉黑失败'));
+                            return;
+                          }
+                          const nextBlocked = !currentlyBlocked;
+                          setFullInfo((prev) => (prev ? { ...prev, isBlocked: nextBlocked } : prev));
+                          onChatInfoUpdated?.(chat.id, { isBlocked: nextBlocked });
+                          setConfirmBlockToggle(false);
+                        } finally {
+                          setIsTogglingBlock(false);
+                        }
+                      }}
+                      className={`px-2 py-1 rounded-lg text-[11px] font-medium text-white cursor-pointer disabled:opacity-50 ${
+                        currentlyBlocked ? 'bg-emerald-600 hover:bg-emerald-700' : 'bg-red-500 hover:bg-red-600'
+                      }`}
+                    >
+                      {isTogglingBlock ? '处理中' : '确认'}
+                    </button>
+                    <button
+                      type="button"
+                      disabled={isTogglingBlock}
+                      onClick={() => setConfirmBlockToggle(false)}
+                      className="px-2 py-1 rounded-lg text-[11px] bg-black/5 dark:bg-white/10 text-[#707579] dark:text-gray-300 cursor-pointer"
+                    >
+                      取消
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => setConfirmBlockToggle(true)}
+                  className="w-full flex items-center justify-between p-2.5 rounded-xl hover:bg-black/5 dark:hover:bg-[#202b36] transition-colors cursor-pointer text-xs"
+                >
+                  <div className="flex items-center gap-3">
+                    {currentlyBlocked ? (
+                      <ShieldCheck className="w-4 h-4 text-emerald-500" />
+                    ) : (
+                      <ShieldAlert className="w-4 h-4 text-amber-500" />
+                    )}
+                    <span className={currentlyBlocked ? 'text-emerald-600 dark:text-emerald-400' : 'text-amber-600 dark:text-amber-400'}>
+                      {currentlyBlocked ? '已加入黑名单' : '拉黑该联系人'}
+                    </span>
+                  </div>
+                  <span className={`text-[11px] ${currentlyBlocked ? 'text-emerald-500' : 'text-amber-500'}`}>
+                    {currentlyBlocked ? '解除拉黑' : '拉黑'}
+                  </span>
+                </button>
+              );
+            })()}
+
+            {chat.id.startsWith('tg_') && !chat.isGroup && !chat.isChannel && !chat.isBot && accountId !== 'acc_telegram_bot' && fullInfo?.isContact && (
+              confirmDeleteContact ? (
+                <div className="p-2.5 rounded-xl bg-red-500/10 border border-red-500/25 flex items-center justify-between gap-2 text-xs">
+                  <span className="text-[#111827] dark:text-white">
+                    从 Telegram 云端通讯录删除该好友？
+                  </span>
+                  <div className="flex items-center gap-1.5 shrink-0">
+                    <button
+                      type="button"
+                      disabled={isDeletingContact}
+                      onClick={async () => {
+                        setActionError(null);
+                        setIsDeletingContact(true);
+                        try {
+                          const res = await deleteTelegramUserContactApi({ accountId, chatId: chat.id });
+                          if (!res.ok) {
+                            setActionError(res.error || '删除好友失败');
+                            return;
+                          }
+                          setFullInfo((prev) => (prev ? { ...prev, isContact: false } : prev));
+                          onRemoveContact?.(chat.id);
+                          setConfirmDeleteContact(false);
+                        } finally {
+                          setIsDeletingContact(false);
+                        }
+                      }}
+                      className="px-2 py-1 rounded-lg text-[11px] font-medium text-white bg-red-500 hover:bg-red-600 cursor-pointer disabled:opacity-50"
+                    >
+                      {isDeletingContact ? '删除中' : '确认'}
+                    </button>
+                    <button
+                      type="button"
+                      disabled={isDeletingContact}
+                      onClick={() => setConfirmDeleteContact(false)}
+                      className="px-2 py-1 rounded-lg text-[11px] bg-black/5 dark:bg-white/10 text-[#707579] dark:text-gray-300 cursor-pointer"
+                    >
+                      取消
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => setConfirmDeleteContact(true)}
+                  className="w-full flex items-center justify-between p-2.5 rounded-xl hover:bg-black/5 dark:hover:bg-[#202b36] transition-colors cursor-pointer text-xs"
+                >
+                  <div className="flex items-center gap-3">
+                    <UserMinus className="w-4 h-4 text-red-400" />
+                    <span className="text-red-500 dark:text-red-400">从通讯录删除好友</span>
+                  </div>
+                  <span className="text-[11px] text-red-400">删除</span>
+                </button>
+              )
+            )}
           </div>
 
           {/* Shared Media Tabs Header */}
@@ -552,33 +715,82 @@ export const TelegramChatInfoDrawer: React.FC<TelegramChatInfoDrawerProps> = ({
           </div>
 
           {/* Danger Zone: Clear History */}
-          <div className="p-4 border-t border-[#e0e4e8] dark:border-[#0e1621] mt-4 space-y-2">
+          <div className="p-4 border-t border-[#e0e4e8] dark:border-[#0e1621] mt-4 space-y-2.5">
             {actionError && !isEditingRemark && (
               <p className="text-[11px] text-rose-500 text-center leading-snug">{actionError}</p>
             )}
-            <button
-              disabled={isClearingHistory}
-              onClick={async () => {
-                if (confirm(`确定要清空与【${chat.title}】的所有云端与本地聊天记录吗？`)) {
+            {!showClearConfirm ? (
+              <button
+                type="button"
+                disabled={isClearingHistory}
+                onClick={() => {
                   setActionError(null);
-                  setIsClearingHistory(true);
-                  try {
-                    const res = await onClearHistory?.(chat.id);
-                    if (res && typeof res === 'object' && res.ok === false) {
-                      setActionError(res.error || '清空聊天记录失败');
-                      return;
-                    }
-                    onClose();
-                  } finally {
-                    setIsClearingHistory(false);
-                  }
-                }
-              }}
-              className="w-full py-2.5 px-3 rounded-xl bg-red-500/10 hover:bg-red-500/20 disabled:opacity-50 text-red-500 text-xs font-medium flex items-center justify-center gap-2 cursor-pointer transition-colors"
-            >
-              <Trash2 className="w-4 h-4" />
-              <span>{isClearingHistory ? '正在同步清空...' : '清空聊天记录'}</span>
-            </button>
+                  setShowClearConfirm(true);
+                }}
+                className="w-full py-2.5 px-3 rounded-xl bg-red-500/10 hover:bg-red-500/20 disabled:opacity-50 text-red-500 text-xs font-medium flex items-center justify-center gap-2 cursor-pointer transition-colors"
+              >
+                <Trash2 className="w-4 h-4" />
+                <span>清空聊天记录</span>
+              </button>
+            ) : (
+              <div className="p-3 rounded-xl bg-red-500/8 border border-red-500/25 space-y-2.5">
+                <p className="text-[11.5px] text-[#111827] dark:text-[#eef4fb] leading-relaxed">
+                  确定要清空与 <span className="font-semibold">【{chat.title}】</span> 的全部云端与本地聊天记录吗？
+                </p>
+                {!chat.isGroup && !chat.isChannel && chat.id.startsWith('tg_') && (
+                  <label className="flex items-start gap-2 text-[11px] text-[#707579] dark:text-[#9aa7b5] cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={revokeClearHistory}
+                      onChange={(e) => setRevokeClearHistory(e.target.checked)}
+                      className="mt-0.5 rounded border-gray-300 text-red-500 focus:ring-red-500"
+                    />
+                    <span>同时为对方清空聊天记录（双向撤回）</span>
+                  </label>
+                )}
+                {(chat.isGroup || chat.isChannel) && chat.id.startsWith('tg_') && (
+                  <p className="text-[11px] text-amber-600 dark:text-amber-400 leading-snug">
+                    提示：频道与超级群组通常仅支持管理员或通过退群清理云端记录，无权限时将被服务端拒绝。
+                  </p>
+                )}
+                <div className="flex items-center justify-end gap-2">
+                  <button
+                    type="button"
+                    disabled={isClearingHistory}
+                    onClick={() => {
+                      setShowClearConfirm(false);
+                      setRevokeClearHistory(false);
+                    }}
+                    className="px-3 py-1.5 rounded-lg text-xs text-[#707579] dark:text-[#9aa7b5] hover:bg-black/5 dark:hover:bg-white/10 cursor-pointer"
+                  >
+                    取消
+                  </button>
+                  <button
+                    type="button"
+                    disabled={isClearingHistory}
+                    onClick={async () => {
+                      setActionError(null);
+                      setIsClearingHistory(true);
+                      try {
+                        const res = await onClearHistory?.(chat.id, { revoke: revokeClearHistory });
+                        if (res && typeof res === 'object' && res.ok === false) {
+                          setActionError(res.error || '清空聊天记录失败');
+                          return;
+                        }
+                        setShowClearConfirm(false);
+                        setRevokeClearHistory(false);
+                        onClose();
+                      } finally {
+                        setIsClearingHistory(false);
+                      }
+                    }}
+                    className="px-3 py-1.5 rounded-lg text-xs bg-red-500 hover:bg-red-600 disabled:opacity-50 text-white font-semibold cursor-pointer"
+                  >
+                    {isClearingHistory ? '正在清空...' : '确认清空'}
+                  </button>
+                </div>
+              </div>
+            )}
           </div>
         </div>
       </div>

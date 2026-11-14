@@ -30,6 +30,11 @@ import {
   Image as ImageIcon,
   Download,
   Cpu,
+  Forward,
+  CheckSquare,
+  Square,
+  History,
+  ChevronUp,
 } from 'lucide-react';
 import { Chat, Message, TranslationSettings, MasterVoiceprint, TelegramStickerItem } from '../types';
 import { VoiceCloneStudioModal } from './VoiceCloneStudioModal';
@@ -42,10 +47,12 @@ import {
   translateText,
   transcribeAudio,
   sendAutonomousChat,
-  syncTelegramCloudMessages,
+  fetchTelegramCloudMessagesApi,
   submitTrainingFeedbackApi,
   sendTelegramStickerApi,
   fetchGlobalPersonaApi,
+  resolveClientTelegramMessageId,
+  isMessageDeleted,
 } from '../services/apiService';
 
 function blobToDataUrl(blob: Blob): Promise<string> {
@@ -229,20 +236,26 @@ interface ChatAreaProps {
   onOpenTranslation?: () => void;
   customLLMConfig?: any;
   currentAccountId?: string;
-  onMessagesSynced?: (synced: Message[]) => void;
+  availableChats?: Chat[];
+  hasMoreHistory?: boolean;
+  onLoadOlderMessages?: (chatId: string, offsetId: number) => Promise<{ ok: boolean; count: number; hasMore: boolean; error?: string }>;
+  onMessagesSynced?: (synced: Message[], meta?: { hasMore?: boolean; readOutboxMaxId?: number }) => void;
   onOpenKnowledgeEvolution?: () => void;
-  onDeleteMessage?: (messageId: string) => void | Promise<{ ok: boolean; error?: string } | void>;
-  onEditMessage?: (messageId: string, newText: string) => void | Promise<{ ok: boolean; error?: string } | void>;
+  onDeleteMessage?: (messageId: string, options?: { revoke?: boolean }) => void | Promise<{ ok: boolean; error?: string } | void>;
+  onBatchDeleteMessages?: (messageIds: string[], options?: { revoke?: boolean }) => void | Promise<{ ok: boolean; error?: string } | void>;
+  onForwardMessages?: (payload: { messageIds: string[]; telegramMessageIds: number[]; toChatId: string; dropAuthor?: boolean }) => Promise<{ ok: boolean; error?: string }>;
+  onEditMessage?: (messageId: string, newText: string, options?: { translatedText?: string }) => void | Promise<{ ok: boolean; error?: string } | void>;
   onUpdateMessage?: (messageId: string, patch: Partial<Message>) => void;
   onRetryMessage?: (messageId: string) => Promise<{ ok: boolean; error?: string }>;
   onToggleReaction?: (messageId: string, emoji: string) => void | Promise<any>;
   onTogglePinMessage?: (messageId: string) => void | Promise<any>;
-  onClearHistory?: (chatId: string) => void | Promise<{ ok: boolean; error?: string } | void>;
+  onClearHistory?: (chatId: string, options?: { revoke?: boolean }) => void | Promise<{ ok: boolean; error?: string } | void>;
   onToggleMuteChat?: (chatId: string) => void | Promise<any>;
   onTogglePinChat?: (chatId: string) => void | Promise<any>;
   onForwardMessage?: (message: Message) => void;
   onUpdateChatTitle?: (chatId: string, newTitle: string) => void | Promise<{ ok: boolean; error?: string } | void>;
   onChatInfoUpdated?: (chatId: string, patch: Partial<Chat>) => void;
+  onRemoveContact?: (contactId: string) => void;
   onCloseChat?: () => void;
   onOpenVoiceCall?: () => void;
   onOpenCustomLLM?: () => void;
@@ -250,6 +263,49 @@ interface ChatAreaProps {
   isChatInfoOpenExternal?: boolean;
   onChatInfoOpenChange?: (open: boolean) => void;
   sendWithEnter?: boolean;
+}
+
+function getMessageDayKey(msg: Message): string {
+  if (typeof msg.createdAt === 'number' && Number.isFinite(msg.createdAt) && msg.createdAt > 0) {
+    const d = new Date(msg.createdAt);
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  }
+  return 'today';
+}
+
+function formatMessageDayLabel(dayKey: string): string {
+  if (dayKey === 'today') return '今天';
+  const now = new Date();
+  const todayKey = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+  if (dayKey === todayKey) return '今天';
+  const yest = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1);
+  const yestKey = `${yest.getFullYear()}-${String(yest.getMonth() + 1).padStart(2, '0')}-${String(yest.getDate()).padStart(2, '0')}`;
+  if (dayKey === yestKey) return '昨天';
+  const [yStr, mStr, dStr] = dayKey.split('-');
+  const y = Number(yStr);
+  const m = Number(mStr);
+  const d = Number(dStr);
+  if (y === now.getFullYear()) return `${m}月${d}日`;
+  return `${y}年${m}月${d}日`;
+}
+
+function buildReplyPayload(replyMsg: Message, chatTitle?: string) {
+  return {
+    id: replyMsg.id,
+    telegramMessageId: replyMsg.telegramMessageId,
+    senderName: replyMsg.sender === 'me' ? '我' : (chatTitle || '对方'),
+    text:
+      replyMsg.text?.trim() ||
+      (replyMsg.isAudio
+        ? '🎤 语音消息'
+        : replyMsg.isVideo
+        ? '🎬 视频消息'
+        : replyMsg.isImage
+        ? '🖼️ 图片消息'
+        : replyMsg.isFile
+        ? `📁 ${replyMsg.fileName || '文档附件'}`
+        : '消息内容'),
+  };
 }
 
 export const ChatArea: React.FC<ChatAreaProps> = ({
@@ -261,9 +317,14 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
   onOpenTranslation,
   customLLMConfig,
   currentAccountId,
+  availableChats = [],
+  hasMoreHistory = false,
+  onLoadOlderMessages,
   onMessagesSynced,
   onOpenKnowledgeEvolution,
   onDeleteMessage,
+  onBatchDeleteMessages,
+  onForwardMessages,
   onEditMessage,
   onUpdateMessage,
   onRetryMessage,
@@ -275,6 +336,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
   onForwardMessage,
   onUpdateChatTitle,
   onChatInfoUpdated,
+  onRemoveContact,
   onCloseChat,
   onOpenVoiceCall,
   onOpenCustomLLM,
@@ -326,6 +388,11 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
   };
   const [isSearchingInChat, setIsSearchingInChat] = useState(false);
   const [chatSearchQuery, setChatSearchQuery] = useState('');
+  const [cloudSearchResults, setCloudSearchResults] = useState<Message[] | null>(null);
+  const [isCloudSearching, setIsCloudSearching] = useState(false);
+  const [isLoadingOlder, setIsLoadingOlder] = useState(false);
+  const [pinnedBannerIndex, setPinnedBannerIndex] = useState(0);
+  const [highlightedMsgId, setHighlightedMsgId] = useState<string | null>(null);
   const [isAttachmentMenuOpen, setIsAttachmentMenuOpen] = useState(false);
   const imageInputRef = useRef<HTMLInputElement>(null);
   const videoInputRef = useRef<HTMLInputElement>(null);
@@ -333,6 +400,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [replyingTo, setReplyingTo] = useState<Message | null>(null);
   const [editingMessage, setEditingMessage] = useState<Message | null>(null);
+  const [translateOnEdit, setTranslateOnEdit] = useState(false);
   const [hoveredMessageId, setHoveredMessageId] = useState<string | null>(null);
   const [activeReactionMsgId, setActiveReactionMsgId] = useState<string | null>(null);
   const [pastedImage, setPastedImage] = useState<{
@@ -341,6 +409,17 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
     caption?: string;
   } | null>(null);
 
+  // Multi-select, Forward & Delete Confirmation State
+  const [isMultiSelectMode, setIsMultiSelectMode] = useState(false);
+  const [selectedMessageIds, setSelectedMessageIds] = useState<Set<string>>(new Set());
+  const [showBatchDeleteModal, setShowBatchDeleteModal] = useState(false);
+  const [revokeBatchDelete, setRevokeBatchDelete] = useState(true);
+  const [isBatchDeleting, setIsBatchDeleting] = useState(false);
+  const [forwardModalMessages, setForwardModalMessages] = useState<Message[] | null>(null);
+  const [forwardSearch, setForwardSearch] = useState('');
+  const [forwardDropAuthor, setForwardDropAuthor] = useState(false);
+  const [isForwarding, setIsForwarding] = useState(false);
+
   // Message Context Menu & Delete Confirmation State
   const [messageContextMenu, setMessageContextMenu] = useState<{
     message: Message;
@@ -348,13 +427,14 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
     y: number;
   } | null>(null);
   const [messageToDelete, setMessageToDelete] = useState<Message | null>(null);
+  const [revokeSingleDelete, setRevokeSingleDelete] = useState(true);
 
   const handleMessageContextMenu = (e: React.MouseEvent, msg: Message) => {
     e.preventDefault();
     e.stopPropagation();
 
     const menuWidth = 190;
-    const menuHeight = 250;
+    const menuHeight = 310;
     let x = e.clientX;
     let y = e.clientY;
 
@@ -388,14 +468,135 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
 
   const confirmDeleteMessage = async () => {
     if (messageToDelete) {
-      const targetId = messageToDelete.id;
+      const targetMsg = messageToDelete;
+      const isLocalOnly =
+        !targetMsg.telegramMessageId ||
+        targetMsg.deliveryStatus === 'failed' ||
+        targetMsg.deliveryStatus === 'pending';
+      const revoke = isLocalOnly ? false : revokeSingleDelete;
       setMessageToDelete(null);
-      const res = await onDeleteMessage?.(targetId);
+      const res = await onDeleteMessage?.(targetMsg.id, { revoke });
       if (res && typeof res === 'object' && res.ok === false) {
         showSyncNotice(`云端撤回删除失败：${res.error || '请检查 Telegram 在线状态'}`);
         return;
       }
-      showSyncNotice('已从云端与本地删除该条消息', 2500);
+      const targetTgId = resolveClientTelegramMessageId(targetMsg);
+      setCloudSearchResults((prev) =>
+        prev
+          ? prev.filter(
+              (m) =>
+                m.id !== targetMsg.id &&
+                !(targetTgId !== undefined && resolveClientTelegramMessageId(m) === targetTgId)
+            )
+          : null
+      );
+      showSyncNotice(
+        isLocalOnly
+          ? '已从本地列表移除该未发送消息'
+          : revoke
+            ? '已从云端双方与本地删除该条消息'
+            : '已仅从当前账号与本地删除该条消息',
+        2500
+      );
+    }
+  };
+
+  const toggleSelectMessage = (msgId: string) => {
+    setSelectedMessageIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(msgId)) next.delete(msgId);
+      else next.add(msgId);
+      return next;
+    });
+  };
+
+  const handleOpenForwardModal = (msgs: Message[]) => {
+    if (!msgs || msgs.length === 0) return;
+    if (onForwardMessage && msgs.length === 1 && !onForwardMessages) {
+      onForwardMessage(msgs[0]);
+      return;
+    }
+    setForwardSearch('');
+    setForwardDropAuthor(false);
+    setForwardModalMessages(msgs);
+  };
+
+  const handleConfirmForward = async (targetChatId: string) => {
+    if (!forwardModalMessages || forwardModalMessages.length === 0 || isForwarding) return;
+    if (!onForwardMessages) return;
+    setIsForwarding(true);
+    try {
+      const isCloudForward = Boolean(chat?.id.startsWith('tg_') && targetChatId.startsWith('tg_'));
+      const forwardableMsgs = isCloudForward
+        ? forwardModalMessages.filter((m) => resolveClientTelegramMessageId(m) !== undefined)
+        : forwardModalMessages;
+      const tgIds = forwardableMsgs
+        .map((m) => resolveClientTelegramMessageId(m))
+        .filter((id): id is number => typeof id === 'number' && id > 0);
+      if (isCloudForward && tgIds.length === 0) {
+        showSyncNotice('所选消息尚未同步 Telegram 云端消息 ID，无法转发');
+        return;
+      }
+      const res = await onForwardMessages({
+        messageIds: forwardableMsgs.map((m) => m.id),
+        telegramMessageIds: tgIds,
+        toChatId: targetChatId,
+        dropAuthor: forwardDropAuthor,
+      });
+      if (!res.ok) {
+        showSyncNotice(`转发失败：${res.error || '请检查 Telegram 在线状态'}`);
+        return;
+      }
+      const targetChat = availableChats.find((c) => c.id === targetChatId);
+      const skippedCount = forwardModalMessages.length - forwardableMsgs.length;
+      setForwardModalMessages(null);
+      setIsMultiSelectMode(false);
+      setSelectedMessageIds(new Set());
+      showSyncNotice(
+        skippedCount > 0
+          ? `已转发 ${forwardableMsgs.length} 条云端消息至「${targetChat?.title || '目标对话'}」（已跳过 ${skippedCount} 条未送达消息）`
+          : `已转发 ${forwardableMsgs.length} 条消息至「${targetChat?.title || '目标对话'}」`,
+        3000
+      );
+    } finally {
+      setIsForwarding(false);
+    }
+  };
+
+  const handleConfirmBatchDelete = async () => {
+    if (selectedMessageIds.size === 0 || isBatchDeleting) return;
+    if (!onBatchDeleteMessages) return;
+    setIsBatchDeleting(true);
+    try {
+      const ids = Array.from(selectedMessageIds);
+      const res = await onBatchDeleteMessages(ids, { revoke: revokeBatchDelete });
+      if (res && typeof res === 'object' && res.ok === false) {
+        showSyncNotice(`批量删除失败：${res.error || '请检查 Telegram 权限或网络'}`);
+        return;
+      }
+      const deletedIdSet = new Set(ids);
+      const deletedTgIdSet = new Set(
+        messages
+          .filter((m) => deletedIdSet.has(m.id))
+          .map((m) => resolveClientTelegramMessageId(m))
+          .filter((id): id is number => typeof id === 'number' && id > 0)
+      );
+      setCloudSearchResults((prev) =>
+        prev
+          ? prev.filter((m) => {
+              if (deletedIdSet.has(m.id)) return false;
+              const tgId = resolveClientTelegramMessageId(m);
+              if (tgId !== undefined && deletedTgIdSet.has(tgId)) return false;
+              return true;
+            })
+          : null
+      );
+      setShowBatchDeleteModal(false);
+      setIsMultiSelectMode(false);
+      setSelectedMessageIds(new Set());
+      showSyncNotice(`已批量删除 ${ids.length} 条消息`, 2500);
+    } finally {
+      setIsBatchDeleting(false);
     }
   };
 
@@ -441,6 +642,10 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
   }, []);
 
   const langMenuRef = useRef<HTMLDivElement>(null);
+  const scrollViewportRef = useRef<HTMLDivElement>(null);
+  const suppressAutoScrollRef = useRef(false);
+  const prevChatIdForScrollRef = useRef<string | null>(null);
+  const prevMsgCountRef = useRef<number>(0);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
@@ -455,11 +660,14 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
     setIsSyncingCloud(true);
     setSyncNotice('正在从 Telegram 官方云端拉取真实历史消息...');
     try {
-      const cloudMsgs = await syncTelegramCloudMessages(chat.id, currentAccountId);
-      if (cloudMsgs && cloudMsgs.length > 0) {
-        onMessagesSynced?.(cloudMsgs);
-        setSyncNotice(`云端同步成功！已拉取 ${cloudMsgs.length} 条真实聊天记录`);
+      const res = await fetchTelegramCloudMessagesApi(chat.id, currentAccountId, { limit: 40 });
+      if (res.ok && res.messages.length > 0) {
+        onMessagesSynced?.(res.messages, { hasMore: res.hasMore, readOutboxMaxId: res.readOutboxMaxId });
+        setSyncNotice(`云端同步成功！已拉取 ${res.messages.length} 条真实聊天记录`);
+      } else if (!res.ok) {
+        setSyncNotice(res.error || '云端历史同步失败，请检查账号连接');
       } else {
+        onMessagesSynced?.([], { hasMore: false, readOutboxMaxId: res.readOutboxMaxId });
         setSyncNotice('云端已是最新记录或暂无更多历史');
       }
     } catch {
@@ -467,6 +675,73 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
     } finally {
       setIsSyncingCloud(false);
       setTimeout(() => setSyncNotice(null), 3000);
+    }
+  };
+
+  const handleLoadOlderClick = async () => {
+    if (!chat?.id || !onLoadOlderMessages || isLoadingOlder) return;
+    const tgIds = messages
+      .map((m) => m.telegramMessageId)
+      .filter((id): id is number => typeof id === 'number' && id > 0);
+    if (tgIds.length === 0) {
+      showSyncNotice('暂无可定位的云端消息 ID，请先点击右上角同步云端消息');
+      return;
+    }
+    const minTgId = Math.min(...tgIds);
+    const viewport = scrollViewportRef.current;
+    const prevHeight = viewport?.scrollHeight || 0;
+    const prevTop = viewport?.scrollTop || 0;
+    suppressAutoScrollRef.current = true;
+    setIsLoadingOlder(true);
+    try {
+      const res = await onLoadOlderMessages(chat.id, minTgId);
+      if (!res.ok) {
+        showSyncNotice(`加载历史消息失败：${res.error || '请检查网络连接'}`);
+        return;
+      }
+      if (res.count === 0) {
+        showSyncNotice('已到达对话最早历史记录', 2500);
+        return;
+      }
+      requestAnimationFrame(() => {
+        const el = scrollViewportRef.current;
+        if (el) {
+          el.scrollTop = el.scrollHeight - prevHeight + prevTop;
+        }
+        setTimeout(() => {
+          suppressAutoScrollRef.current = false;
+        }, 120);
+      });
+    } finally {
+      setIsLoadingOlder(false);
+    }
+  };
+
+  const handleCloudSearch = async () => {
+    if (!chat?.id || !chatSearchQuery.trim()) {
+      setCloudSearchResults(null);
+      return;
+    }
+    if (!chat.id.startsWith('tg_') || currentAccountId === 'acc_telegram_bot') {
+      setCloudSearchResults(null);
+      return;
+    }
+    setIsCloudSearching(true);
+    try {
+      const res = await fetchTelegramCloudMessagesApi(chat.id, currentAccountId, {
+        limit: 40,
+        search: chatSearchQuery.trim(),
+      });
+      if (res.ok) {
+        setCloudSearchResults(res.messages);
+        if (res.messages.length === 0) {
+          showSyncNotice('Telegram 云端未检索到匹配的消息', 2500);
+        }
+      } else {
+        showSyncNotice(res.error || '云端搜索失败');
+      }
+    } finally {
+      setIsCloudSearching(false);
     }
   };
 
@@ -646,8 +921,16 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
   };
 
   useEffect(() => {
-    scrollToBottom();
-  }, [messages]);
+    const currentId = chat?.id || null;
+    const chatChanged = prevChatIdForScrollRef.current !== currentId;
+    const appended = messages.length > prevMsgCountRef.current;
+    prevChatIdForScrollRef.current = currentId;
+    prevMsgCountRef.current = messages.length;
+    if (suppressAutoScrollRef.current) return;
+    if (chatChanged || appended) {
+      scrollToBottom();
+    }
+  }, [chat?.id, messages]);
 
   // Reset translation preview & historical AI suggestion state when switching chats
   useEffect(() => {
@@ -656,6 +939,15 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
     setAiSuggestion(null);
     setAiSuggestionTranslation(null);
     setIsTranslatingSuggestion(false);
+    setIsMultiSelectMode(false);
+    setSelectedMessageIds(new Set());
+    setIsSearchingInChat(false);
+    setChatSearchQuery('');
+    setCloudSearchResults(null);
+    setPinnedBannerIndex(0);
+    setReplyingTo(null);
+    setEditingMessage(null);
+    setTranslateOnEdit(false);
     if (syncNoticeTimerRef.current) {
       clearTimeout(syncNoticeTimerRef.current);
       syncNoticeTimerRef.current = null;
@@ -665,7 +957,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
 
   // Real-time input translation preview
   useEffect(() => {
-    if (!inputText.trim() || translationSettings?.autoTranslateOutbound === false) {
+    if (!inputText.trim() || translationSettings?.autoTranslateOutbound === false || (editingMessage && !translateOnEdit)) {
       setTranslatedPreview('');
       setTranslatedPreviewSource('');
       return;
@@ -707,7 +999,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
       isCurrent = false;
       clearTimeout(timer);
     };
-  }, [inputText, outboundTargetLang, translationSettings, customLLMConfig]);
+  }, [inputText, outboundTargetLang, translationSettings, customLLMConfig, editingMessage, translateOnEdit]);
 
   // Send message
   const handleSendText = async () => {
@@ -717,7 +1009,8 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
 
     setIsSending(true);
     try {
-      const shouldAutoTranslate = translationSettings?.autoTranslateOutbound !== false;
+      const shouldAutoTranslate =
+        translationSettings?.autoTranslateOutbound !== false && (!editingMessage || translateOnEdit);
       let targetText = textToSend;
       let translationOfTarget = '';
 
@@ -781,12 +1074,15 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
       }
 
       if (editingMessage) {
-        const editRes = await onEditMessage?.(editingMessage.id, targetText);
+        const editRes = await onEditMessage?.(editingMessage.id, targetText, {
+          translatedText: shouldAutoTranslate ? translationOfTarget : '',
+        });
         if (editRes && typeof editRes === 'object' && editRes.ok === false) {
           showSyncNotice(`云端编辑失败：${editRes.error || '请检查 Telegram 在线状态'}`);
           return;
         }
         setEditingMessage(null);
+        setTranslateOnEdit(false);
         setInputText('');
         setTranslatedPreview('');
         setTranslatedPreviewSource('');
@@ -797,13 +1093,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
         sender: 'me',
         text: targetText,
         translatedText: translationOfTarget,
-        replyTo: replyingTo
-          ? {
-              id: replyingTo.id,
-              senderName: replyingTo.sender === 'me' ? '我' : (chat.title || '对方'),
-              text: replyingTo.text,
-            }
-          : undefined,
+        replyTo: replyingTo ? buildReplyPayload(replyingTo, chat.title) : undefined,
         timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false }),
       });
 
@@ -828,8 +1118,10 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
         imageUrl: dataUrl,
         imageCaption: userCaption || undefined,
         text: userCaption || '',
+        replyTo: replyingTo ? buildReplyPayload(replyingTo, chat?.title) : undefined,
         timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false }),
       });
+      if (replyingTo) setReplyingTo(null);
       if (userCaption) {
         setInputText('');
         setTranslatedPreview('');
@@ -871,8 +1163,10 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
         videoUrl: dataUrl,
         videoDuration: duration,
         text: userCaption || `[视频] ${file.name}`,
+        replyTo: replyingTo ? buildReplyPayload(replyingTo, chat?.title) : undefined,
         timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false }),
       });
+      if (replyingTo) setReplyingTo(null);
       if (userCaption) {
         setInputText('');
         setTranslatedPreview('');
@@ -910,8 +1204,10 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
         audioUrl: dataUrl,
         audioDuration: duration || 5,
         text: '🎤 语音消息',
+        replyTo: replyingTo ? buildReplyPayload(replyingTo, chat?.title) : undefined,
         timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false }),
       });
+      if (replyingTo) setReplyingTo(null);
     } catch (err: any) {
       console.warn('Failed to upload audio', err);
       showSyncNotice(`音频读取失败：${err?.message || '请检查音频文件是否损坏或有读取权限'}`);
@@ -928,6 +1224,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
       const isVid = file.type.startsWith('video/') || /\.(mp4|mov|webm|mkv|avi|m4v)$/i.test(file.name);
       const isAud = file.type.startsWith('audio/') || /\.(mp3|ogg|wav|m4a|aac|flac)$/i.test(file.name);
       const dataUrl = await blobToDataUrl(file);
+      const replyPayload = replyingTo ? buildReplyPayload(replyingTo, chat?.title) : undefined;
 
       if (isImg) {
         const userCaption = inputText.trim();
@@ -937,6 +1234,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
           imageUrl: dataUrl,
           imageCaption: userCaption || undefined,
           text: userCaption || '',
+          replyTo: replyPayload,
           timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false }),
         });
         if (userCaption) {
@@ -951,6 +1249,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
           isVideo: true,
           videoUrl: dataUrl,
           text: userCaption || `[视频] ${file.name}`,
+          replyTo: replyPayload,
           timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false }),
         });
         if (userCaption) {
@@ -965,6 +1264,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
           audioUrl: dataUrl,
           audioDuration: 5,
           text: '🎤 语音消息',
+          replyTo: replyPayload,
           timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false }),
         });
       } else {
@@ -976,9 +1276,11 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
           fileSize: `${sizeKb} KB`,
           fileUrl: dataUrl,
           text: `[文件] ${file.name}`,
+          replyTo: replyPayload,
           timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false }),
         });
       }
+      if (replyingTo) setReplyingTo(null);
     } catch (err: any) {
       console.warn('Failed to upload file', err);
       showSyncNotice(`文件读取失败：${err?.message || '请检查文件是否损坏或有读取权限'}`);
@@ -995,6 +1297,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
     }
     setShowEmojiPicker(false);
     const replyToMsgId = replyingTo?.telegramMessageId;
+    const replyPayload = replyingTo ? buildReplyPayload(replyingTo, chat.title) : undefined;
     const res = await sendTelegramStickerApi({
       accountId: currentAccountId,
       chatId: chat.id,
@@ -1014,6 +1317,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
       imageUrl: sticker.thumbUrl,
       imageCaption: packTitle ? `${sticker.emoji} · ${packTitle}` : `${sticker.emoji} [贴纸]`,
       text: `${sticker.emoji} [贴纸]`,
+      replyTo: replyPayload,
       telegramMessageId: res.telegramMessageId,
       deliveryStatus: 'delivered',
       skipCloudRelay: true,
@@ -1183,8 +1487,10 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
       imageUrl: pastedImage.dataUrl,
       imageCaption: userCaption || undefined,
       text: userCaption || '',
+      replyTo: replyingTo ? buildReplyPayload(replyingTo, chat.title) : undefined,
       timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false }),
     });
+    if (replyingTo) setReplyingTo(null);
     setPastedImage(null);
     setInputText('');
     setTranslatedPreview('');
@@ -1335,8 +1641,10 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
             audioDuration: recordDurationRef.current || 1,
             audioUrl,
             text: '🎤 语音消息',
+            replyTo: replyingTo ? buildReplyPayload(replyingTo, chat?.title) : undefined,
             timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false }),
           });
+          if (replyingTo) setReplyingTo(null);
           stream.getTracks().forEach((track) => track.stop());
         };
 
@@ -1381,8 +1689,10 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
       voiceName: voiceData.voiceName,
       voiceTone: voiceData.voiceTone,
       isMasterVoice: voiceData.isMasterVoice,
+      replyTo: replyingTo ? buildReplyPayload(replyingTo, chat?.title) : undefined,
       timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false }),
     });
+    if (replyingTo) setReplyingTo(null);
 
     setInputText('');
     setTranslatedPreview('');
@@ -1406,9 +1716,47 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
     );
   }
 
-  const displayedMessages = chatSearchQuery.trim()
-    ? messages.filter((m) => m.text?.toLowerCase().includes(chatSearchQuery.toLowerCase()))
+  const displayedMessages = cloudSearchResults !== null
+    ? cloudSearchResults
+        .filter((r) => !isMessageDeleted(r.id))
+        .map((r) => {
+          const rTgId = resolveClientTelegramMessageId(r);
+          const live = messages.find((m) => {
+            if (m.id === r.id) return true;
+            if (rTgId !== undefined) {
+              return resolveClientTelegramMessageId(m) === rTgId;
+            }
+            return false;
+          });
+          if (!live) return r;
+          return {
+            ...r,
+            text: live.text,
+            translatedText: live.translatedText ?? r.translatedText,
+            imageCaption: live.imageCaption ?? r.imageCaption,
+            isPinned: live.isPinned,
+            isEdited: live.isEdited,
+            status: live.status,
+            deliveryStatus: live.deliveryStatus,
+          };
+        })
+    : chatSearchQuery.trim()
+    ? messages.filter((m) => {
+        const q = chatSearchQuery.toLowerCase();
+        return (
+          m.text?.toLowerCase().includes(q) ||
+          m.translatedText?.toLowerCase().includes(q) ||
+          m.sttText?.toLowerCase().includes(q) ||
+          m.fileName?.toLowerCase().includes(q) ||
+          m.imageCaption?.toLowerCase().includes(q) ||
+          m.forwardFrom?.toLowerCase().includes(q)
+        );
+      })
     : messages;
+
+  const pinnedMessages = messages.filter((m) => m.isPinned);
+  const safePinnedIndex = pinnedMessages.length > 0 ? pinnedBannerIndex % pinnedMessages.length : 0;
+  const activePinnedMessage = pinnedMessages[safePinnedIndex] || null;
 
   const activeModelDisplay =
     customLLMConfig?.engineMode === 'custom' && customLLMConfig?.modelName
@@ -1453,17 +1801,19 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
               <span className="font-semibold text-[14px] text-[#0f172a] dark:text-[#f5f7fa] truncate leading-tight">
                 {chat.title}
               </span>
-              <button
-                type="button"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  setChatInfoOpen(true);
-                }}
-                title="设置/修改好友备注"
-                className="p-0.5 text-[#64748b] hover:text-[#2481cc] dark:text-[#7f93a5] dark:hover:text-[#2ba0ff] rounded-sm transition-colors cursor-pointer"
-              >
-                <Edit2 className="w-3 h-3" />
-              </button>
+              {!chat.isGroup && !chat.isChannel && (
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setChatInfoOpen(true);
+                  }}
+                  title="设置/修改好友备注"
+                  className="p-0.5 text-[#64748b] hover:text-[#2481cc] dark:text-[#7f93a5] dark:hover:text-[#2ba0ff] rounded-sm transition-colors cursor-pointer"
+                >
+                  <Edit2 className="w-3 h-3" />
+                </button>
+              )}
               {chat.isVerified && (
                 <span className="w-3.5 h-3.5 bg-[#2481cc] rounded-full flex items-center justify-center text-white shrink-0">
                   <Check className="w-2.5 h-2.5 stroke-[3]" />
@@ -1627,20 +1977,49 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
           <input
             type="text"
             value={chatSearchQuery}
-            onChange={(e) => setChatSearchQuery(e.target.value)}
-            placeholder={chat.isChannel ? "搜索频道帖子..." : "搜索消息..."}
+            onChange={(e) => {
+              setChatSearchQuery(e.target.value);
+              if (cloudSearchResults !== null) setCloudSearchResults(null);
+            }}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' && chat.id.startsWith('tg_') && currentAccountId !== 'acc_telegram_bot') {
+                e.preventDefault();
+                void handleCloudSearch();
+              }
+            }}
+            placeholder={chat.isChannel ? '搜索频道帖子 (Enter 搜云端)...' : '搜索消息 (Enter 搜云端历史)...'}
             className="flex-1 bg-[#f0f2f5] dark:bg-[#242f3d] px-3 py-1.5 rounded-lg text-xs text-[#111827] dark:text-white border border-transparent focus:border-[#2ba0ff]/50 focus:outline-none"
             autoFocus
           />
+          {chat.id.startsWith('tg_') && currentAccountId !== 'acc_telegram_bot' && chatSearchQuery.trim() && (
+            <button
+              type="button"
+              disabled={isCloudSearching}
+              onClick={() => void handleCloudSearch()}
+              className="px-2.5 py-1 rounded-lg bg-[#2481cc] hover:bg-[#1d6fb3] disabled:opacity-50 text-white font-medium text-[11px] shrink-0 cursor-pointer transition-colors"
+            >
+              {isCloudSearching ? '检索中...' : '云端全文搜索'}
+            </button>
+          )}
+          {cloudSearchResults !== null && (
+            <button
+              type="button"
+              onClick={() => setCloudSearchResults(null)}
+              className="px-2 py-1 rounded-lg bg-black/5 dark:bg-white/10 text-[#64748b] dark:text-[#a0acb8] hover:text-[#0f172a] dark:hover:text-white text-[11px] shrink-0 cursor-pointer"
+            >
+              返回列表
+            </button>
+          )}
           {chatSearchQuery && (
             <span className="text-[11px] text-[#707579] dark:text-[#7f93a5] whitespace-nowrap tabular-nums">
-              匹配 {messages.filter((m) => m.text?.toLowerCase().includes(chatSearchQuery.toLowerCase())).length} 条
+              {cloudSearchResults !== null ? `云端 ${displayedMessages.length} 条` : `匹配 ${displayedMessages.length} 条`}
             </span>
           )}
           <button
             onClick={() => {
               setIsSearchingInChat(false);
               setChatSearchQuery('');
+              setCloudSearchResults(null);
             }}
             className="p-1 text-[#707579] hover:text-[#111827] dark:text-[#7f93a5] dark:hover:text-white cursor-pointer"
           >
@@ -1650,21 +2029,50 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
       )}
 
       {/* Telegram Pinned Message Top Banner */}
-      {messages.some((m) => m.isPinned) && (
+      {activePinnedMessage && (
         <div className="bg-[#f0f7ff] dark:bg-[#1a2530] border-b border-[#dbeafe] dark:border-[#101b26] px-4 py-2 flex items-center justify-between text-xs animate-in fade-in duration-150">
-          <div className="flex items-center gap-2 min-w-0">
+          <button
+            type="button"
+            onClick={() => {
+              const targetEl = scrollViewportRef.current?.querySelector(
+                `[data-msg-id="${CSS.escape(activePinnedMessage.id)}"]`
+              ) as HTMLElement | null;
+              if (targetEl) {
+                targetEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                setHighlightedMsgId(activePinnedMessage.id);
+                setTimeout(() => setHighlightedMsgId((cur) => (cur === activePinnedMessage.id ? null : cur)), 1800);
+              } else {
+                showSyncNotice('该置顶消息不在当前已加载窗口，可点击上方“加载更早历史消息”拉取', 3000);
+              }
+            }}
+            className="flex items-center gap-2 min-w-0 flex-1 text-left cursor-pointer hover:opacity-85 transition-opacity"
+            title="点击定位到当前置顶消息"
+          >
             <Pin className="w-3.5 h-3.5 text-[#2481cc] dark:text-[#2ba0ff] shrink-0 fill-current" />
             <div className="min-w-0 truncate">
-              <span className="font-semibold text-[#2481cc] dark:text-[#2ba0ff] mr-1.5">置顶消息:</span>
-              <span className="text-[#0f172a] dark:text-[#f5f7fa]">{messages.find((m) => m.isPinned)?.text}</span>
+              <span className="font-semibold text-[#2481cc] dark:text-[#2ba0ff] mr-1.5">
+                置顶消息{pinnedMessages.length > 1 ? ` (${safePinnedIndex + 1}/${pinnedMessages.length})` : ''}:
+              </span>
+              <span className="text-[#0f172a] dark:text-[#f5f7fa]">
+                {activePinnedMessage.text ||
+                  (activePinnedMessage.isImage ? '🖼️ [图片]' : activePinnedMessage.isAudio ? '🎤 [语音]' : '消息')}
+              </span>
             </div>
-          </div>
+          </button>
+          {pinnedMessages.length > 1 && (
+            <button
+              type="button"
+              onClick={() => setPinnedBannerIndex((i) => (i + 1) % pinnedMessages.length)}
+              className="text-xs text-[#2481cc] dark:text-[#2ba0ff] p-1 cursor-pointer shrink-0 ml-1"
+              title="下一条置顶消息"
+            >
+              <ChevronUp className="w-3.5 h-3.5" />
+            </button>
+          )}
           <button
-            onClick={() => {
-              const pinned = messages.find((m) => m.isPinned);
-              if (pinned) onTogglePinMessage?.(pinned.id);
-            }}
-            className="text-xs text-[#64748b] hover:text-[#0f172a] dark:hover:text-white p-1 cursor-pointer shrink-0 ml-2"
+            type="button"
+            onClick={() => onTogglePinMessage?.(activePinnedMessage.id)}
+            className="text-xs text-[#64748b] hover:text-[#0f172a] dark:hover:text-white p-1 cursor-pointer shrink-0 ml-1"
             title="取消置顶"
           >
             <X className="w-3.5 h-3.5" />
@@ -1783,147 +2191,223 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
       )}
 
       {/* 3. Messages Stream Viewport with Official Telegram Wallpaper Pattern */}
-      <div className="flex-1 overflow-y-auto px-5 py-4 space-y-3 tg-chat-pattern select-text">
-        {/* Date Marker Divider */}
-        <div className="flex items-center justify-center my-1.5">
-          <span className="px-3 py-0.5 rounded-full bg-white/90 dark:bg-black/40 border border-[#e2e8f0] dark:border-transparent text-[11px] font-medium text-[#64748b] dark:text-white shadow-xs">
-            今天
-          </span>
-        </div>
+      <div
+        ref={scrollViewportRef}
+        className="flex-1 overflow-y-auto px-5 py-4 space-y-3 tg-chat-pattern select-text"
+      >
+        {/* Load Older Cloud History Button */}
+        {chat.id.startsWith('tg_') && currentAccountId !== 'acc_telegram_bot' && hasMoreHistory && cloudSearchResults === null && onLoadOlderMessages && (
+          <div className="flex items-center justify-center my-1">
+            <button
+              type="button"
+              disabled={isLoadingOlder}
+              onClick={() => void handleLoadOlderClick()}
+              className="px-3.5 py-1 rounded-full bg-white/90 dark:bg-[#162333] hover:bg-[#e8f3ff] dark:hover:bg-[#1d3047] border border-[#e2e8f0] dark:border-[#24374e] text-[11px] font-medium text-[#2481cc] dark:text-[#2ba0ff] shadow-xs flex items-center gap-1.5 cursor-pointer disabled:opacity-50 transition-colors"
+            >
+              <History className={`w-3.5 h-3.5 ${isLoadingOlder ? 'animate-spin' : ''}`} />
+              <span>{isLoadingOlder ? '正在加载更早消息...' : '加载更早历史消息'}</span>
+            </button>
+          </div>
+        )}
 
-        {displayedMessages.map((msg) => {
+        {displayedMessages.map((msg, idx) => {
           const isMe = msg.sender === 'me';
+          const dayKey = getMessageDayKey(msg);
+          const prevDayKey = idx > 0 ? getMessageDayKey(displayedMessages[idx - 1]) : null;
+          const showDayDivider = idx === 0 || dayKey !== prevDayKey;
+          const isSelectedMulti = selectedMessageIds.has(msg.id);
 
           return (
-            <div
-              key={msg.id}
-              className={`flex flex-col ${isMe ? 'items-end' : 'items-start'} group relative my-1`}
-              onMouseEnter={() => setHoveredMessageId(msg.id)}
-              onMouseLeave={() => setHoveredMessageId(null)}
-              onContextMenu={(e) => handleMessageContextMenu(e, msg)}
-            >
-              {/* Telegram Floating Quick Action Menu on Hover */}
-              {hoveredMessageId === msg.id && (
-                <div
-                  className={`absolute -top-4 z-20 flex items-center gap-0.5 bg-white dark:bg-[#17212b] border border-[#e0e4e8] dark:border-[#2b3848] rounded-full px-1.5 py-0.5 shadow-lg animate-in fade-in zoom-in-95 duration-100 ${
-                    isMe ? 'right-2' : 'left-2'
-                  }`}
-                >
-                  {/* Quick Reactions Bar */}
-                  <div className="flex items-center gap-0.5 pr-1 border-r border-black/5 dark:border-white/10">
-                    {['👍', '❤️', '🔥', '🎉'].map((emoji) => (
-                      <button
-                        key={emoji}
-                        type="button"
-                        onClick={() => onToggleReaction?.(msg.id, emoji)}
-                        className="text-xs hover:scale-130 transition-transform p-0.5 cursor-pointer leading-none"
-                        title={`回应 ${emoji}`}
-                      >
-                        {emoji}
-                      </button>
-                    ))}
-                  </div>
-
-                  {/* Reply Button */}
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setReplyingTo(msg);
-                      setEditingMessage(null);
-                    }}
-                    className="p-1 text-[#707579] hover:text-[#2481cc] dark:text-[#7f93a5] dark:hover:text-[#2ba0ff] cursor-pointer"
-                    title="回复消息"
-                  >
-                    <Reply className="w-3.5 h-3.5" />
-                  </button>
-
-                  {/* Pin Button */}
-                  <button
-                    type="button"
-                    onClick={() => onTogglePinMessage?.(msg.id)}
-                    className="p-1 text-[#707579] hover:text-[#2481cc] dark:text-[#7f93a5] dark:hover:text-[#2ba0ff] cursor-pointer"
-                    title={msg.isPinned ? '取消置顶' : '置顶此消息'}
-                  >
-                    <Pin className={`w-3.5 h-3.5 ${msg.isPinned ? 'text-[#2481cc] fill-current' : ''}`} />
-                  </button>
-
-                  {/* Edit Button (For sent messages) */}
-                  {isMe && !msg.isAudio && (
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setEditingMessage(msg);
-                        setInputText(msg.text);
-                        setReplyingTo(null);
-                      }}
-                      className="p-1 text-[#707579] hover:text-[#2481cc] dark:text-[#7f93a5] dark:hover:text-[#2ba0ff] cursor-pointer"
-                      title="编辑消息"
-                    >
-                      <Edit2 className="w-3.5 h-3.5" />
-                    </button>
-                  )}
-
-                  {/* Copy Text or Copy Image */}
-                  <button
-                    type="button"
-                    onClick={() => {
-                      if (msg.isImage && msg.imageUrl) {
-                        copyImageToClipboard(msg.imageUrl, msg.id);
-                      } else {
-                        copyToClipboard(msg.text, msg.id);
-                      }
-                    }}
-                    className="p-1 text-[#707579] hover:text-[#2481cc] dark:text-[#7f93a5] dark:hover:text-[#2ba0ff] cursor-pointer"
-                    title={msg.isImage ? '复制照片到剪贴板' : '复制消息内容'}
-                  >
-                    {copiedId === msg.id ? (
-                      <Check className="w-3.5 h-3.5 text-emerald-500" />
-                    ) : (
-                      <Copy className="w-3.5 h-3.5" />
-                    )}
-                  </button>
-
-                  {/* Delete Button */}
-                  <button
-                    type="button"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      setMessageToDelete(msg);
-                    }}
-                    className="p-1 text-[#707579] hover:text-red-500 dark:text-[#7f93a5] dark:hover:text-red-400 cursor-pointer"
-                    title="删除消息"
-                  >
-                    <Trash2 className="w-3.5 h-3.5" />
-                  </button>
+            <React.Fragment key={msg.id}>
+              {showDayDivider && (
+                <div className="flex items-center justify-center my-1.5">
+                  <span className="px-3 py-0.5 rounded-full bg-white/90 dark:bg-black/40 border border-[#e2e8f0] dark:border-transparent text-[11px] font-medium text-[#64748b] dark:text-white shadow-xs">
+                    {formatMessageDayLabel(dayKey)}
+                  </span>
                 </div>
               )}
 
               <div
-                className={`max-w-[80%] sm:max-w-[74%] rounded-2xl p-3 px-3.5 relative transition-all select-text ${
-                  isMe
-                    ? 'bg-[#1e88e5] text-white dark:bg-[#2b5278] dark:text-white rounded-br-xs shadow-[0_1px_3px_rgba(30,136,229,0.22)]'
-                    : 'bg-white text-[#0f172a] border border-[#e2e8f0] dark:bg-[#182533] dark:text-[#f5f7fa] dark:border-transparent rounded-bl-xs shadow-[0_1px_2px_rgba(15,23,42,0.04)]'
-                }`}
+                data-msg-id={msg.id}
+                onClick={isMultiSelectMode ? () => toggleSelectMessage(msg.id) : undefined}
+                className={`flex ${isMultiSelectMode ? 'items-center gap-2.5 cursor-pointer rounded-xl px-1.5 py-0.5 transition-colors ' + (isSelectedMulti ? 'bg-[#2481cc]/10 dark:bg-[#2ba0ff]/15' : 'hover:bg-black/5 dark:hover:bg-white/5') : 'flex-col'} ${
+                  isMe ? (isMultiSelectMode ? 'justify-end' : 'items-end') : (isMultiSelectMode ? 'justify-start' : 'items-start')
+                } group relative my-1`}
+                onMouseEnter={() => !isMultiSelectMode && setHoveredMessageId(msg.id)}
+                onMouseLeave={() => setHoveredMessageId(null)}
+                onContextMenu={(e) => {
+                  if (!isMultiSelectMode) handleMessageContextMenu(e, msg);
+                }}
               >
-                {/* Telegram Reply Quote Header */}
-                {msg.replyTo && (
-                  <div
-                    className={`mb-2 pl-2.5 py-1 border-l-2 rounded-r text-[11px] select-none ${
-                      isMe
-                        ? 'border-white/70 bg-white/12 text-white'
-                        : 'border-[#2481cc] bg-[#f8fafc] dark:bg-white/5 text-[#0f172a] dark:text-[#f5f7fa]'
+                {isMultiSelectMode && (
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      toggleSelectMessage(msg.id);
+                    }}
+                    className={`shrink-0 p-1 rounded-lg transition-colors cursor-pointer ${
+                      isSelectedMulti
+                        ? 'text-[#2481cc] dark:text-[#2ba0ff]'
+                        : 'text-[#94a3b8] dark:text-[#64748b]'
                     }`}
                   >
-                    <div
-                      className={`font-semibold truncate ${
-                        isMe ? 'text-white' : 'text-[#2481cc] dark:text-[#2ba0ff]'
-                      }`}
-                    >
-                      {msg.replyTo.senderName || '回复消息'}
+                    {isSelectedMulti ? <CheckSquare className="w-4 h-4" /> : <Square className="w-4 h-4" />}
+                  </button>
+                )}
+
+                {/* Telegram Floating Quick Action Menu on Hover */}
+                {!isMultiSelectMode && hoveredMessageId === msg.id && (
+                  <div
+                    className={`absolute -top-4 z-20 flex items-center gap-0.5 bg-white dark:bg-[#17212b] border border-[#e0e4e8] dark:border-[#2b3848] rounded-full px-1.5 py-0.5 shadow-lg animate-in fade-in zoom-in-95 duration-100 ${
+                      isMe ? 'right-2' : 'left-2'
+                    }`}
+                  >
+                    {/* Quick Reactions Bar */}
+                    <div className="flex items-center gap-0.5 pr-1 border-r border-black/5 dark:border-white/10">
+                      {['👍', '❤️', '🔥', '🎉'].map((emoji) => (
+                        <button
+                          key={emoji}
+                          type="button"
+                          onClick={() => onToggleReaction?.(msg.id, emoji)}
+                          className="text-xs hover:scale-130 transition-transform p-0.5 cursor-pointer leading-none"
+                          title={`回应 ${emoji}`}
+                        >
+                          {emoji}
+                        </button>
+                      ))}
                     </div>
-                    <div className="opacity-85 truncate text-[10.5px]">{msg.replyTo.text}</div>
+
+                    {/* Reply Button */}
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setReplyingTo(msg);
+                        setEditingMessage(null);
+                      }}
+                      className="p-1 text-[#707579] hover:text-[#2481cc] dark:text-[#7f93a5] dark:hover:text-[#2ba0ff] cursor-pointer"
+                      title="回复消息"
+                    >
+                      <Reply className="w-3.5 h-3.5" />
+                    </button>
+
+                    {/* Forward Button */}
+                    <button
+                      type="button"
+                      onClick={() => handleOpenForwardModal([msg])}
+                      className="p-1 text-[#707579] hover:text-[#2481cc] dark:text-[#7f93a5] dark:hover:text-[#2ba0ff] cursor-pointer"
+                      title="转发消息"
+                    >
+                      <Forward className="w-3.5 h-3.5" />
+                    </button>
+
+                    {/* Pin Button */}
+                    <button
+                      type="button"
+                      onClick={() => onTogglePinMessage?.(msg.id)}
+                      className="p-1 text-[#707579] hover:text-[#2481cc] dark:text-[#7f93a5] dark:hover:text-[#2ba0ff] cursor-pointer"
+                      title={msg.isPinned ? '取消置顶' : '置顶此消息'}
+                    >
+                      <Pin className={`w-3.5 h-3.5 ${msg.isPinned ? 'text-[#2481cc] fill-current' : ''}`} />
+                    </button>
+
+                    {/* Edit Button (For delivered non-audio sent messages) */}
+                    {isMe &&
+                      !msg.isAudio &&
+                      msg.deliveryStatus !== 'failed' &&
+                      msg.deliveryStatus !== 'pending' &&
+                      (!chat.id.startsWith('tg_') || typeof msg.telegramMessageId === 'number') && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setEditingMessage(msg);
+                          setTranslateOnEdit(false);
+                          setInputText(msg.text);
+                          setReplyingTo(null);
+                        }}
+                        className="p-1 text-[#707579] hover:text-[#2481cc] dark:text-[#7f93a5] dark:hover:text-[#2ba0ff] cursor-pointer"
+                        title="编辑消息"
+                      >
+                        <Edit2 className="w-3.5 h-3.5" />
+                      </button>
+                    )}
+
+                    {/* Copy Text or Copy Image */}
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (msg.isImage && msg.imageUrl) {
+                          copyImageToClipboard(msg.imageUrl, msg.id);
+                        } else {
+                          copyToClipboard(msg.text, msg.id);
+                        }
+                      }}
+                      className="p-1 text-[#707579] hover:text-[#2481cc] dark:text-[#7f93a5] dark:hover:text-[#2ba0ff] cursor-pointer"
+                      title={msg.isImage ? '复制照片到剪贴板' : '复制消息内容'}
+                    >
+                      {copiedId === msg.id ? (
+                        <Check className="w-3.5 h-3.5 text-emerald-500" />
+                      ) : (
+                        <Copy className="w-3.5 h-3.5" />
+                      )}
+                    </button>
+
+                    {/* Delete Button */}
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setRevokeSingleDelete(true);
+                        setMessageToDelete(msg);
+                      }}
+                      className="p-1 text-[#707579] hover:text-red-500 dark:text-[#7f93a5] dark:hover:text-red-400 cursor-pointer"
+                      title="删除消息"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                    </button>
                   </div>
                 )}
+
+                <div
+                  className={`max-w-[80%] sm:max-w-[74%] rounded-2xl p-3 px-3.5 relative transition-all select-text ${
+                    highlightedMsgId === msg.id ? 'ring-2 ring-amber-400 shadow-lg' : ''
+                  } ${
+                    isMe
+                      ? 'bg-[#1e88e5] text-white dark:bg-[#2b5278] dark:text-white rounded-br-xs shadow-[0_1px_3px_rgba(30,136,229,0.22)]'
+                      : 'bg-white text-[#0f172a] border border-[#e2e8f0] dark:bg-[#182533] dark:text-[#f5f7fa] dark:border-transparent rounded-bl-xs shadow-[0_1px_2px_rgba(15,23,42,0.04)]'
+                  }`}
+                >
+                  {/* Forwarded Label */}
+                  {msg.forwardFrom && (
+                    <div
+                      className={`mb-1 flex items-center gap-1 text-[10.5px] font-medium ${
+                        isMe ? 'text-white/85' : 'text-[#2481cc] dark:text-[#2ba0ff]'
+                      }`}
+                    >
+                      <Forward className="w-3 h-3 shrink-0" />
+                      <span className="truncate">转发自 {msg.forwardFrom}</span>
+                    </div>
+                  )}
+
+                  {/* Telegram Reply Quote Header */}
+                  {msg.replyTo && (
+                    <div
+                      className={`mb-2 pl-2.5 py-1 border-l-2 rounded-r text-[11px] select-none ${
+                        isMe
+                          ? 'border-white/70 bg-white/12 text-white'
+                          : 'border-[#2481cc] bg-[#f8fafc] dark:bg-white/5 text-[#0f172a] dark:text-[#f5f7fa]'
+                      }`}
+                    >
+                      <div
+                        className={`font-semibold truncate ${
+                          isMe ? 'text-white' : 'text-[#2481cc] dark:text-[#2ba0ff]'
+                        }`}
+                      >
+                        {msg.replyTo.senderName || '回复消息'}
+                      </div>
+                      <div className="opacity-85 truncate text-[10.5px]">{msg.replyTo.text}</div>
+                    </div>
+                  )}
 
                 {/* Image / Sticker Attachment with Copy and Download Overlay */}
                 {msg.isImage && msg.imageUrl && (
@@ -2224,6 +2708,20 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                         <ShieldAlert className="w-3 h-3" />
                         <span>失败 · 重发</span>
                       </button>
+                    ) : chat.isChannel ? (
+                      <span title="已发送至频道" className="inline-flex items-center">
+                        <CheckCheck className="w-3.5 h-3.5 text-white/95 dark:text-[#2ba0ff]" />
+                      </span>
+                    ) : chat.id.startsWith('tg_') && currentAccountId !== 'acc_telegram_bot' && typeof msg.telegramMessageId === 'number' ? (
+                      typeof chat.readOutboxMaxId === 'number' && msg.telegramMessageId <= chat.readOutboxMaxId ? (
+                        <span title="对方已读" className="inline-flex items-center">
+                          <CheckCheck className="w-3.5 h-3.5 text-white/95 dark:text-[#2ba0ff]" />
+                        </span>
+                      ) : (
+                        <span title="已送达（对方未读）" className="inline-flex items-center">
+                          <Check className="w-3.5 h-3.5 text-white/80 dark:text-[#7f95ab]" />
+                        </span>
+                      )
                     ) : (
                       <CheckCheck className="w-3.5 h-3.5 text-white/95 dark:text-[#2ba0ff]" />
                     )
@@ -2231,10 +2729,71 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                 </div>
               </div>
             </div>
+            </React.Fragment>
           );
         })}
         <div ref={messagesEndRef} />
       </div>
+
+      {/* Multi-Select Batch Operations Bar */}
+      {isMultiSelectMode && (
+        <div className="bg-[#f0f7ff] dark:bg-[#112031] border-t border-[#bfdbfe] dark:border-[#243b55] px-4 py-2.5 flex items-center justify-between gap-2 text-xs shrink-0 animate-in fade-in duration-150">
+          <div className="flex items-center gap-2.5">
+            <span className="font-semibold text-[#2481cc] dark:text-[#2ba0ff] tabular-nums">
+              已选择 {selectedMessageIds.size} 条消息
+            </span>
+            <button
+              type="button"
+              onClick={() => {
+                if (selectedMessageIds.size === displayedMessages.length) {
+                  setSelectedMessageIds(new Set());
+                } else {
+                  setSelectedMessageIds(new Set(displayedMessages.map((m) => m.id)));
+                }
+              }}
+              className="px-2 py-1 rounded-lg bg-white dark:bg-[#1a2c42] border border-[#dbeafe] dark:border-[#2a4360] text-[#0f172a] dark:text-white hover:bg-[#e8f3ff] cursor-pointer text-[11px]"
+            >
+              {selectedMessageIds.size === displayedMessages.length && displayedMessages.length > 0 ? '取消全选' : '全选当前'}
+            </button>
+          </div>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              disabled={selectedMessageIds.size === 0}
+              onClick={() => {
+                const picked = messages.filter((m) => selectedMessageIds.has(m.id));
+                handleOpenForwardModal(picked);
+              }}
+              className="px-3 py-1.5 rounded-lg bg-[#2481cc] hover:bg-[#1d6fb3] disabled:opacity-40 text-white font-medium flex items-center gap-1.5 cursor-pointer"
+            >
+              <Forward className="w-3.5 h-3.5" />
+              <span>转发</span>
+            </button>
+            <button
+              type="button"
+              disabled={selectedMessageIds.size === 0}
+              onClick={() => {
+                setRevokeBatchDelete(true);
+                setShowBatchDeleteModal(true);
+              }}
+              className="px-3 py-1.5 rounded-lg bg-red-500 hover:bg-red-600 disabled:opacity-40 text-white font-medium flex items-center gap-1.5 cursor-pointer"
+            >
+              <Trash2 className="w-3.5 h-3.5" />
+              <span>批量删除</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setIsMultiSelectMode(false);
+                setSelectedMessageIds(new Set());
+              }}
+              className="px-2.5 py-1.5 rounded-lg text-[#64748b] dark:text-[#9aa7b5] hover:bg-black/5 dark:hover:bg-white/10 cursor-pointer"
+            >
+              退出多选
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* 4. Official Telegram Composer (Structured Dual-Layer Input Area) */}
       <footer onPaste={handlePaste} className="bg-white/95 dark:bg-[#09111d]/95 backdrop-blur-md border-t border-[#e2e8f0] dark:border-[#162436] px-4 py-2.5 shrink-0 transition-colors">
@@ -2346,8 +2905,10 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                       sender: 'me',
                       text: targetSuggestion,
                       translatedText: cnTranslation,
+                      replyTo: replyingTo ? buildReplyPayload(replyingTo, chat.title) : undefined,
                       timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false }),
                     });
+                    if (replyingTo) setReplyingTo(null);
                     const lastPeerMsg = [...messages].reverse().find((m) => m.sender === 'peer');
                     submitTrainingFeedbackApi({
                       snippet: targetSuggestion.slice(0, 500),
@@ -2427,11 +2988,24 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
 
         {/* Edit Message Banner above Input */}
         {editingMessage && (
-          <div className="mb-2 p-2 px-3 bg-amber-50 dark:bg-amber-500/12 border border-amber-300/70 dark:border-amber-500/35 rounded-xl flex items-center justify-between text-xs animate-in fade-in duration-150">
-            <div className="min-w-0 pr-2">
-              <div className="font-semibold text-amber-600 dark:text-amber-400 flex items-center gap-1.5">
-                <Edit2 className="w-3.5 h-3.5" />
-                <span>正在编辑消息</span>
+          <div className="mb-2 p-2 px-3 bg-amber-50 dark:bg-amber-500/12 border border-amber-300/70 dark:border-amber-500/35 rounded-xl flex items-center justify-between gap-2 text-xs animate-in fade-in duration-150">
+            <div className="min-w-0 pr-2 flex-1">
+              <div className="font-semibold text-amber-600 dark:text-amber-400 flex items-center gap-2 flex-wrap">
+                <span className="inline-flex items-center gap-1.5">
+                  <Edit2 className="w-3.5 h-3.5" />
+                  <span>正在编辑消息</span>
+                </span>
+                {translationSettings?.autoTranslateOutbound !== false && (
+                  <label className="inline-flex items-center gap-1 text-[11px] font-normal text-[#475569] dark:text-[#cbd5e1] cursor-pointer select-none">
+                    <input
+                      type="checkbox"
+                      checked={translateOnEdit}
+                      onChange={(e) => setTranslateOnEdit(e.target.checked)}
+                      className="rounded border-amber-400 text-[#2481cc] focus:ring-[#2481cc]"
+                    />
+                    <span>重新翻译为外文</span>
+                  </label>
+                )}
               </div>
               <div className="text-[11px] text-[#64748b] dark:text-[#7f93a5] truncate mt-0.5">
                 原消息: {editingMessage.text}
@@ -2441,6 +3015,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
               type="button"
               onClick={() => {
                 setEditingMessage(null);
+                setTranslateOnEdit(false);
                 setInputText('');
               }}
               className="p-1 text-[#64748b] hover:text-[#0f172a] dark:hover:text-white cursor-pointer shrink-0"
@@ -2759,6 +3334,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
         onTogglePin={onTogglePinChat}
         onUpdateTitle={onUpdateChatTitle}
         onChatInfoUpdated={onChatInfoUpdated}
+        onRemoveContact={onRemoveContact}
       />
 
       {/* Voice Clone Studio Modal */}
@@ -2816,6 +3392,33 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
           <button
             type="button"
             onClick={() => {
+              const target = messageContextMenu.message;
+              setMessageContextMenu(null);
+              handleOpenForwardModal([target]);
+            }}
+            className="w-full flex items-center gap-2.5 px-3 py-2 rounded-xl hover:bg-black/5 dark:hover:bg-[#202b36] text-[#111827] dark:text-white cursor-pointer font-medium"
+          >
+            <Forward className="w-4 h-4 text-[#2481cc]" />
+            <span>转发消息</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => {
+              const target = messageContextMenu.message;
+              setMessageContextMenu(null);
+              setIsMultiSelectMode(true);
+              setSelectedMessageIds(new Set([target.id]));
+            }}
+            className="w-full flex items-center gap-2.5 px-3 py-2 rounded-xl hover:bg-black/5 dark:hover:bg-[#202b36] text-[#111827] dark:text-white cursor-pointer font-medium"
+          >
+            <CheckSquare className="w-4 h-4 text-[#707579] dark:text-[#a0acb8]" />
+            <span>多选消息</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => {
               if (messageContextMenu.message.isImage && messageContextMenu.message.imageUrl) {
                 copyImageToClipboard(messageContextMenu.message.imageUrl, messageContextMenu.message.id);
               } else {
@@ -2841,11 +3444,16 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
             <span>{messageContextMenu.message.isPinned ? '取消置顶' : '置顶消息'}</span>
           </button>
 
-          {messageContextMenu.message.sender === 'me' && !messageContextMenu.message.isAudio && (
+          {messageContextMenu.message.sender === 'me' &&
+            !messageContextMenu.message.isAudio &&
+            messageContextMenu.message.deliveryStatus !== 'failed' &&
+            messageContextMenu.message.deliveryStatus !== 'pending' &&
+            (!chat.id.startsWith('tg_') || typeof messageContextMenu.message.telegramMessageId === 'number') && (
             <button
               type="button"
               onClick={() => {
                 setEditingMessage(messageContextMenu.message);
+                setTranslateOnEdit(false);
                 setInputText(messageContextMenu.message.text);
                 setReplyingTo(null);
                 setMessageContextMenu(null);
@@ -2864,6 +3472,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
             onClick={() => {
               const target = messageContextMenu.message;
               setMessageContextMenu(null);
+              setRevokeSingleDelete(true);
               setMessageToDelete(target);
             }}
             className="w-full flex items-center gap-2.5 px-3 py-2 rounded-xl hover:bg-red-500/10 text-red-500 dark:text-red-400 cursor-pointer font-medium"
@@ -2875,7 +3484,94 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
       )}
 
       {/* Telegram Confirmation Modal for Deleting Single Message */}
-      {messageToDelete && (
+      {messageToDelete && (() => {
+        const isLocalOnly =
+          !messageToDelete.telegramMessageId ||
+          messageToDelete.deliveryStatus === 'failed' ||
+          messageToDelete.deliveryStatus === 'pending';
+        const isTgUserChat = chat.id.startsWith('tg_') && currentAccountId !== 'acc_telegram_bot';
+        const isSupergroupOrChannel = chat.id.startsWith('tg_-100') || Boolean(chat.isChannel);
+        const showRevokeOption = !isLocalOnly && isTgUserChat && !isSupergroupOrChannel;
+        const showSupergroupHint = !isLocalOnly && isTgUserChat && isSupergroupOrChannel;
+        const showPeerGroupHint = !isLocalOnly && isTgUserChat && messageToDelete.sender === 'peer' && (chat.isGroup || chat.isChannel);
+        return (
+          <div className="fixed inset-0 bg-black/60 backdrop-blur-xs flex items-center justify-center z-50 p-4 animate-in fade-in duration-150">
+            <div className="bg-white dark:bg-[#1e2c3a] border border-[#e0e4e8] dark:border-[#2b3c4e] rounded-2xl p-5 max-w-sm w-full shadow-2xl space-y-4">
+              <div className="flex items-center gap-3">
+                <div className="w-10 h-10 rounded-full bg-red-500/10 dark:bg-red-500/20 text-red-500 flex items-center justify-center shrink-0">
+                  <Trash2 className="w-5 h-5" />
+                </div>
+                <div className="min-w-0">
+                  <h3 className="text-sm font-semibold text-[#111827] dark:text-white">
+                    删除此条消息？
+                  </h3>
+                  <p className="text-xs text-[#707579] dark:text-[#7f93a5] mt-0.5">
+                    {isLocalOnly
+                      ? '该消息未送达 Telegram 云端，确认后将仅从本地列表移除。'
+                      : messageToDelete.sender === 'me'
+                        ? '确定删除您发送的这条消息吗？'
+                        : '确定删除客户发送的这条消息吗？'}
+                  </p>
+                </div>
+              </div>
+
+              <div className="p-2.5 rounded-xl bg-black/5 dark:bg-black/20 text-xs text-[#707579] dark:text-[#a0acb8] truncate border border-black/5 dark:border-white/5">
+                “{messageToDelete.text || (messageToDelete.isAudio ? '🎤 语音消息' : messageToDelete.isVideo ? '🎬 视频消息' : messageToDelete.isImage ? '🖼️ 图片消息' : '消息内容')}”
+              </div>
+
+              {showRevokeOption && (
+                <label className="flex items-start gap-2.5 p-2.5 rounded-xl bg-black/5 dark:bg-[#243242] cursor-pointer text-xs">
+                  <input
+                    type="checkbox"
+                    checked={revokeSingleDelete}
+                    onChange={(e) => setRevokeSingleDelete(e.target.checked)}
+                    className="mt-0.5 rounded border-gray-300 text-[#2481cc] focus:ring-[#2481cc]"
+                  />
+                  <span className="text-[#111827] dark:text-[#eef4fb] leading-snug">
+                    同时为对方删除 / 双向撤回
+                  </span>
+                </label>
+              )}
+
+              {showSupergroupHint && !showPeerGroupHint && (
+                <p className="text-[11px] text-[#64748b] dark:text-[#9aa7b5] leading-snug">
+                  提示：在超级群组/频道中删除消息将直接从云端对所有成员删除。
+                </p>
+              )}
+
+              {showPeerGroupHint && (
+                <p className="text-[11px] text-amber-600 dark:text-amber-400 leading-snug">
+                  提示：在群组/频道中删除他人消息需要具备管理员删除权限，否则 Telegram 服务端将拒绝撤回（超级群组删除将对全员生效）。
+                </p>
+              )}
+
+              <div className="flex items-center justify-end gap-2 pt-1">
+                <button
+                  type="button"
+                  onClick={() => setMessageToDelete(null)}
+                  className="px-4 py-2 rounded-xl text-xs font-medium text-[#707579] dark:text-[#a0acb8] hover:bg-black/5 dark:hover:bg-white/10 transition-colors cursor-pointer"
+                >
+                  取消
+                </button>
+                <button
+                  type="button"
+                  onClick={confirmDeleteMessage}
+                  className="px-4 py-2 rounded-xl text-xs font-semibold bg-red-500 hover:bg-red-600 text-white shadow-sm transition-colors cursor-pointer flex items-center gap-1.5"
+                >
+                  <Trash2 className="w-3.5 h-3.5" />
+                  <span>确认删除</span>
+                </button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+
+      {/* Telegram Batch Delete Confirmation Modal */}
+      {showBatchDeleteModal && (() => {
+        const isTgUserChat = chat.id.startsWith('tg_') && currentAccountId !== 'acc_telegram_bot';
+        const isSupergroupOrChannel = chat.id.startsWith('tg_-100') || Boolean(chat.isChannel);
+        return (
         <div className="fixed inset-0 bg-black/60 backdrop-blur-xs flex items-center justify-center z-50 p-4 animate-in fade-in duration-150">
           <div className="bg-white dark:bg-[#1e2c3a] border border-[#e0e4e8] dark:border-[#2b3c4e] rounded-2xl p-5 max-w-sm w-full shadow-2xl space-y-4">
             <div className="flex items-center gap-3">
@@ -2884,36 +3580,146 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
               </div>
               <div className="min-w-0">
                 <h3 className="text-sm font-semibold text-[#111827] dark:text-white">
-                  删除此条消息？
+                  批量删除 {selectedMessageIds.size} 条消息？
                 </h3>
                 <p className="text-xs text-[#707579] dark:text-[#7f93a5] mt-0.5">
-                  {messageToDelete.sender === 'me'
-                    ? '确定从当前会话记录中彻底移除您发送的这条消息吗？'
-                    : '确定从当前会话记录中彻底移除客户发送的这条消息吗？'}
+                  删除操作将同步到 Telegram 云端及本地记录，不可恢复。
                 </p>
               </div>
             </div>
 
-            <div className="p-2.5 rounded-xl bg-black/5 dark:bg-black/20 text-xs text-[#707579] dark:text-[#a0acb8] truncate border border-black/5 dark:border-white/5">
-              “{messageToDelete.text || (messageToDelete.isAudio ? '🎤 语音消息' : messageToDelete.isVideo ? '🎬 视频消息' : messageToDelete.isImage ? '🖼️ 图片消息' : '消息内容')}”
-            </div>
+            {isTgUserChat && !isSupergroupOrChannel && (
+              <label className="flex items-start gap-2.5 p-2.5 rounded-xl bg-black/5 dark:bg-[#243242] cursor-pointer text-xs">
+                <input
+                  type="checkbox"
+                  checked={revokeBatchDelete}
+                  onChange={(e) => setRevokeBatchDelete(e.target.checked)}
+                  className="mt-0.5 rounded border-gray-300 text-[#2481cc] focus:ring-[#2481cc]"
+                />
+                <span className="text-[#111827] dark:text-[#eef4fb] leading-snug">
+                  同时为对方删除 / 双向撤回
+                </span>
+              </label>
+            )}
+
+            {isTgUserChat && isSupergroupOrChannel && (
+              <p className="text-[11px] text-amber-600 dark:text-amber-400 leading-snug">
+                提示：在超级群组/频道中批量删除将对所有成员生效；若包含他人消息需具备管理员权限。
+              </p>
+            )}
 
             <div className="flex items-center justify-end gap-2 pt-1">
               <button
                 type="button"
-                onClick={() => setMessageToDelete(null)}
+                disabled={isBatchDeleting}
+                onClick={() => setShowBatchDeleteModal(false)}
                 className="px-4 py-2 rounded-xl text-xs font-medium text-[#707579] dark:text-[#a0acb8] hover:bg-black/5 dark:hover:bg-white/10 transition-colors cursor-pointer"
               >
                 取消
               </button>
               <button
                 type="button"
-                onClick={confirmDeleteMessage}
-                className="px-4 py-2 rounded-xl text-xs font-semibold bg-red-500 hover:bg-red-600 text-white shadow-sm transition-colors cursor-pointer flex items-center gap-1.5"
+                disabled={isBatchDeleting}
+                onClick={() => void handleConfirmBatchDelete()}
+                className="px-4 py-2 rounded-xl text-xs font-semibold bg-red-500 hover:bg-red-600 disabled:opacity-50 text-white shadow-sm transition-colors cursor-pointer flex items-center gap-1.5"
               >
                 <Trash2 className="w-3.5 h-3.5" />
-                <span>确认删除</span>
+                <span>{isBatchDeleting ? '正在删除...' : '确认批量删除'}</span>
               </button>
+            </div>
+          </div>
+        </div>
+        );
+      })()}
+
+      {/* Forward Messages Target Picker Modal */}
+      {forwardModalMessages && (
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-xs flex items-center justify-center z-50 p-4 animate-in fade-in duration-150">
+          <div className="bg-white dark:bg-[#17212b] border border-[#e0e4e8] dark:border-[#243547] rounded-2xl w-full max-w-md shadow-2xl overflow-hidden flex flex-col max-h-[80vh]">
+            <div className="px-4 py-3 border-b border-[#e0e4e8] dark:border-[#243547] flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <Forward className="w-4 h-4 text-[#2481cc] dark:text-[#2ba0ff]" />
+                <span className="font-semibold text-sm text-[#111827] dark:text-white">
+                  转发 {forwardModalMessages.length} 条消息至...
+                </span>
+              </div>
+              <button
+                type="button"
+                onClick={() => setForwardModalMessages(null)}
+                className="p-1 text-[#707579] hover:text-[#111827] dark:text-[#7f93a5] dark:hover:text-white cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="p-3 border-b border-[#e0e4e8] dark:border-[#243547] space-y-2">
+              <div className="relative">
+                <Search className="w-3.5 h-3.5 text-[#707579] absolute left-3 top-1/2 -translate-y-1/2" />
+                <input
+                  type="text"
+                  value={forwardSearch}
+                  onChange={(e) => setForwardSearch(e.target.value)}
+                  placeholder="搜索目标会话、联系人或群组..."
+                  autoFocus
+                  className="w-full bg-[#f0f2f5] dark:bg-[#202b36] pl-8 pr-3 py-1.5 rounded-lg text-xs text-[#111827] dark:text-white focus:outline-none border border-transparent focus:border-[#2ba0ff]/50"
+                />
+              </div>
+              <label className="flex items-center gap-2 text-[11.5px] text-[#64748b] dark:text-[#9aa7b5] cursor-pointer select-none">
+                <input
+                  type="checkbox"
+                  checked={forwardDropAuthor}
+                  onChange={(e) => setForwardDropAuthor(e.target.checked)}
+                  className="rounded border-gray-300 text-[#2481cc] focus:ring-[#2481cc]"
+                />
+                <span>隐藏原发送者名称（不附带转发来源）</span>
+              </label>
+            </div>
+
+            <div className="flex-1 overflow-y-auto p-2 space-y-1">
+              {availableChats
+                .filter((c) => {
+                  const q = forwardSearch.trim().toLowerCase();
+                  if (!q) return true;
+                  return (
+                    c.title.toLowerCase().includes(q) ||
+                    (c.username && c.username.toLowerCase().includes(q))
+                  );
+                })
+                .map((targetChat) => (
+                  <button
+                    key={targetChat.id}
+                    type="button"
+                    disabled={isForwarding}
+                    onClick={() => void handleConfirmForward(targetChat.id)}
+                    className="w-full flex items-center gap-3 p-2.5 rounded-xl hover:bg-[#f0f7ff] dark:hover:bg-[#202b36] transition-colors text-left cursor-pointer disabled:opacity-50"
+                  >
+                    <div
+                      className="w-9 h-9 rounded-full flex items-center justify-center text-white text-xs font-bold shrink-0 overflow-hidden relative"
+                      style={{ backgroundColor: targetChat.avatarBg || '#2481cc' }}
+                    >
+                      <span>{targetChat.avatarInitial}</span>
+                      {targetChat.avatarUrl && (
+                        <img
+                          src={targetChat.avatarUrl}
+                          alt={targetChat.title}
+                          className="w-full h-full object-cover absolute inset-0"
+                          onError={(e) => {
+                            (e.currentTarget as HTMLElement).style.display = 'none';
+                          }}
+                        />
+                      )}
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <div className="text-xs font-semibold text-[#111827] dark:text-white truncate">
+                        {targetChat.title}
+                      </div>
+                      <div className="text-[11px] text-[#707579] dark:text-[#7f93a5] truncate">
+                        {targetChat.username || (targetChat.isGroup ? '群组' : targetChat.isChannel ? '频道' : '私聊对话')}
+                      </div>
+                    </div>
+                    <Forward className="w-3.5 h-3.5 text-[#2481cc] shrink-0" />
+                  </button>
+                ))}
             </div>
           </div>
         </div>

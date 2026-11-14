@@ -39,6 +39,10 @@ export interface Chat {
   inviteLink?: string;
   pinnedMessageId?: string;
   isMuted?: boolean;
+  readOutboxMaxId?: number;
+  readInboxMaxId?: number;
+  phone?: string;
+  isBlocked?: boolean;
 }
 
 export interface TelegramChatParticipant {
@@ -64,6 +68,9 @@ export interface TelegramChatFullInfo {
   isVerified?: boolean;
   isOnline?: boolean;
   statusText?: string;
+  phone?: string;
+  isBlocked?: boolean;
+  isContact?: boolean;
   memberCount?: number;
   onlineCount?: number;
   inviteLink?: string;
@@ -123,9 +130,10 @@ export interface Message {
   videoWidth?: number;
   videoHeight?: number;
   timestamp: string;
+  createdAt?: number;
   status: 'sending' | 'sent' | 'read';
   deliveryStatus?: 'delivered' | 'failed' | 'retrying' | 'pending';
-  replyTo?: { id: string; senderName?: string; text: string };
+  replyTo?: { id: string; telegramMessageId?: number; senderName?: string; text: string };
   reactions?: Record<string, number>;
   myReactions?: string[];
   isPinned?: boolean;
@@ -233,7 +241,10 @@ export interface TelegramContact {
   avatarInitial?: string;
   avatarUrl?: string;
   status?: 'online' | 'offline';
+  statusText?: string;
   bio?: string;
+  isBlocked?: boolean;
+  isContact?: boolean;
 }
 
 export interface TelegramCallRecord {

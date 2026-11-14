@@ -33,7 +33,7 @@ interface ChatListProps {
   onToggleArchiveChat?: (chatId: string) => void;
   onToggleMuteChat?: (chatId: string) => void;
   onToggleMarkUnread?: (chatId: string) => void;
-  onDeleteChat?: (chatId: string) => void;
+  onDeleteChat?: (chatId: string, options?: { revoke?: boolean }) => void;
   onNewChatClick?: () => void;
   currentAccountStatus?: string;
   onReloginCurrentAccount?: () => void;
@@ -80,6 +80,7 @@ export const ChatList: React.FC<ChatListProps> = ({
   const [activeFolder, setActiveFolder] = useState<'all' | 'unread' | 'personal' | 'groups' | 'channels' | 'bots' | 'archived'>('all');
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
   const [chatToDelete, setChatToDelete] = useState<Chat | null>(null);
+  const [revokeDeleteChat, setRevokeDeleteChat] = useState(false);
   const [previewChat, setPreviewChat] = useState<Chat | null>(null);
 
   // Drag-to-resize handlers
@@ -168,11 +169,15 @@ export const ChatList: React.FC<ChatListProps> = ({
 
   const filteredChats = chats.filter((c) => {
     const q = searchQuery.toLowerCase().trim();
+    const qDigits = q.replace(/[\s\-\(\)\.+]/g, '');
     const matchesSearch =
       !q ||
       c.title.toLowerCase().includes(q) ||
       c.lastMessage.toLowerCase().includes(q) ||
-      (c.username && c.username.toLowerCase().includes(q));
+      (c.username && c.username.toLowerCase().includes(q)) ||
+      (c.phone &&
+        (c.phone.toLowerCase().includes(q) ||
+          (qDigits.length > 0 && c.phone.replace(/[\s\-\(\)\.+]/g, '').toLowerCase().includes(qDigits))));
 
     if (!matchesSearch) return false;
 
@@ -684,13 +689,14 @@ export const ChatList: React.FC<ChatListProps> = ({
           <button
             type="button"
             onClick={() => {
+              setRevokeDeleteChat(false);
               setChatToDelete(contextMenu.chat);
               setContextMenu(null);
             }}
             className="w-full flex items-center gap-3 px-3.5 py-2 hover:bg-red-500/10 text-red-500 transition-colors text-left cursor-pointer font-medium"
           >
             <Trash2 className="w-4 h-4" />
-            <span>删除对话</span>
+            <span>{contextMenu.chat.isGroup || contextMenu.chat.isChannel ? '退出并删除对话' : '删除对话'}</span>
           </button>
         </div>
       )}
@@ -757,14 +763,36 @@ export const ChatList: React.FC<ChatListProps> = ({
       {chatToDelete && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-xs select-none">
           <div className="bg-white dark:bg-[#17212b] border border-[#e0e4e8] dark:border-[#202b36] rounded-2xl w-full max-w-sm overflow-hidden shadow-2xl p-5 animate-in fade-in zoom-in-95 duration-150">
-            <h4 className="font-bold text-base text-[#111827] dark:text-[#f5f7fa] mb-2">删除此对话？</h4>
-            <p className="text-xs text-[#707579] dark:text-[#7f93a5] leading-relaxed mb-5">
-              确定要删除与 <span className="font-semibold text-[#111827] dark:text-[#f5f7fa]">「{chatToDelete.title}」</span> 的全部聊天记录吗？此操作无法撤销。
+            <h4 className="font-bold text-base text-[#111827] dark:text-[#f5f7fa] mb-2">
+              {chatToDelete.isGroup || chatToDelete.isChannel
+                ? `退出并删除该${chatToDelete.isChannel ? '频道' : '群组'}？`
+                : '删除此对话？'}
+            </h4>
+            <p className="text-xs text-[#707579] dark:text-[#7f93a5] leading-relaxed mb-4">
+              {chatToDelete.isGroup || chatToDelete.isChannel
+                ? <>确定要退出并移除 <span className="font-semibold text-[#111827] dark:text-[#f5f7fa]">「{chatToDelete.title}」</span> 的会话记录吗？此操作无法撤销。</>
+                : <>确定要删除与 <span className="font-semibold text-[#111827] dark:text-[#f5f7fa]">「{chatToDelete.title}」</span> 的全部聊天记录吗？此操作无法撤销。</>}
             </p>
+            {!chatToDelete.isGroup && !chatToDelete.isChannel && chatToDelete.id.startsWith('tg_') && (
+              <label className="flex items-start gap-2.5 p-2.5 mb-4 rounded-xl bg-black/5 dark:bg-[#202b36] cursor-pointer text-xs">
+                <input
+                  type="checkbox"
+                  checked={revokeDeleteChat}
+                  onChange={(e) => setRevokeDeleteChat(e.target.checked)}
+                  className="mt-0.5 rounded border-gray-300 text-[#2481cc] focus:ring-[#2481cc]"
+                />
+                <span className="text-[#111827] dark:text-[#eef4fb] leading-snug">
+                  同时为对方删除全部聊天记录（双向清除）
+                </span>
+              </label>
+            )}
             <div className="flex items-center justify-end gap-2.5">
               <button
                 type="button"
-                onClick={() => setChatToDelete(null)}
+                onClick={() => {
+                  setChatToDelete(null);
+                  setRevokeDeleteChat(false);
+                }}
                 className="px-4 py-2 rounded-xl text-xs text-[#707579] dark:text-[#7f93a5] hover:bg-black/5 dark:hover:bg-white/5 cursor-pointer font-medium"
               >
                 取消
@@ -772,12 +800,14 @@ export const ChatList: React.FC<ChatListProps> = ({
               <button
                 type="button"
                 onClick={() => {
-                  onDeleteChat?.(chatToDelete.id);
+                  const revoke = !chatToDelete.isGroup && !chatToDelete.isChannel ? revokeDeleteChat : false;
+                  onDeleteChat?.(chatToDelete.id, { revoke });
                   setChatToDelete(null);
+                  setRevokeDeleteChat(false);
                 }}
                 className="px-4 py-2 rounded-xl text-xs bg-red-500 hover:bg-red-600 text-white font-semibold cursor-pointer shadow-xs"
               >
-                确认删除
+                {chatToDelete.isGroup || chatToDelete.isChannel ? '确认退出并删除' : '确认删除'}
               </button>
             </div>
           </div>

@@ -1490,6 +1490,8 @@ export async function fetchTelegramUserDialogs(client: TelegramClient, limit = 1
         ? new Date(d.date * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false })
         : '刚刚';
       const unreadCount = Number(d.unreadCount || 0) || (d.dialog?.unreadMark ? 1 : 0);
+      const readOutboxMaxId = Number(d.dialog?.readOutboxMaxId || 0) || undefined;
+      const readInboxMaxId = Number(d.dialog?.readInboxMaxId || 0) || undefined;
       const chatId = `tg_${d.id}`;
       const avatarUrl = signTelegramResourceUrl(`/api/telegram/user/avatar/${encodeURIComponent(String(d.id))}`, accountScope);
 
@@ -1512,6 +1514,8 @@ export async function fetchTelegramUserDialogs(client: TelegramClient, limit = 1
         lastTime: timestamp,
         lastDate: d.date ? Number(d.date) : 0,
         unreadCount,
+        readOutboxMaxId,
+        readInboxMaxId,
         avatarUrl,
         avatarInitial: isOfficial ? 'TG' : (title || 'TG').slice(0, 2).toUpperCase(),
         avatarBg: isChannel ? '#3b5998' : isGroup ? '#1e3a5f' : isBot ? '#6b4fbb' : '#2481cc',
@@ -2703,6 +2707,10 @@ export interface UnifiedChatMessage {
   timestamp: string;
   createdAt: number;
   deliveryStatus: string;
+  replyTo?: { id: string; telegramMessageId?: number; senderName?: string; text: string };
+  isEdited?: boolean;
+  isPinned?: boolean;
+  forwardFrom?: string;
 }
 
 function sanitizeDbMediaUrl(url: any): string {
@@ -2738,6 +2746,13 @@ export function normalizeStoredMessageRecord(
         : `msg_${createdAt}_${Math.random().toString(36).slice(2, 6)}`)
   );
 
+  const parsedReplyTo =
+    raw.replyTo && typeof raw.replyTo === 'object'
+      ? raw.replyTo
+      : typeof raw.reply_to_json === 'string' && raw.reply_to_json
+      ? safeJsonParse<{ id: string; telegramMessageId?: number; senderName?: string; text: string } | undefined>(raw.reply_to_json, undefined)
+      : undefined;
+
   return {
     id,
     telegramMessageId,
@@ -2764,6 +2779,10 @@ export function normalizeStoredMessageRecord(
     ),
     createdAt,
     deliveryStatus: String(raw.deliveryStatus ?? raw.delivery_status ?? 'delivered'),
+    ...(parsedReplyTo ? { replyTo: parsedReplyTo } : {}),
+    isEdited: Boolean(raw.isEdited ?? raw.is_edited),
+    isPinned: Boolean(raw.isPinned ?? raw.is_pinned),
+    ...(raw.forwardFrom || raw.forward_from ? { forwardFrom: String(raw.forwardFrom ?? raw.forward_from) } : {}),
   };
 }
 
@@ -2933,6 +2952,7 @@ export async function upsertSyncedMessageToDb(
         .get(msg.chatId, altChatId, ...accVariants, msg.telegramMessageId)) as any;
 
       if (existingByTg?.id && existingByTg.id !== msg.id) {
+        const replyToJson = msg.replyTo ? JSON.stringify(msg.replyTo) : null;
         await db
           .prepare(
             `UPDATE messages SET
@@ -2940,7 +2960,11 @@ export async function upsertSyncedMessageToDb(
                translated_text = CASE WHEN ? != '' THEN ? ELSE translated_text END,
                stt_text = CASE WHEN ? != '' THEN ? ELSE stt_text END,
                voice_tone = CASE WHEN ? != '' THEN ? ELSE voice_tone END,
-               delivery_status = CASE WHEN ? != '' THEN ? ELSE delivery_status END
+               delivery_status = CASE WHEN ? != '' THEN ? ELSE delivery_status END,
+               reply_to_json = COALESCE(?, reply_to_json),
+               is_edited = CASE WHEN ? = 1 THEN 1 ELSE is_edited END,
+               is_pinned = ?,
+               forward_from = COALESCE(?, forward_from)
              WHERE id = ?`
           )
           .run(
@@ -2954,20 +2978,26 @@ export async function upsertSyncedMessageToDb(
             msg.voiceTone,
             msg.deliveryStatus,
             msg.deliveryStatus,
+            replyToJson,
+            msg.isEdited ? 1 : 0,
+            msg.isPinned ? 1 : 0,
+            msg.forwardFrom || null,
             existingByTg.id
           );
         return true;
       }
     }
 
+    const replyToJson = msg.replyTo ? JSON.stringify(msg.replyTo) : null;
     await db
       .prepare(
         `INSERT INTO messages (
           id, chat_id, account_id, sender, sender_name, text, translated_text,
           is_audio, audio_duration, audio_url, stt_text, voice_tone,
           is_image, image_url, image_caption, is_video, video_url, video_duration,
-          timestamp, created_at, delivery_status, telegram_message_id
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          timestamp, created_at, delivery_status, telegram_message_id,
+          reply_to_json, is_edited, is_pinned, forward_from
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
           text = CASE WHEN excluded.text != '' THEN excluded.text ELSE messages.text END,
           translated_text = CASE WHEN excluded.translated_text != '' THEN excluded.translated_text ELSE messages.translated_text END,
@@ -2977,7 +3007,11 @@ export async function upsertSyncedMessageToDb(
           image_url = CASE WHEN excluded.image_url != '' THEN excluded.image_url ELSE messages.image_url END,
           video_url = CASE WHEN excluded.video_url != '' THEN excluded.video_url ELSE messages.video_url END,
           delivery_status = CASE WHEN excluded.delivery_status != '' THEN excluded.delivery_status ELSE messages.delivery_status END,
-          telegram_message_id = COALESCE(excluded.telegram_message_id, messages.telegram_message_id)`
+          telegram_message_id = COALESCE(excluded.telegram_message_id, messages.telegram_message_id),
+          reply_to_json = COALESCE(excluded.reply_to_json, messages.reply_to_json),
+          is_edited = CASE WHEN excluded.is_edited = 1 THEN 1 ELSE messages.is_edited END,
+          is_pinned = excluded.is_pinned,
+          forward_from = COALESCE(excluded.forward_from, messages.forward_from)`
       )
       .run(
         msg.id,
@@ -3001,7 +3035,11 @@ export async function upsertSyncedMessageToDb(
         msg.timestamp,
         msg.createdAt,
         msg.deliveryStatus,
-        msg.telegramMessageId ?? null
+        msg.telegramMessageId ?? null,
+        replyToJson,
+        msg.isEdited ? 1 : 0,
+        msg.isPinned ? 1 : 0,
+        msg.forwardFrom || null
       );
     return true;
   } catch (err: any) {
@@ -3372,19 +3410,31 @@ app.get('/api/messages/:chatId', requireTenantAuth, async (req: Request, res: Re
         is_image as isImage, image_url as imageUrl, image_caption as imageCaption,
         is_video as isVideo, video_url as videoUrl, video_duration as videoDuration,
         timestamp, created_at as createdAt, delivery_status as deliveryStatus,
-        telegram_message_id as telegramMessageId
+        telegram_message_id as telegramMessageId,
+        reply_to_json as replyToJson,
+        is_edited as isEdited,
+        is_pinned as isPinned,
+        forward_from as forwardFrom
       FROM messages
       WHERE (chat_id = ? OR chat_id = ?) AND account_id IN (${accPlaceholders})
       ORDER BY created_at ASC
     `).all(chatId, altChatId, ...accVariants)) as any[];
 
-    const formatted = rows.map((r: any) => ({
-      ...r,
-      isAudio: Boolean(r.isAudio),
-      isImage: Boolean(r.isImage),
-      isVideo: Boolean(r.isVideo),
-      deliveryStatus: r.deliveryStatus || 'delivered',
-    }));
+    const formatted = rows.map((r: any) => {
+      const { replyToJson, ...rest } = r;
+      const replyTo = replyToJson ? safeJsonParse(replyToJson, undefined) : undefined;
+      return {
+        ...rest,
+        isAudio: Boolean(r.isAudio),
+        isImage: Boolean(r.isImage),
+        isVideo: Boolean(r.isVideo),
+        isEdited: Boolean(r.isEdited),
+        isPinned: Boolean(r.isPinned),
+        ...(replyTo ? { replyTo } : {}),
+        ...(r.forwardFrom ? { forwardFrom: r.forwardFrom } : {}),
+        deliveryStatus: r.deliveryStatus || 'delivered',
+      };
+    });
 
     // If local messages are empty, attempt real-time cloud sync from connected MTProto client
     if (formatted.length === 0) {
@@ -3482,7 +3532,12 @@ async function deliverOutboundTelegramMessage(
     isFile = false,
     fileName = '',
     fileUrl = '',
+    replyTo,
+    replyToMsgId,
   } = payload || {};
+
+  const resolvedReplyToTgId =
+    resolveTelegramMessageNumericId(replyTo?.id, replyTo?.telegramMessageId ?? replyToMsgId) || undefined;
 
   const isExplicitBotChannel = effectiveAccountId === 'acc_telegram_bot';
   const isTelegramChat = Boolean(chatId && (String(chatId).startsWith('tg_') || isExplicitBotChannel));
@@ -3501,41 +3556,45 @@ async function deliverOutboundTelegramMessage(
 
       let botResult: any = null;
       let failDetail = 'Telegram Bot API 投递失败';
+      const botOpts: TelegramSendOptions = {
+        messageId: msgId,
+        ...(resolvedReplyToTgId ? { replyToMessageId: resolvedReplyToTgId } : {}),
+      };
 
       if (isAudio) {
         if (!audioUrl) {
           return { delivered: false, channel: 'bot', error: '语音消息缺少音频地址，无法通过 Bot 发送' };
         }
         console.log(`[Telegram Outbound] Bot sending voice message to ${chatId} (${audioDuration}s)...`);
-        botResult = await sendTelegramVoice(chatId, audioUrl, sttText || text || translatedText, audioDuration, { messageId: msgId });
+        botResult = await sendTelegramVoice(chatId, audioUrl, sttText || text || translatedText, audioDuration, botOpts);
         failDetail = 'Telegram Bot API 语音发送失败（请检查音频转码或 Bot 权限）';
       } else if (isImage) {
         if (!imageUrl) {
           return { delivered: false, channel: 'bot', error: '图片消息缺少图片地址，无法通过 Bot 发送' };
         }
         console.log(`[Telegram Outbound] Bot sending photo to ${chatId}...`);
-        botResult = await sendTelegramPhoto(chatId, imageUrl, text || imageCaption || translatedText, { messageId: msgId });
+        botResult = await sendTelegramPhoto(chatId, imageUrl, text || imageCaption || translatedText, botOpts);
         failDetail = 'Telegram Bot API 图片发送失败';
       } else if (isVideo) {
         if (!videoUrl) {
           return { delivered: false, channel: 'bot', error: '视频消息缺少视频地址，无法通过 Bot 发送' };
         }
         console.log(`[Telegram Outbound] Bot sending video to ${chatId} (${videoDuration}s)...`);
-        botResult = await sendTelegramVideo(chatId, videoUrl, text || translatedText, videoDuration, { messageId: msgId });
+        botResult = await sendTelegramVideo(chatId, videoUrl, text || translatedText, videoDuration, botOpts);
         failDetail = 'Telegram Bot API 视频发送失败';
       } else if (isFile) {
         if (!fileUrl) {
           return { delivered: false, channel: 'bot', error: '文件消息缺少文件地址，无法通过 Bot 发送' };
         }
         console.log(`[Telegram Outbound] Bot sending document to ${chatId}: ${fileName}...`);
-        botResult = await sendTelegramDocument(chatId, fileUrl, fileName, text !== `[文件] ${fileName}` ? text : undefined, { messageId: msgId });
+        botResult = await sendTelegramDocument(chatId, fileUrl, fileName, text !== `[文件] ${fileName}` ? text : undefined, botOpts);
         failDetail = 'Telegram Bot API 文件发送失败';
       } else {
         if (!outText) {
           return { delivered: false, channel: 'bot', error: '消息内容为空，未能发送至 Telegram' };
         }
         console.log(`[Telegram Outbound] Bot sending text message to ${chatId}: "${outText.slice(0, 30)}..."`);
-        botResult = await sendTelegramMessage(chatId, outText, { messageId: msgId });
+        botResult = await sendTelegramMessage(chatId, outText, botOpts);
       }
 
       if (botResult && botResult.ok !== false) {
@@ -3607,6 +3666,7 @@ async function deliverOutboundTelegramMessage(
           file: voiceFile,
           voiceNote: true,
           caption: sttText || text || undefined,
+          ...(resolvedReplyToTgId ? { replyTo: resolvedReplyToTgId } : {}),
         });
         console.log(`[MTProto Outbound] Successfully delivered native OGG Opus voice note to ${rawTgId}`);
         return { delivered: true, channel: 'mtproto', telegramMessageId: Number(sentVoice?.id) || undefined };
@@ -3647,6 +3707,7 @@ async function deliverOutboundTelegramMessage(
         const sentPhoto: any = await personalAccount.client.sendFile(rawPeer, {
           file: photoFile,
           caption: explicitCaption || undefined,
+          ...(resolvedReplyToTgId ? { replyTo: resolvedReplyToTgId } : {}),
         });
         console.log(`[MTProto Outbound] Successfully delivered photo to ${rawTgId}`);
         return { delivered: true, channel: 'mtproto', telegramMessageId: Number(sentPhoto?.id) || undefined };
@@ -3687,6 +3748,7 @@ async function deliverOutboundTelegramMessage(
           file: videoFile,
           supportsStreaming: true,
           caption: explicitCaption || undefined,
+          ...(resolvedReplyToTgId ? { replyTo: resolvedReplyToTgId } : {}),
         });
         console.log(`[MTProto Outbound] Successfully delivered video to ${rawTgId}`);
         return { delivered: true, channel: 'mtproto', telegramMessageId: Number(sentVideo?.id) || undefined };
@@ -3718,6 +3780,7 @@ async function deliverOutboundTelegramMessage(
           file: docFile,
           caption: text !== `[文件] ${fileName}` ? (text || undefined) : undefined,
           forceDocument: true,
+          ...(resolvedReplyToTgId ? { replyTo: resolvedReplyToTgId } : {}),
         });
         console.log(`[MTProto Outbound] Successfully delivered document to ${rawTgId}`);
         return { delivered: true, channel: 'mtproto', telegramMessageId: Number(sentDoc?.id) || undefined };
@@ -3743,7 +3806,10 @@ async function deliverOutboundTelegramMessage(
 
     console.log(`[MTProto Outbound] Personal account sending text message to ${rawTgId}: "${outText.slice(0, 30)}..."`);
     markOutboundMessageSent(chatId, outText);
-    const sentMsg: any = await personalAccount.client.sendMessage(rawPeer, { message: outText });
+    const sentMsg: any = await personalAccount.client.sendMessage(rawPeer, {
+      message: outText,
+      ...(resolvedReplyToTgId ? { replyTo: resolvedReplyToTgId } : {}),
+    });
     return { delivered: true, channel: 'mtproto', telegramMessageId: Number(sentMsg?.id) || undefined };
   } catch (tgSyncErr: any) {
     const errMsg = formatTelegramError(tgSyncErr);
@@ -3888,6 +3954,7 @@ app.post('/api/messages/:id/retry', requireTenantAuth, async (req: Request, res:
         isFile: Boolean(msg.is_file),
         fileName: msg.file_name,
         fileUrl: msg.file_url,
+        replyTo: msg.reply_to_json ? safeJsonParse(msg.reply_to_json, undefined) : undefined,
       },
       msg.account_id || effectiveAccountId,
       id
@@ -3973,11 +4040,17 @@ app.delete('/api/messages/:id', requireTenantAuth, async (req: Request, res: Res
 
     const chatId = String((req.query.chatId as string) || msg?.chat_id || '').trim();
     const explicitTgId = req.query.telegramMessageId as string | undefined;
-    const tgMsgId = resolveTelegramMessageNumericId(id, explicitTgId);
+    const tgMsgId = resolveTelegramMessageNumericId(id, explicitTgId ?? msg?.telegram_message_id);
+    const revoke = req.query.revoke === 'false' || req.query.revoke === '0' ? false : true;
+    const isLocalOnlyRequested = req.query.localOnly === 'true' || req.query.localOnly === '1';
 
     const isTelegramChat = Boolean(chatId.startsWith('tg_') || effectiveAccountId.startsWith('acc_tg_') || effectiveAccountId === 'acc_telegram_bot');
+    const isLocalFailedOrDraft = Boolean(
+      !tgMsgId && (isLocalOnlyRequested || msg?.delivery_status === 'failed' || msg?.delivery_status === 'pending' || String(id).startsWith('msg_'))
+    );
+    let cloudSynced = false;
 
-    if (isTelegramChat) {
+    if (isTelegramChat && !isLocalFailedOrDraft) {
       if (!tgMsgId) {
         return res.status(400).json({
           success: false,
@@ -3998,9 +4071,10 @@ app.delete('/api/messages/:id', requireTenantAuth, async (req: Request, res: Res
           return res.status(502).json({
             success: false,
             deleted: false,
-            error: botJson.description || 'Telegram Bot 撤回消息失败',
+            error: botJson.description || 'Telegram Bot 撤回消息失败（Bot 仅能撤回 48 小时内消息或需管理员删帖权限）',
           });
         }
+        cloudSynced = true;
       } else {
         const connected = resolveConnectedTelegramUser(effectiveAccountId);
         if (!connected || !connected.client) {
@@ -4011,7 +4085,8 @@ app.delete('/api/messages/:id', requireTenantAuth, async (req: Request, res: Res
           });
         }
         const { inputPeer } = await resolveTelegramInputPeer(connected.client, chatId, connected.userId);
-        await connected.client.deleteMessages(inputPeer, [tgMsgId], { revoke: true });
+        await connected.client.deleteMessages(inputPeer, [tgMsgId], { revoke });
+        cloudSynced = true;
       }
     }
 
@@ -4029,7 +4104,7 @@ app.delete('/api/messages/:id', requireTenantAuth, async (req: Request, res: Res
       changes = (result as any)?.changes ?? 0;
     }
 
-    res.json({ success: true, deleted: true, cloudSynced: isTelegramChat, id, changes });
+    res.json({ success: true, deleted: true, cloudSynced, revoke, id, changes });
   } catch (err: any) {
     res.status(500).json({ success: false, deleted: false, error: formatTelegramError(err) });
   }
@@ -8961,6 +9036,7 @@ function isDuplicateUpdate(updateId: number): boolean {
 
 export interface TelegramSendOptions {
   messageId?: string;
+  replyToMessageId?: number;
   maxRetries?: number;
   initialBackoffMs?: number;
   fetcher?: typeof fetch;
@@ -9079,6 +9155,7 @@ export async function sendTelegramMessage(chatId: string | number, text: string,
       body: JSON.stringify({
         chat_id: targetChatId,
         text,
+        ...(options?.replyToMessageId ? { reply_to_message_id: options.replyToMessageId } : {}),
       }),
     },
     options
@@ -9125,6 +9202,7 @@ export async function sendTelegramPhoto(chatId: string | number, photoUrl: strin
       const formData = new FormData();
       formData.append('chat_id', String(targetChatId));
       if (caption) formData.append('caption', caption);
+      if (options?.replyToMessageId) formData.append('reply_to_message_id', String(options.replyToMessageId));
       formData.append('photo', new Blob([new Uint8Array(buffer)], { type: mimeType }), `photo.${ext}`);
 
       const uploadResult = await executeTelegramApiWithRetry(
@@ -9148,6 +9226,7 @@ export async function sendTelegramPhoto(chatId: string | number, photoUrl: strin
           chat_id: targetChatId,
           photo: photoUrl,
           caption: caption || '',
+          ...(options?.replyToMessageId ? { reply_to_message_id: options.replyToMessageId } : {}),
         }),
       },
       options
@@ -9190,6 +9269,7 @@ export async function sendTelegramVideo(
         chat_id: targetChatId,
         video: videoData,
         caption: caption || '',
+        ...(options?.replyToMessageId ? { reply_to_message_id: options.replyToMessageId } : {}),
       };
       if (duration && duration > 0) payload.duration = Math.round(duration);
 
@@ -9231,6 +9311,7 @@ export async function sendTelegramVideo(
     formData.append('chat_id', String(targetChatId));
     if (caption) formData.append('caption', caption);
     if (duration && duration > 0) formData.append('duration', String(Math.round(duration)));
+    if (options?.replyToMessageId) formData.append('reply_to_message_id', String(options.replyToMessageId));
     const videoBlob = new Blob([new Uint8Array(buffer)]);
     formData.append('video', videoBlob, 'video.mp4');
 
@@ -9281,6 +9362,7 @@ export async function sendTelegramDocument(
             chat_id: targetChatId,
             document: fileData,
             caption: caption || '',
+            ...(options?.replyToMessageId ? { reply_to_message_id: options.replyToMessageId } : {}),
           }),
         },
         options
@@ -9313,6 +9395,7 @@ export async function sendTelegramDocument(
     const formData = new FormData();
     formData.append('chat_id', String(targetChatId));
     if (caption) formData.append('caption', caption);
+    if (options?.replyToMessageId) formData.append('reply_to_message_id', String(options.replyToMessageId));
     const docBlob = new Blob([new Uint8Array(buffer)]);
     formData.append('document', docBlob, filename || 'file.bin');
 
@@ -9365,6 +9448,7 @@ export async function sendTelegramVoice(
             voice: audioData,
             caption: caption || '',
             duration: duration && duration > 0 ? Math.round(duration) : undefined,
+            ...(options?.replyToMessageId ? { reply_to_message_id: options.replyToMessageId } : {}),
           }),
         },
         options
@@ -9411,6 +9495,9 @@ export async function sendTelegramVoice(
     }
     if (duration && duration > 0) {
       formData.append('duration', String(Math.round(duration)));
+    }
+    if (options?.replyToMessageId) {
+      formData.append('reply_to_message_id', String(options.replyToMessageId));
     }
 
     const audioBlob = new Blob([new Uint8Array(oggBuffer)], { type: 'audio/ogg' });
@@ -10138,6 +10225,209 @@ ${dialogueTranscript}
   }
 }
 
+// Shared processor for incoming Telegram Bot updates (used by both Webhook & desktop getUpdates long-polling)
+async function processIncomingBotUpdate(
+  update: any
+): Promise<{ ok: boolean; duplicate?: boolean; ignored?: boolean; reason?: string; update_id?: number; chat_id?: string; message_id?: number; queued?: boolean }> {
+  const updateId = Number(update?.update_id);
+  if (!updateId) {
+    return { ok: false, reason: 'Missing update_id' };
+  }
+
+  if (isDuplicateUpdate(updateId)) {
+    console.log(`[Telegram Bot Update] Ignored duplicate update_id: ${updateId}`);
+    return { ok: true, duplicate: true, update_id: updateId };
+  }
+
+  const isEditedUpdate = Boolean(update.edited_message);
+  const msg = update.message || update.edited_message || update.channel_post;
+  if (!msg) {
+    return { ok: true, ignored: true, reason: 'No message in update', update_id: updateId };
+  }
+
+  const tgChatId = `tg_${msg.chat?.id}`;
+  const senderName = [msg.from?.first_name, msg.from?.last_name].filter(Boolean).join(' ') || msg.from?.username || `TG用户_${msg.chat?.id}`;
+  const isAudio = Boolean(msg.voice || msg.audio);
+  const voiceFileId = msg.voice?.file_id || msg.audio?.file_id || '';
+  const audioDuration = msg.voice?.duration || msg.audio?.duration || 0;
+  const isVideo = Boolean(msg.video || msg.video_note);
+  const videoDuration = msg.video?.duration || msg.video_note?.duration || 0;
+  const isImage = Boolean(msg.photo && msg.photo.length > 0);
+  const now = Date.now();
+  const internalMsgId = `tg_${msg.message_id}_${updateId}`;
+
+  let textContent = msg.text || msg.caption;
+  if (!textContent) {
+    if (isAudio) {
+      textContent = '[语音消息]';
+    } else if (isVideo) {
+      textContent = '[视频消息]';
+    } else if (isImage) {
+      textContent = '[图片消息]';
+    } else {
+      textContent = '[多媒体消息]';
+    }
+  }
+
+  const incomingMsgTimestamp = new Date(msg.date ? msg.date * 1000 : now).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false });
+  const incomingTgMsgId = Number(msg.message_id) || null;
+
+  if (isEditedUpdate && incomingTgMsgId) {
+    try {
+      await db
+        .prepare('UPDATE messages SET text = ?, is_edited = 1 WHERE chat_id = ? AND account_id = ? AND telegram_message_id = ?')
+        .run(textContent, tgChatId, 'acc_telegram_bot', incomingTgMsgId);
+    } catch {}
+    pushPendingLocalUpdate({
+      id: `bot_edit_${tgChatId}_${incomingTgMsgId}_${updateId}`,
+      type: 'edit',
+      telegramMessageId: incomingTgMsgId,
+      chatId: tgChatId,
+      accountId: 'acc_telegram_bot',
+      sender: 'peer',
+      senderName,
+      text: textContent,
+      timestamp: incomingMsgTimestamp,
+      createdAt: now,
+      isEdited: true,
+    });
+    return {
+      ok: true,
+      update_id: updateId,
+      chat_id: tgChatId,
+      message_id: msg.message_id,
+      queued: false,
+    };
+  }
+
+  await db.prepare(`
+    INSERT OR REPLACE INTO messages (
+      id, chat_id, account_id, sender, sender_name, text, translated_text,
+      is_audio, audio_duration, audio_url, stt_text, voice_tone,
+      is_image, image_url, image_caption,
+      is_video, video_url, video_duration,
+      timestamp, created_at, telegram_message_id
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    internalMsgId,
+    tgChatId,
+    'acc_telegram_bot',
+    'peer',
+    senderName,
+    textContent,
+    '',
+    isAudio ? 1 : 0,
+    audioDuration,
+    '',
+    '',
+    '',
+    isImage ? 1 : 0,
+    '',
+    isImage ? (msg.caption || '') : '',
+    isVideo ? 1 : 0,
+    '',
+    videoDuration,
+    incomingMsgTimestamp,
+    now,
+    incomingTgMsgId
+  );
+
+  pushPendingLocalUpdate({
+    id: internalMsgId,
+    telegramMessageId: incomingTgMsgId ?? undefined,
+    chatId: tgChatId,
+    accountId: 'acc_telegram_bot',
+    sender: 'peer',
+    senderName,
+    text: textContent,
+    timestamp: incomingMsgTimestamp,
+    createdAt: now,
+    isAudio,
+    audioDuration,
+    isImage,
+    imageCaption: isImage ? (msg.caption || '') : undefined,
+    isVideo,
+    videoDuration,
+  });
+
+  await db.prepare(`
+    INSERT INTO customer_profiles (
+      chat_id, account_id, client_name, relationship_stage, total_messages_count, updated_at
+    ) VALUES (?, ?, ?, '初次结识', 1, ?)
+    ON CONFLICT(chat_id) DO UPDATE SET
+      total_messages_count = total_messages_count + 1,
+      updated_at = excluded.updated_at
+  `).run(tgChatId, 'acc_telegram_bot', senderName, now);
+
+  setImmediate(() => {
+    chatQueueManager
+      .enqueue(tgChatId, async () => {
+        await processTelegramMessageAsync(tgChatId, textContent, senderName, voiceFileId, internalMsgId);
+      })
+      .catch((err) => {
+        console.error(`[Telegram Bot Queue] Background dispatch failed for chat ${tgChatId}:`, err);
+      });
+  });
+
+  return {
+    ok: true,
+    update_id: updateId,
+    chat_id: tgChatId,
+    message_id: msg.message_id,
+    queued: true,
+  };
+}
+
+let isBotPollingStarted = false;
+async function startTelegramBotLongPolling() {
+  const botToken = process.env.TELEGRAM_BOT_TOKEN;
+  if (!botToken || isBotPollingStarted) return;
+  if (process.env.TELEGRAM_AUTO_REGISTER_WEBHOOK === 'true' || process.env.AUTO_REGISTER_WEBHOOK === 'true') {
+    return;
+  }
+  isBotPollingStarted = true;
+  try {
+    const infoRes = await fetch(`https://api.telegram.org/bot${botToken}/getWebhookInfo`);
+    const infoJson: any = await infoRes.json().catch(() => null);
+    if (infoJson?.ok && infoJson?.result?.url) {
+      console.log(`[Telegram Bot Polling] Skipped because active webhook is set: ${infoJson.result.url}`);
+      return;
+    }
+  } catch {
+    // Proceed to poll only if no webhook configured
+  }
+
+  console.log('[Telegram Bot Polling] Started desktop getUpdates long-polling loop.');
+  let offset = 0;
+  const pollLoop = async () => {
+    while (isBotPollingStarted) {
+      try {
+        const res = await fetch(
+          `https://api.telegram.org/bot${botToken}/getUpdates?offset=${offset}&timeout=20&allowed_updates=${encodeURIComponent(JSON.stringify(['message', 'edited_message', 'channel_post']))}`
+        );
+        if (res.status === 409 || res.status === 401) {
+          console.warn(`[Telegram Bot Polling] Stopped due to Telegram API HTTP ${res.status} (webhook active or invalid token).`);
+          isBotPollingStarted = false;
+          return;
+        }
+        const data: any = await res.json().catch(() => null);
+        if (data?.ok && Array.isArray(data.result)) {
+          for (const upd of data.result) {
+            if (typeof upd.update_id === 'number' && upd.update_id >= offset) {
+              offset = upd.update_id + 1;
+            }
+            await processIncomingBotUpdate(upd);
+          }
+        }
+      } catch (err: any) {
+        console.warn('[Telegram Bot Polling Warning]:', err?.message || err);
+        await new Promise((r) => setTimeout(r, 4000));
+      }
+    }
+  };
+  void pollLoop();
+}
+
 // 12. Telegram Webhook Endpoint
 app.post('/api/telegram/webhook', async (req: Request, res: Response) => {
   try {
@@ -10164,132 +10454,12 @@ app.post('/api/telegram/webhook', async (req: Request, res: Response) => {
     if (!update || typeof update !== 'object') {
       return res.status(400).json({ error: 'Invalid update payload' });
     }
-
-    const updateId = Number(update.update_id);
-    if (!updateId) {
+    if (!Number(update.update_id)) {
       return res.status(400).json({ error: 'Missing update_id' });
     }
 
-    // 2. Update ID Deduplication Check
-    if (isDuplicateUpdate(updateId)) {
-      console.log(`[Telegram Webhook] Ignored duplicate update_id: ${updateId}`);
-      // Return 200 OK immediately so Telegram stops retrying duplicate updates
-      return res.status(200).json({ ok: true, duplicate: true, update_id: updateId });
-    }
-
-    // 3. Extract Message or Edited Message
-    const msg = update.message || update.edited_message || update.channel_post;
-    if (!msg) {
-      // Non-message update (e.g. callback_query, inline_query, my_chat_member)
-      return res.status(200).json({ ok: true, ignored: true, reason: 'No message in update' });
-    }
-
-    const tgChatId = `tg_${msg.chat?.id}`;
-    const senderName = [msg.from?.first_name, msg.from?.last_name].filter(Boolean).join(' ') || msg.from?.username || `TG用户_${msg.chat?.id}`;
-    const isAudio = Boolean(msg.voice || msg.audio);
-    const voiceFileId = msg.voice?.file_id || msg.audio?.file_id || '';
-    const audioDuration = msg.voice?.duration || msg.audio?.duration || 0;
-    const isVideo = Boolean(msg.video || msg.video_note);
-    const videoDuration = msg.video?.duration || msg.video_note?.duration || 0;
-    const isImage = Boolean(msg.photo && msg.photo.length > 0);
-    const now = Date.now();
-    const internalMsgId = `tg_${msg.message_id}_${updateId}`;
-
-    let textContent = msg.text || msg.caption;
-    if (!textContent) {
-      if (isAudio) {
-        textContent = '[语音消息]';
-      } else if (isVideo) {
-        textContent = '[视频消息]';
-      } else if (isImage) {
-        textContent = '[图片消息]';
-      } else {
-        textContent = '[多媒体消息]';
-      }
-    }
-
-    // 4. Save incoming message into unified database & local poll buffer
-    const incomingMsgTimestamp = new Date(msg.date ? msg.date * 1000 : now).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false });
-    const incomingTgMsgId = Number(msg.message_id) || null;
-    await db.prepare(`
-      INSERT OR REPLACE INTO messages (
-        id, chat_id, account_id, sender, sender_name, text, translated_text,
-        is_audio, audio_duration, audio_url, stt_text, voice_tone,
-        is_image, image_url, image_caption,
-        is_video, video_url, video_duration,
-        timestamp, created_at, telegram_message_id
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(
-      internalMsgId,
-      tgChatId,
-      'acc_telegram_bot',
-      'peer',
-      senderName,
-      textContent,
-      '',
-      isAudio ? 1 : 0,
-      audioDuration,
-      '',
-      '',
-      '',
-      isImage ? 1 : 0,
-      '',
-      isImage ? (msg.caption || '') : '',
-      isVideo ? 1 : 0,
-      '',
-      videoDuration,
-      incomingMsgTimestamp,
-      now,
-      incomingTgMsgId
-    );
-
-    pushPendingLocalUpdate({
-      id: internalMsgId,
-      telegramMessageId: incomingTgMsgId ?? undefined,
-      chatId: tgChatId,
-      accountId: 'acc_telegram_bot',
-      sender: 'peer',
-      senderName,
-      text: textContent,
-      timestamp: incomingMsgTimestamp,
-      createdAt: now,
-      isAudio,
-      audioDuration,
-      isImage,
-      imageCaption: isImage ? (msg.caption || '') : undefined,
-      isVideo,
-      videoDuration,
-    });
-
-    // Update customer message count
-    await db.prepare(`
-      INSERT INTO customer_profiles (
-        chat_id, account_id, client_name, relationship_stage, total_messages_count, updated_at
-      ) VALUES (?, ?, ?, '初次结识', 1, ?)
-      ON CONFLICT(chat_id) DO UPDATE SET
-        total_messages_count = total_messages_count + 1,
-        updated_at = excluded.updated_at
-    `).run(tgChatId, 'acc_telegram_bot', senderName, now);
-
-    // 5. Asynchronously dispatch to per-chat FIFO serial queue (Non-blocking: reply 200 OK to Telegram within milliseconds)
-    setImmediate(() => {
-      chatQueueManager
-        .enqueue(tgChatId, async () => {
-          await processTelegramMessageAsync(tgChatId, textContent, senderName, voiceFileId, internalMsgId);
-        })
-        .catch((err) => {
-          console.error(`[Telegram Webhook Queue] Background dispatch failed for chat ${tgChatId}:`, err);
-        });
-    });
-
-    // Acknowledge Telegram webhook receipt immediately
-    res.status(200).json({
-      ok: true,
-      update_id: updateId,
-      chat_id: tgChatId,
-      message_id: msg.message_id,
-      queued: true,
-    });
+    const result = await processIncomingBotUpdate(update);
+    return res.status(200).json(result);
   } catch (error: any) {
     console.error('[Telegram Webhook Error]:', error);
     res.status(500).json({ ok: false, error: error.message });
@@ -13725,7 +13895,7 @@ app.get('/api/telegram/user/saved-messages', requireTenantAuth, async (req: Requ
 app.post('/api/telegram/user/messages/edit', requireTenantAuth, async (req: Request, res: Response) => {
   try {
     const accountId = (req.body?.accountId as string) || (req.headers['x-account-id'] as string) || '';
-    const { chatId, messageId, telegramMessageId, newText } = req.body || {};
+    const { chatId, messageId, telegramMessageId, newText, translatedText } = req.body || {};
 
     if (!chatId || !newText || !String(newText).trim()) {
       return res.status(400).json({ ok: false, error: '目标会话与修改后的消息文本不能为空' });
@@ -13738,14 +13908,27 @@ app.post('/api/telegram/user/messages/edit', requireTenantAuth, async (req: Requ
 
     if (accountId === 'acc_telegram_bot' && process.env.TELEGRAM_BOT_TOKEN) {
       const cleanChatId = String(chatId).replace(/^tg_/, '');
-      const botRes = await fetch(`https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/editMessageText`, {
+      let isMediaMsg = Boolean(req.body?.isMedia);
+      if (!isMediaMsg && messageId) {
+        try {
+          const existingRow = (await db
+            .prepare('SELECT is_image, is_video, is_file, is_audio FROM messages WHERE id = ? LIMIT 1')
+            .get(String(messageId))) as any;
+          if (existingRow && (existingRow.is_image || existingRow.is_video || existingRow.is_file || existingRow.is_audio)) {
+            isMediaMsg = true;
+          }
+        } catch {}
+      }
+      const botMethod = isMediaMsg ? 'editMessageCaption' : 'editMessageText';
+      const botPayload: Record<string, any> = {
+        chat_id: /^-?\d+$/.test(cleanChatId) ? Number(cleanChatId) : cleanChatId,
+        message_id: tgMsgId,
+        ...(isMediaMsg ? { caption: String(newText).trim() } : { text: String(newText).trim() }),
+      };
+      const botRes = await fetch(`https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/${botMethod}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          chat_id: /^-?\d+$/.test(cleanChatId) ? Number(cleanChatId) : cleanChatId,
-          message_id: tgMsgId,
-          text: String(newText).trim(),
-        }),
+        body: JSON.stringify(botPayload),
       });
       const botJson: any = await botRes.json();
       if (!botJson.ok) {
@@ -13767,16 +13950,30 @@ app.post('/api/telegram/user/messages/edit', requireTenantAuth, async (req: Requ
       const altChatId = String(chatId).startsWith('tg_') ? String(chatId).replace(/^tg_/, '') : `tg_${chatId}`;
       const scopedAcc = accountId || (req as any).auth?.effectiveAccountId || '';
       const accVariants = scopedAcc ? getScopedAccountIdVariants(scopedAcc) : [];
+      const hasTranslatedPatch = typeof translatedText === 'string';
+      const nextTransVal = hasTranslatedPatch ? translatedText : '';
       if (accVariants.length > 0) {
         const accPlaceholders = accVariants.map(() => '?').join(', ');
+        if (hasTranslatedPatch) {
+          await db
+            .prepare(
+              `UPDATE messages SET text = ?, translated_text = ?, is_edited = 1 WHERE (id = ? OR ((chat_id = ? OR chat_id = ?) AND telegram_message_id = ?)) AND account_id IN (${accPlaceholders})`
+            )
+            .run(String(newText).trim(), nextTransVal, messageId || '', String(chatId), altChatId, tgMsgId, ...accVariants);
+        } else {
+          await db
+            .prepare(
+              `UPDATE messages SET text = ?, is_edited = 1 WHERE (id = ? OR ((chat_id = ? OR chat_id = ?) AND telegram_message_id = ?)) AND account_id IN (${accPlaceholders})`
+            )
+            .run(String(newText).trim(), messageId || '', String(chatId), altChatId, tgMsgId, ...accVariants);
+        }
+      } else if (hasTranslatedPatch) {
         await db
-          .prepare(
-            `UPDATE messages SET text = ? WHERE (id = ? OR ((chat_id = ? OR chat_id = ?) AND telegram_message_id = ?)) AND account_id IN (${accPlaceholders})`
-          )
-          .run(String(newText).trim(), messageId || '', String(chatId), altChatId, tgMsgId, ...accVariants);
+          .prepare('UPDATE messages SET text = ?, translated_text = ?, is_edited = 1 WHERE id = ?')
+          .run(String(newText).trim(), nextTransVal, messageId || '');
       } else {
         await db
-          .prepare('UPDATE messages SET text = ? WHERE id = ?')
+          .prepare('UPDATE messages SET text = ?, is_edited = 1 WHERE id = ?')
           .run(String(newText).trim(), messageId || '');
       }
     } catch {}
@@ -13848,6 +14045,25 @@ app.post('/api/telegram/user/messages/pin', requireTenantAuth, async (req: Reque
         silent: false,
       })
     );
+
+    try {
+      const altChatId = String(chatId).startsWith('tg_') ? String(chatId).replace(/^tg_/, '') : `tg_${chatId}`;
+      const scopedAcc = accountId || (req as any).auth?.effectiveAccountId || '';
+      const accVariants = scopedAcc ? getScopedAccountIdVariants(scopedAcc) : [];
+      const pinnedFlag = pin ? 1 : 0;
+      if (accVariants.length > 0) {
+        const accPlaceholders = accVariants.map(() => '?').join(', ');
+        await db
+          .prepare(
+            `UPDATE messages SET is_pinned = ? WHERE (id = ? OR ((chat_id = ? OR chat_id = ?) AND telegram_message_id = ?)) AND account_id IN (${accPlaceholders})`
+          )
+          .run(pinnedFlag, messageId || '', String(chatId), altChatId, tgMsgId, ...accVariants);
+      } else {
+        await db
+          .prepare('UPDATE messages SET is_pinned = ? WHERE id = ?')
+          .run(pinnedFlag, messageId || '');
+      }
+    } catch {}
 
     return res.json({ ok: true, cloudSynced: true, pinned: Boolean(pin), telegramMessageId: tgMsgId });
   } catch (err: any) {
@@ -14070,6 +14286,230 @@ app.post('/api/telegram/user/dialogs/delete', requireTenantAuth, async (req: Req
     } catch {}
 
     return res.json({ ok: true, cloudSynced: true });
+  } catch (err: any) {
+    return await handleMtprotoRouteError(res, err, {
+      accountId: (req.body?.accountId as string) || (req.headers['x-account-id'] as string) || '',
+    }, 400);
+  }
+});
+
+// 20.3.1s2 Mark Dialog Read in Telegram Cloud (markAsRead + clear unread badge)
+app.post('/api/telegram/user/dialogs/read', requireTenantAuth, async (req: Request, res: Response) => {
+  try {
+    const accountId = (req.body?.accountId as string) || (req.headers['x-account-id'] as string) || '';
+    const { chatId, maxId } = req.body || {};
+    if (!chatId) {
+      return res.status(400).json({ ok: false, error: 'chatId 不能为空' });
+    }
+
+    const connected = resolveConnectedTelegramUser(accountId);
+    if (!connected || !connected.client) {
+      return res.json({ ok: false, cloudSynced: false, error: '当前账号未在线连接 Telegram MTProto' });
+    }
+
+    const { inputPeer } = await resolveTelegramInputPeer(connected.client, chatId, connected.userId);
+    const numericMaxId = Number(maxId);
+    await connected.client.markAsRead(
+      inputPeer,
+      undefined,
+      Number.isInteger(numericMaxId) && numericMaxId > 0 ? { maxId: numericMaxId, clearMentions: true } : { clearMentions: true }
+    );
+    try {
+      await connected.client.invoke(
+        new Api.messages.MarkDialogUnread({
+          peer: new Api.InputDialogPeer({ peer: inputPeer }),
+          unread: false,
+        })
+      );
+    } catch {}
+
+    return res.json({ ok: true, cloudSynced: true });
+  } catch (err: any) {
+    return await handleMtprotoRouteError(res, err, {
+      accountId: (req.body?.accountId as string) || (req.headers['x-account-id'] as string) || '',
+    }, 400);
+  }
+});
+
+// 20.3.1s3 Batch Delete Messages in Telegram Cloud & DB (supports revoke: boolean + local failed items)
+app.post('/api/telegram/user/messages/batch-delete', requireTenantAuth, async (req: Request, res: Response) => {
+  try {
+    const authContext = (req as any).auth;
+    const accountId =
+      (req.body?.accountId as string) ||
+      (req.headers['x-account-id'] as string) ||
+      authContext?.effectiveAccountId ||
+      '';
+    const isMaster = Boolean(authContext?.session?.isMaster);
+    const { chatId, items, revoke = true } = req.body || {};
+
+    if (!chatId || !Array.isArray(items) || items.length === 0) {
+      return res.status(400).json({ ok: false, error: '目标会话与待删除消息列表不能为空' });
+    }
+
+    const normalizedItems = items
+      .filter((item: any) => item && item.id)
+      .map((item: any) => {
+        const id = String(item.id);
+        const tgId = resolveTelegramMessageNumericId(id, item.telegramMessageId);
+        return {
+          id,
+          tgId,
+          isLocalOnly: Boolean(item.localOnly) || !tgId,
+        };
+      });
+
+    const tgIds = Array.from(
+      new Set(normalizedItems.filter((i) => !i.isLocalOnly && i.tgId).map((i) => Number(i.tgId)))
+    );
+    const isTelegramChat = Boolean(
+      String(chatId).startsWith('tg_') || accountId.startsWith('acc_tg_') || accountId === 'acc_telegram_bot'
+    );
+    let cloudSynced = false;
+
+    if (isTelegramChat && tgIds.length > 0) {
+      if (accountId === 'acc_telegram_bot' && process.env.TELEGRAM_BOT_TOKEN) {
+        const cleanChatId = String(chatId).replace(/^tg_/, '');
+        const numericChatId = /^-?\d+$/.test(cleanChatId) ? Number(cleanChatId) : cleanChatId;
+        for (const tgMsgId of tgIds) {
+          const botRes = await fetch(`https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/deleteMessage`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ chat_id: numericChatId, message_id: tgMsgId }),
+          });
+          const botJson: any = await botRes.json();
+          if (!botJson.ok) {
+            return res.status(400).json({
+              ok: false,
+              error: botJson.description || 'Telegram Bot 批量删除失败',
+            });
+          }
+        }
+        cloudSynced = true;
+      } else {
+        const connected = resolveConnectedTelegramUser(accountId);
+        if (!connected || !connected.client) {
+          return res.status(400).json({ ok: false, error: '当前账号未在线连接 Telegram MTProto，无法批量删除云端消息' });
+        }
+        const { inputPeer } = await resolveTelegramInputPeer(connected.client, chatId, connected.userId);
+        for (let i = 0; i < tgIds.length; i += 100) {
+          const chunk = tgIds.slice(i, i + 100);
+          await connected.client.deleteMessages(inputPeer, chunk, { revoke: Boolean(revoke) });
+        }
+        cloudSynced = true;
+      }
+    }
+
+    try {
+      const altChatId = String(chatId).startsWith('tg_') ? String(chatId).replace(/^tg_/, '') : `tg_${chatId}`;
+      const accVariants = accountId ? getScopedAccountIdVariants(accountId) : [];
+      for (const item of normalizedItems) {
+        if (isMaster || accVariants.length === 0) {
+          await db.prepare('DELETE FROM messages WHERE id = ?').run(item.id);
+          if (item.tgId) {
+            await db.prepare('DELETE FROM messages WHERE (chat_id = ? OR chat_id = ?) AND telegram_message_id = ?').run(String(chatId), altChatId, item.tgId);
+          }
+        } else {
+          const accPlaceholders = accVariants.map(() => '?').join(', ');
+          await db.prepare(`DELETE FROM messages WHERE id = ? AND account_id IN (${accPlaceholders})`).run(item.id, ...accVariants);
+          if (item.tgId) {
+            await db.prepare(`DELETE FROM messages WHERE (chat_id = ? OR chat_id = ?) AND telegram_message_id = ? AND account_id IN (${accPlaceholders})`).run(String(chatId), altChatId, item.tgId, ...accVariants);
+          }
+        }
+      }
+    } catch {}
+
+    return res.json({
+      ok: true,
+      cloudSynced,
+      deletedCount: normalizedItems.length,
+      deletedIds: normalizedItems.map((i) => i.id),
+      revoke: Boolean(revoke),
+    });
+  } catch (err: any) {
+    return await handleMtprotoRouteError(res, err, {
+      accountId: (req.body?.accountId as string) || (req.headers['x-account-id'] as string) || '',
+    }, 400);
+  }
+});
+
+// 20.3.1s4 Forward Messages in Telegram Cloud (client.forwardMessages)
+app.post('/api/telegram/user/messages/forward', requireTenantAuth, async (req: Request, res: Response) => {
+  try {
+    const accountId = (req.body?.accountId as string) || (req.headers['x-account-id'] as string) || '';
+    const { fromChatId, toChatId, messageIds, telegramMessageIds, dropAuthor = false } = req.body || {};
+
+    if (!fromChatId || !toChatId) {
+      return res.status(400).json({ ok: false, error: '来源会话与目标会话不能为空' });
+    }
+
+    const tgIdsSet = new Set<number>();
+    if (Array.isArray(telegramMessageIds)) {
+      for (const raw of telegramMessageIds) {
+        const n = Number(raw);
+        if (Number.isInteger(n) && n > 0) tgIdsSet.add(n);
+      }
+    }
+    if (Array.isArray(messageIds)) {
+      for (const id of messageIds) {
+        const n = resolveTelegramMessageNumericId(String(id));
+        if (n) tgIdsSet.add(n);
+      }
+    }
+
+    const tgIds = Array.from(tgIdsSet);
+    if (tgIds.length === 0) {
+      return res.status(400).json({ ok: false, error: '所选消息缺少有效的 Telegram 云端消息 ID，无法转发' });
+    }
+
+    if (accountId === 'acc_telegram_bot' && process.env.TELEGRAM_BOT_TOKEN) {
+      const cleanFrom = String(fromChatId).replace(/^tg_/, '');
+      const cleanTo = String(toChatId).replace(/^tg_/, '');
+      const fromPeerBot = /^-?\d+$/.test(cleanFrom) ? Number(cleanFrom) : cleanFrom;
+      const toPeerBot = /^-?\d+$/.test(cleanTo) ? Number(cleanTo) : cleanTo;
+      const botMethod = dropAuthor ? 'copyMessage' : 'forwardMessage';
+      let forwardedCount = 0;
+      for (const tgMsgId of tgIds) {
+        const botRes = await fetch(`https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/${botMethod}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            chat_id: toPeerBot,
+            from_chat_id: fromPeerBot,
+            message_id: tgMsgId,
+          }),
+        });
+        const botJson: any = await botRes.json();
+        if (!botJson.ok) {
+          return res.status(400).json({
+            ok: false,
+            error: botJson.description || 'Telegram Bot 转发消息失败',
+          });
+        }
+        forwardedCount++;
+      }
+      return res.json({ ok: true, cloudSynced: true, forwardedCount });
+    }
+
+    const connected = resolveConnectedTelegramUser(accountId);
+    if (!connected || !connected.client) {
+      return res.status(400).json({ ok: false, error: '当前账号未在线连接 Telegram MTProto，无法转发消息' });
+    }
+
+    const { inputPeer: fromPeer } = await resolveTelegramInputPeer(connected.client, fromChatId, connected.userId);
+    const { inputPeer: toPeer } = await resolveTelegramInputPeer(connected.client, toChatId, connected.userId);
+
+    const forwarded = await connected.client.forwardMessages(toPeer, {
+      messages: tgIds,
+      fromPeer,
+      dropAuthor: Boolean(dropAuthor),
+    });
+
+    return res.json({
+      ok: true,
+      cloudSynced: true,
+      forwardedCount: Array.isArray(forwarded) ? forwarded.length : tgIds.length,
+    });
   } catch (err: any) {
     return await handleMtprotoRouteError(res, err, {
       accountId: (req.body?.accountId as string) || (req.headers['x-account-id'] as string) || '',
@@ -14335,12 +14775,15 @@ app.get('/api/telegram/user/chat-info/:chatId', requireTenantAuth, async (req: R
     const fullName =
       [targetUser.firstName, targetUser.lastName].filter(Boolean).join(' ').trim() ||
       (targetUser.username ? `@${targetUser.username}` : undefined);
+    const rawPhone = targetUser.phone ? String(targetUser.phone).trim() : '';
+    const formattedPhone = rawPhone ? (rawPhone.startsWith('+') ? rawPhone : `+${rawPhone}`) : undefined;
 
     return res.json({
       ok: true,
       chatId: canonicalId,
       title: fullName,
       username: targetUser.username ? `@${targetUser.username}` : undefined,
+      phone: formattedPhone,
       description: String(fullUserRes?.fullUser?.about || ''),
       isGroup: false,
       isChannel: false,
@@ -14348,6 +14791,8 @@ app.get('/api/telegram/user/chat-info/:chatId', requireTenantAuth, async (req: R
       isVerified: Boolean(targetUser.verified || String(targetUser.id) === '777000'),
       isOnline: uStatus.isOnline,
       statusText: uStatus.statusText,
+      isBlocked: Boolean(fullUserRes?.fullUser?.blocked),
+      isContact: Boolean(targetUser.contact),
     });
   } catch (err: any) {
     if (isTelegramSessionExpiredError(err)) {
@@ -14691,7 +15136,8 @@ async function resolveTelegramInputUser(client: TelegramClient, peerRef: string)
   if (!clean) return null;
   const candidates: any[] = [];
   const stripped = clean.replace(/^tg_/, '').replace(/^chat_contact_/, '');
-  if (/^-?\d+$/.test(stripped)) {
+  const isNumericId = /^-?\d+$/.test(stripped);
+  if (isNumericId) {
     candidates.push(Number(stripped));
   }
   if (clean.startsWith('@')) {
@@ -14699,19 +15145,132 @@ async function resolveTelegramInputUser(client: TelegramClient, peerRef: string)
   } else {
     candidates.push(clean);
   }
-  for (const cand of candidates) {
-    try {
-      const inputEntity = await client.getInputEntity(cand);
-      if (inputEntity instanceof Api.InputUser) return inputEntity;
-      if (inputEntity instanceof Api.InputPeerUser) {
-        return new Api.InputUser({
-          userId: inputEntity.userId,
-          accessHash: inputEntity.accessHash,
-        });
+  const cleanLower = clean.replace(/^@/, '').toLowerCase();
+
+  const matchUserFromList = (users: any[]): Api.InputUser | null => {
+    for (const u of users) {
+      if (!u || u.id === undefined) continue;
+      const uidStr = String(u.id);
+      const uname = typeof u.username === 'string' ? u.username.toLowerCase() : '';
+      if ((isNumericId && uidStr === stripped) || (cleanLower && uname && uname === cleanLower)) {
+        if (u.accessHash !== undefined && u.accessHash !== null) {
+          return new Api.InputUser({
+            userId: u.id,
+            accessHash: u.accessHash,
+          });
+        }
       }
+    }
+    return null;
+  };
+
+  const tryResolve = async (): Promise<Api.InputUser | null> => {
+    for (const cand of candidates) {
+      try {
+        const inputEntity = await client.getInputEntity(cand);
+        if (inputEntity instanceof Api.InputUser) return inputEntity;
+        if (inputEntity instanceof Api.InputPeerUser) {
+          return new Api.InputUser({
+            userId: inputEntity.userId,
+            accessHash: inputEntity.accessHash,
+          });
+        }
+      } catch {}
+    }
+    return null;
+  };
+
+  const direct = await tryResolve();
+  if (direct) return direct;
+
+  // Fallback 1: refresh contacts entity cache and scan returned users directly
+  try {
+    const contactsRes: any = await client.invoke(new Api.contacts.GetContacts({ hash: BigInt(0) as any }));
+    const matched = matchUserFromList(Array.isArray(contactsRes?.users) ? contactsRes.users : []);
+    if (matched) return matched;
+  } catch {}
+  const afterContacts = await tryResolve();
+  if (afterContacts) return afterContacts;
+
+  // Fallback 2: scan Telegram cloud blacklist so deleted-chat strangers can still be unblocked after restart
+  try {
+    let offset = 0;
+    const pageLimit = 100;
+    for (let page = 0; page < 10; page++) {
+      const blockedRes: any = await client.invoke(
+        new Api.contacts.GetBlocked({ offset, limit: pageLimit })
+      );
+      const users: any[] = Array.isArray(blockedRes?.users) ? blockedRes.users : [];
+      const matched = matchUserFromList(users);
+      if (matched) return matched;
+      if (users.length < pageLimit) break;
+      offset += pageLimit;
+    }
+  } catch {}
+  const afterBlocked = await tryResolve();
+  if (afterBlocked) return afterBlocked;
+
+  // Fallback 3: resolve public @username via contacts.ResolveUsername
+  if (!isNumericId && cleanLower) {
+    try {
+      const resolved: any = await client.invoke(
+        new Api.contacts.ResolveUsername({ username: cleanLower })
+      );
+      const matched = matchUserFromList(Array.isArray(resolved?.users) ? resolved.users : []);
+      if (matched) return matched;
     } catch {}
   }
-  return null;
+
+  // Fallback 4: refresh recent dialogs entity cache
+  try {
+    await client.getDialogs({ limit: 80 });
+  } catch {}
+  return await tryResolve();
+}
+
+async function fetchAllBlockedUsers(client: TelegramClient): Promise<{
+  users: any[];
+  blockedIdSet: Set<string>;
+}> {
+  const userMap = new Map<string, any>();
+  const blockedIdSet = new Set<string>();
+  const pageLimit = 100;
+  let offset = 0;
+
+  for (let page = 0; page < 10; page++) {
+    const blockedRes: any = await client.invoke(
+      new Api.contacts.GetBlocked({
+        offset,
+        limit: pageLimit,
+      })
+    );
+    const users: any[] = Array.isArray(blockedRes?.users) ? blockedRes.users : [];
+    const peers: any[] = Array.isArray(blockedRes?.blocked) ? blockedRes.blocked : [];
+    for (const bp of peers) {
+      if (bp?.peerId?.userId !== undefined) {
+        blockedIdSet.add(String(bp.peerId.userId));
+      }
+    }
+    for (const u of users) {
+      if (u && u.id !== undefined) {
+        const uid = String(u.id);
+        userMap.set(uid, u);
+        if (peers.length === 0) {
+          blockedIdSet.add(uid);
+        }
+      }
+    }
+    const totalCount = typeof blockedRes?.count === 'number' ? blockedRes.count : undefined;
+    offset += peers.length > 0 ? peers.length : users.length;
+    if (users.length === 0 && peers.length === 0) break;
+    if (totalCount !== undefined && offset >= totalCount) break;
+    if (peers.length < pageLimit && users.length < pageLimit) break;
+  }
+
+  return {
+    users: Array.from(userMap.values()),
+    blockedIdSet,
+  };
 }
 
 function pickAvatarBg(idStr: string): string {
@@ -14721,10 +15280,15 @@ function pickAvatarBg(idStr: string): string {
   return palette[sum % palette.length];
 }
 
-function mapTelegramUserToContact(u: any, ownerUserId?: string) {
+function mapTelegramUserToContact(
+  u: any,
+  ownerUserId?: string,
+  options?: { isBlocked?: boolean; isContact?: boolean }
+) {
   const uid = String(u.id);
   const fullName = `${u.firstName || ''} ${u.lastName || ''}`.trim() || (u.username ? `@${u.username}` : `TG_${uid}`);
-  const isOnline = u.status?.className === 'UserStatusOnline';
+  const uStatus = formatTelegramUserStatus(u);
+
   return {
     id: `tg_${uid}`,
     name: fullName,
@@ -14736,11 +15300,14 @@ function mapTelegramUserToContact(u: any, ownerUserId?: string) {
     ),
     avatarBg: pickAvatarBg(uid),
     avatarInitial: (fullName.slice(0, 2) || 'TG').toUpperCase(),
-    status: isOnline ? ('online' as const) : ('offline' as const),
+    status: uStatus.isOnline ? ('online' as const) : ('offline' as const),
+    statusText: uStatus.statusText,
+    ...(typeof options?.isBlocked === 'boolean' ? { isBlocked: options.isBlocked } : {}),
+    ...(typeof options?.isContact === 'boolean' ? { isContact: options.isContact } : { isContact: Boolean(u.contact) }),
   };
 }
 
-// 20.3.2 Sync real contacts from Telegram Cloud MTProto (contacts.GetContacts)
+// 20.3.2 Sync real contacts from Telegram Cloud MTProto (contacts.GetContacts + contacts.GetBlocked)
 app.get('/api/telegram/user/contacts', requireTenantAuth, async (req: Request, res: Response) => {
   try {
     const accountId = (req.query.accountId as string) || (req.headers['x-account-id'] as string) || '';
@@ -14754,15 +15321,133 @@ app.get('/api/telegram/user/contacts', requireTenantAuth, async (req: Request, r
       });
     }
 
-    const result: any = await connected.client.invoke(
-      new Api.contacts.GetContacts({ hash: BigInt(0) as any })
-    );
+    const [contactsSettled, blockedSettled] = await Promise.allSettled([
+      connected.client.invoke(new Api.contacts.GetContacts({ hash: BigInt(0) as any })),
+      fetchAllBlockedUsers(connected.client),
+    ]);
+
+    if (contactsSettled.status === 'rejected') {
+      throw contactsSettled.reason;
+    }
+
+    const result: any = contactsSettled.value;
+    const blockedIdSet =
+      blockedSettled.status === 'fulfilled' ? blockedSettled.value.blockedIdSet : new Set<string>();
+
     const users: any[] = Array.isArray(result?.users) ? result.users : [];
     const contacts = users
       .filter((u) => u && !u.deleted && !u.self && String(u.id) !== connected.userId)
-      .map((u) => mapTelegramUserToContact(u, connected.userId));
+      .map((u) =>
+        mapTelegramUserToContact(u, connected.userId, {
+          isBlocked: blockedIdSet.has(String(u.id)),
+          isContact: true,
+        })
+      );
 
     return res.json({ ok: true, cloudSynced: true, contacts });
+  } catch (err: any) {
+    return await handleMtprotoRouteError(res, err, {
+      accountId: (req.query.accountId as string) || (req.headers['x-account-id'] as string) || '',
+    }, 500);
+  }
+});
+
+// 20.3.2.1 Search global Telegram users & contacts via MTProto (contacts.Search + contacts.ResolvePhone)
+app.get('/api/telegram/user/contacts/search', requireTenantAuth, async (req: Request, res: Response) => {
+  try {
+    const accountId = (req.query.accountId as string) || (req.headers['x-account-id'] as string) || '';
+    const q = typeof req.query.q === 'string' ? req.query.q.trim() : '';
+    if (!q) {
+      return res.json({ ok: true, contacts: [] });
+    }
+    const connected = resolveConnectedTelegramUser(accountId);
+    if (!connected || !connected.client) {
+      return res.status(400).json({
+        ok: false,
+        contacts: [],
+        error: '当前账号未在线连接 Telegram MTProto，无法执行云端用户搜索',
+      });
+    }
+
+    const compactPhone = q.replace(/[\s\-\(\)\.]/g, '');
+    const isInternationalPhoneQuery = /^(\+|00)\d{6,15}$/.test(compactPhone);
+
+    const [searchSettled, phoneSettled, blockedSettled] = await Promise.allSettled([
+      connected.client.invoke(
+        new Api.contacts.Search({
+          q: q.replace(/^@/, ''),
+          limit: 20,
+        })
+      ),
+      isInternationalPhoneQuery
+        ? connected.client.invoke(
+            new Api.contacts.ResolvePhone({
+              phone: normalizePhoneNumber(compactPhone),
+            })
+          )
+        : Promise.resolve(null),
+      fetchAllBlockedUsers(connected.client),
+    ]);
+
+    if (searchSettled.status === 'rejected' && (!isInternationalPhoneQuery || phoneSettled.status === 'rejected')) {
+      throw searchSettled.reason;
+    }
+
+    const searchUsers: any[] =
+      searchSettled.status === 'fulfilled' && Array.isArray((searchSettled.value as any)?.users)
+        ? (searchSettled.value as any).users
+        : [];
+    const phoneUsers: any[] =
+      phoneSettled.status === 'fulfilled' && Array.isArray((phoneSettled.value as any)?.users)
+        ? (phoneSettled.value as any).users
+        : [];
+    const blockedIdSet =
+      blockedSettled.status === 'fulfilled' ? blockedSettled.value.blockedIdSet : new Set<string>();
+
+    const seen = new Set<string>();
+    const combinedUsers = [...phoneUsers, ...searchUsers];
+    const contacts = combinedUsers
+      .filter((u) => {
+        if (!u || u.deleted || u.self || String(u.id) === connected.userId) return false;
+        const uid = String(u.id);
+        if (seen.has(uid)) return false;
+        seen.add(uid);
+        return true;
+      })
+      .map((u) =>
+        mapTelegramUserToContact(u, connected.userId, {
+          isContact: Boolean(u.contact),
+          isBlocked: blockedIdSet.has(String(u.id)),
+        })
+      );
+
+    return res.json({ ok: true, cloudSynced: true, contacts });
+  } catch (err: any) {
+    return await handleMtprotoRouteError(res, err, {
+      accountId: (req.query.accountId as string) || (req.headers['x-account-id'] as string) || '',
+    }, 500);
+  }
+});
+
+// 20.3.2.2 Fetch real Telegram Blacklist / Blocked Users via MTProto (contacts.GetBlocked paginated)
+app.get('/api/telegram/user/contacts/blocked', requireTenantAuth, async (req: Request, res: Response) => {
+  try {
+    const accountId = (req.query.accountId as string) || (req.headers['x-account-id'] as string) || '';
+    const connected = resolveConnectedTelegramUser(accountId);
+    if (!connected || !connected.client) {
+      return res.status(400).json({
+        ok: false,
+        blocked: [],
+        error: '当前账号未在线连接 Telegram MTProto，无法拉取黑名单列表',
+      });
+    }
+
+    const { users, blockedIdSet } = await fetchAllBlockedUsers(connected.client);
+    const blocked = users
+      .filter((u) => u && !u.deleted && (blockedIdSet.size === 0 || blockedIdSet.has(String(u.id))))
+      .map((u) => mapTelegramUserToContact(u, connected.userId, { isBlocked: true }));
+
+    return res.json({ ok: true, cloudSynced: true, blocked });
   } catch (err: any) {
     return await handleMtprotoRouteError(res, err, {
       accountId: (req.query.accountId as string) || (req.headers['x-account-id'] as string) || '',
@@ -14797,6 +15482,17 @@ app.post('/api/telegram/user/contacts/add', requireTenantAuth, async (req: Reque
         cloudSynced: false,
         error: '同步至 Telegram 云端通讯录需要填写对方的手机号或 @用户名',
       });
+    }
+
+    if (cleanPhone) {
+      const compactPhone = cleanPhone.replace(/[\s\-\(\)\.]/g, '');
+      if (!/^(\+|00)\d{6,15}$/.test(compactPhone)) {
+        return res.status(400).json({
+          ok: false,
+          cloudSynced: false,
+          error: '手机号必须包含国际区号（例如 +8613800000000）',
+        });
+      }
     }
 
     let resolvedUser: any = null;
@@ -14856,8 +15552,95 @@ app.post('/api/telegram/user/contacts/add', requireTenantAuth, async (req: Reque
       });
     }
 
-    const contact = mapTelegramUserToContact(resolvedUser, connected.userId);
+    const contact = mapTelegramUserToContact(resolvedUser, connected.userId, { isContact: true });
     return res.json({ ok: true, cloudSynced: true, contact });
+  } catch (err: any) {
+    return await handleMtprotoRouteError(res, err, {
+      accountId: (req.body?.accountId as string) || (req.headers['x-account-id'] as string) || '',
+    }, 500);
+  }
+});
+
+// 20.3.3.1 Delete contact from Telegram Cloud MTProto (contacts.DeleteContacts)
+app.post('/api/telegram/user/contacts/delete', requireTenantAuth, async (req: Request, res: Response) => {
+  try {
+    const accountId = (req.body?.accountId as string) || (req.headers['x-account-id'] as string) || '';
+    const chatId = req.body?.chatId;
+    if (!chatId) {
+      return res.status(400).json({ ok: false, error: '联系人 ID 为必填项' });
+    }
+    const connected = resolveConnectedTelegramUser(accountId);
+    if (!connected || !connected.client) {
+      return res.status(400).json({ ok: false, error: '当前账号未在线连接 Telegram MTProto' });
+    }
+    const inputUser = await resolveTelegramInputUser(connected.client, String(chatId));
+    if (!inputUser) {
+      return res.status(400).json({ ok: false, error: '未能解析该联系人的 Telegram 输入用户对象' });
+    }
+    await connected.client.invoke(
+      new Api.contacts.DeleteContacts({
+        id: [inputUser],
+      })
+    );
+    return res.json({ ok: true, cloudSynced: true });
+  } catch (err: any) {
+    return await handleMtprotoRouteError(res, err, {
+      accountId: (req.body?.accountId as string) || (req.headers['x-account-id'] as string) || '',
+    }, 500);
+  }
+});
+
+// 20.3.3.2 Block contact in Telegram Cloud MTProto (contacts.Block)
+app.post('/api/telegram/user/contacts/block', requireTenantAuth, async (req: Request, res: Response) => {
+  try {
+    const accountId = (req.body?.accountId as string) || (req.headers['x-account-id'] as string) || '';
+    const chatId = req.body?.chatId;
+    if (!chatId) {
+      return res.status(400).json({ ok: false, error: '联系人 ID 为必填项' });
+    }
+    const connected = resolveConnectedTelegramUser(accountId);
+    if (!connected || !connected.client) {
+      return res.status(400).json({ ok: false, error: '当前账号未在线连接 Telegram MTProto' });
+    }
+    const inputUser = await resolveTelegramInputUser(connected.client, String(chatId));
+    if (!inputUser) {
+      return res.status(400).json({ ok: false, error: '未能解析该联系人的 Telegram 输入用户对象' });
+    }
+    await connected.client.invoke(
+      new Api.contacts.Block({
+        id: inputUser,
+      })
+    );
+    return res.json({ ok: true, cloudSynced: true });
+  } catch (err: any) {
+    return await handleMtprotoRouteError(res, err, {
+      accountId: (req.body?.accountId as string) || (req.headers['x-account-id'] as string) || '',
+    }, 500);
+  }
+});
+
+// 20.3.3.3 Unblock contact in Telegram Cloud MTProto (contacts.Unblock)
+app.post('/api/telegram/user/contacts/unblock', requireTenantAuth, async (req: Request, res: Response) => {
+  try {
+    const accountId = (req.body?.accountId as string) || (req.headers['x-account-id'] as string) || '';
+    const chatId = req.body?.chatId;
+    if (!chatId) {
+      return res.status(400).json({ ok: false, error: '联系人 ID 为必填项' });
+    }
+    const connected = resolveConnectedTelegramUser(accountId);
+    if (!connected || !connected.client) {
+      return res.status(400).json({ ok: false, error: '当前账号未在线连接 Telegram MTProto' });
+    }
+    const inputUser = await resolveTelegramInputUser(connected.client, String(chatId));
+    if (!inputUser) {
+      return res.status(400).json({ ok: false, error: '未能解析该联系人的 Telegram 输入用户对象' });
+    }
+    await connected.client.invoke(
+      new Api.contacts.Unblock({
+        id: inputUser,
+      })
+    );
+    return res.json({ ok: true, cloudSynced: true });
   } catch (err: any) {
     return await handleMtprotoRouteError(res, err, {
       accountId: (req.body?.accountId as string) || (req.headers['x-account-id'] as string) || '',
@@ -15374,12 +16157,13 @@ function extractTelegramMediaFields(m: any, canonicalId: string, accountId: stri
   };
 }
 
-// Sync real historical chat messages from Telegram Cloud MTProto
+// Sync real historical chat messages from Telegram Cloud MTProto (supports offsetId pagination & cloud search)
 export async function syncTelegramUserChatMessages(
   client: TelegramClient,
   rawChatId: string,
   limit = 40,
-  explicitUserId?: string
+  explicitUserId?: string,
+  options?: { offsetId?: number; search?: string }
 ) {
   try {
     const rawId = rawChatId.startsWith('tg_') ? rawChatId.replace('tg_', '') : rawChatId;
@@ -15392,8 +16176,15 @@ export async function syncTelegramUserChatMessages(
       }
     }
 
-    const messages = await client.getMessages(peerTarget, { limit });
-    if (!messages || messages.length === 0) return [];
+    const iterParams: any = { limit };
+    if (options?.offsetId && Number.isInteger(options.offsetId) && options.offsetId > 0) {
+      iterParams.offsetId = options.offsetId;
+    }
+    if (options?.search && options.search.trim()) {
+      iterParams.search = options.search.trim();
+    }
+
+    const messages = await client.getMessages(peerTarget, iterParams);
 
     const canonicalId =
       rawId === 'me' && explicitUserId
@@ -15403,13 +16194,35 @@ export async function syncTelegramUserChatMessages(
           : `tg_${rawChatId}`;
     const accountId = `acc_tg_${explicitUserId || (client as any)._selfId || 'user'}`;
 
+    const allFetched: any[] = Array.isArray(messages) ? [...messages] : [];
+
+    // On initial sync (not pagination/search), also include up to 5 latest pinned messages so older pinned banners appear
+    if (!options?.offsetId && !options?.search) {
+      try {
+        const pinnedMsgs = await client.getMessages(peerTarget, {
+          limit: 5,
+          filter: new Api.InputMessagesFilterPinned(),
+        });
+        if (Array.isArray(pinnedMsgs)) {
+          const existingIds = new Set(allFetched.map((m) => Number(m?.id)).filter(Boolean));
+          for (const pm of pinnedMsgs) {
+            if (pm && pm.id && !existingIds.has(Number(pm.id))) {
+              allFetched.push(pm);
+            }
+          }
+        }
+      } catch {}
+    }
+
+    if (allFetched.length === 0) return [];
+
     const msgById = new Map<number, any>();
     const missingReplyIds = new Set<number>();
-    for (const m of messages) {
+    for (const m of allFetched) {
       if (!m || !m.id) continue;
       msgById.set(Number(m.id), m);
     }
-    for (const m of messages) {
+    for (const m of allFetched) {
       const replyId = Number((m as any)?.replyTo?.replyToMsgId || 0);
       if (replyId > 0 && !msgById.has(replyId)) {
         missingReplyIds.add(replyId);
@@ -15427,7 +16240,7 @@ export async function syncTelegramUserChatMessages(
     }
 
     const synced: any[] = [];
-    for (const m of messages) {
+    for (const m of allFetched) {
       if (!m) continue;
       const mediaParsed = extractTelegramMediaFields(m, canonicalId, accountId);
       if (!mediaParsed.text && !m.media) continue;
@@ -15438,7 +16251,7 @@ export async function syncTelegramUserChatMessages(
       const internalId = `tg_cloud_${m.id}_${createdAt}_${accountId}`;
       const senderName = getTelegramMessageSenderName(m, isOut);
 
-      let replyTo: { id: string; senderName?: string; text: string } | undefined = undefined;
+      let replyTo: { id: string; telegramMessageId?: number; senderName?: string; text: string } | undefined = undefined;
       const replyToId = Number((m as any).replyTo?.replyToMsgId || 0);
       if (replyToId > 0) {
         const targetReply = msgById.get(replyToId);
@@ -15451,6 +16264,7 @@ export async function syncTelegramUserChatMessages(
           id: targetReply
             ? `tg_cloud_${targetReply.id}_${(targetReply.date || 0) * 1000}_${accountId}`
             : `msg_tg_${explicitUserId || (client as any)._selfId || 'user'}_${replyToId}`,
+          telegramMessageId: replyToId,
           senderName: replySenderName,
           text: replySummary,
         };
@@ -15498,9 +16312,11 @@ export async function syncTelegramUserChatMessages(
       });
     }
 
-    // Save to unified database cache for consistent queries across customer profile, evolution & transcripts
-    for (const msg of synced) {
-      await upsertSyncedMessageToDb(msg, canonicalId, accountId);
+    // Save to unified database cache (skip when searching subset only)
+    if (!options?.search) {
+      for (const msg of synced) {
+        await upsertSyncedMessageToDb(msg, canonicalId, accountId);
+      }
     }
 
     return synced.sort((a, b) => a.createdAt - b.createdAt);
@@ -15513,13 +16329,15 @@ export async function syncTelegramUserChatMessages(
   }
 }
 
-// 20.4 Fetch real cloud messages from Telegram for a specific conversation
+// 20.4 Fetch real cloud messages from Telegram for a specific conversation (supports offsetId pagination, search & readOutboxMaxId)
 app.get('/api/telegram/user/messages/:chatId', requireTenantAuth, async (req: Request, res: Response) => {
   const { chatId } = req.params;
   const accountId = (req.query.accountId as string) || (req.headers['x-account-id'] as string);
   let connected: ConnectedTelegramUser | undefined;
   try {
-    const limit = Number(req.query.limit) || 30;
+    const limit = Math.min(Math.max(Number(req.query.limit) || 30, 1), 100);
+    const offsetId = req.query.offsetId ? Number(req.query.offsetId) : undefined;
+    const search = typeof req.query.search === 'string' ? req.query.search.trim() : undefined;
 
     connected = accountId
       ? connectedUserClients.get(accountId) ||
@@ -15529,11 +16347,34 @@ app.get('/api/telegram/user/messages/:chatId', requireTenantAuth, async (req: Re
       : undefined;
 
     if (!connected || !connected.client) {
-      return res.json({ ok: false, messages: [], message: '未找到在线的 Telegram 客户端会话' });
+      return res.json({ ok: false, messages: [], hasMore: false, message: '未找到在线的 Telegram 客户端会话' });
     }
 
-    const messages = await syncTelegramUserChatMessages(connected.client, chatId, limit, connected.userId);
-    res.json({ ok: true, messages });
+    const messages = await syncTelegramUserChatMessages(connected.client, chatId, limit, connected.userId, {
+      offsetId: offsetId && Number.isInteger(offsetId) && offsetId > 0 ? offsetId : undefined,
+      search,
+    });
+
+    let readOutboxMaxId: number | undefined;
+    if (!offsetId && !search) {
+      try {
+        const { inputPeer } = await resolveTelegramInputPeer(connected.client, chatId, connected.userId);
+        const peerDialogs: any = await connected.client.invoke(
+          new Api.messages.GetPeerDialogs({ peers: [new Api.InputDialogPeer({ peer: inputPeer })] })
+        );
+        const d = peerDialogs?.dialogs?.[0];
+        if (d && typeof d.readOutboxMaxId === 'number') {
+          readOutboxMaxId = d.readOutboxMaxId;
+        }
+      } catch {}
+    }
+
+    res.json({
+      ok: true,
+      messages,
+      hasMore: messages.length >= limit,
+      ...(typeof readOutboxMaxId === 'number' ? { readOutboxMaxId } : {}),
+    });
   } catch (err: any) {
     if (isTelegramSessionExpiredError(err)) {
       await markTelegramSessionExpired({
@@ -15591,7 +16432,15 @@ app.post('/api/telegram/autopilot/toggle', requireTenantAuth, (req: Request, res
 // Real-time MTProto NewMessage event listener for personal Telegram account
 export interface LocalIncomingUpdate {
   id: string;
+  type?: 'message' | 'edit' | 'delete' | 'read_outbox' | 'pin' | 'user_status' | 'peer_blocked';
   telegramMessageId?: number;
+  deletedMessageIds?: number[];
+  readOutboxMaxId?: number;
+  pinnedMessageIds?: number[];
+  pinned?: boolean;
+  isOnline?: boolean;
+  statusText?: string;
+  isBlocked?: boolean;
   chatId: string;
   rawChatId?: string;
   accountId: string;
@@ -15617,7 +16466,7 @@ export interface LocalIncomingUpdate {
   fileName?: string;
   fileSize?: string;
   fileUrl?: string;
-  replyTo?: { id: string; senderName?: string; text: string };
+  replyTo?: { id: string; telegramMessageId?: number; senderName?: string; text: string };
   isEdited?: boolean;
   isPinned?: boolean;
 }
@@ -15681,17 +16530,19 @@ app.post('/api/telegram/user/ack-updates', (req: Request, res: Response) => {
 });
 
 // In-memory cache of recently sent outbound messages and processed MTProto message IDs to prevent echo duplicates
-const recentlySentOutboundCache = new Map<string, number>();
+const recentlySentOutboundCache = new Map<string, { count: number; expiresAt: number }>();
 const processedMtprotoMsgIds = new Map<string, number>();
 
 export function markOutboundMessageSent(chatId: string, text: string) {
   if (!text) return;
   const key = `${chatId.replace(/^tg_/, '')}:${text.trim()}`;
-  recentlySentOutboundCache.set(key, Date.now());
+  const now = Date.now();
+  const prev = recentlySentOutboundCache.get(key);
+  const nextCount = prev && now < prev.expiresAt ? prev.count + 1 : 1;
+  recentlySentOutboundCache.set(key, { count: nextCount, expiresAt: now + 25000 });
   if (recentlySentOutboundCache.size > 300) {
-    const now = Date.now();
-    for (const [k, ts] of recentlySentOutboundCache.entries()) {
-      if (now - ts > 30000) recentlySentOutboundCache.delete(k);
+    for (const [k, item] of recentlySentOutboundCache.entries()) {
+      if (now >= item.expiresAt) recentlySentOutboundCache.delete(k);
     }
   }
 }
@@ -15699,9 +16550,14 @@ export function markOutboundMessageSent(chatId: string, text: string) {
 export function isRecentOutboundEcho(chatId: string, text: string): boolean {
   if (!text) return false;
   const key = `${chatId.replace(/^tg_/, '')}:${text.trim()}`;
-  const sentTime = recentlySentOutboundCache.get(key);
-  if (!sentTime) return false;
-  if (Date.now() - sentTime < 25000) {
+  const entry = recentlySentOutboundCache.get(key);
+  if (!entry) return false;
+  if (Date.now() < entry.expiresAt && entry.count > 0) {
+    if (entry.count <= 1) {
+      recentlySentOutboundCache.delete(key);
+    } else {
+      recentlySentOutboundCache.set(key, { count: entry.count - 1, expiresAt: entry.expiresAt });
+    }
     return true;
   }
   recentlySentOutboundCache.delete(key);
@@ -15721,8 +16577,11 @@ export function attachTelegramClientMessageListener(client: TelegramClient, phon
         const message = event.message;
         if (!message) return;
 
-        // Deduplicate MTProto events by message id to prevent double triggers
-        const mtprotoMsgKey = `${userId}_${message.id}`;
+        const senderId = message.senderId ? String(message.senderId) : null;
+        const rawChatId = String(message.chatId || senderId || 'unknown');
+
+        // Deduplicate MTProto events per chat+message ID (channel/supergroup IDs are only unique per chat)
+        const mtprotoMsgKey = `${userId}_${rawChatId}_${message.id}`;
         if (processedMtprotoMsgIds.has(mtprotoMsgKey)) {
           return;
         }
@@ -15733,9 +16592,6 @@ export function attachTelegramClientMessageListener(client: TelegramClient, phon
             if (now - ts > 60000) processedMtprotoMsgIds.delete(k);
           }
         }
-
-        const senderId = message.senderId ? String(message.senderId) : null;
-        const rawChatId = String(message.chatId || senderId || 'unknown');
         // Always enforce canonical tg_ prefix matching the desktop dialog list
         const canonicalChatId = rawChatId.startsWith('tg_') ? rawChatId : `tg_${rawChatId}`;
         const isOut = Boolean(message.out);
@@ -16030,6 +16886,209 @@ ${kbContext}${langConstraint}
         console.warn('[MTProto Message Listener Event Error]:', e.message);
       }
     }, new NewMessage({}));
+
+    // Real-time MTProto Raw updates for Message Edits, Deletions, Outbox Read Receipts & Pinned Changes
+    const resolveRawPeerChatId = (peer: any): string => {
+      if (!peer) return '';
+      if (peer.userId !== undefined) return `tg_${String(peer.userId)}`;
+      if (peer.chatId !== undefined) return `tg_-${String(peer.chatId)}`;
+      if (peer.channelId !== undefined) return `tg_-100${String(peer.channelId)}`;
+      return '';
+    };
+
+    client.addEventHandler(async (update: any) => {
+      try {
+        const accountId = `acc_tg_${userId}`;
+        if (update instanceof Api.UpdateEditMessage || update instanceof Api.UpdateEditChannelMessage) {
+          const msgObj: any = update.message;
+          if (!msgObj || !msgObj.id) return;
+          const peerChatId = resolveRawPeerChatId(msgObj.peerId);
+          if (!peerChatId) return;
+          const tgMsgId = Number(msgObj.id);
+          const editedText = typeof msgObj.message === 'string' ? msgObj.message : '';
+          pushPendingLocalUpdate({
+            id: `edit_${userId}_${tgMsgId}_${Date.now()}`,
+            type: 'edit',
+            telegramMessageId: tgMsgId,
+            chatId: peerChatId,
+            accountId,
+            sender: msgObj.out ? 'me' : 'peer',
+            senderName: msgObj.out ? '我方' : '对方',
+            text: editedText,
+            timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false }),
+            createdAt: Date.now(),
+            isEdited: true,
+          });
+          try {
+            const altChatId = peerChatId.replace(/^tg_/, '');
+            await db
+              .prepare(`UPDATE messages SET text = CASE WHEN ? != '' THEN ? ELSE text END, is_edited = 1 WHERE (chat_id = ? OR chat_id = ?) AND telegram_message_id = ? AND account_id = ?`)
+              .run(editedText, editedText, peerChatId, altChatId, tgMsgId, accountId);
+          } catch {}
+          return;
+        }
+
+        if (update instanceof Api.UpdateDeleteMessages) {
+          const delIds = (update.messages || []).map((n: any) => Number(n)).filter((n: number) => Number.isInteger(n) && n > 0);
+          if (delIds.length === 0) return;
+          pushPendingLocalUpdate({
+            id: `del_${userId}_${Date.now()}_${Math.random().toString(36).slice(2, 5)}`,
+            type: 'delete',
+            deletedMessageIds: delIds,
+            chatId: '',
+            accountId,
+            sender: 'peer',
+            senderName: '',
+            text: '',
+            timestamp: '',
+            createdAt: Date.now(),
+          });
+          try {
+            const placeholders = delIds.map(() => '?').join(', ');
+            await db
+              .prepare(
+                `DELETE FROM messages WHERE account_id = ? AND chat_id NOT LIKE 'tg_-100%' AND chat_id NOT LIKE '-100%' AND telegram_message_id IN (${placeholders})`
+              )
+              .run(accountId, ...delIds);
+          } catch {}
+          return;
+        }
+
+        if (update instanceof Api.UpdateDeleteChannelMessages) {
+          const delIds = (update.messages || []).map((n: any) => Number(n)).filter((n: number) => Number.isInteger(n) && n > 0);
+          const channelChatId = update.channelId ? `tg_-100${String(update.channelId)}` : '';
+          if (delIds.length === 0) return;
+          pushPendingLocalUpdate({
+            id: `delch_${userId}_${Date.now()}_${Math.random().toString(36).slice(2, 5)}`,
+            type: 'delete',
+            deletedMessageIds: delIds,
+            chatId: channelChatId,
+            accountId,
+            sender: 'peer',
+            senderName: '',
+            text: '',
+            timestamp: '',
+            createdAt: Date.now(),
+          });
+          try {
+            const placeholders = delIds.map(() => '?').join(', ');
+            if (channelChatId) {
+              const alt = channelChatId.replace(/^tg_/, '');
+              await db
+                .prepare(`DELETE FROM messages WHERE account_id = ? AND (chat_id = ? OR chat_id = ?) AND telegram_message_id IN (${placeholders})`)
+                .run(accountId, channelChatId, alt, ...delIds);
+            }
+          } catch {}
+          return;
+        }
+
+        if (update instanceof Api.UpdateReadHistoryOutbox) {
+          const peerChatId = resolveRawPeerChatId(update.peer);
+          const maxId = Number(update.maxId || 0);
+          if (!peerChatId || !maxId) return;
+          pushPendingLocalUpdate({
+            id: `readout_${userId}_${peerChatId}_${maxId}`,
+            type: 'read_outbox',
+            chatId: peerChatId,
+            readOutboxMaxId: maxId,
+            accountId,
+            sender: 'peer',
+            senderName: '',
+            text: '',
+            timestamp: '',
+            createdAt: Date.now(),
+          });
+          return;
+        }
+
+        if (update instanceof Api.UpdateReadChannelOutbox) {
+          const channelChatId = update.channelId ? `tg_-100${String(update.channelId)}` : '';
+          const maxId = Number(update.maxId || 0);
+          if (!channelChatId || !maxId) return;
+          pushPendingLocalUpdate({
+            id: `readchout_${userId}_${channelChatId}_${maxId}`,
+            type: 'read_outbox',
+            chatId: channelChatId,
+            readOutboxMaxId: maxId,
+            accountId,
+            sender: 'peer',
+            senderName: '',
+            text: '',
+            timestamp: '',
+            createdAt: Date.now(),
+          });
+          return;
+        }
+
+        if (update instanceof Api.UpdatePinnedMessages || update instanceof Api.UpdatePinnedChannelMessages) {
+          const pinIds = (update.messages || []).map((n: any) => Number(n)).filter((n: number) => Number.isInteger(n) && n > 0);
+          const peerChatId =
+            update instanceof Api.UpdatePinnedChannelMessages
+              ? (update.channelId ? `tg_-100${String(update.channelId)}` : '')
+              : resolveRawPeerChatId((update as Api.UpdatePinnedMessages).peer);
+          if (!peerChatId || pinIds.length === 0) return;
+          const pinnedVal = Boolean(update.pinned);
+          pushPendingLocalUpdate({
+            id: `pin_${userId}_${peerChatId}_${Date.now()}`,
+            type: 'pin',
+            chatId: peerChatId,
+            pinnedMessageIds: pinIds,
+            pinned: pinnedVal,
+            accountId,
+            sender: 'peer',
+            senderName: '',
+            text: '',
+            timestamp: '',
+            createdAt: Date.now(),
+          });
+          try {
+            const alt = peerChatId.replace(/^tg_/, '');
+            const placeholders = pinIds.map(() => '?').join(', ');
+            await db
+              .prepare(`UPDATE messages SET is_pinned = ? WHERE account_id = ? AND (chat_id = ? OR chat_id = ?) AND telegram_message_id IN (${placeholders})`)
+              .run(pinnedVal ? 1 : 0, accountId, peerChatId, alt, ...pinIds);
+          } catch {}
+          return;
+        }
+
+        if (update instanceof Api.UpdateUserStatus) {
+          const targetUid = update.userId !== undefined ? String(update.userId) : '';
+          if (!targetUid) return;
+          const uStatus = formatTelegramUserStatus({ id: targetUid, status: update.status });
+          pushPendingLocalUpdate({
+            id: `status_${userId}_${targetUid}_${Date.now()}`,
+            type: 'user_status',
+            chatId: `tg_${targetUid}`,
+            accountId,
+            isOnline: uStatus.isOnline,
+            statusText: uStatus.statusText,
+            sender: 'peer',
+            senderName: '',
+            text: '',
+            timestamp: '',
+            createdAt: Date.now(),
+          });
+          return;
+        }
+
+        if (update instanceof Api.UpdatePeerBlocked) {
+          const peerChatId = resolveRawPeerChatId(update.peerId);
+          if (!peerChatId) return;
+          pushPendingLocalUpdate({
+            id: `blk_${userId}_${peerChatId}_${Date.now()}`,
+            type: 'peer_blocked',
+            chatId: peerChatId,
+            accountId,
+            isBlocked: Boolean(update.blocked),
+            sender: 'peer',
+            senderName: '',
+            text: '',
+            timestamp: '',
+            createdAt: Date.now(),
+          });
+        }
+      } catch {}
+    }, new Raw({}));
   } catch (err: any) {
     console.warn('[Attach Telegram Listener Error]:', err.message);
   }
@@ -16194,6 +17253,8 @@ async function startServer() {
     } catch (autoErr: any) {
       console.warn('[Telegram Auto-Register Warning]:', autoErr.message);
     }
+  } else if (autoBotToken) {
+    void startTelegramBotLongPolling();
   }
 
   const httpServer = http.createServer(app);

@@ -47,7 +47,7 @@ import {
   setActiveApiAccount,
   fetchTelegramUserDialogsDetailedApi,
   fetchTelegramChatFullInfoApi,
-  syncTelegramCloudMessages,
+  fetchTelegramCloudMessagesApi,
   fetchTelegramActiveAccounts,
   fetchTelegramUserStatusApi,
   pollIncomingTelegramUpdates,
@@ -62,6 +62,9 @@ import {
   recordDeletedMessageId,
   isMessageDeleted,
   deleteMessageFromDb,
+  batchDeleteTelegramMessagesApi,
+  forwardTelegramMessagesApi,
+  markTelegramDialogReadApi,
   getLocalCustomerProfile,
   saveLocalCustomerProfile,
   translateText,
@@ -83,6 +86,11 @@ import {
   clearTelegramDialogHistoryApi,
   deleteTelegramDialogApi,
   renameTelegramContactApi,
+  normalizeStalePendingMessages,
+  resolveClientTelegramMessageId,
+  fetchTelegramUserContactsApi,
+  getScopedContacts,
+  saveScopedContacts,
 } from './services/apiService';
 
 
@@ -153,12 +161,18 @@ function mapCloudDialogToChat(d: any, accountId: string, existing?: Chat): Chat 
     lastMessage: d.lastMessage || existing?.lastMessage || '暂无消息',
     lastTime: d.lastTime || existing?.lastTime || '刚刚',
     unreadCount: typeof d.unreadCount === 'number' ? d.unreadCount : (existing?.unreadCount || 0),
+    readOutboxMaxId: typeof d.readOutboxMaxId === 'number' ? d.readOutboxMaxId : existing?.readOutboxMaxId,
+    readInboxMaxId: typeof d.readInboxMaxId === 'number' ? d.readInboxMaxId : existing?.readInboxMaxId,
     sourceLang: existing?.sourceLang || 'Auto',
     targetLang: existing?.targetLang || 'Chinese',
   };
 }
 
-function mergeCloudMessagesWithLocal(localMsgs: Message[], cloudMsgs: Message[]): Message[] {
+function mergeCloudMessagesWithLocal(
+  localMsgs: Message[],
+  cloudMsgs: Message[],
+  options?: { preserveAllLocal?: boolean }
+): Message[] {
   const visibleLocal = (Array.isArray(localMsgs) ? localMsgs : []).filter((m) => !isMessageDeleted(m.id));
   const visibleCloud = (Array.isArray(cloudMsgs) ? cloudMsgs : []).filter((m) => !isMessageDeleted(m.id));
   if (visibleCloud.length === 0) return visibleLocal;
@@ -218,6 +232,7 @@ function mergeCloudMessagesWithLocal(localMsgs: Message[], cloudMsgs: Message[])
 
   const retainedLocal = visibleLocal.filter((lm) => {
     if (matchedLocalIds.has(lm.id)) return false;
+    if (options?.preserveAllLocal) return true;
     if (lm.deliveryStatus === 'pending' || lm.deliveryStatus === 'retrying' || lm.deliveryStatus === 'failed') {
       return true;
     }
@@ -228,15 +243,20 @@ function mergeCloudMessagesWithLocal(localMsgs: Message[], cloudMsgs: Message[])
     return false;
   });
 
-  return [...retainedLocal, ...mergedCloud];
-}
+  const combined = options?.preserveAllLocal
+    ? [...mergedCloud, ...retainedLocal]
+    : [...retainedLocal, ...mergedCloud];
 
-const DEFAULT_CONTACTS: TelegramContact[] = [
-  { id: 'contact_alex', name: 'Alex Cooper', phone: '+1 202 555 0148', username: '@alex_cooper_trade', avatarBg: '#65aadd', avatarInitial: 'AC', status: 'online', bio: 'Senior Import & Logistics Partner' },
-  { id: 'contact_elena', name: 'Elena Rostova', phone: '+7 916 555 3421', username: '@elena_rostova', avatarBg: '#e17076', avatarInitial: 'ER', status: 'online', bio: 'Moscow Regional Supply Chain' },
-  { id: 'contact_david', name: 'David Harrison', phone: '+44 7911 123456', username: '@david_harrison_vip', avatarBg: '#7bc862', avatarInitial: 'DH', status: 'offline', bio: 'Global Business Development Lead' },
-  { id: 'contact_katarina', name: 'Katarina Volkova', phone: '+90 532 555 7890', username: '@katarina_v', avatarBg: '#a695e7', avatarInitial: 'KV', status: 'online', bio: 'Istanbul Luxury Goods Specialist' },
-];
+  return combined.sort((a, b) => {
+    if (typeof a.telegramMessageId === 'number' && typeof b.telegramMessageId === 'number') {
+      return a.telegramMessageId - b.telegramMessageId;
+    }
+    if (typeof a.createdAt === 'number' && typeof b.createdAt === 'number') {
+      return a.createdAt - b.createdAt;
+    }
+    return 0;
+  });
+}
 
 const DEFAULT_CALL_RECORDS: TelegramCallRecord[] = [
   { id: 'call_rec_1', contactName: 'Elena Rostova', avatarBg: '#e17076', avatarInitial: 'ER', type: 'incoming', duration: '03:42', timestamp: '今天 10:24' },
@@ -315,6 +335,7 @@ export default function App() {
   const [searchQuery, setSearchQuery] = useState('');
   const [activeRightPanel, setActiveRightPanel] = useState<RightPanelTab | null>(null);
   const [isChatInfoOpen, setIsChatInfoOpen] = useState(false);
+  const [chatHasMoreMap, setChatHasMoreMap] = useState<Record<string, boolean>>({});
 
   const openRightPanel = (tab: RightPanelTab) => {
     setIsChatInfoOpen(false);
@@ -364,14 +385,9 @@ export default function App() {
   const [isVoiceCallOpen, setIsVoiceCallOpen] = useState(false);
   const [voiceCallTargetName, setVoiceCallTargetName] = useState<string>('');
 
-  // Telegram contacts and call history state
+  // Telegram contacts (strictly scoped by account & AES-encrypted, zero mock defaults) and call history state
   const [contacts, setContacts] = useState<TelegramContact[]>(() => {
-    try {
-      const saved = localStorage.getItem('tg_pro_contacts');
-      return saved ? JSON.parse(saved) : DEFAULT_CONTACTS;
-    } catch {
-      return DEFAULT_CONTACTS;
-    }
+    return getScopedContacts(accounts[0]?.id || '');
   });
 
   const [callRecords, setCallRecords] = useState<TelegramCallRecord[]>(() => {
@@ -382,12 +398,6 @@ export default function App() {
       return DEFAULT_CALL_RECORDS;
     }
   });
-
-  useEffect(() => {
-    try {
-      localStorage.setItem('tg_pro_contacts', JSON.stringify(contacts));
-    } catch {}
-  }, [contacts]);
 
   useEffect(() => {
     try {
@@ -482,8 +492,16 @@ export default function App() {
       }
 
       if (savedMsgs && Object.keys(savedMsgs).length > 0) {
+        const normalizedSavedMsgs: Record<string, Message[]> = {};
+        for (const [bucketKey, list] of Object.entries(savedMsgs)) {
+          if (Array.isArray(list)) {
+            normalizedSavedMsgs[bucketKey] = normalizeStalePendingMessages(
+              list.filter((m) => !isMessageDeleted(m.id))
+            );
+          }
+        }
         if (isRestore) {
-          const mergedMsgs: Record<string, Message[]> = { ...savedMsgs };
+          const mergedMsgs: Record<string, Message[]> = { ...normalizedSavedMsgs };
           const curChatId = activeChatIdRef.current;
           const curAccId = resolvedActiveAccId || activeAccountIdRef.current;
           if (curChatId) {
@@ -494,7 +512,7 @@ export default function App() {
           }
           setMessagesMap(mergedMsgs);
         } else {
-          setMessagesMap(savedMsgs);
+          setMessagesMap(normalizedSavedMsgs);
         }
       } else if (isRestore) {
         const reconstructed: Record<string, Message[]> = {};
@@ -510,8 +528,10 @@ export default function App() {
             }
           }
           if (Array.isArray(msgs) && msgs.length > 0) {
-            reconstructed[msgBucketKey(acc, c.id)] = msgs.filter(
-              (m) => !isMessageDeleted(m.id) && (!acc || !m.accountId || m.accountId === acc)
+            reconstructed[msgBucketKey(acc, c.id)] = normalizeStalePendingMessages(
+              msgs.filter(
+                (m) => !isMessageDeleted(m.id) && (!acc || !m.accountId || m.accountId === acc)
+              )
             );
           }
         }
@@ -543,10 +563,7 @@ export default function App() {
       }
 
       if (isRestore) {
-        try {
-          const savedContacts = localStorage.getItem('tg_pro_contacts');
-          if (savedContacts) setContacts(JSON.parse(savedContacts));
-        } catch {}
+        setContacts(getScopedContacts(resolvedActiveAccId || activeAccountIdRef.current));
         try {
           const savedCalls = localStorage.getItem('tg_pro_call_records');
           if (savedCalls) setCallRecords(JSON.parse(savedCalls));
@@ -798,6 +815,14 @@ export default function App() {
     setActiveApiAccount(activeAccountId);
 
     let isMounted = true;
+    setContacts(getScopedContacts(activeAccountId));
+    if (activeAccountId.startsWith('acc_tg_')) {
+      fetchTelegramUserContactsApi(activeAccountId).then((res) => {
+        if (isMounted && res.ok && Array.isArray(res.contacts)) {
+          handleSyncContacts(res.contacts, activeAccountId);
+        }
+      }).catch(() => {});
+    }
 
     // Load dialogs/chats for this account
     const syncChats = () => {
@@ -868,6 +893,40 @@ export default function App() {
             });
             return [...nextAccountChats, ...otherChats];
           });
+          if (realDialogs.length > 0 && activeAccountIdRef.current === activeAccountId) {
+            const dialogById = new Map<string, any>();
+            realDialogs.forEach((d: any) => {
+              if (d && d.id && !d.isGroup && !d.isChannel) {
+                dialogById.set(d.id, d);
+              }
+            });
+            if (dialogById.size > 0) {
+              setContacts((prev) => {
+                let changed = false;
+                const next = prev.map((ct) => {
+                  const d = dialogById.get(ct.id);
+                  if (!d) return ct;
+                  const nextStatus = d.isOnline ? ('online' as const) : ('offline' as const);
+                  const nextStatusText = typeof d.statusText === 'string' ? d.statusText : ct.statusText;
+                  const nextName = typeof d.title === 'string' && d.title.trim() ? d.title.trim() : ct.name;
+                  if (ct.status !== nextStatus || ct.statusText !== nextStatusText || ct.name !== nextName) {
+                    changed = true;
+                    return {
+                      ...ct,
+                      name: nextName,
+                      status: nextStatus,
+                      ...(nextStatusText ? { statusText: nextStatusText } : {}),
+                    };
+                  }
+                  return ct;
+                });
+                if (changed) {
+                  saveScopedContacts(next, activeAccountId);
+                }
+                return changed ? next : prev;
+              });
+            }
+          }
         }).catch(() => {});
       }
     };
@@ -908,8 +967,20 @@ export default function App() {
       }
 
       if (activeChatId.startsWith('tg_') && activeAccountId !== 'acc_telegram_bot') {
-        syncTelegramCloudMessages(activeChatId, activeAccountId).then((cloudMsgs) => {
-          if (!isMounted || !cloudMsgs || cloudMsgs.length === 0) return;
+        fetchTelegramCloudMessagesApi(activeChatId, activeAccountId, { limit: 40 }).then((cloudRes) => {
+          if (!isMounted || !cloudRes.ok) return;
+          setChatHasMoreMap((prev) => ({ ...prev, [bucketKey]: cloudRes.hasMore }));
+          if (typeof cloudRes.readOutboxMaxId === 'number') {
+            setChats((prev) =>
+              prev.map((c) =>
+                c.id === activeChatId && (!activeAccountId || c.accountId === activeAccountId)
+                  ? { ...c, readOutboxMaxId: Math.max(c.readOutboxMaxId || 0, cloudRes.readOutboxMaxId || 0) }
+                  : c
+              )
+            );
+          }
+          const cloudMsgs = cloudRes.messages;
+          if (!cloudMsgs || cloudMsgs.length === 0) return;
           setMessagesMap((prev) => {
             const base = getBucketMessages(prev, activeAccountId, activeChatId);
             const merged = mergeCloudMessagesWithLocal(
@@ -1041,6 +1112,169 @@ export default function App() {
 
             const isOfficialNotice = isOfficial || targetChatId === 'tg_777000' || targetChatId === 'tg_42777';
             const officialTitle = 'Telegram 官方服务通知';
+            const updType = upd.type || 'message';
+
+            if (updType === 'edit') {
+              const targetBucketKey = msgBucketKey(targetAccountId, targetChatId);
+              const editedTgId = typeof upd.telegramMessageId === 'number' ? upd.telegramMessageId : undefined;
+              const newText = String(upd.text || '');
+              setMessagesMap((prev) => {
+                const list = getBucketMessages(prev, targetAccountId, targetChatId);
+                if (list.length === 0) return prev;
+                let changed = false;
+                const updated = list.map((m) => {
+                  if (
+                    (editedTgId !== undefined && m.telegramMessageId === editedTgId) ||
+                    (upd.messageId && m.id === upd.messageId)
+                  ) {
+                    changed = true;
+                    return { ...m, text: newText, isEdited: true };
+                  }
+                  return m;
+                });
+                if (!changed) return prev;
+                setLocalMessages(targetChatId, updated, targetAccountId);
+                return { ...prev, [targetBucketKey]: updated };
+              });
+              return;
+            }
+
+            if (updType === 'delete') {
+              const deletedTgIds = new Set<number>(
+                Array.isArray(upd.deletedMessageIds)
+                  ? upd.deletedMessageIds.map((x: any) => Number(x)).filter((n: number) => Number.isInteger(n) && n > 0)
+                  : []
+              );
+              if (deletedTgIds.size === 0) return;
+              setMessagesMap((prev) => {
+                const next = { ...prev };
+                let anyChanged = false;
+                const candidateKeys = rawChatId
+                  ? [msgBucketKey(targetAccountId, targetChatId)]
+                  : Object.keys(prev).filter((k) => {
+                      const matchesAcc = k.startsWith(`${targetAccountId}::`) || k === targetChatId;
+                      if (!matchesAcc) return false;
+                      const chatPart = k.includes('::') ? k.split('::').slice(1).join('::') : k;
+                      // UpdateDeleteMessages only applies to private/basic-group dialogs, never tg_-100* supergroups/channels
+                      return !chatPart.startsWith('tg_-100') && !chatPart.startsWith('-100');
+                    });
+                for (const key of candidateKeys) {
+                  const list = prev[key];
+                  if (!Array.isArray(list) || list.length === 0) continue;
+                  const removed = list.filter(
+                    (m) => typeof m.telegramMessageId === 'number' && deletedTgIds.has(m.telegramMessageId)
+                  );
+                  if (removed.length === 0) continue;
+                  anyChanged = true;
+                  removed.forEach((m) => recordDeletedMessageId(m.id));
+                  const remaining = list.filter(
+                    (m) => !(typeof m.telegramMessageId === 'number' && deletedTgIds.has(m.telegramMessageId))
+                  );
+                  const chatKey = key.includes('::') ? key.split('::').slice(1).join('::') : key;
+                  setLocalMessages(chatKey, remaining, targetAccountId);
+                  next[key] = remaining;
+                }
+                return anyChanged ? next : prev;
+              });
+              return;
+            }
+
+            if (updType === 'read_outbox') {
+              const maxId = Number(upd.readOutboxMaxId);
+              if (!Number.isInteger(maxId) || maxId <= 0) return;
+              setChats((prev) =>
+                prev.map((c) =>
+                  c.id === targetChatId && c.accountId === targetAccountId
+                    ? { ...c, readOutboxMaxId: Math.max(c.readOutboxMaxId || 0, maxId) }
+                    : c
+                )
+              );
+              return;
+            }
+
+            if (updType === 'pin') {
+              const pinnedTgIds = new Set<number>(
+                Array.isArray(upd.pinnedMessageIds)
+                  ? upd.pinnedMessageIds.map((x: any) => Number(x)).filter((n: number) => Number.isInteger(n) && n > 0)
+                  : []
+              );
+              if (pinnedTgIds.size === 0) return;
+              const targetBucketKey = msgBucketKey(targetAccountId, targetChatId);
+              const nextPinned = Boolean(upd.pinned);
+              setMessagesMap((prev) => {
+                const list = getBucketMessages(prev, targetAccountId, targetChatId);
+                if (list.length === 0) return prev;
+                let changed = false;
+                const updated = list.map((m) => {
+                  if (typeof m.telegramMessageId === 'number' && pinnedTgIds.has(m.telegramMessageId)) {
+                    changed = true;
+                    return { ...m, isPinned: nextPinned };
+                  }
+                  return m;
+                });
+                if (!changed) return prev;
+                setLocalMessages(targetChatId, updated, targetAccountId);
+                return { ...prev, [targetBucketKey]: updated };
+              });
+              return;
+            }
+
+            if (updType === 'user_status') {
+              const nextOnline = Boolean(upd.isOnline);
+              const nextStatusText = typeof upd.statusText === 'string' ? upd.statusText : undefined;
+              setChats((prev) =>
+                prev.map((c) =>
+                  c.id === targetChatId && c.accountId === targetAccountId
+                    ? { ...c, isOnline: nextOnline, ...(nextStatusText ? { statusText: nextStatusText } : {}) }
+                    : c
+                )
+              );
+              setContacts((prev) => {
+                let changed = false;
+                const next = prev.map((ct) => {
+                  if (ct.id === targetChatId) {
+                    changed = true;
+                    return {
+                      ...ct,
+                      status: nextOnline ? ('online' as const) : ('offline' as const),
+                      ...(nextStatusText ? { statusText: nextStatusText } : {}),
+                    };
+                  }
+                  return ct;
+                });
+                if (changed && targetAccountId === activeAccountIdRef.current) {
+                  saveScopedContacts(next, targetAccountId);
+                }
+                return changed ? next : prev;
+              });
+              return;
+            }
+
+            if (updType === 'peer_blocked') {
+              const nextBlocked = Boolean(upd.isBlocked);
+              setChats((prev) =>
+                prev.map((c) =>
+                  c.id === targetChatId && c.accountId === targetAccountId
+                    ? { ...c, isBlocked: nextBlocked }
+                    : c
+                )
+              );
+              setContacts((prev) => {
+                let changed = false;
+                const next = prev.map((ct) => {
+                  if (ct.id === targetChatId) {
+                    changed = true;
+                    return { ...ct, isBlocked: nextBlocked };
+                  }
+                  return ct;
+                });
+                if (changed && targetAccountId === activeAccountIdRef.current) {
+                  saveScopedContacts(next, targetAccountId);
+                }
+                return changed ? next : prev;
+              });
+              return;
+            }
 
             const incomingMsg: Message = {
               id: upd.id || `upd_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
@@ -1067,9 +1301,11 @@ export default function App() {
               fileSize: upd.fileSize,
               fileUrl: upd.fileUrl,
               replyTo: upd.replyTo,
+              forwardFrom: upd.forwardFrom,
               isPinned: Boolean(upd.isPinned),
               isEdited: Boolean(upd.isEdited),
               sttText: upd.sttText,
+              createdAt: typeof upd.createdAt === 'number' ? upd.createdAt : Date.now(),
               timestamp: upd.timestamp || new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false }),
               status: 'sent',
               deliveryStatus: 'delivered',
@@ -1077,16 +1313,26 @@ export default function App() {
 
             const targetBucketKey = msgBucketKey(targetAccountId, targetChatId);
             const existingForChat = getBucketMessages(messagesMapRef.current, targetAccountId, targetChatId);
+            const incomingTgId = resolveClientTelegramMessageId(incomingMsg);
             const matchesMessage = (m: Message) => {
               if (m.id === incomingMsg.id) return true;
+              const existingTgId = resolveClientTelegramMessageId(m);
+              if (existingTgId !== undefined && incomingTgId !== undefined) {
+                return existingTgId === incomingTgId;
+              }
+              // Only fall back to text matching when at least one side lacks a cloud telegramMessageId (e.g. optimistic outbound)
               if (
                 m.sender === incomingMsg.sender &&
                 m.text &&
                 incomingMsg.text &&
                 m.text.trim() === incomingMsg.text.trim()
               ) {
-                if (incomingMsg.sender === 'me') return true;
-                if (m.timestamp === incomingMsg.timestamp) return true;
+                const sameMinute = m.timestamp === incomingMsg.timestamp;
+                const closeInTime =
+                  typeof m.createdAt === 'number' &&
+                  typeof incomingMsg.createdAt === 'number' &&
+                  Math.abs(m.createdAt - incomingMsg.createdAt) < 120000;
+                if (sameMinute || closeInTime) return true;
               }
               return false;
             };
@@ -1098,7 +1344,7 @@ export default function App() {
                 ...messagesMapRef.current,
                 [targetBucketKey]: [...existingForChat, incomingMsg],
               };
-            } else if (incomingMsg.translatedText) {
+            } else if (incomingMsg.translatedText || incomingTgId !== undefined) {
               saveLocalMessage(targetChatId, incomingMsg, targetAccountId);
             }
 
@@ -1107,9 +1353,16 @@ export default function App() {
               const foundIdx = currentList.findIndex(matchesMessage);
 
               if (foundIdx >= 0) {
-                if (incomingMsg.translatedText && !currentList[foundIdx].translatedText) {
+                const existing = currentList[foundIdx];
+                const needsTranslation = Boolean(incomingMsg.translatedText && !existing.translatedText);
+                const needsTgId = Boolean(incomingTgId !== undefined && !existing.telegramMessageId);
+                if (needsTranslation || needsTgId) {
                   const updated = [...currentList];
-                  updated[foundIdx] = { ...updated[foundIdx], translatedText: incomingMsg.translatedText };
+                  updated[foundIdx] = {
+                    ...existing,
+                    ...(needsTranslation ? { translatedText: incomingMsg.translatedText } : {}),
+                    ...(needsTgId ? { telegramMessageId: incomingTgId } : {}),
+                  };
                   saveLocalMessage(targetChatId, updated[foundIdx], targetAccountId);
                   return {
                     ...prev,
@@ -1128,6 +1381,20 @@ export default function App() {
 
             if (isDuplicateMsg) {
               return;
+            }
+
+            if (
+              incomingMsg.sender === 'peer' &&
+              targetChatId === activeChatIdRef.current &&
+              targetAccountId === activeAccountIdRef.current &&
+              targetChatId.startsWith('tg_') &&
+              targetAccountId !== 'acc_telegram_bot'
+            ) {
+              markTelegramDialogReadApi({
+                accountId: targetAccountId,
+                chatId: targetChatId,
+                maxId: incomingMsg.telegramMessageId,
+              }).catch(() => {});
             }
 
             // Real Auto-translate inbound message if enabled (using latest settings & chat language)
@@ -1207,7 +1474,11 @@ export default function App() {
                   id: targetChatId,
                   accountId: targetAccountId,
                   title: isOfficialNotice ? officialTitle : (upd.senderName || `Telegram (${targetChatId.replace('tg_', '')})`),
-                  unreadCount: 1,
+                  unreadCount:
+                    incomingMsg.sender === 'me' ||
+                    (targetChatId === activeChatIdRef.current && targetAccountId === activeAccountIdRef.current)
+                      ? 0
+                      : 1,
                   lastMessage: summaryText,
                   lastTime: incomingMsg.timestamp,
                   avatarInitial: isOfficialNotice ? 'TG' : (upd.senderName || 'TG').slice(0, 2).toUpperCase(),
@@ -1230,7 +1501,9 @@ export default function App() {
                       unreadCount:
                         c.id === activeChatIdRef.current && c.accountId === activeAccountIdRef.current
                           ? 0
-                          : (c.unreadCount || 0) + 1,
+                          : incomingMsg.sender === 'me'
+                            ? (c.unreadCount || 0)
+                            : (c.unreadCount || 0) + 1,
                     }
                   : c
               );
@@ -1292,6 +1565,9 @@ export default function App() {
       return;
     }
     setActiveChatId(chatId);
+    const targetChatObj = chats.find(
+      (c) => c.id === chatId && (!activeAccountId || c.accountId === activeAccountId)
+    );
     setChats((prev) =>
       prev.map((c) =>
         c.id === chatId && (!activeAccountId || c.accountId === activeAccountId)
@@ -1299,6 +1575,21 @@ export default function App() {
           : c
       )
     );
+    if (chatId.startsWith('tg_') && activeAccountId !== 'acc_telegram_bot') {
+      const existingMsgs = getBucketMessages(messagesMapRef.current, activeAccountId, chatId);
+      const fallbackMsgs = existingMsgs.length > 0 ? existingMsgs : getLocalMessages(chatId, activeAccountId);
+      const tgIds = fallbackMsgs
+        .map((m) => m.telegramMessageId)
+        .filter((id): id is number => typeof id === 'number' && id > 0);
+      const maxTgId = tgIds.length > 0 ? Math.max(...tgIds) : undefined;
+      if ((targetChatObj?.unreadCount || 0) > 0 || maxTgId !== undefined) {
+        markTelegramDialogReadApi({
+          accountId: activeAccountId,
+          chatId,
+          ...(maxTgId ? { maxId: maxTgId } : {}),
+        }).catch(() => {});
+      }
+    }
   };
 
   // Handle send message (Zero-DB mandate: strictly save locally in browser storage)
@@ -1342,6 +1633,7 @@ export default function App() {
       fileSize: newMsg.fileSize,
       fileUrl: newMsg.fileUrl,
       replyTo: newMsg.replyTo,
+      createdAt: newMsg.createdAt || Date.now(),
       timestamp: newMsg.timestamp || new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false }),
       status: 'sent',
       deliveryStatus: newMsg.deliveryStatus || (isTelegramOutbound ? 'pending' : 'delivered'),
@@ -1492,6 +1784,31 @@ export default function App() {
       secureSetItemSync('tg_pro_chats', updated);
       return updated;
     });
+    let updatedExistingContact = false;
+    setContacts((prev) => {
+      let changed = false;
+      const next = prev.map((ct) => {
+        if (ct.id === chatId) {
+          changed = true;
+          updatedExistingContact = true;
+          return { ...ct, name: trimmed };
+        }
+        return ct;
+      });
+      if (changed) {
+        saveScopedContacts(next, activeAccountId);
+      }
+      return changed ? next : prev;
+    });
+    if (!updatedExistingContact && isTelegramCloudChat(chatId) && activeAccountId.startsWith('acc_tg_')) {
+      fetchTelegramUserContactsApi(activeAccountId)
+        .then((res) => {
+          if (res.ok && Array.isArray(res.contacts)) {
+            handleSyncContacts(res.contacts, activeAccountId);
+          }
+        })
+        .catch(() => {});
+    }
     return { ok: true };
   };
 
@@ -1695,21 +2012,26 @@ export default function App() {
     }
   };
 
-  // Message actions: delete, edit, reaction, pin, patch, clear (Cloud-first, block local fake mutation on failure)
-  const handleDeleteMessage = async (messageId: string): Promise<{ ok: boolean; error?: string }> => {
+  // Message actions: delete, batch delete, forward, edit, reaction, pin, patch, clear (Cloud-first, block local fake mutation on failure)
+  const handleDeleteMessage = async (
+    messageId: string,
+    options?: { revoke?: boolean }
+  ): Promise<{ ok: boolean; error?: string }> => {
     if (!activeChatId) return { ok: false, error: '未选中对话' };
     const targetChatId = activeChatId;
     const targetAccountId = activeAccountId;
     const bucketKey = msgBucketKey(targetAccountId, targetChatId);
     const targetMsg = getBucketMessages(messagesMap, targetAccountId, targetChatId).find((m) => m.id === messageId);
+    const isLocalOnly = !targetMsg?.telegramMessageId || targetMsg.deliveryStatus === 'failed' || targetMsg.deliveryStatus === 'pending';
 
     const delRes = await deleteMessageFromDb(
       messageId,
       targetAccountId,
       targetChatId,
-      targetMsg?.telegramMessageId
+      targetMsg?.telegramMessageId,
+      { revoke: options?.revoke ?? true, localOnly: isLocalOnly }
     );
-    if (isTelegramCloudChat(targetChatId) && !delRes.ok) {
+    if (isTelegramCloudChat(targetChatId) && !isLocalOnly && !delRes.ok) {
       const errMsg = delRes.error || '云端撤回删除消息失败';
       showCloudError(errMsg);
       return { ok: false, error: errMsg };
@@ -1750,9 +2072,164 @@ export default function App() {
     return { ok: true };
   };
 
+  const handleBatchDeleteMessages = async (
+    messageIds: string[],
+    options?: { revoke?: boolean }
+  ): Promise<{ ok: boolean; error?: string }> => {
+    if (!activeChatId) return { ok: false, error: '未选中对话' };
+    if (!Array.isArray(messageIds) || messageIds.length === 0) return { ok: false, error: '未选择任何消息' };
+    const targetChatId = activeChatId;
+    const targetAccountId = activeAccountId;
+    const bucketKey = msgBucketKey(targetAccountId, targetChatId);
+    const currentList = getBucketMessages(messagesMap, targetAccountId, targetChatId);
+    const idSet = new Set(messageIds);
+    const items = currentList
+      .filter((m) => idSet.has(m.id))
+      .map((m) => ({
+        id: m.id,
+        telegramMessageId: m.telegramMessageId,
+        localOnly: !m.telegramMessageId || m.deliveryStatus === 'failed' || m.deliveryStatus === 'pending',
+      }));
+
+    if (items.length === 0) return { ok: false, error: '未找到要删除的消息' };
+
+    const res = await batchDeleteTelegramMessagesApi({
+      accountId: targetAccountId,
+      chatId: targetChatId,
+      items,
+      revoke: options?.revoke ?? true,
+    });
+
+    if (!res.ok) {
+      const errMsg = res.error || '批量删除消息失败';
+      showCloudError(errMsg);
+      return { ok: false, error: errMsg };
+    }
+
+    messageIds.forEach((id) => recordDeletedMessageId(id));
+    setMessagesMap((prev) => {
+      const list = getBucketMessages(prev, targetAccountId, targetChatId);
+      const updated = list.filter((m) => !idSet.has(m.id));
+      setLocalMessages(targetChatId, updated, targetAccountId);
+
+      if (updated.length > 0) {
+        const last = updated[updated.length - 1];
+        const summary = last.isAudio ? '🎤 语音消息' : last.isImage ? '🖼️ 图片消息' : (last.text || '暂无消息');
+        setChats((chatList) =>
+          chatList.map((c) =>
+            c.id === targetChatId && (!targetAccountId || c.accountId === targetAccountId)
+              ? { ...c, lastMessage: summary, lastTime: last.timestamp || c.lastTime }
+              : c
+          )
+        );
+      } else {
+        setChats((chatList) =>
+          chatList.map((c) =>
+            c.id === targetChatId && (!targetAccountId || c.accountId === targetAccountId)
+              ? { ...c, lastMessage: '暂无消息' }
+              : c
+          )
+        );
+      }
+      return { ...prev, [bucketKey]: updated };
+    });
+
+    return { ok: true };
+  };
+
+  const handleForwardMessages = async (payload: {
+    messageIds: string[];
+    telegramMessageIds: number[];
+    toChatId: string;
+    dropAuthor?: boolean;
+  }): Promise<{ ok: boolean; error?: string }> => {
+    if (!activeChatId) return { ok: false, error: '未选中来源对话' };
+    const fromChatId = activeChatId;
+    const targetAccountId = activeAccountId;
+    if (isTelegramCloudChat(fromChatId) && isTelegramCloudChat(payload.toChatId)) {
+      const res = await forwardTelegramMessagesApi({
+        accountId: targetAccountId,
+        fromChatId,
+        toChatId: payload.toChatId,
+        messageIds: payload.messageIds,
+        telegramMessageIds: payload.telegramMessageIds,
+        dropAuthor: payload.dropAuthor,
+      });
+      if (!res.ok) {
+        const errMsg = res.error || '云端转发消息失败';
+        showCloudError(errMsg);
+        return { ok: false, error: errMsg };
+      }
+      // Refresh target chat snippet if needed
+      const srcMsgs = getBucketMessages(messagesMap, targetAccountId, fromChatId);
+      const lastForwarded = srcMsgs.filter((m) => payload.messageIds.includes(m.id)).slice(-1)[0];
+      if (lastForwarded) {
+        const summary = lastForwarded.isAudio ? '🎤 语音消息' : lastForwarded.isImage ? '🖼️ 图片消息' : (lastForwarded.text || '转发消息');
+        setChats((prev) =>
+          prev.map((c) =>
+            c.id === payload.toChatId && (!targetAccountId || c.accountId === targetAccountId)
+              ? { ...c, lastMessage: summary, lastTime: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false }) }
+              : c
+          )
+        );
+      }
+      return { ok: true };
+    }
+
+    // Local/non-TG chat fallback: copy messages to target chat bucket
+    const srcMsgs = getBucketMessages(messagesMap, targetAccountId, fromChatId);
+    const toCopy = srcMsgs.filter((m) => payload.messageIds.includes(m.id));
+    if (toCopy.length === 0) return { ok: false, error: '未找到要转发的消息' };
+    const toBucketKey = msgBucketKey(targetAccountId, payload.toChatId);
+    const nowTime = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false });
+    const cloned: Message[] = toCopy.map((m, idx) => ({
+      ...m,
+      id: `fwd_${Date.now()}_${idx}_${Math.random().toString(36).slice(2, 6)}`,
+      chatId: payload.toChatId,
+      sender: 'me',
+      forwardFrom: payload.dropAuthor ? undefined : (m.senderName || '转发消息'),
+      createdAt: Date.now() + idx,
+      timestamp: nowTime,
+      deliveryStatus: 'delivered',
+    }));
+    setMessagesMap((prev) => {
+      const existing = getBucketMessages(prev, targetAccountId, payload.toChatId);
+      const next = [...existing, ...cloned];
+      setLocalMessages(payload.toChatId, next, targetAccountId);
+      return { ...prev, [toBucketKey]: next };
+    });
+    return { ok: true };
+  };
+
+  const handleLoadOlderMessages = async (
+    chatId: string,
+    offsetId: number
+  ): Promise<{ ok: boolean; count: number; hasMore: boolean; error?: string }> => {
+    const targetAccountId = activeAccountId;
+    const bucketKey = msgBucketKey(targetAccountId, chatId);
+    const res = await fetchTelegramCloudMessagesApi(chatId, targetAccountId, {
+      limit: 40,
+      offsetId,
+    });
+    if (!res.ok) {
+      return { ok: false, count: 0, hasMore: false, error: res.error };
+    }
+    setChatHasMoreMap((prev) => ({ ...prev, [bucketKey]: res.hasMore }));
+    if (res.messages.length > 0) {
+      setMessagesMap((prev) => {
+        const base = getBucketMessages(prev, targetAccountId, chatId);
+        const merged = mergeCloudMessagesWithLocal(base, res.messages, { preserveAllLocal: true });
+        setLocalMessages(chatId, merged, targetAccountId);
+        return { ...prev, [bucketKey]: merged };
+      });
+    }
+    return { ok: true, count: res.messages.length, hasMore: res.hasMore };
+  };
+
   const handleEditMessage = async (
     messageId: string,
-    newText: string
+    newText: string,
+    options?: { translatedText?: string }
   ): Promise<{ ok: boolean; error?: string }> => {
     if (!activeChatId) return { ok: false, error: '未选中对话' };
     const targetChatId = activeChatId;
@@ -1767,6 +2244,7 @@ export default function App() {
         messageId,
         telegramMessageId: targetMsg?.telegramMessageId,
         newText,
+        ...(options?.translatedText !== undefined ? { translatedText: options.translatedText } : {}),
       });
       if (!editRes.ok) {
         const errMsg = editRes.error || '云端编辑消息失败';
@@ -1778,7 +2256,17 @@ export default function App() {
     setMessagesMap((prev) => {
       const currentList = getBucketMessages(prev, targetAccountId, targetChatId);
       const updated = currentList.map((m) =>
-        m.id === messageId ? { ...m, text: newText, isEdited: true } : m
+        m.id === messageId
+          ? {
+              ...m,
+              text: newText,
+              isEdited: true,
+              ...(m.isImage ? { imageCaption: newText } : {}),
+              ...(options?.translatedText !== undefined
+                ? { translatedText: options.translatedText, translationError: undefined }
+                : {}),
+            }
+          : m
       );
       setLocalMessages(targetChatId, updated, targetAccountId);
       return { ...prev, [bucketKey]: updated };
@@ -1879,13 +2367,17 @@ export default function App() {
     });
   };
 
-  const handleClearHistory = async (chatId: string): Promise<{ ok: boolean; error?: string }> => {
+  const handleClearHistory = async (
+    chatId: string,
+    options?: { revoke?: boolean }
+  ): Promise<{ ok: boolean; error?: string }> => {
     const targetAccountId = activeAccountId;
     const bucketKey = msgBucketKey(targetAccountId, chatId);
     if (isTelegramCloudChat(chatId)) {
       const clearRes = await clearTelegramDialogHistoryApi({
         accountId: targetAccountId,
         chatId,
+        revoke: options?.revoke,
       });
       if (!clearRes.ok) {
         const errMsg = clearRes.error || '清空云端聊天记录失败';
@@ -2001,13 +2493,14 @@ export default function App() {
     );
   };
 
-  const handleDeleteChat = async (chatId: string) => {
+  const handleDeleteChat = async (chatId: string, options?: { revoke?: boolean }) => {
     const targetAccountId = activeAccountId;
     const bucketKey = msgBucketKey(targetAccountId, chatId);
     if (isTelegramCloudChat(chatId)) {
       const res = await deleteTelegramDialogApi({
         accountId: targetAccountId,
         chatId,
+        revoke: options?.revoke,
       });
       if (!res.ok) {
         showCloudError(res.error || '云端删除/退出对话失败');
@@ -2047,18 +2540,63 @@ export default function App() {
   };
 
   const handleAddContact = (contact: TelegramContact) => {
-    setContacts((prev) => [contact, ...prev.filter((c) => c.id !== contact.id)]);
+    setContacts((prev) => {
+      const next = [contact, ...prev.filter((c) => c.id !== contact.id)];
+      saveScopedContacts(next, activeAccountIdRef.current);
+      return next;
+    });
   };
 
-  const handleSyncContacts = (cloudContacts: TelegramContact[]) => {
+  const handleSyncContacts = (cloudContacts: TelegramContact[], targetAccId?: string) => {
+    const acc = targetAccId || activeAccountIdRef.current;
+    const normalized = (Array.isArray(cloudContacts) ? cloudContacts : []).filter(
+      (c) => c && c.id && !c.id.startsWith('contact_')
+    );
+    saveScopedContacts(normalized, acc);
+    if (!targetAccId || targetAccId === activeAccountIdRef.current) {
+      setContacts(normalized);
+    }
+    if (normalized.length > 0) {
+      const contactById = new Map<string, TelegramContact>();
+      normalized.forEach((ct) => contactById.set(ct.id, ct));
+      setChats((prev) =>
+        prev.map((c) => {
+          if (acc && c.accountId !== acc) return c;
+          const ct = contactById.get(c.id);
+          if (!ct) return c;
+          return {
+            ...c,
+            ...(ct.phone ? { phone: ct.phone } : {}),
+            ...(typeof ct.isBlocked === 'boolean' ? { isBlocked: ct.isBlocked } : {}),
+            ...(ct.status ? { isOnline: ct.status === 'online' } : {}),
+            ...(ct.statusText ? { statusText: ct.statusText } : {}),
+          };
+        })
+      );
+    }
+  };
+
+  const handleRemoveContact = (contactId: string) => {
     setContacts((prev) => {
-      const map = new Map<string, TelegramContact>();
-      cloudContacts.forEach((c) => map.set(c.id, c));
-      prev
-        .filter((c) => !c.id.startsWith('contact_') && !map.has(c.id))
-        .forEach((c) => map.set(c.id, c));
-      return Array.from(map.values());
+      const next = prev.filter((c) => c.id !== contactId);
+      saveScopedContacts(next, activeAccountIdRef.current);
+      return next;
     });
+  };
+
+  const handleContactBlockChanged = (contactId: string, isBlocked: boolean) => {
+    setContacts((prev) => {
+      const next = prev.map((c) => (c.id === contactId ? { ...c, isBlocked } : c));
+      saveScopedContacts(next, activeAccountIdRef.current);
+      return next;
+    });
+    setChats((prev) =>
+      prev.map((c) =>
+        c.id === contactId && (!activeAccountIdRef.current || c.accountId === activeAccountIdRef.current)
+          ? { ...c, isBlocked }
+          : c
+      )
+    );
   };
 
   const handleStartChatWithContact = (contact: TelegramContact) => {
@@ -2072,6 +2610,25 @@ export default function App() {
           (contact.username && c.username === contact.username))
     );
     if (existing) {
+      if (
+        (contact.phone && !existing.phone) ||
+        (contact.statusText && !existing.statusText) ||
+        typeof contact.isBlocked === 'boolean'
+      ) {
+        setChats((prev) =>
+          prev.map((c) =>
+            c.id === existing.id && c.accountId === existing.accountId
+              ? {
+                  ...c,
+                  ...(contact.phone ? { phone: contact.phone } : {}),
+                  ...(contact.status ? { isOnline: contact.status === 'online' } : {}),
+                  ...(contact.statusText ? { statusText: contact.statusText } : {}),
+                  ...(typeof contact.isBlocked === 'boolean' ? { isBlocked: contact.isBlocked } : {}),
+                }
+              : c
+          )
+        );
+      }
       setActiveChatId(existing.id);
       setIsContactsOpen(false);
       return;
@@ -2086,8 +2643,12 @@ export default function App() {
       isGroup: false,
       isVerified: false,
       username: contact.username,
+      phone: contact.phone,
+      isOnline: contact.status === 'online',
+      statusText: contact.statusText || contact.bio,
+      isBlocked: contact.isBlocked,
       description: contact.bio,
-      lastMessage: '已添加联系人',
+      lastMessage: '已发起会话',
       lastTime: '刚刚',
       unreadCount: 0,
       sourceLang: 'Auto',
@@ -2127,7 +2688,12 @@ export default function App() {
     <div className="flex h-screen w-screen overflow-hidden bg-[#f4f7fb] text-[#0f172a] dark:bg-[#05080f] dark:text-[#eef4fb] font-sans antialiased transition-colors">
       {/* 1. Leftmost Features & Multi-Account Activity Rail (56px) */}
       <LeftSidebar
-        accounts={accounts}
+        accounts={accounts.map((a) => ({
+          ...a,
+          unreadTotal: chats
+            .filter((c) => c.accountId === a.id && !c.isArchived)
+            .reduce((sum, c) => sum + (c.unreadCount || 0), 0),
+        }))}
         activeAccountId={activeAccountId}
         onSelectAccount={(accountId) => {
           handleSelectAccount(accountId);
@@ -2196,6 +2762,15 @@ export default function App() {
             if (open) setActiveRightPanel(null);
           }}
           onDeleteMessage={handleDeleteMessage}
+          onBatchDeleteMessages={handleBatchDeleteMessages}
+          onForwardMessages={handleForwardMessages}
+          availableChats={currentAccountChats}
+          hasMoreHistory={
+            activeChatId
+              ? chatHasMoreMap[msgBucketKey(activeAccountId, activeChatId)] ?? Boolean(activeChatId.startsWith('tg_'))
+              : false
+          }
+          onLoadOlderMessages={handleLoadOlderMessages}
           onEditMessage={handleEditMessage}
           onUpdateMessage={handleUpdateMessage}
           onRetryMessage={handleRetryMessage}
@@ -2205,6 +2780,7 @@ export default function App() {
           onToggleMuteChat={handleToggleMuteChat}
           onTogglePinChat={handleTogglePinChat}
           onUpdateChatTitle={handleUpdateChatTitle}
+          onRemoveContact={handleRemoveContact}
           onChatInfoUpdated={(chatId, patch) => {
             setChats((prev) =>
               prev.map((c) =>
@@ -2213,27 +2789,59 @@ export default function App() {
                   : c
               )
             );
+            if (typeof patch.isBlocked === 'boolean') {
+              handleContactBlockChanged(chatId, patch.isBlocked);
+            }
+            if (typeof patch.title === 'string' && patch.title.trim()) {
+              const nextTitle = patch.title.trim();
+              setContacts((prev) => {
+                let changed = false;
+                const next = prev.map((ct) => {
+                  if (ct.id === chatId && ct.name !== nextTitle) {
+                    changed = true;
+                    return { ...ct, name: nextTitle };
+                  }
+                  return ct;
+                });
+                if (changed) saveScopedContacts(next, activeAccountIdRef.current);
+                return changed ? next : prev;
+              });
+            }
           }}
           sendWithEnter={clientPrefs.sendWithEnter}
           onOpenVoiceCall={() => {
             setVoiceCallTargetName(currentChat?.title || '');
             setIsVoiceCallOpen(true);
           }}
-          onMessagesSynced={(synced) => {
-            if (activeChatId && synced.length > 0) {
+          onMessagesSynced={(synced, meta) => {
+            if (activeChatId) {
               const bucketKey = msgBucketKey(activeAccountId, activeChatId);
-              setMessagesMap((prev) => {
-                const base = getBucketMessages(prev, activeAccountId, activeChatId);
-                const merged = mergeCloudMessagesWithLocal(
-                  base.length > 0 ? base : getLocalMessages(activeChatId, activeAccountId),
-                  synced
+              if (meta && typeof meta.hasMore === 'boolean') {
+                setChatHasMoreMap((prev) => ({ ...prev, [bucketKey]: meta.hasMore! }));
+              }
+              if (meta && typeof meta.readOutboxMaxId === 'number') {
+                setChats((prev) =>
+                  prev.map((c) =>
+                    c.id === activeChatId && (!activeAccountId || c.accountId === activeAccountId)
+                      ? { ...c, readOutboxMaxId: Math.max(c.readOutboxMaxId || 0, meta.readOutboxMaxId!) }
+                      : c
+                  )
                 );
-                setLocalMessages(activeChatId, merged, activeAccountId);
-                return {
-                  ...prev,
-                  [bucketKey]: merged,
-                };
-              });
+              }
+              if (synced.length > 0) {
+                setMessagesMap((prev) => {
+                  const base = getBucketMessages(prev, activeAccountId, activeChatId);
+                  const merged = mergeCloudMessagesWithLocal(
+                    base.length > 0 ? base : getLocalMessages(activeChatId, activeAccountId),
+                    synced
+                  );
+                  setLocalMessages(activeChatId, merged, activeAccountId);
+                  return {
+                    ...prev,
+                    [bucketKey]: merged,
+                  };
+                });
+              }
             }
           }}
         />
@@ -2350,6 +2958,9 @@ export default function App() {
         currentAccountId={activeAccountId}
         onAddContact={handleAddContact}
         onSyncContacts={handleSyncContacts}
+        onRemoveContact={handleRemoveContact}
+        onBlockStatusChanged={handleContactBlockChanged}
+        onRenameContact={handleUpdateChatTitle}
         onStartChatWithContact={handleStartChatWithContact}
       />
 
@@ -2372,6 +2983,7 @@ export default function App() {
         onOpenSystemAdmin={() => setIsSystemSettingsOpen(true)}
         clientPrefs={clientPrefs}
         onUpdateClientPrefs={setClientPrefs}
+        onBlockStatusChanged={handleContactBlockChanged}
       />
 
       {/* 19. Telegram Voice Call Modal */}

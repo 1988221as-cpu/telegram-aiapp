@@ -28,9 +28,9 @@ export const TelegramNewGroupModal: React.FC<TelegramNewGroupModalProps> = ({
   useEffect(() => {
     if (!isOpen) return;
     setErrorMsg('');
-    if (currentAccountId) {
+    if (currentAccountId && currentAccountId.startsWith('acc_tg_')) {
       fetchTelegramUserContactsApi(currentAccountId).then((res) => {
-        if (res.ok && Array.isArray(res.contacts) && res.contacts.length > 0) {
+        if (res.ok && Array.isArray(res.contacts)) {
           onSyncContacts?.(res.contacts);
         }
       });
@@ -135,13 +135,20 @@ export const TelegramNewGroupModal: React.FC<TelegramNewGroupModalProps> = ({
                   >
                     <div className="flex items-center gap-3">
                       <div
-                        className="w-9 h-9 rounded-full flex items-center justify-center font-bold text-white text-xs shrink-0 overflow-hidden"
+                        className="w-9 h-9 rounded-full flex items-center justify-center font-bold text-white text-xs shrink-0 overflow-hidden relative"
                         style={{ backgroundColor: contact.avatarBg || '#2481cc' }}
                       >
-                        {contact.avatarUrl ? (
-                          <img src={contact.avatarUrl} alt={contact.name} className="w-full h-full object-cover" />
-                        ) : (
-                          <span>{contact.avatarInitial || contact.name.slice(0, 2)}</span>
+                        <span className="select-none">{contact.avatarInitial || contact.name.slice(0, 2)}</span>
+                        {contact.avatarUrl && (
+                          <img
+                            src={contact.avatarUrl}
+                            alt={contact.name}
+                            referrerPolicy="no-referrer"
+                            className="w-full h-full object-cover absolute inset-0"
+                            onError={(e) => {
+                              (e.currentTarget as HTMLElement).style.display = 'none';
+                            }}
+                          />
                         )}
                       </div>
                       <div>
