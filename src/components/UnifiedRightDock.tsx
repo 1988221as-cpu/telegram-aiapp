@@ -104,26 +104,26 @@ export const UnifiedRightDock: React.FC<UnifiedRightDockProps> = ({
       {/* Docked Push Split Sidebar on Desktop (>= 1024px), Slide-Over Drawer on Narrow Viewports */}
       <aside
         aria-label={activeMeta.title}
-        className="fixed inset-y-0 right-0 z-40 w-full max-w-[440px] lg:static lg:z-20 lg:w-[440px] lg:shrink-0 h-full flex flex-col overflow-hidden bg-white/95 dark:bg-[#09111b]/95 backdrop-blur-xl border-l border-[#e2e8f0] dark:border-[#18273a] shadow-2xl lg:shadow-[-12px_0_32px_-16px_rgba(2,8,20,0.35)] text-[#0f172a] dark:text-[#eef4fb] select-none transition-colors animate-in slide-in-from-right duration-200"
+        className="fixed inset-y-0 right-0 z-40 w-full max-w-[440px] lg:static lg:z-20 lg:w-[440px] lg:shrink-0 h-full flex flex-col overflow-hidden bg-white/95 dark:bg-[#09111b]/95 aurora:bg-[#0c151b]/95 backdrop-blur-xl border-l border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] shadow-2xl lg:shadow-[-12px_0_32px_-16px_rgba(2,8,20,0.35)] text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] select-none transition-colors animate-in slide-in-from-right duration-200"
       >
         {/* Top Precision Hairline Accent */}
-        <div className="h-[2px] w-full bg-gradient-to-r from-transparent via-[#2481cc]/60 dark:via-[#2ba0ff]/75 to-transparent shrink-0" />
+        <div className="h-[2px] w-full bg-gradient-to-r from-transparent via-[#2481cc]/60 dark:via-[#2ba0ff]/75 aurora:via-[#2dd4bf]/80 to-transparent shrink-0" />
 
         {/* Unified Dock Header */}
-        <div className="px-4 pt-3 pb-2.5 border-b border-[#e2e8f0] dark:border-[#162436] bg-[#f8fafc]/90 dark:bg-[#0b1523]/90 shrink-0 space-y-2.5">
+        <div className="px-4 pt-3 pb-2.5 border-b border-[#e2e8f0] dark:border-[#162436] aurora:border-[#182b34] bg-[#f8fafc]/90 dark:bg-[#0b1523]/90 aurora:bg-[#0e1920]/92 shrink-0 space-y-2.5">
           {/* Row 1: Active Panel Identity + Close */}
           <div className="flex items-center justify-between gap-2">
             <div className="flex items-center gap-2.5 min-w-0">
-              <div className="w-8 h-8 rounded-lg bg-[#e8f3ff] dark:bg-[#2ba0ff]/12 border border-[#bfdbfe] dark:border-[#2ba0ff]/25 flex items-center justify-center text-[#2481cc] dark:text-[#2ba0ff] shrink-0">
+              <div className="w-8 h-8 rounded-lg bg-[#e8f3ff] dark:bg-[#2ba0ff]/12 aurora:bg-[#112d36] border border-[#bfdbfe] dark:border-[#2ba0ff]/25 aurora:border-[#2dd4bf]/35 flex items-center justify-center text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#5eead4] shrink-0">
                 <ActiveIcon className="w-4 h-4" />
               </div>
               <div className="min-w-0">
-                <h2 className="text-[13.5px] font-semibold text-[#0f172a] dark:text-[#f1f6fc] truncate leading-tight">
+                <h2 className="text-[13.5px] font-semibold text-[#0f172a] dark:text-[#f1f6fc] aurora:text-[#ecf6f8] truncate leading-tight">
                   {activePanel === 'memory'
                     ? `${currentChat?.title || '当前联系人'} · 全息记忆`
                     : activeMeta.title}
                 </h2>
-                <p className="text-[11px] text-[#64748b] dark:text-[#7b93ad] truncate leading-tight mt-0.5">
+                <p className="text-[11px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] truncate leading-tight mt-0.5">
                   {activePanel === 'memory'
                     ? `${customerProfile?.relationshipStage || '沟通中'} · 右侧协同面板`
                     : activePanel === 'llm'
@@ -161,7 +161,7 @@ export const UnifiedRightDock: React.FC<UnifiedRightDockProps> = ({
           <div
             role="tablist"
             aria-label="右侧功能工作台切换"
-            className="grid grid-cols-5 gap-1 p-1 rounded-xl bg-[#eef2f6] dark:bg-[#060c14] border border-[#e2e8f0] dark:border-[#152233]"
+            className="grid grid-cols-5 gap-1 p-1 rounded-xl bg-[#eef2f6] dark:bg-[#060c14] aurora:bg-[#081014] border border-[#e2e8f0] dark:border-[#152233] aurora:border-[#182b34]"
           >
             {PANEL_TABS.map((tab) => {
               const Icon = tab.icon;
@@ -175,14 +175,14 @@ export const UnifiedRightDock: React.FC<UnifiedRightDockProps> = ({
                   onClick={() => onSelectPanel(tab.id)}
                   className={`h-8 px-1.5 rounded-lg text-[11.5px] font-medium flex items-center justify-center gap-1.5 transition-all cursor-pointer whitespace-nowrap relative ${
                     isSelected
-                      ? 'bg-white dark:bg-[#132234] text-[#2481cc] dark:text-[#2ba0ff] shadow-xs border border-[#cbd5e1]/80 dark:border-[#2ba0ff]/35 font-semibold'
-                      : 'text-[#64748b] dark:text-[#7b93ad] hover:text-[#0f172a] dark:hover:text-[#e2ebf5] hover:bg-white/60 dark:hover:bg-[#0e1928] border border-transparent'
+                      ? 'bg-white dark:bg-[#132234] aurora:bg-[#112d36] text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#5eead4] shadow-xs border border-[#cbd5e1]/80 dark:border-[#2ba0ff]/35 aurora:border-[#2dd4bf]/45 font-semibold'
+                      : 'text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] hover:text-[#0f172a] dark:hover:text-[#e2ebf5] aurora:hover:text-[#ecf6f8] hover:bg-white/60 dark:hover:bg-[#0e1928] aurora:hover:bg-[#112028] border border-transparent'
                   }`}
                 >
                   <span className="relative shrink-0">
                     <Icon className="w-3.5 h-3.5" />
                     {tab.id === 'voice' && isMasterVoiceActive && (
-                      <span className="absolute -top-0.5 -right-0.5 w-1.5 h-1.5 rounded-full bg-[#2481cc] dark:bg-[#2ba0ff]" />
+                      <span className="absolute -top-0.5 -right-0.5 w-1.5 h-1.5 rounded-full bg-[#2481cc] dark:bg-[#2ba0ff] aurora:bg-[#2dd4bf]" />
                     )}
                   </span>
                   <span className="truncate">{tab.label}</span>

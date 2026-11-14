@@ -774,13 +774,21 @@ export function decodeHtmlEntities(str: string): string {
 
 export function inferGatewayProtocolFromUrlAndModel(
   baseUrl?: string,
-  modelName?: string
+  modelName?: string,
+  explicitProtocol?: string
 ): 'openai' | 'gemini' | 'anthropic' {
   const url = (baseUrl || '').toLowerCase();
-  const model = (modelName || '').toLowerCase();
+  const model = (modelName || '').toLowerCase().trim();
   if (url.includes('googleapis.com')) return 'gemini';
   if (url.includes('anthropic.com')) return 'anthropic';
+  if (explicitProtocol === 'openai' || explicitProtocol === 'gemini' || explicitProtocol === 'anthropic') {
+    if (url.includes('openai.com') || url.includes('deepseek.com')) return 'openai';
+    return explicitProtocol;
+  }
+  if (url.includes('openai.com') || url.includes('deepseek.com')) return 'openai';
+  if (url.includes('/v1beta')) return 'gemini';
   if (!url && model.includes('claude')) return 'anthropic';
+  if (!url && (model.startsWith('gemini') || model.startsWith('gemma'))) return 'gemini';
   return 'openai';
 }
 
@@ -956,8 +964,19 @@ export async function translateText(
 
   const cleanBaseUrl = (customConfig?.baseUrl || '').trim();
   const cleanApiKey = (customConfig?.apiKey || '').trim();
+  const rawProvidedModel = (customModelName || '').trim() || (customConfig?.modelName || '').trim();
+  const inferredProtocol = inferGatewayProtocolFromUrlAndModel(
+    cleanBaseUrl,
+    rawProvidedModel,
+    customConfig?.protocol
+  );
   const effectiveCustomModel =
-    (customModelName || '').trim() || (customConfig?.modelName || '').trim() || 'gpt-4o-mini';
+    rawProvidedModel ||
+    (inferredProtocol === 'gemini'
+      ? ''
+      : inferredProtocol === 'anthropic'
+      ? 'claude-3-5-sonnet-20241022'
+      : 'gpt-4o-mini');
 
   if (strictEngine === 'custom_llm') {
     if (!customConfig || !cleanBaseUrl || isBuiltInCloudGatewayUrl(cleanBaseUrl)) {
@@ -972,9 +991,18 @@ export async function translateText(
     if (!cleanApiKey && !isLocalhost) {
       throw new Error('自定义翻译/自有密钥通道缺少 API 密钥，请在「模型 → 接入自有模型网关」填写 API 密钥');
     }
+    if (inferredProtocol === 'gemini' && !effectiveCustomModel) {
+      throw new Error('自有 Gemini 协议网关未填写模型型号 (Model Name)，已拦截空模型请求，请先在「模型」填写具体 Gemini 模型 ID');
+    }
   }
 
-  const inferredProtocol = inferGatewayProtocolFromUrlAndModel(cleanBaseUrl, effectiveCustomModel);
+  const preservedProtocol =
+    customConfig?.protocol === 'openai' ||
+    customConfig?.protocol === 'gemini' ||
+    customConfig?.protocol === 'anthropic' ||
+    customConfig?.protocol === 'auto'
+      ? customConfig.protocol
+      : inferredProtocol;
   const safeCustomConfigForTranslation =
     strictEngine === 'custom_llm'
       ? {
@@ -982,7 +1010,7 @@ export async function translateText(
           enabled: true,
           explicitlyDisabled: false,
           engineMode: 'custom' as const,
-          protocol: inferredProtocol,
+          protocol: preservedProtocol,
           modelName: effectiveCustomModel,
           knowledgeBaseApiUrl: '',
           knowledgeBaseApiKey: '',
@@ -1431,7 +1459,7 @@ export async function pingCustomLLM(
   apiKey: string,
   modelName: string,
   customHeaders?: string,
-  protocol: 'openai' | 'gemini' | 'anthropic' = 'openai',
+  protocol: 'auto' | 'openai' | 'gemini' | 'anthropic' = 'auto',
   engineMode?: 'cloud' | 'custom',
   engineLicenseKey?: string
 ): Promise<{
@@ -2064,13 +2092,26 @@ export function buildSafeLlmConfigPayload(customConfig?: CustomLLMConfig): Custo
     };
   }
   if (customConfig.engineMode === 'custom') {
-    const cleanModel = (customConfig.modelName || '').trim() || 'gpt-4o-mini';
+    const preservedProtocol: 'auto' | 'openai' | 'gemini' | 'anthropic' =
+      customConfig.protocol === 'openai' ||
+      customConfig.protocol === 'gemini' ||
+      customConfig.protocol === 'anthropic' ||
+      customConfig.protocol === 'auto'
+        ? customConfig.protocol
+        : 'auto';
+    const resolvedProto = inferGatewayProtocolFromUrlAndModel(
+      customConfig.baseUrl,
+      customConfig.modelName,
+      preservedProtocol
+    );
+    const rawModel = (customConfig.modelName || '').trim();
+    const cleanModel = rawModel || (resolvedProto === 'gemini' ? '' : 'gpt-4o-mini');
     return {
       ...customConfig,
       enabled: true,
       explicitlyDisabled: false,
       engineMode: 'custom',
-      protocol: inferGatewayProtocolFromUrlAndModel(customConfig.baseUrl, cleanModel),
+      protocol: preservedProtocol,
       modelName: cleanModel,
       enableKnowledgeBaseRAG: false,
       knowledgeBaseApiUrl: '',
@@ -4001,6 +4042,11 @@ export async function testPersonaReplyApi(params: {
   stage?: string;
   personaName?: string;
   matchedKnowledge?: any[];
+  ragSources?: {
+    cloudRagEnabled?: boolean;
+    cloudRagMatchedCount?: number;
+    localRagMatchedCount?: number;
+  };
   appliedHabits?: any[];
   source?: string;
   error?: string;

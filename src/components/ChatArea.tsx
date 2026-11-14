@@ -2401,15 +2401,15 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
 
   if (!chat) {
     return (
-      <div className="flex-1 min-w-0 bg-[#f4f7fb] dark:bg-[#060b12] tg-chat-pattern flex flex-col items-center justify-center select-none text-[#64748b] dark:text-[#7b93ad] transition-colors px-6">
-        <div className="flex flex-col items-center text-center max-w-xs space-y-2.5 px-6 py-5 rounded-2xl bg-white/80 dark:bg-[#0a1320]/80 backdrop-blur-md border border-[#e2e8f0] dark:border-[#162436] shadow-xs">
-          <div className="w-10 h-10 rounded-xl bg-[#e8f3ff] dark:bg-[#2ba0ff]/12 border border-[#bfdbfe] dark:border-[#2ba0ff]/25 flex items-center justify-center text-[#2481cc] dark:text-[#2ba0ff]">
+      <div className="flex-1 min-w-0 bg-[#f4f7fb] dark:bg-[#060b12] aurora:bg-[#081116] tg-chat-pattern flex flex-col items-center justify-center select-none text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] transition-colors px-6">
+        <div className="flex flex-col items-center text-center max-w-xs space-y-2.5 px-6 py-5 rounded-2xl bg-white/80 dark:bg-[#0a1320]/80 aurora:bg-[#0e1b23]/82 backdrop-blur-md border border-[#e2e8f0] dark:border-[#162436] aurora:border-[#2dd4bf]/35 shadow-xs aurora:shadow-[0_0_28px_rgba(34,211,238,0.12)]">
+          <div className="w-10 h-10 rounded-xl bg-[#e8f3ff] dark:bg-[#2ba0ff]/12 aurora:bg-[#112d36] border border-[#bfdbfe] dark:border-[#2ba0ff]/25 aurora:border-[#2dd4bf]/35 flex items-center justify-center text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#5eead4]">
             <Sparkles className="w-5 h-5" />
           </div>
-          <div className="text-[13px] font-semibold text-[#0f172a] dark:text-[#eef4fb]">
+          <div className="text-[13px] font-semibold text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8]">
             选择左侧会话开始协同
           </div>
-          <p className="text-[11.5px] text-[#64748b] dark:text-[#7b93ad] leading-relaxed">
+          <p className="text-[11.5px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#86a4b0] leading-relaxed">
             可随时点击最左侧导航栏在右侧工作台展开记忆、大模型、翻译、音色与人设配置。
           </p>
         </div>
@@ -2479,9 +2479,9 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
       : 'HumanSense 云端引擎';
 
   return (
-    <div className="flex-1 min-w-0 bg-[#f4f7fb] dark:bg-[#060b12] flex flex-col h-full relative overflow-hidden transition-colors">
+    <div className="flex-1 min-w-0 bg-[#f4f7fb] dark:bg-[#060b12] aurora:bg-[#081116] flex flex-col h-full relative overflow-hidden transition-colors">
       {/* 1. Official Telegram Top Bar Header */}
-      <header className="h-[56px] bg-white/90 dark:bg-[#09111d]/90 backdrop-blur-md border-b border-[#e2e8f0] dark:border-[#162436] flex items-center justify-between px-4 shrink-0 z-10 transition-colors">
+      <header className="h-[56px] bg-white/90 dark:bg-[#09111d]/90 aurora:bg-[#0d171d]/92 backdrop-blur-md border-b border-[#e2e8f0] dark:border-[#162436] aurora:border-[#182b34] flex items-center justify-between px-4 shrink-0 z-10 transition-colors">
         {/* Left: Contact Info (Click to view Profile & Shared Media) */}
         <div
           onClick={() => setChatInfoOpen(true)}
@@ -2581,13 +2581,13 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
               title={isModelDualOff ? '大模型已关闭（双关状态）— 点击前往配置' : '切换或配置大模型引擎'}
               className={`hidden xl:flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[11.5px] font-medium border transition-colors cursor-pointer ${
                 activeRightPanel === 'llm'
-                  ? 'bg-[#e8f3ff] border-[#bfdbfe] text-[#2481cc] dark:bg-[#132234] dark:border-[#2ba0ff]/40 dark:text-[#2ba0ff]'
+                  ? 'bg-[#e8f3ff] border-[#bfdbfe] text-[#2481cc] dark:bg-[#132234] dark:border-[#2ba0ff]/40 dark:text-[#2ba0ff] aurora:bg-[#112e37] aurora:border-[#2dd4bf]/45 aurora:text-[#5eead4]'
                   : isModelDualOff
                   ? 'bg-amber-50/70 hover:bg-amber-50 dark:bg-amber-500/10 dark:hover:bg-amber-500/15 border-amber-200 dark:border-amber-500/30 text-amber-700 dark:text-amber-300'
-                  : 'bg-[#f8fafc] hover:bg-[#f1f5f9] dark:bg-[#0e1726] dark:hover:bg-[#142236] border-[#e2e8f0] dark:border-[#1a2b40] text-[#334155] dark:text-[#dbe7f3]'
+                  : 'bg-[#f8fafc] hover:bg-[#f1f5f9] dark:bg-[#0e1726] dark:hover:bg-[#142236] aurora:bg-[#101c23] aurora:hover:bg-[#15252e] border-[#e2e8f0] dark:border-[#1a2b40] aurora:border-[#1e343e] text-[#334155] dark:text-[#dbe7f3] aurora:text-[#d5ebee]'
               }`}
             >
-              <Cpu className={`w-3.5 h-3.5 ${isModelDualOff ? 'text-amber-500 dark:text-amber-400' : 'text-[#2481cc] dark:text-[#2ba0ff]'}`} />
+              <Cpu className={`w-3.5 h-3.5 ${isModelDualOff ? 'text-amber-500 dark:text-amber-400' : 'text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf]'}`} />
               <span className="max-w-[140px] truncate">{activeModelDisplay}</span>
             </button>
           )}
@@ -2599,8 +2599,8 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
             title="展开或收起实时翻译栏"
             className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[11.5px] font-medium border transition-colors cursor-pointer ${
               isTranslateBarVisible
-                ? 'bg-[#e8f3ff] border-[#bfdbfe] text-[#2481cc] dark:bg-[#132234] dark:border-[#2ba0ff]/40 dark:text-[#2ba0ff]'
-                : 'bg-[#f8fafc] border-[#e2e8f0] text-[#64748b] hover:text-[#0f172a] dark:bg-[#0e1726] dark:border-[#1a2b40] dark:text-[#8aa0b8] dark:hover:text-white'
+                ? 'bg-[#e8f3ff] border-[#bfdbfe] text-[#2481cc] dark:bg-[#132234] dark:border-[#2ba0ff]/40 dark:text-[#2ba0ff] aurora:bg-[#112e37] aurora:border-[#2dd4bf]/45 aurora:text-[#5eead4]'
+                : 'bg-[#f8fafc] border-[#e2e8f0] text-[#64748b] hover:text-[#0f172a] dark:bg-[#0e1726] dark:border-[#1a2b40] dark:text-[#8aa0b8] dark:hover:text-white aurora:bg-[#101c23] aurora:border-[#1e343e] aurora:text-[#7e9aa5] aurora:hover:text-[#ecf6f8]'
             }`}
           >
             <Languages className="w-3.5 h-3.5" />
@@ -2618,11 +2618,11 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
               title="同步云端消息"
               className={`w-8 h-8 rounded-lg flex items-center justify-center transition-colors cursor-pointer ${
                 isSyncingCloud
-                  ? 'bg-[#e8f3ff] text-[#2481cc] dark:bg-[#2481cc]/20 dark:text-[#2ba0ff]'
-                  : 'hover:bg-[#f1f5f9] dark:hover:bg-[#202b36] text-[#64748b] dark:text-[#a0acb8] hover:text-[#2481cc] dark:hover:text-white'
+                  ? 'bg-[#e8f3ff] text-[#2481cc] dark:bg-[#2481cc]/20 dark:text-[#2ba0ff] aurora:bg-[#112e37] aurora:text-[#5eead4]'
+                  : 'hover:bg-[#f1f5f9] dark:hover:bg-[#202b36] aurora:hover:bg-[#15252e] text-[#64748b] dark:text-[#a0acb8] aurora:text-[#7e9aa5] hover:text-[#2481cc] dark:hover:text-white aurora:hover:text-[#5eead4]'
               }`}
             >
-              <RotateCw className={`w-4 h-4 ${isSyncingCloud ? 'animate-spin text-[#2481cc]' : ''}`} />
+              <RotateCw className={`w-4 h-4 ${isSyncingCloud ? 'animate-spin text-[#2481cc] aurora:text-[#2dd4bf]' : ''}`} />
             </button>
           )}
 
@@ -2633,8 +2633,8 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
             title="搜索消息"
             className={`w-8 h-8 rounded-lg flex items-center justify-center transition-colors cursor-pointer ${
               isSearchingInChat
-                ? 'bg-[#e8f3ff] text-[#2481cc] dark:bg-[#2481cc]/20 dark:text-[#2ba0ff]'
-                : 'hover:bg-[#f1f5f9] dark:hover:bg-[#202b36] text-[#64748b] dark:text-[#a0acb8] hover:text-[#0f172a] dark:hover:text-white'
+                ? 'bg-[#e8f3ff] text-[#2481cc] dark:bg-[#2481cc]/20 dark:text-[#2ba0ff] aurora:bg-[#112e37] aurora:text-[#5eead4]'
+                : 'hover:bg-[#f1f5f9] dark:hover:bg-[#202b36] aurora:hover:bg-[#15252e] text-[#64748b] dark:text-[#a0acb8] aurora:text-[#7e9aa5] hover:text-[#0f172a] dark:hover:text-white aurora:hover:text-[#ecf6f8]'
             }`}
           >
             <Search className="w-4 h-4" />
@@ -2647,8 +2647,8 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
             title="人设资料"
             className={`flex items-center gap-1 px-2.5 py-1 rounded-lg text-[11.5px] font-medium border transition-colors cursor-pointer ${
               activeRightPanel === 'persona'
-                ? 'bg-[#2481cc] border-[#2481cc] text-white dark:bg-[#2ba0ff]/20 dark:border-[#2ba0ff]/50 dark:text-[#2ba0ff]'
-                : 'bg-[#f0f7ff] hover:bg-[#e0efff] dark:bg-[#102033] dark:hover:bg-[#142840] border-[#dbeafe] dark:border-[#2ba0ff]/25 text-[#2481cc] dark:text-[#2ba0ff]'
+                ? 'bg-[#2481cc] border-[#2481cc] text-white dark:bg-[#2ba0ff]/20 dark:border-[#2ba0ff]/50 dark:text-[#2ba0ff] aurora:bg-[#112e37] aurora:border-[#2dd4bf]/55 aurora:text-[#5eead4]'
+                : 'bg-[#f0f7ff] hover:bg-[#e0efff] dark:bg-[#102033] dark:hover:bg-[#142840] aurora:bg-[#10242b] aurora:hover:bg-[#132d36] border-[#dbeafe] dark:border-[#2ba0ff]/25 aurora:border-[#2dd4bf]/30 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#5eead4]'
             }`}
           >
             <Sparkles className="w-3.5 h-3.5" />
@@ -2833,9 +2833,9 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
 
       {/* 2. Official Telegram Native Translate Bar (Telegram 8.4+ Style) */}
       {isTranslateBarVisible && (
-        <div className="bg-[#f8fafc]/90 dark:bg-[#0c1624]/90 backdrop-blur-xs border-b border-[#e2e8f0] dark:border-[#162436] px-4 py-1.5 flex items-center justify-between text-xs text-[#0f172a] dark:text-[#d3e2ef] transition-colors shrink-0">
+        <div className="bg-[#f8fafc]/90 dark:bg-[#0c1624]/90 aurora:bg-[#0c171d]/92 backdrop-blur-xs border-b border-[#e2e8f0] dark:border-[#162436] aurora:border-[#182b34] px-4 py-1.5 flex items-center justify-between text-xs text-[#0f172a] dark:text-[#d3e2ef] aurora:text-[#d5ebee] transition-colors shrink-0">
           <div className="flex items-center gap-2 min-w-0">
-            <Languages className="w-3.5 h-3.5 text-[#2481cc] dark:text-[#2ba0ff] shrink-0" />
+            <Languages className="w-3.5 h-3.5 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf] shrink-0" />
             <span className="font-medium whitespace-nowrap text-[#334155] dark:text-[#d3e2ef]">
               自动翻译为{getLanguageDisplayName(inboundTargetLang)}
             </span>
@@ -3132,8 +3132,8 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                     highlightedMsgId === msg.id ? 'ring-2 ring-amber-400 shadow-lg' : ''
                   } ${
                     isMe
-                      ? 'bg-[#1e88e5] text-white dark:bg-[#2b5278] dark:text-white rounded-br-xs shadow-[0_1px_3px_rgba(30,136,229,0.22)]'
-                      : 'bg-white text-[#0f172a] border border-[#e2e8f0] dark:bg-[#182533] dark:text-[#f5f7fa] dark:border-transparent rounded-bl-xs shadow-[0_1px_2px_rgba(15,23,42,0.04)]'
+                      ? 'bg-[#1e88e5] text-white dark:bg-[#2b5278] dark:text-white aurora:bg-[#11434d] aurora:border aurora:border-[#2dd4bf]/25 rounded-br-xs shadow-[0_1px_3px_rgba(30,136,229,0.22)]'
+                      : 'bg-white text-[#0f172a] border border-[#e2e8f0] dark:bg-[#182533] dark:text-[#f5f7fa] dark:border-transparent aurora:bg-[#101c23] aurora:text-[#ecf6f8] aurora:border-[#1c323c] rounded-bl-xs shadow-[0_1px_2px_rgba(15,23,42,0.04)]'
                   }`}
                 >
                   {/* Forwarded Label */}
@@ -3728,7 +3728,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
       )}
 
       {/* 4. Official Telegram Composer (Structured Dual-Layer Input Area) */}
-      <footer onPaste={handlePaste} className="bg-white/95 dark:bg-[#09111d]/95 backdrop-blur-md border-t border-[#e2e8f0] dark:border-[#162436] px-4 py-2.5 shrink-0 transition-colors">
+      <footer onPaste={handlePaste} className="bg-white/95 dark:bg-[#09111d]/95 aurora:bg-[#0d171d]/95 backdrop-blur-md border-t border-[#e2e8f0] dark:border-[#162436] aurora:border-[#182b34] px-4 py-2.5 shrink-0 transition-colors">
         {/* AI Generating Indicator */}
         {isGeneratingAi && (
           <div className="mb-2 px-3 py-2 bg-[#e8f3ff] dark:bg-[#2481cc]/10 border border-[#bfdbfe] dark:border-[#2481cc]/30 rounded-xl flex items-center gap-2 text-xs text-[#2481cc] dark:text-[#2ba0ff] animate-pulse">
@@ -4158,8 +4158,8 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
               title="查看或切换人设资料"
               className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg border font-medium cursor-pointer transition-colors shrink-0 ${
                 activeRightPanel === 'persona'
-                  ? 'bg-[#2481cc] border-[#2481cc] text-white dark:bg-[#132234] dark:border-[#2ba0ff]/45 dark:text-[#2ba0ff]'
-                  : 'bg-[#f0f7ff] hover:bg-[#e0efff] dark:bg-[#0e1726] dark:hover:bg-[#142236] border-[#dbeafe] dark:border-[#1a2b40] text-[#2481cc] dark:text-[#2ba0ff]'
+                  ? 'bg-[#2481cc] border-[#2481cc] text-white dark:bg-[#132234] dark:border-[#2ba0ff]/45 dark:text-[#2ba0ff] aurora:bg-[#112e37] aurora:border-[#2dd4bf]/50 aurora:text-[#5eead4]'
+                  : 'bg-[#f0f7ff] hover:bg-[#e0efff] dark:bg-[#0e1726] dark:hover:bg-[#142236] aurora:bg-[#102027] aurora:hover:bg-[#142a33] border-[#dbeafe] dark:border-[#1a2b40] aurora:border-[#1e3640] text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#5eead4]'
               }`}
             >
               <Sparkles className="w-3 h-3" />
@@ -4179,8 +4179,8 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
               title="配置发信自动翻译语言"
               className={`inline-flex items-center gap-1 px-2 py-1 rounded-lg border transition-colors cursor-pointer shrink-0 ${
                 activeRightPanel === 'translation'
-                  ? 'bg-[#e8f3ff] border-[#bfdbfe] text-[#2481cc] dark:bg-[#132234] dark:border-[#2ba0ff]/45 dark:text-[#2ba0ff]'
-                  : 'border-transparent text-[#475569] hover:text-[#2481cc] hover:bg-[#f1f5f9] dark:text-[#94a3b8] dark:hover:text-[#2ba0ff] dark:hover:bg-[#101c2d]'
+                  ? 'bg-[#e8f3ff] border-[#bfdbfe] text-[#2481cc] dark:bg-[#132234] dark:border-[#2ba0ff]/45 dark:text-[#2ba0ff] aurora:bg-[#112e37] aurora:border-[#2dd4bf]/50 aurora:text-[#5eead4]'
+                  : 'border-transparent text-[#475569] hover:text-[#2481cc] hover:bg-[#f1f5f9] dark:text-[#94a3b8] dark:hover:text-[#2ba0ff] dark:hover:bg-[#101c2d] aurora:text-[#7e9aa5] aurora:hover:text-[#5eead4] aurora:hover:bg-[#12222a]'
               }`}
             >
               <Languages className="w-3.5 h-3.5 text-[#16a34a] dark:text-emerald-400" />
@@ -4192,7 +4192,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
             type="button"
             onClick={() => setIsVoiceStudioOpen(true)}
             title="打开预设音色与语音合成台"
-            className="inline-flex items-center gap-1 px-2 py-1 rounded-lg text-[#64748b] hover:text-[#2481cc] hover:bg-[#f1f5f9] dark:text-[#94a3b8] dark:hover:text-[#2ba0ff] dark:hover:bg-[#101c2d] transition-colors cursor-pointer shrink-0"
+            className="inline-flex items-center gap-1 px-2 py-1 rounded-lg text-[#64748b] hover:text-[#2481cc] hover:bg-[#f1f5f9] dark:text-[#94a3b8] dark:hover:text-[#2ba0ff] dark:hover:bg-[#101c2d] aurora:text-[#7e9aa5] aurora:hover:text-[#5eead4] aurora:hover:bg-[#12222a] transition-colors cursor-pointer shrink-0"
           >
             <AudioWaveform className="w-3.5 h-3.5" />
             <span className="hidden sm:inline">音色合成</span>
@@ -4200,7 +4200,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
         </div>
 
         {/* Main Input Container + Bottom Compact Action Row */}
-        <div className="rounded-xl border border-[#e2e8f0] dark:border-[#18273a] bg-[#f8fafc] dark:bg-[#0e1726] focus-within:bg-white dark:focus-within:bg-[#101b2c] focus-within:border-[#2481cc] dark:focus-within:border-[#2ba0ff] transition-all">
+        <div className="rounded-xl border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#1e343e] bg-[#f8fafc] dark:bg-[#0e1726] aurora:bg-[#111d24] focus-within:bg-white dark:focus-within:bg-[#101b2c] aurora:focus-within:bg-[#13222b] focus-within:border-[#2481cc] dark:focus-within:border-[#2ba0ff] aurora:focus-within:border-[#2dd4bf] transition-all">
           <input
             type="text"
             value={inputText}
@@ -4262,8 +4262,8 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                 title="基于人设与最近30条对话生成 AI 拟真回复"
                 className={`flex items-center gap-1 px-2.5 h-8 rounded-lg text-xs font-medium transition-all cursor-pointer ${
                   isGeneratingAi
-                    ? 'bg-[#e8f3ff] text-[#2481cc] dark:bg-[#2481cc]/20 dark:text-[#2ba0ff]'
-                    : 'hover:bg-[#e8f3ff] text-[#2481cc] dark:text-[#2ba0ff] dark:hover:bg-[#2481cc]/15'
+                    ? 'bg-[#e8f3ff] text-[#2481cc] dark:bg-[#2481cc]/20 dark:text-[#2ba0ff] aurora:bg-[#112e37] aurora:text-[#5eead4]'
+                    : 'hover:bg-[#e8f3ff] text-[#2481cc] dark:text-[#2ba0ff] dark:hover:bg-[#2481cc]/15 aurora:text-[#5eead4] aurora:hover:bg-[#112e37]'
                 }`}
               >
                 <Sparkles className={`w-3.5 h-3.5 ${isGeneratingAi ? 'animate-spin' : ''}`} />
@@ -4273,7 +4273,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
 
             {/* Right Actions: Shortcut hint + Mic / Send Button */}
             <div className="flex items-center gap-2">
-              <span className="hidden sm:inline text-[11px] text-[#94a3b8] dark:text-[#7f93a5] select-none">
+              <span className="hidden sm:inline text-[11px] text-[#94a3b8] dark:text-[#7f93a5] aurora:text-[#7e9aa5] select-none">
                 {sendWithEnter ? 'Enter 发送' : 'Ctrl+Enter 发送'}
               </span>
 
@@ -4283,7 +4283,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                   disabled={isSending}
                   onClick={pastedImage ? handleSendPastedImage : () => void handleSendText()}
                   title={editingMessage ? '保存修改' : pastedImage ? '发送照片' : '发送消息'}
-                  className={`h-8 px-3.5 rounded-lg bg-[#2481cc] hover:bg-[#1d6fb3] text-white text-xs font-medium flex items-center gap-1.5 transition-all cursor-pointer shadow-xs shrink-0 ${
+                  className={`h-8 px-3.5 rounded-lg bg-[#2481cc] hover:bg-[#1d6fb3] aurora:bg-[#0d9488] aurora:hover:bg-[#0f766e] text-white text-xs font-medium flex items-center gap-1.5 transition-all cursor-pointer shadow-xs shrink-0 ${
                     isSending ? 'opacity-50 pointer-events-none' : ''
                   }`}
                 >

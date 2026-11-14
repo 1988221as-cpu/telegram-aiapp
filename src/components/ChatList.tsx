@@ -328,19 +328,19 @@ export const ChatList: React.FC<ChatListProps> = ({
   return (
     <div
       style={{ width: `${width}px` }}
-      className="bg-white/95 dark:bg-[#09111d]/95 backdrop-blur-md border-r border-[#e2e8f0] dark:border-[#162436] flex flex-col h-full shrink-0 select-none transition-colors relative"
+      className="bg-white/95 dark:bg-[#09111d]/95 aurora:bg-[#0f171c]/95 backdrop-blur-md border-r border-[#e2e8f0] dark:border-[#162436] aurora:border-[#182b34] flex flex-col h-full shrink-0 select-none transition-colors relative"
     >
       {/* 1. Top Header: Search Bar + Compact New Chat Button */}
-      <div className="h-[56px] px-2.5 flex items-center gap-2 border-b border-[#e2e8f0] dark:border-[#162436] shrink-0">
+      <div className="h-[56px] px-2.5 flex items-center gap-2 border-b border-[#e2e8f0] dark:border-[#162436] aurora:border-[#182b34] shrink-0">
         {/* Search Input */}
         <div className="relative flex-1 flex items-center">
-          <Search className="w-3.5 h-3.5 text-[#64748b] dark:text-[#7f95ab] absolute left-3 pointer-events-none" />
+          <Search className="w-3.5 h-3.5 text-[#64748b] dark:text-[#7f95ab] aurora:text-[#7e9aa5] absolute left-3 pointer-events-none" />
           <input
             type="text"
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
             placeholder="搜索对话、频道与消息..."
-            className="w-full bg-[#f1f5f9]/90 dark:bg-[#0e1726] text-[#0f172a] dark:text-[#eef4fb] text-xs pl-8 pr-7 py-2 rounded-lg border border-[#e2e8f0] dark:border-[#18273a] focus:border-[#2ba0ff]/60 focus:bg-white dark:focus:bg-[#0b1320] focus:outline-none placeholder-[#94a3b8] dark:placeholder-[#566d85] transition-all"
+            className="w-full bg-[#f1f5f9]/90 dark:bg-[#0e1726] aurora:bg-[#162128] text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] text-xs pl-8 pr-7 py-2 rounded-lg border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#203540] focus:border-[#2ba0ff]/60 aurora:focus:border-[#2dd4bf]/60 focus:bg-white dark:focus:bg-[#0b1320] aurora:focus:bg-[#101b22] focus:outline-none placeholder-[#94a3b8] dark:placeholder-[#566d85] aurora:placeholder-[#617b86] transition-all"
           />
           {searchQuery && (
             <button
@@ -358,7 +358,7 @@ export const ChatList: React.FC<ChatListProps> = ({
             type="button"
             onClick={onNewChatClick}
             title="发起新聊天 / 联系人"
-            className="w-8 h-8 rounded-lg bg-[#f1f5f9] hover:bg-[#e8f3ff] dark:bg-[#0e1726] dark:hover:bg-[#132236] text-[#475569] hover:text-[#0284c7] dark:text-[#9bb3c9] dark:hover:text-[#2ba0ff] flex items-center justify-center transition-colors cursor-pointer shrink-0 border border-[#e2e8f0] dark:border-[#18273a] hover:border-[#bfdbfe] dark:hover:border-[#2ba0ff]/40"
+            className="w-8 h-8 rounded-lg bg-[#f1f5f9] hover:bg-[#e8f3ff] dark:bg-[#0e1726] dark:hover:bg-[#132236] aurora:bg-[#162128] aurora:hover:bg-[#112d36] text-[#475569] hover:text-[#0284c7] dark:text-[#9bb3c9] dark:hover:text-[#2ba0ff] aurora:text-[#89a5b0] aurora:hover:text-[#5eead4] flex items-center justify-center transition-colors cursor-pointer shrink-0 border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#203540] hover:border-[#bfdbfe] dark:hover:border-[#2ba0ff]/40 aurora:hover:border-[#2dd4bf]/45"
           >
             <PenSquare className="w-4 h-4" />
           </button>
@@ -410,13 +410,13 @@ export const ChatList: React.FC<ChatListProps> = ({
       )}
 
       {/* 2. Chat Folder Tabs */}
-      <div className="flex items-center px-2 py-1.5 gap-1 border-b border-[#e2e8f0] dark:border-[#162436] overflow-x-auto no-scrollbar text-[11.5px] font-medium shrink-0">
+      <div className="flex items-center px-2 py-1.5 gap-1 border-b border-[#e2e8f0] dark:border-[#162436] aurora:border-[#182b34] overflow-x-auto no-scrollbar text-[11.5px] font-medium shrink-0">
         <button
           onClick={() => setActiveFolder('all')}
           className={`px-2.5 py-1 rounded-lg transition-all cursor-pointer whitespace-nowrap shrink-0 relative border ${
             activeFolder === 'all'
-              ? 'text-[#0284c7] dark:text-[#2ba0ff] font-semibold bg-[#e8f3ff] dark:bg-[#13253b] border-[#bfdbfe]/70 dark:border-[#2ba0ff]/30'
-              : 'border-transparent text-[#64748b] dark:text-[#7f95ab] hover:text-[#0f172a] dark:hover:text-white hover:bg-[#f1f5f9] dark:hover:bg-[#0e1726]'
+              ? 'text-[#0284c7] dark:text-[#2ba0ff] aurora:text-[#5eead4] font-semibold bg-[#e8f3ff] dark:bg-[#13253b] aurora:bg-[#112e37] border-[#bfdbfe]/70 dark:border-[#2ba0ff]/30 aurora:border-[#2dd4bf]/35'
+              : 'border-transparent text-[#64748b] dark:text-[#7f95ab] aurora:text-[#7e9aa5] hover:text-[#0f172a] dark:hover:text-white aurora:hover:text-[#ecf6f8] hover:bg-[#f1f5f9] dark:hover:bg-[#0e1726] aurora:hover:bg-[#132129]'
           }`}
         >
           全部
@@ -426,13 +426,13 @@ export const ChatList: React.FC<ChatListProps> = ({
           onClick={() => setActiveFolder('unread')}
           className={`px-2.5 py-1 rounded-lg transition-all cursor-pointer whitespace-nowrap shrink-0 flex items-center gap-1 border ${
             activeFolder === 'unread'
-              ? 'text-[#0284c7] dark:text-[#2ba0ff] font-semibold bg-[#e8f3ff] dark:bg-[#13253b] border-[#bfdbfe]/70 dark:border-[#2ba0ff]/30'
-              : 'border-transparent text-[#64748b] dark:text-[#7f95ab] hover:text-[#0f172a] dark:hover:text-white hover:bg-[#f1f5f9] dark:hover:bg-[#0e1726]'
+              ? 'text-[#0284c7] dark:text-[#2ba0ff] aurora:text-[#5eead4] font-semibold bg-[#e8f3ff] dark:bg-[#13253b] aurora:bg-[#112e37] border-[#bfdbfe]/70 dark:border-[#2ba0ff]/30 aurora:border-[#2dd4bf]/35'
+              : 'border-transparent text-[#64748b] dark:text-[#7f95ab] aurora:text-[#7e9aa5] hover:text-[#0f172a] dark:hover:text-white aurora:hover:text-[#ecf6f8] hover:bg-[#f1f5f9] dark:hover:bg-[#0e1726] aurora:hover:bg-[#132129]'
           }`}
         >
           <span>未读</span>
           {unreadCount > 0 && (
-            <span className="px-1.5 py-0.2 rounded-full text-[10px] bg-[#2ba0ff] text-white font-bold leading-none tabular-nums">
+            <span className="px-1.5 py-0.2 rounded-full text-[10px] bg-[#2ba0ff] aurora:bg-[#14b8a6] text-white font-bold leading-none tabular-nums">
               {unreadCount}
             </span>
           )}
@@ -442,8 +442,8 @@ export const ChatList: React.FC<ChatListProps> = ({
           onClick={() => setActiveFolder('personal')}
           className={`px-2.5 py-1 rounded-lg transition-all cursor-pointer whitespace-nowrap shrink-0 border ${
             activeFolder === 'personal'
-              ? 'text-[#0284c7] dark:text-[#2ba0ff] font-semibold bg-[#e8f3ff] dark:bg-[#13253b] border-[#bfdbfe]/70 dark:border-[#2ba0ff]/30'
-              : 'border-transparent text-[#64748b] dark:text-[#7f95ab] hover:text-[#0f172a] dark:hover:text-white hover:bg-[#f1f5f9] dark:hover:bg-[#0e1726]'
+              ? 'text-[#0284c7] dark:text-[#2ba0ff] aurora:text-[#5eead4] font-semibold bg-[#e8f3ff] dark:bg-[#13253b] aurora:bg-[#112e37] border-[#bfdbfe]/70 dark:border-[#2ba0ff]/30 aurora:border-[#2dd4bf]/35'
+              : 'border-transparent text-[#64748b] dark:text-[#7f95ab] aurora:text-[#7e9aa5] hover:text-[#0f172a] dark:hover:text-white aurora:hover:text-[#ecf6f8] hover:bg-[#f1f5f9] dark:hover:bg-[#0e1726] aurora:hover:bg-[#132129]'
           }`}
         >
           私聊
@@ -453,8 +453,8 @@ export const ChatList: React.FC<ChatListProps> = ({
           onClick={() => setActiveFolder('groups')}
           className={`px-2.5 py-1 rounded-lg transition-all cursor-pointer whitespace-nowrap shrink-0 border ${
             activeFolder === 'groups'
-              ? 'text-[#0284c7] dark:text-[#2ba0ff] font-semibold bg-[#e8f3ff] dark:bg-[#13253b] border-[#bfdbfe]/70 dark:border-[#2ba0ff]/30'
-              : 'border-transparent text-[#64748b] dark:text-[#7f95ab] hover:text-[#0f172a] dark:hover:text-white hover:bg-[#f1f5f9] dark:hover:bg-[#0e1726]'
+              ? 'text-[#0284c7] dark:text-[#2ba0ff] aurora:text-[#5eead4] font-semibold bg-[#e8f3ff] dark:bg-[#13253b] aurora:bg-[#112e37] border-[#bfdbfe]/70 dark:border-[#2ba0ff]/30 aurora:border-[#2dd4bf]/35'
+              : 'border-transparent text-[#64748b] dark:text-[#7f95ab] aurora:text-[#7e9aa5] hover:text-[#0f172a] dark:hover:text-white aurora:hover:text-[#ecf6f8] hover:bg-[#f1f5f9] dark:hover:bg-[#0e1726] aurora:hover:bg-[#132129]'
           }`}
         >
           群组
@@ -464,8 +464,8 @@ export const ChatList: React.FC<ChatListProps> = ({
           onClick={() => setActiveFolder('channels')}
           className={`px-2.5 py-1 rounded-lg transition-all cursor-pointer whitespace-nowrap shrink-0 border ${
             activeFolder === 'channels'
-              ? 'text-[#0284c7] dark:text-[#2ba0ff] font-semibold bg-[#e8f3ff] dark:bg-[#13253b] border-[#bfdbfe]/70 dark:border-[#2ba0ff]/30'
-              : 'border-transparent text-[#64748b] dark:text-[#7f95ab] hover:text-[#0f172a] dark:hover:text-white hover:bg-[#f1f5f9] dark:hover:bg-[#0e1726]'
+              ? 'text-[#0284c7] dark:text-[#2ba0ff] aurora:text-[#5eead4] font-semibold bg-[#e8f3ff] dark:bg-[#13253b] aurora:bg-[#112e37] border-[#bfdbfe]/70 dark:border-[#2ba0ff]/30 aurora:border-[#2dd4bf]/35'
+              : 'border-transparent text-[#64748b] dark:text-[#7f95ab] aurora:text-[#7e9aa5] hover:text-[#0f172a] dark:hover:text-white aurora:hover:text-[#ecf6f8] hover:bg-[#f1f5f9] dark:hover:bg-[#0e1726] aurora:hover:bg-[#132129]'
           }`}
         >
           频道
@@ -475,8 +475,8 @@ export const ChatList: React.FC<ChatListProps> = ({
           onClick={() => setActiveFolder('bots')}
           className={`px-2.5 py-1 rounded-lg transition-all cursor-pointer whitespace-nowrap shrink-0 border ${
             activeFolder === 'bots'
-              ? 'text-[#0284c7] dark:text-[#2ba0ff] font-semibold bg-[#e8f3ff] dark:bg-[#13253b] border-[#bfdbfe]/70 dark:border-[#2ba0ff]/30'
-              : 'border-transparent text-[#64748b] dark:text-[#7f95ab] hover:text-[#0f172a] dark:hover:text-white hover:bg-[#f1f5f9] dark:hover:bg-[#0e1726]'
+              ? 'text-[#0284c7] dark:text-[#2ba0ff] aurora:text-[#5eead4] font-semibold bg-[#e8f3ff] dark:bg-[#13253b] aurora:bg-[#112e37] border-[#bfdbfe]/70 dark:border-[#2ba0ff]/30 aurora:border-[#2dd4bf]/35'
+              : 'border-transparent text-[#64748b] dark:text-[#7f95ab] aurora:text-[#7e9aa5] hover:text-[#0f172a] dark:hover:text-white aurora:hover:text-[#ecf6f8] hover:bg-[#f1f5f9] dark:hover:bg-[#0e1726] aurora:hover:bg-[#132129]'
           }`}
         >
           机器人
@@ -487,8 +487,8 @@ export const ChatList: React.FC<ChatListProps> = ({
             onClick={() => setActiveFolder('archived')}
             className={`px-2.5 py-1 rounded-lg transition-all cursor-pointer whitespace-nowrap shrink-0 flex items-center gap-1 border ${
               activeFolder === 'archived'
-                ? 'text-[#0284c7] dark:text-[#2ba0ff] font-semibold bg-[#e8f3ff] dark:bg-[#13253b] border-[#bfdbfe]/70 dark:border-[#2ba0ff]/30'
-                : 'border-transparent text-[#64748b] dark:text-[#7f95ab] hover:text-[#0f172a] dark:hover:text-white hover:bg-[#f1f5f9] dark:hover:bg-[#0e1726]'
+                ? 'text-[#0284c7] dark:text-[#2ba0ff] aurora:text-[#5eead4] font-semibold bg-[#e8f3ff] dark:bg-[#13253b] aurora:bg-[#112e37] border-[#bfdbfe]/70 dark:border-[#2ba0ff]/30 aurora:border-[#2dd4bf]/35'
+                : 'border-transparent text-[#64748b] dark:text-[#7f95ab] aurora:text-[#7e9aa5] hover:text-[#0f172a] dark:hover:text-white aurora:hover:text-[#ecf6f8] hover:bg-[#f1f5f9] dark:hover:bg-[#0e1726] aurora:hover:bg-[#132129]'
             }`}
           >
             <Archive className="w-3.5 h-3.5" />
@@ -531,9 +531,9 @@ export const ChatList: React.FC<ChatListProps> = ({
         )}
 
         {sortedChats.length === 0 ? (
-          <div className="p-8 text-center flex flex-col items-center justify-center gap-2 text-[#64748b] dark:text-[#7f95ab]">
-            <Search className="w-6 h-6 opacity-35 text-[#2ba0ff]" />
-            <span className="text-xs font-medium text-[#0f172a] dark:text-[#eef4fb]">
+          <div className="p-8 text-center flex flex-col items-center justify-center gap-2 text-[#64748b] dark:text-[#7f95ab] aurora:text-[#7e9aa5]">
+            <Search className="w-6 h-6 opacity-35 text-[#2ba0ff] aurora:text-[#2dd4bf]" />
+            <span className="text-xs font-medium text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8]">
               {activeFolder === 'archived'
                 ? '暂无已归档会话'
                 : chats.length === 0
@@ -552,8 +552,8 @@ export const ChatList: React.FC<ChatListProps> = ({
                 onContextMenu={(e) => handleOpenContextMenu(chat, e)}
                 className={`mx-1.5 flex items-center px-2.5 py-2.5 rounded-xl cursor-pointer transition-all relative group border ${
                   isSelected
-                    ? 'bg-[#e8f3ff]/90 border-[#bfdbfe] text-[#0f172a] dark:bg-[#12263f]/90 dark:border-[#2ba0ff]/35 dark:text-white shadow-xs'
-                    : 'border-transparent hover:bg-[#f8fafc] dark:hover:bg-[#0e1726]/75 text-[#0f172a] dark:text-[#eef4fb]'
+                    ? 'bg-[#e8f3ff]/90 border-[#bfdbfe] text-[#0f172a] dark:bg-[#12263f]/90 dark:border-[#2ba0ff]/35 dark:text-white aurora:bg-[#122b33]/90 aurora:border-[#2dd4bf]/40 aurora:text-[#ecf6f8] shadow-xs'
+                    : 'border-transparent hover:bg-[#f8fafc] dark:hover:bg-[#0e1726]/75 aurora:hover:bg-[#132129]/80 text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8]'
                 }`}
               >
                 {/* Contact Avatar */}
@@ -673,7 +673,7 @@ export const ChatList: React.FC<ChatListProps> = ({
                       {chat.isPinned && (
                         <Pin
                           className={`w-3 h-3 fill-current ${
-                            isSelected ? 'text-[#0284c7] dark:text-[#2ba0ff]' : 'text-[#0284c7] dark:text-[#2ba0ff]'
+                            isSelected ? 'text-[#0284c7] dark:text-[#2ba0ff] aurora:text-[#2dd4bf]' : 'text-[#0284c7] dark:text-[#2ba0ff] aurora:text-[#2dd4bf]'
                           }`}
                         />
                       )}
@@ -683,8 +683,8 @@ export const ChatList: React.FC<ChatListProps> = ({
                         <span
                           className={`min-w-[18px] h-[18px] px-1.5 rounded-full text-[10.5px] font-bold flex items-center justify-center tabular-nums leading-none ${
                             isSelected
-                              ? 'bg-[#2ba0ff] text-white'
-                              : 'bg-[#2ba0ff] text-white'
+                              ? 'bg-[#2ba0ff] aurora:bg-[#14b8a6] text-white'
+                              : 'bg-[#2ba0ff] aurora:bg-[#14b8a6] text-white'
                           }`}
                         >
                           {chat.unreadCount}
@@ -719,12 +719,12 @@ export const ChatList: React.FC<ChatListProps> = ({
         onDoubleClick={() => setWidth(280)}
         title="拖拽调整宽度 (双击恢复)"
         className={`absolute top-0 right-0 w-2 h-full cursor-col-resize z-20 group transition-colors ${
-          isResizing ? 'bg-[#2ba0ff]/40' : 'hover:bg-[#2ba0ff]/30 bg-transparent'
+          isResizing ? 'bg-[#2ba0ff]/40 aurora:bg-[#2dd4bf]/40' : 'hover:bg-[#2ba0ff]/30 aurora:hover:bg-[#2dd4bf]/30 bg-transparent'
         }`}
       >
         <div
           className={`w-[2px] h-full ml-auto transition-colors ${
-            isResizing ? 'bg-[#2ba0ff]' : 'group-hover:bg-[#2ba0ff] bg-transparent'
+            isResizing ? 'bg-[#2ba0ff] aurora:bg-[#2dd4bf]' : 'group-hover:bg-[#2ba0ff] aurora:group-hover:bg-[#2dd4bf] bg-transparent'
           }`}
         />
       </div>

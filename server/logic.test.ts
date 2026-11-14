@@ -1729,7 +1729,7 @@ test('Issue #16: server routes default cloud brain requests through Cloudflare W
   assert.equal(workerSrc.includes("'X-Engine-License'"), true);
   assert.equal(workerSrc.includes("'X-License-Key'"), true);
   assert.equal(workerSrc.includes('telegram-messages-reply-to-large-models-production.up.railway.app'), false);
-  assert.match(serverSrc, /searchRailwayKnowledgeBase\(\s*(?:text|effectiveIncomingText),[\s\S]*?lastActiveUserJwt \|\| undefined/);
+  assert.match(serverSrc, /searchRailwayKnowledgeBase\(\s*(?:text|effectiveIncomingText|autoRagQuery|combinedText),[\s\S]*?lastActiveUserJwt \|\| undefined/);
   assert.match(serverSrc, /searchRailwayKnowledgeBase\(\s*combinedText,[\s\S]*?lastActiveUserJwt \|\| undefined/);
   assert.match(serverSrc, /callCustomLlm\(\{\s*customConfig: serverCustomConfig,[\s\S]*?userJwt: lastActiveUserJwt \|\| undefined/);
 });
@@ -2146,7 +2146,7 @@ test('Priority Custom Key mode: mutually exclusive with Cloud RAG and routes cha
   );
   assert.match(
     serverSrc,
-    /getCnTranslationIfForeign\(\s*replyText,\s*undefined,\s*lastActiveUserJwt \|\| undefined,\s*webhookChatTargetLang\s*\)/
+    /getCnTranslationIfForeign\(\s*replyText,\s*serverCustomConfig,\s*lastActiveUserJwt \|\| undefined,\s*webhookChatTargetLang\s*\)/
   );
   assert.match(
     serverSrc,
@@ -2877,6 +2877,9 @@ test('Commercialization Audit P0/P1 Fixes: socks dependency, proxy-forwarded pre
   const authModalSrc = readFileSync(resolve(process.cwd(), 'src/components/MemberAuthModal.tsx'), 'utf8');
   assert.equal(authModalSrc.includes('savePreLoginProxyApi'), true);
   assert.equal(authModalSrc.includes('网络代理设置'), true);
+  assert.equal(authModalSrc.includes('返回会员登录'), true);
+  assert.equal(authModalSrc.includes("switchTab('register')"), true);
+  assert.equal(authModalSrc.includes("switchTab('redeem')"), true);
 
   const appSrc = readFileSync(resolve(process.cwd(), 'src/App.tsx'), 'utf8');
   assert.equal(appSrc.includes("secureSetItemSync('tg_pro_messages'"), false);
@@ -5138,9 +5141,9 @@ test('H1: extractRecentTwoWayMessages, /api/llm/chat, MTProto autopilot, and Bot
       'Expected /api/llm/chat to pass accountId into extractRecentTwoWayMessages'
     );
     assert.equal(
-      serverSrc.includes('extractRecentTwoWayMessages(canonicalChatId, rawChatId, [], 20, accountId)'),
+      serverSrc.includes('extractRecentTwoWayMessages(canonicalChatId, rawChatId, [], 30, accountId)'),
       true,
-      'Expected MTProto autopilot to pass accountId into extractRecentTwoWayMessages'
+      'Expected MTProto autopilot to pass accountId and 30 turns into extractRecentTwoWayMessages'
     );
     assert.equal(
       serverSrc.includes("WHERE (chat_id = ? OR chat_id = ?) AND account_id IN ('acc_telegram_bot', 'acc_1')"),
@@ -7119,6 +7122,577 @@ test('P1 Fix 4-6: Real document parsing (UTF-8/UTF-16/GB18030/CSV/JSON/PDF), chu
     else process.env.JWT_SECRET = prevJwtSecret;
   }
 });
+
+test('P2 #7: unifies 30-turn history, 4-msg RAG window, transcripts without hardcoded catchphrase, cold-start blankness, character budget, Webhook translation config, and real Cloud RAG test-reply', async () => {
+  const { readFileSync } = await import('node:fs');
+  const { resolve } = await import('node:path');
+  const http = await import('node:http');
+  const { createHmac } = await import('node:crypto');
+  const { db, initDatabase } = await import('./db.ts');
+  const {
+    app,
+    getServerCustomLlmConfig,
+    syncServerCustomLlmConfig,
+    UNIFIED_REPLY_HISTORY_LIMIT,
+    UNIFIED_RAG_WINDOW_MESSAGES,
+    UNIFIED_TRANSCRIPT_SNIPPET_LINES,
+    UNIFIED_SYSTEM_PROMPT_BUDGET_CHARS,
+    buildUnifiedRagQuery,
+    isCustomerColdStartProfile,
+    buildUnifiedColdStartGuideline,
+    formatUnifiedTranscriptContext,
+    normalizeTestReplyHistoryTurns,
+    applyPromptCharacterBudget,
+  } = await import('../server.ts');
+
+  await initDatabase();
+
+  // 1. Unit assertions for shared reply pipeline constants & helpers
+  assert.equal(UNIFIED_REPLY_HISTORY_LIMIT, 30);
+  assert.equal(UNIFIED_RAG_WINDOW_MESSAGES, 4);
+  assert.equal(UNIFIED_TRANSCRIPT_SNIPPET_LINES, 14);
+  assert.equal(UNIFIED_SYSTEM_PROMPT_BUDGET_CHARS, 14000);
+
+  const ragQuery = buildUnifiedRagQuery(
+    [
+      { text: 'turn 1 old' },
+      { text: 'turn 2 old' },
+      { text: 'turn 3 recent' },
+      { text: 'turn 4 recent' },
+      { text: 'turn 5 recent' },
+    ],
+    'turn 6 incoming'
+  );
+  assert.equal(ragQuery, 'turn 3 recent turn 4 recent turn 5 recent turn 6 incoming');
+
+  assert.equal(isCustomerColdStartProfile(null, [], []), true);
+  assert.equal(isCustomerColdStartProfile({ relationship_stage: '初次沟通' }, ['coffee'], []), true);
+  assert.equal(isCustomerColdStartProfile({ relationship_stage: '深度熟人' }, ['coffee'], []), false);
+  assert.match(buildUnifiedColdStartGuideline(true, []), /冷启动客观留白准则/);
+  assert.match(buildUnifiedColdStartGuideline(false, ['高尔夫']), /高尔夫/);
+
+  const manyLines = Array.from({ length: 20 }, (_, i) => `L${i + 1}: dialogue`).join('\n');
+  const formattedTranscript = formatUnifiedTranscriptContext([
+    { title: '真实销冠记录', learned_style: '克制真诚', dialogue_text: manyLines },
+  ]);
+  assert.equal(formattedTranscript.includes('小笨蛋'), false);
+  assert.equal(formattedTranscript.includes('L7: dialogue'), true);
+  assert.equal(formattedTranscript.includes('L6: dialogue'), false);
+
+  const normalized30 = normalizeTestReplyHistoryTurns(
+    Array.from({ length: 40 }, (_, i) => ({ sender: i % 2 === 0 ? 'peer' : 'me', text: `msg_${i + 1}` })),
+    'latest_msg'
+  );
+  assert.equal(normalized30.length, 30);
+  assert.equal(normalized30[normalized30.length - 1]?.text, 'latest_msg');
+
+  const budgeted = applyPromptCharacterBudget(
+    {
+      persona: 'CORE_PERSONA',
+      antiAi: 'CORE_ANTIAI',
+      coldStartGuideline: 'CORE_COLDSTART',
+      profile: 'PROFILE_' + 'A'.repeat(2000),
+      knowledge: 'KB_' + 'B'.repeat(5000),
+      transcripts: 'TRANS_' + 'C'.repeat(9000),
+      langConstraint: 'LANG_LOCK',
+    },
+    6000
+  );
+  assert.equal(budgeted.truncated, true);
+  assert.ok(budgeted.totalChars <= 6000);
+  assert.ok(budgeted.prompt.includes('CORE_PERSONA'));
+  assert.ok(budgeted.prompt.includes('CORE_ANTIAI'));
+  assert.ok(budgeted.prompt.includes('CORE_COLDSTART'));
+  assert.ok(budgeted.prompt.includes('LANG_LOCK'));
+
+  // 2. Source contract verification across all 4 AI reply paths + KnowledgeEvolutionModal
+  const serverSrc = readFileSync(resolve(process.cwd(), 'server.ts'), 'utf8');
+  assert.equal(serverSrc.includes('小笨蛋'), false, 'Hardcoded catchphrase must be removed completely from server.ts');
+  assert.match(serverSrc, /app\.post\('\/api\/llm\/chat'[\s\S]*?applyPromptCharacterBudget/);
+  assert.match(serverSrc, /processTelegramMessageAsync[\s\S]*?LIMIT 30[\s\S]*?loadUnifiedTranscriptContext\('acc_telegram_bot'\)[\s\S]*?applyPromptCharacterBudget[\s\S]*?getCnTranslationIfForeign\(\s*replyText,\s*serverCustomConfig/);
+  assert.match(serverSrc, /extractRecentTwoWayMessages\(canonicalChatId, rawChatId, \[\], 30, accountId\)[\s\S]*?buildUnifiedRagQuery[\s\S]*?applyPromptCharacterBudget/);
+
+  const keModalSrc = readFileSync(resolve(process.cwd(), 'src/components/KnowledgeEvolutionModal.tsx'), 'utf8');
+  assert.match(keModalSrc, /云端知识库 \(Cloud RAG\)/);
+  assert.match(keModalSrc, /本地知识库:/);
+
+  // 3. HTTP runtime test: /api/persona/test-reply genuinely queries Cloud RAG & enforces disconnection guard
+  const prevJwtSecret = process.env.JWT_SECRET;
+  const prevBrainUrl = process.env.RAILWAY_BRAIN_URL;
+  process.env.JWT_SECRET = 'p2_7_test_jwt_secret';
+  const prevCustomCfg = await getServerCustomLlmConfig().catch(() => null);
+
+  let cloudRagRequests = 0;
+  let failCloudRag = false;
+  let capturedLlmMessages: any[] = [];
+  let capturedSystemPrompt = '';
+
+  const mockCloudSrv = http.createServer(async (req, res) => {
+    const chunks: Buffer[] = [];
+    for await (const c of req) chunks.push(Buffer.from(c));
+    const bodyStr = Buffer.concat(chunks).toString('utf8');
+    let bodyJson: any = {};
+    try {
+      bodyJson = JSON.parse(bodyStr);
+    } catch {}
+
+    if (req.url?.startsWith('/api/knowledge/search')) {
+      cloudRagRequests++;
+      if (failCloudRag) {
+        res.writeHead(502, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Mock Cloud KB Gateway Down' }));
+        return;
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(
+        JSON.stringify({
+          results: [
+            {
+              id: 'ckb_1',
+              title: '结算对账标准',
+              content: '支持每日 T+0 实时结算与双语对账单导出。',
+              category: '结算',
+            },
+          ],
+        })
+      );
+      return;
+    }
+
+    if (req.url?.includes('/chat/completions')) {
+      capturedLlmMessages = Array.isArray(bodyJson.messages) ? bodyJson.messages : [];
+      capturedSystemPrompt = capturedLlmMessages.find((m: any) => m.role === 'system')?.content || '';
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(
+        JSON.stringify({
+          id: 'chatcmpl_p2_7',
+          choices: [{ message: { role: 'assistant', content: '我们支持每日T+0实时结算，我发份双语对账单样例给您看下。' } }],
+        })
+      );
+      return;
+    }
+
+    res.writeHead(404, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'Not Found' }));
+  });
+
+  await new Promise<void>((r) => mockCloudSrv.listen(0, '127.0.0.1', r));
+  const mockCloudPort = (mockCloudSrv.address() as any).port;
+  process.env.RAILWAY_BRAIN_URL = `http://127.0.0.1:${mockCloudPort}`;
+
+  const appSrv = http.createServer(app);
+  await new Promise<void>((r) => appSrv.listen(0, '127.0.0.1', r));
+  const appPort = (appSrv.address() as any).port;
+
+  const headerB64 = Buffer.from(JSON.stringify({ alg: 'HS256', typ: 'JWT' })).toString('base64url');
+  const payloadB64 = Buffer.from(
+    JSON.stringify({ sub: 'member_p2_7', username: 'member_p2_7', role: 'member', exp: Math.floor(Date.now() / 1000) + 3600 })
+  ).toString('base64url');
+  const sigB64 = createHmac('sha256', process.env.JWT_SECRET).update(`${headerB64}.${payloadB64}`).digest('base64url');
+  const memberJwt = `${headerB64}.${payloadB64}.${sigB64}`;
+
+  const testAcc = `acc_tg_p2_7_${Date.now()}`;
+  const kbId = `kb_p2_7_${Date.now()}`;
+
+  try {
+    await db
+      .prepare(
+        `INSERT INTO knowledge_base (id, account_id, title, content, category, keywords, source_type, is_active, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, 'manual', 1, ?, ?)`
+      )
+      .run(kbId, testAcc, '本地结算说明', '支持多种合规币种实时结算与资金隔离托管。', '业务规则', '结算 资金', Date.now(), Date.now());
+
+    const cloudConfig = {
+      enabled: true,
+      explicitlyDisabled: false,
+      engineMode: 'cloud',
+      baseUrl: `http://127.0.0.1:${mockCloudPort}/v1`,
+      apiKey: 'test-cloud-key',
+      engineLicenseKey: 'test-license-key',
+      modelName: 'gemini-4-hydrogen',
+      enableKnowledgeBaseRAG: true,
+    };
+
+    const resOk = await fetch(`http://127.0.0.1:${appPort}/api/persona/test-reply`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${memberJwt}`,
+        'X-Account-Id': testAcc,
+      },
+      body: JSON.stringify({
+        message: '你们的结算周期是怎样的？',
+        recentChatHistory: [
+          { sender: 'peer', text: '你好，我想了解一下你们的产品服务' },
+          { sender: 'me', text: '你好呀，请问主要想了解哪部分呢？' },
+          { sender: 'peer', text: '主要是结算方面的问题' },
+        ],
+        customConfig: cloudConfig,
+      }),
+    });
+    assert.equal(resOk.status, 200);
+    const dataOk = (await resOk.json()) as any;
+    assert.ok(cloudRagRequests >= 1, 'Expected /api/persona/test-reply to genuinely call Cloud RAG');
+    assert.equal(dataOk.ragSources?.cloudRagEnabled, true);
+    assert.equal(dataOk.ragSources?.cloudRagMatchedCount, 1);
+    assert.equal(dataOk.ragSources?.localRagMatchedCount, 1);
+    assert.ok(dataOk.matchedKnowledge.some((k: any) => k.source === 'cloud_kb' && k.title === '结算对账标准'));
+    assert.ok(dataOk.matchedKnowledge.some((k: any) => k.source === 'local_rag' && k.title === '本地结算说明'));
+    assert.ok(capturedSystemPrompt.includes('冷启动客观留白准则'));
+    assert.ok(capturedLlmMessages.some((m: any) => m.role === 'assistant' && m.content.includes('请问主要想了解哪部分呢')));
+
+    // Verify Cloud RAG failure blocks instead of silently degrading
+    failCloudRag = true;
+    const resBlocked = await fetch(`http://127.0.0.1:${appPort}/api/persona/test-reply`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${memberJwt}`,
+        'X-Account-Id': testAcc,
+      },
+      body: JSON.stringify({
+        message: '换个问题测试断连拦截：资金安全怎么保障？',
+        customConfig: cloudConfig,
+      }),
+    });
+    assert.equal(resBlocked.status, 502);
+    const dataBlocked = (await resBlocked.json()) as any;
+    assert.equal(dataBlocked.blocked, true);
+    assert.equal(dataBlocked.source, 'cloud_kb_disconnection_guard');
+  } finally {
+    await db.prepare('DELETE FROM knowledge_base WHERE id = ?').run(kbId).catch(() => {});
+    await syncServerCustomLlmConfig(prevCustomCfg || { enabled: true, engineMode: 'cloud', apiKey: '', engineLicenseKey: '' });
+    await new Promise<void>((r) => appSrv.close(() => r()));
+    await new Promise<void>((r) => mockCloudSrv.close(() => r()));
+    if (prevBrainUrl === undefined) delete process.env.RAILWAY_BRAIN_URL;
+    else process.env.RAILWAY_BRAIN_URL = prevBrainUrl;
+    if (prevJwtSecret === undefined) delete process.env.JWT_SECRET;
+    else process.env.JWT_SECRET = prevJwtSecret;
+  }
+});
+
+test('P2 #8: CustomLLMModal protocol selector preserves protocol, aligns /api/llm/ping URLs, intercepts empty Gemini models, validates inference payloads, and passes through upstream errors', async () => {
+  const { readFileSync } = await import('node:fs');
+  const { resolve } = await import('node:path');
+  const http = await import('node:http');
+  const { createHmac } = await import('node:crypto');
+  const { initDatabase } = await import('./db.ts');
+  const {
+    app,
+    inferGatewayProtocol,
+    buildCustomGeminiUrl,
+    buildCustomOpenAiUrls,
+    validatePingInferencePayload,
+  } = await import('../server.ts');
+  const { inferGatewayProtocolFromUrlAndModel } = await import('../src/services/apiService.ts');
+
+  await initDatabase();
+
+  // 1. Unit assertions for protocol preservation & URL / model / payload helpers
+  assert.equal(inferGatewayProtocol('https://relay.example.com', 'gpt-4o', 'anthropic'), 'anthropic');
+  assert.equal(inferGatewayProtocol('https://relay.example.com', 'claude-3-5-sonnet', 'gemini'), 'gemini');
+  assert.equal(inferGatewayProtocol('https://relay.example.com', 'gemini-2.5-flash', 'openai'), 'openai');
+  assert.equal(inferGatewayProtocol('https://relay.example.com', 'claude-3-5-sonnet', 'auto'), 'openai');
+  assert.equal(inferGatewayProtocol('https://relay.example.com/v1beta', '', 'auto'), 'gemini');
+  assert.equal(inferGatewayProtocolFromUrlAndModel('https://relay.example.com', 'gpt-4o', 'gemini'), 'gemini');
+  assert.equal(inferGatewayProtocolFromUrlAndModel('https://relay.example.com', '', 'anthropic'), 'anthropic');
+  assert.equal(inferGatewayProtocolFromUrlAndModel('https://relay.example.com/v1beta', '', 'auto'), 'gemini');
+
+  assert.throws(() => buildCustomGeminiUrl('https://relay.example.com', ''), /拦截空模型请求/);
+  assert.deepEqual(buildCustomOpenAiUrls('https://relay.example.com/api'), [
+    'https://relay.example.com/api/v1/chat/completions',
+    'https://relay.example.com/api/chat/completions',
+    'https://relay.example.com/api/api/chat/completions',
+    'https://relay.example.com/api/api/v1/chat/completions',
+  ]);
+  assert.deepEqual(buildCustomOpenAiUrls('https://relay.example.com'), [
+    'https://relay.example.com/v1/chat/completions',
+    'https://relay.example.com/chat/completions',
+    'https://relay.example.com/api/chat/completions',
+    'https://relay.example.com/api/v1/chat/completions',
+  ]);
+
+  assert.equal(validatePingInferencePayload('openai', '<html><body>502 Bad Gateway</body></html>').ok, false);
+  assert.equal(validatePingInferencePayload('openai', JSON.stringify({ error: { message: 'Quota exceeded upstream' } })).ok, false);
+  assert.equal(validatePingInferencePayload('openai', JSON.stringify({ ok: true })).ok, false);
+  assert.equal(validatePingInferencePayload('openai', JSON.stringify({ choices: [{ message: { content: 'pong' } }] })).ok, true);
+  assert.equal(validatePingInferencePayload('gemini', JSON.stringify({ candidates: [{ content: { parts: [{ text: 'pong' }] } }] })).ok, true);
+  assert.equal(validatePingInferencePayload('anthropic', JSON.stringify({ content: [{ type: 'text', text: 'pong' }] })).ok, true);
+
+  // 2. Frontend UI / service contracts
+  const modalSrc = readFileSync(resolve(process.cwd(), 'src/components/CustomLLMModal.tsx'), 'utf8');
+  const apiSvcSrc = readFileSync(resolve(process.cwd(), 'src/services/apiService.ts'), 'utf8');
+  assert.match(modalSrc, /接口协议 \(Protocol\)/);
+  assert.match(modalSrc, /value="auto"[\s\S]*?value="openai"[\s\S]*?value="anthropic"[\s\S]*?value="gemini"/);
+  assert.match(modalSrc, /const probeModel = cleanModel;/);
+  assert.equal(modalSrc.includes("cleanModelName || (resolvedSaveProto === 'gemini' ? '' : 'gpt-4o-mini')"), true);
+  assert.equal(apiSvcSrc.includes("inferredProtocol === 'gemini'"), true);
+
+  // 3. HTTP runtime tests against real local mock gateways
+  const prevJwtSecret = process.env.JWT_SECRET;
+  process.env.JWT_SECRET = 'p2_8_test_jwt_secret';
+
+  const hitPaths: string[] = [];
+  let gatewayBehavior:
+    | 'openai_api_prefix_ok'
+    | 'fake_200_html'
+    | 'upstream_429_detail'
+    | 'anthropic_ok'
+    | 'gemini_no_models_list'
+    | 'gemini_inference_ok' = 'openai_api_prefix_ok';
+
+  const mockGateway = http.createServer(async (req, res) => {
+    hitPaths.push(`${req.method} ${req.url}`);
+    const chunks: Buffer[] = [];
+    for await (const c of req) chunks.push(Buffer.from(c));
+
+    if (gatewayBehavior === 'fake_200_html') {
+      res.writeHead(200, { 'Content-Type': 'text/html' });
+      res.end('<!doctype html><html><body>Login Portal</body></html>');
+      return;
+    }
+
+    if (gatewayBehavior === 'upstream_429_detail') {
+      res.writeHead(429, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: { message: 'UPSTREAM_DETAIL_QUOTA_EXHAUSTED_9876' } }));
+      return;
+    }
+
+    if (gatewayBehavior === 'openai_api_prefix_ok' && req.url === '/api/chat/completions') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ choices: [{ message: { content: 'pong' } }] }));
+      return;
+    }
+
+    if (gatewayBehavior === 'anthropic_ok' && req.url === '/v1/messages') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ type: 'message', content: [{ type: 'text', text: 'pong' }] }));
+      return;
+    }
+
+    if (gatewayBehavior === 'gemini_no_models_list') {
+      res.writeHead(404, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: { message: 'models endpoint disabled on relay' } }));
+      return;
+    }
+
+    if (gatewayBehavior === 'gemini_inference_ok' && req.url === '/v1beta/models/gemini-2.5-flash:generateContent') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ candidates: [{ content: { parts: [{ text: 'pong' }] } }] }));
+      return;
+    }
+
+    res.writeHead(404, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: { message: 'Route not found on mock gateway' } }));
+  });
+
+  await new Promise<void>((r) => mockGateway.listen(0, '127.0.0.1', r));
+  const mockPort = (mockGateway.address() as any).port;
+
+  const appSrv = http.createServer(app);
+  await new Promise<void>((r) => appSrv.listen(0, '127.0.0.1', r));
+  const appPort = (appSrv.address() as any).port;
+
+  const headerB64 = Buffer.from(JSON.stringify({ alg: 'HS256', typ: 'JWT' })).toString('base64url');
+  const payloadB64 = Buffer.from(
+    JSON.stringify({ sub: 'member_p2_8', username: 'member_p2_8', role: 'member', exp: Math.floor(Date.now() / 1000) + 3600 })
+  ).toString('base64url');
+  const sigB64 = createHmac('sha256', process.env.JWT_SECRET).update(`${headerB64}.${payloadB64}`).digest('base64url');
+  const memberJwt = `${headerB64}.${payloadB64}.${sigB64}`;
+
+  const authHeaders = {
+    'Content-Type': 'application/json',
+    Authorization: `Bearer ${memberJwt}`,
+    'X-Account-Id': 'acc_p2_8',
+  };
+
+  try {
+    // 3a. Aligned OpenAI candidate URLs (/api/chat/completions)
+    gatewayBehavior = 'openai_api_prefix_ok';
+    hitPaths.length = 0;
+    const pingOpenAiApi = await fetch(`http://127.0.0.1:${appPort}/api/llm/ping`, {
+      method: 'POST',
+      headers: authHeaders,
+      body: JSON.stringify({
+        baseUrl: `http://127.0.0.1:${mockPort}/api`,
+        apiKey: 'sk-test',
+        modelName: 'gpt-4o-mini',
+        protocol: 'openai',
+        engineMode: 'custom',
+      }),
+    });
+    assert.equal(pingOpenAiApi.status, 200);
+    const pingOpenAiJson = (await pingOpenAiApi.json()) as any;
+    assert.equal(pingOpenAiJson.ok, true);
+    assert.ok(hitPaths.includes('POST /api/chat/completions'));
+
+    // 3b. Explicit Anthropic protocol works on arbitrary host
+    gatewayBehavior = 'anthropic_ok';
+    hitPaths.length = 0;
+    const pingAnthropic = await fetch(`http://127.0.0.1:${appPort}/api/llm/ping`, {
+      method: 'POST',
+      headers: authHeaders,
+      body: JSON.stringify({
+        baseUrl: `http://127.0.0.1:${mockPort}`,
+        apiKey: 'sk-ant-test',
+        modelName: 'claude-3-5-sonnet-20241022',
+        protocol: 'anthropic',
+        engineMode: 'custom',
+      }),
+    });
+    assert.equal(pingAnthropic.status, 200);
+    assert.ok(hitPaths.includes('POST /v1/messages'));
+
+    // 3c. Gemini empty model interception (must NOT probe gemini-4-hydrogen!)
+    gatewayBehavior = 'gemini_no_models_list';
+    hitPaths.length = 0;
+    const pingGeminiEmpty = await fetch(`http://127.0.0.1:${appPort}/api/llm/ping`, {
+      method: 'POST',
+      headers: authHeaders,
+      body: JSON.stringify({
+        baseUrl: `http://127.0.0.1:${mockPort}`,
+        apiKey: 'AIzaTestKey',
+        modelName: '',
+        protocol: 'gemini',
+        engineMode: 'custom',
+      }),
+    });
+    assert.equal(pingGeminiEmpty.status, 400);
+    const pingGeminiEmptyJson = (await pingGeminiEmpty.json()) as any;
+    assert.equal(pingGeminiEmptyJson.ok, false);
+    assert.equal(pingGeminiEmptyJson.source, 'custom_llm_missing_model');
+    assert.equal(hitPaths.some((p) => p.includes('gemini-4-hydrogen') || p.includes(':generateContent')), false);
+
+    // 3d. Gemini explicit model runs real :generateContent inference handshake
+    gatewayBehavior = 'gemini_inference_ok';
+    hitPaths.length = 0;
+    const pingGeminiValid = await fetch(`http://127.0.0.1:${appPort}/api/llm/ping`, {
+      method: 'POST',
+      headers: authHeaders,
+      body: JSON.stringify({
+        baseUrl: `http://127.0.0.1:${mockPort}`,
+        apiKey: 'AIzaTestKey',
+        modelName: 'gemini-2.5-flash',
+        protocol: 'gemini',
+        engineMode: 'custom',
+      }),
+    });
+    assert.equal(pingGeminiValid.status, 200);
+    assert.ok(hitPaths.includes('POST /v1beta/models/gemini-2.5-flash:generateContent'));
+
+    // 3e. Fake HTTP 200 HTML portal page is rejected as failed handshake (502)
+    gatewayBehavior = 'fake_200_html';
+    const pingFakeHtml = await fetch(`http://127.0.0.1:${appPort}/api/llm/ping`, {
+      method: 'POST',
+      headers: authHeaders,
+      body: JSON.stringify({
+        baseUrl: `http://127.0.0.1:${mockPort}`,
+        apiKey: 'sk-test',
+        modelName: 'gpt-4o-mini',
+        protocol: 'openai',
+        engineMode: 'custom',
+      }),
+    });
+    assert.equal(pingFakeHtml.status, 502);
+    const pingFakeHtmlJson = (await pingFakeHtml.json()) as any;
+    assert.equal(pingFakeHtmlJson.ok, false);
+    assert.match(pingFakeHtmlJson.error, /HTML/);
+
+    // 3f. Upstream detailed error passthrough in both /api/llm/ping and /api/llm/chat
+    gatewayBehavior = 'upstream_429_detail';
+    const pingErr = await fetch(`http://127.0.0.1:${appPort}/api/llm/ping`, {
+      method: 'POST',
+      headers: authHeaders,
+      body: JSON.stringify({
+        baseUrl: `http://127.0.0.1:${mockPort}`,
+        apiKey: 'sk-test',
+        modelName: 'gpt-4o-mini',
+        protocol: 'openai',
+        engineMode: 'custom',
+      }),
+    });
+    assert.equal(pingErr.status, 429);
+    const pingErrJson = (await pingErr.json()) as any;
+    assert.match(pingErrJson.error, /UPSTREAM_DETAIL_QUOTA_EXHAUSTED_9876/);
+
+    const chatGeminiBlocked = await fetch(`http://127.0.0.1:${appPort}/api/llm/chat`, {
+      method: 'POST',
+      headers: authHeaders,
+      body: JSON.stringify({
+        chatId: 'tg_p2_8_chat',
+        accountId: 'acc_p2_8',
+        messages: [{ sender: 'peer', text: 'hello' }],
+        customConfig: {
+          enabled: true,
+          engineMode: 'custom',
+          protocol: 'gemini',
+          baseUrl: `http://127.0.0.1:${mockPort}`,
+          apiKey: 'AIzaTestKey',
+          modelName: '',
+        },
+      }),
+    });
+    assert.equal(chatGeminiBlocked.status, 400);
+    const chatGeminiBlockedJson = (await chatGeminiBlocked.json()) as any;
+    assert.equal(chatGeminiBlockedJson.source, 'custom_llm_missing_model');
+
+    const chatUpstreamErr = await fetch(`http://127.0.0.1:${appPort}/api/llm/chat`, {
+      method: 'POST',
+      headers: authHeaders,
+      body: JSON.stringify({
+        chatId: 'tg_p2_8_chat',
+        accountId: 'acc_p2_8',
+        messages: [{ sender: 'peer', text: 'hello' }],
+        customConfig: {
+          enabled: true,
+          engineMode: 'custom',
+          protocol: 'openai',
+          baseUrl: `http://127.0.0.1:${mockPort}`,
+          apiKey: 'sk-test',
+          modelName: 'gpt-4o-mini',
+        },
+      }),
+    });
+    assert.equal(chatUpstreamErr.status, 429);
+    const chatUpstreamErrJson = (await chatUpstreamErr.json()) as any;
+    assert.match(chatUpstreamErrJson.error, /UPSTREAM_DETAIL_QUOTA_EXHAUSTED_9876/);
+    assert.match(chatUpstreamErrJson.upstreamError, /UPSTREAM_DETAIL_QUOTA_EXHAUSTED_9876/);
+  } finally {
+    await new Promise<void>((r) => appSrv.close(() => r()));
+    await new Promise<void>((r) => mockGateway.close(() => r()));
+    if (prevJwtSecret === undefined) delete process.env.JWT_SECRET;
+    else process.env.JWT_SECRET = prevJwtSecret;
+  }
+});
+
+test('UI Theme Support: 3rd aurora cyan-teal mode is wired alongside light & dark without breaking light/dark', async () => {
+  const { readFileSync } = await import('node:fs');
+  const { resolve } = await import('node:path');
+  const typesSrc = readFileSync(resolve(process.cwd(), 'src', 'types', 'index.ts'), 'utf8');
+  const cssSrc = readFileSync(resolve(process.cwd(), 'src', 'index.css'), 'utf8');
+  const appSrc = readFileSync(resolve(process.cwd(), 'src', 'App.tsx'), 'utf8');
+  const sidebarSrc = readFileSync(resolve(process.cwd(), 'src', 'components', 'LeftSidebar.tsx'), 'utf8');
+  const chatListSrc = readFileSync(resolve(process.cwd(), 'src', 'components', 'ChatList.tsx'), 'utf8');
+  const chatAreaSrc = readFileSync(resolve(process.cwd(), 'src', 'components', 'ChatArea.tsx'), 'utf8');
+  const dockSrc = readFileSync(resolve(process.cwd(), 'src', 'components', 'UnifiedRightDock.tsx'), 'utf8');
+  const menuSrc = readFileSync(resolve(process.cwd(), 'src', 'components', 'TelegramMenuDrawer.tsx'), 'utf8');
+  const settingsSrc = readFileSync(resolve(process.cwd(), 'src', 'components', 'TelegramSettingsModal.tsx'), 'utf8');
+
+  assert.match(typesSrc, /AppThemeMode\s*=\s*'light'\s*\|\s*'dark'\s*\|\s*'aurora'/);
+  assert.match(cssSrc, /@variant\s+aurora/);
+  assert.match(cssSrc, /\.theme-aurora\s*\{/);
+  assert.match(cssSrc, /\.theme-aurora\s+\.tg-chat-pattern/);
+  assert.match(appSrc, /classList\.toggle\('theme-aurora',\s*theme\s*===\s*'aurora'\)/);
+  assert.match(appSrc, /theme\s*===\s*'dark'\s*\|\|\s*theme\s*===\s*'aurora'/);
+  assert.match(sidebarSrc, /aurora:/);
+  assert.match(chatListSrc, /aurora:/);
+  assert.match(chatAreaSrc, /aurora:/);
+  assert.match(dockSrc, /aurora:/);
+  assert.match(menuSrc, /青夜/);
+  assert.match(settingsSrc, /极光青暗/);
+});
+
+
 
 
 

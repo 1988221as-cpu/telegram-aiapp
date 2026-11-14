@@ -29,7 +29,7 @@ import {
   ShieldAlert,
   ShieldCheck,
 } from 'lucide-react';
-import { Account, TelegramContact } from '../types';
+import { Account, AppThemeMode, TelegramContact } from '../types';
 import {
   updateTelegramUserProfileApi,
   fetchTelegramUserSettingsApi,
@@ -86,8 +86,9 @@ interface TelegramSettingsModalProps {
   onClose: () => void;
   currentAccount?: Account | null;
   onUpdateAccount?: (updated: Partial<Account>, accountId?: string) => void;
-  theme: 'dark' | 'light';
+  theme: AppThemeMode;
   onToggleTheme: () => void;
+  onSelectTheme?: (theme: AppThemeMode) => void;
   onOpenSystemAdmin?: () => void;
   clientPrefs?: TelegramClientPrefs;
   onUpdateClientPrefs?: (updated: TelegramClientPrefs) => void;
@@ -115,6 +116,7 @@ export const TelegramSettingsModal: React.FC<TelegramSettingsModalProps> = ({
   onUpdateAccount,
   theme,
   onToggleTheme,
+  onSelectTheme,
   onOpenSystemAdmin,
   clientPrefs: externalPrefs,
   onUpdateClientPrefs,
@@ -1862,19 +1864,47 @@ export const TelegramSettingsModal: React.FC<TelegramSettingsModalProps> = ({
 
             {activeTab === 'appearance' && (
               <div className="space-y-4 max-w-md text-xs">
-                <div className="p-3.5 rounded-xl bg-gray-50 dark:bg-[#1e2a38] flex items-center justify-between">
+                <div className="p-3.5 rounded-xl bg-gray-50 dark:bg-[#1e2a38] aurora:bg-[#101c23] space-y-3 border border-transparent aurora:border-[#182b34]">
                   <div>
-                    <div className="font-semibold text-[#111827] dark:text-white">夜间模式</div>
+                    <div className="font-semibold text-[#111827] dark:text-white">界面色调模式</div>
                     <div className="text-[11px] text-[#707579] dark:text-[#7f93a5]">
-                      当前主题: {theme === 'dark' ? '深夜暗色主题' : '经典亮白主题'}
+                      当前主题: {theme === 'aurora' ? '极光青暗模式' : theme === 'dark' ? '深夜暗色主题' : '经典亮白主题'}
                     </div>
                   </div>
-                  <button
-                    onClick={onToggleTheme}
-                    className="px-3 py-1.5 rounded-lg bg-[#2481cc] text-white text-xs font-medium cursor-pointer"
-                  >
-                    切换为{theme === 'dark' ? '白天模式' : '夜间模式'}
-                  </button>
+                  <div className="grid grid-cols-3 gap-2">
+                    {(
+                      [
+                        { id: 'light', label: '经典亮白', swatch: 'bg-[#f4f7fb] border-[#cbd5e1]' },
+                        { id: 'dark', label: '深夜蓝黑', swatch: 'bg-[#09111d] border-[#2ba0ff]' },
+                        { id: 'aurora', label: '极光青暗', swatch: 'bg-[#081116] border-[#2dd4bf]' },
+                      ] as const
+                    ).map((opt) => {
+                      const isActive = theme === opt.id;
+                      return (
+                        <button
+                          key={opt.id}
+                          type="button"
+                          onClick={() => {
+                            if (onSelectTheme) {
+                              onSelectTheme(opt.id);
+                            } else {
+                              onToggleTheme();
+                            }
+                          }}
+                          className={`p-2 rounded-xl border text-left transition-all cursor-pointer flex items-center gap-2 ${
+                            isActive
+                              ? opt.id === 'aurora'
+                                ? 'bg-[#112d36] border-[#2dd4bf] text-[#5eead4] font-semibold'
+                                : 'bg-[#2481cc]/10 border-[#2481cc] text-[#2481cc] dark:text-[#2ba0ff] font-semibold'
+                              : 'bg-white/70 dark:bg-[#16212e] border-[#e2e8f0] dark:border-[#2a394a] text-[#475569] dark:text-[#b7c7d6] hover:border-[#94a3b8]'
+                          }`}
+                        >
+                          <span className={`w-3.5 h-3.5 rounded-full border shrink-0 ${opt.swatch}`} />
+                          <span className="truncate">{opt.label}</span>
+                        </button>
+                      );
+                    })}
+                  </div>
                 </div>
 
                 <div className="p-3.5 rounded-xl bg-gray-50 dark:bg-[#1e2a38] flex items-center justify-between">

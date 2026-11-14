@@ -45,12 +45,33 @@ const CHAT_MEMORY_MODEL_PRESETS: Array<{ value: string; label: string }> = [
   { value: 'gemini-2.5-pro', label: 'gemini-2.5-pro (Google Gemini 2.5 旗舰)' },
 ];
 
+function normalizeUiProtocol(
+  rawProtocol: any,
+  engineMode: 'cloud' | 'custom'
+): 'auto' | 'openai' | 'gemini' | 'anthropic' {
+  if (engineMode !== 'custom') return 'openai';
+  if (
+    rawProtocol === 'auto' ||
+    rawProtocol === 'openai' ||
+    rawProtocol === 'gemini' ||
+    rawProtocol === 'anthropic'
+  ) {
+    return rawProtocol;
+  }
+  return 'auto';
+}
+
 function sanitizeConfigForUi(cfg: CustomLLMConfig): CustomLLMConfig {
   const baseUrl = isBuiltInCloudGatewayUrl(cfg.baseUrl) ? '' : cfg.baseUrl || '';
   const engineMode: 'cloud' | 'custom' = cfg.engineMode === 'custom' ? 'custom' : 'cloud';
   const enabled = Boolean(cfg.enabled);
+  const protocol = normalizeUiProtocol(cfg.protocol, engineMode);
   const rawModel = (cfg.modelName || '').trim();
-  const modelName = engineMode === 'custom' ? rawModel || 'gpt-4o-mini' : rawModel;
+  const resolvedProto = inferGatewayProtocolFromUrlAndModel(baseUrl, rawModel, protocol);
+  const modelName =
+    engineMode === 'custom' && enabled && !rawModel && resolvedProto !== 'gemini'
+      ? 'gpt-4o-mini'
+      : rawModel;
   const cleanEngineKey = (cfg.engineLicenseKey || '').trim();
   const cleanKbKey = (cfg.knowledgeBaseApiKey || '').trim();
   return {
@@ -59,7 +80,7 @@ function sanitizeConfigForUi(cfg: CustomLLMConfig): CustomLLMConfig {
     explicitlyDisabled: enabled ? false : Boolean(cfg.explicitlyDisabled || cfg.enabled === false),
     engineMode,
     modelName,
-    protocol: engineMode === 'custom' ? inferGatewayProtocolFromUrlAndModel(baseUrl, modelName) : 'openai',
+    protocol,
     baseUrl,
     knowledgeBaseApiUrl: '',
     enableKnowledgeBaseRAG: engineMode === 'cloud' && enabled,
@@ -130,9 +151,21 @@ export const CustomLLMModal: React.FC<CustomLLMModalProps> = ({
   const isCloudTab = activeTab === 'cloud';
   const isCloudModeEnabled = Boolean(formData.enabled && formData.engineMode !== 'custom');
   const isCustomPriorityEnabled = Boolean(formData.enabled && formData.engineMode === 'custom');
-  const currentChatModel = (formData.modelName || '').trim() || 'gpt-4o-mini';
-  const isPresetChatModel = CHAT_MEMORY_MODEL_PRESETS.some(
-    (m) => m.value === (formData.modelName ?? currentChatModel)
+  const selectedUiProtocol: 'auto' | 'openai' | 'gemini' | 'anthropic' =
+    formData.protocol === 'openai' ||
+    formData.protocol === 'gemini' ||
+    formData.protocol === 'anthropic' ||
+    formData.protocol === 'auto'
+      ? formData.protocol
+      : 'auto';
+  const detectedEffectiveProtocol = inferGatewayProtocolFromUrlAndModel(
+    formData.baseUrl,
+    formData.modelName,
+    selectedUiProtocol
+  );
+  const currentChatModel = (formData.modelName || '').trim();
+  const isPresetChatModel = Boolean(
+    currentChatModel && CHAT_MEMORY_MODEL_PRESETS.some((m) => m.value === currentChatModel)
   );
 
   const handleTestCloudEngineAndRag = async () => {
@@ -230,14 +263,21 @@ export const CustomLLMModal: React.FC<CustomLLMModalProps> = ({
       return;
     }
 
-    const probeModel = isCustomPriorityEnabled ? (cleanModel || 'gpt-4o-mini') : '';
-    const inferredProto = inferGatewayProtocolFromUrlAndModel(cleanBaseUrl, probeModel);
+    const selectedProto: 'auto' | 'openai' | 'gemini' | 'anthropic' =
+      formData.protocol === 'openai' ||
+      formData.protocol === 'gemini' ||
+      formData.protocol === 'anthropic' ||
+      formData.protocol === 'auto'
+        ? formData.protocol
+        : 'auto';
+    // Whenever the user filled in a model name, always run a real inference handshake against it
+    const probeModel = cleanModel;
     const result = await pingCustomLLM(
       cleanBaseUrl,
       cleanApiKey,
       probeModel,
       '',
-      inferredProto,
+      selectedProto,
       'custom'
     );
 
@@ -253,10 +293,10 @@ export const CustomLLMModal: React.FC<CustomLLMModalProps> = ({
       modelDetails: Array.isArray(result.modelDetails) ? result.modelDetails : undefined,
       message: result.ok
         ? result.message ||
-          (isCustomPriorityEnabled
-            ? `优先自有密钥网关与模型 (${probeModel}) 握手成功！响应延迟 ${result.latencyMs ?? 0}ms。`
+          (probeModel
+            ? `自有模型网关与模型 (${probeModel}) 真实推理握手成功！响应延迟 ${result.latencyMs ?? 0}ms。`
             : `网关握手成功！响应延迟 ${result.latencyMs ?? 0}ms，可用于自定义翻译与语音合成。`)
-        : `连接失败：${result.error || '请检查接入网址或 API 密钥'}`,
+        : `连接失败：${result.error || '请检查接入网址、协议选择或 API 密钥'}`,
     });
   };
 
@@ -312,6 +352,22 @@ export const CustomLLMModal: React.FC<CustomLLMModalProps> = ({
       }
     }
 
+    const preservedProtocol: 'auto' | 'openai' | 'gemini' | 'anthropic' =
+      formData.protocol === 'openai' ||
+      formData.protocol === 'gemini' ||
+      formData.protocol === 'anthropic' ||
+      formData.protocol === 'auto'
+        ? formData.protocol
+        : 'auto';
+    const resolvedSaveProto = inferGatewayProtocolFromUrlAndModel(
+      cleanBaseUrl,
+      cleanModelName,
+      preservedProtocol
+    );
+    const finalModelName = savingCustomPriority
+      ? cleanModelName || (resolvedSaveProto === 'gemini' ? '' : 'gpt-4o-mini')
+      : cleanModelName;
+
     const cleanToSave: CustomLLMConfig = sanitizeConfigForUi({
       ...formData,
       engineMode: savingCustomPriority ? 'custom' : 'cloud',
@@ -319,10 +375,8 @@ export const CustomLLMModal: React.FC<CustomLLMModalProps> = ({
       explicitlyDisabled: !Boolean(formData.enabled),
       baseUrl: cleanBaseUrl,
       apiKey: cleanApiKey,
-      modelName: savingCustomPriority ? cleanModelName || 'gpt-4o-mini' : cleanModelName,
-      protocol: savingCustomPriority
-        ? inferGatewayProtocolFromUrlAndModel(cleanBaseUrl, cleanModelName || 'gpt-4o-mini')
-        : 'openai',
+      modelName: finalModelName,
+      protocol: savingCustomPriority ? preservedProtocol : preservedProtocol,
       enableKnowledgeBaseRAG: !savingCustomPriority && Boolean(formData.enabled),
     });
 
@@ -542,7 +596,7 @@ export const CustomLLMModal: React.FC<CustomLLMModalProps> = ({
                           .replace(/^[^\x21-\x7E]+|[^\x21-\x7E]+$/g, '')
                           .replace(/[^\x20-\x7E]/g, '')
                           .trim();
-                        const cleanModelName = (formData.modelName || '').trim() || 'gpt-4o-mini';
+                        const cleanModelName = (formData.modelName || '').trim();
                         const nextConfig: CustomLLMConfig = sanitizeConfigForUi({
                           ...formData,
                           engineMode: 'custom',
@@ -691,59 +745,106 @@ export const CustomLLMModal: React.FC<CustomLLMModalProps> = ({
                 )}
               </div>
 
-              {/* Chat & Memory Model Selector (shown when Priority Custom Key Reply is ON) */}
-              {isCustomPriorityEnabled && (
-                <div className="space-y-1.5 pt-2 border-t border-[#e2e8f0] dark:border-[#18273a]">
-                  <label className="text-xs font-semibold text-[#0f172a] dark:text-[#eef4fb] block">
-                    对话与记忆模型型号 (Model Name · 支持自由输入)
+              {/* Protocol Selector (Auto / OpenAI / Anthropic / Gemini) */}
+              <div className="space-y-1.5">
+                <div className="flex items-center justify-between gap-2">
+                  <label className="text-xs font-semibold text-[#0f172a] dark:text-[#eef4fb]">
+                    接口协议 (Protocol)
                   </label>
-                  <select
-                    value={isPresetChatModel ? (formData.modelName ?? currentChatModel) : '__custom__'}
-                    onChange={(e) => {
-                      if (e.target.value !== '__custom__') {
-                        setFormData({ ...formData, modelName: e.target.value });
-                      } else {
-                        setFormData({ ...formData, modelName: '' });
-                      }
-                    }}
-                    className="w-full bg-white dark:bg-[#090f19] border border-[#cbd5e1] dark:border-[#1e3148] rounded-lg px-3 py-1.5 text-xs text-[#0f172a] dark:text-[#eef4fb] focus:outline-none focus:border-[#2ba0ff]"
-                  >
-                    {CHAT_MEMORY_MODEL_PRESETS.map((m) => (
-                      <option key={m.value} value={m.value}>
-                        {m.label}
-                      </option>
-                    ))}
-                    <option value="__custom__">自定义输入其他型号...</option>
-                  </select>
-                  <input
-                    type="text"
-                    value={formData.modelName ?? currentChatModel}
-                    onChange={(e) => setFormData({ ...formData, modelName: e.target.value })}
-                    placeholder="输入用于聊天回复、记忆提炼与翻译的模型型号，如 gpt-4o-mini"
-                    className="w-full bg-white dark:bg-[#090f19] border border-[#cbd5e1] dark:border-[#1e3148] rounded-lg px-3 py-2 text-xs font-mono text-[#0284c7] dark:text-[#9ec2e6] placeholder-[#94a3b8] dark:placeholder-[#4e657e] focus:outline-none focus:border-[#2ba0ff]"
-                  />
-                  {/\s/.test((formData.modelName || '').trim()) ? (
-                    <p className="text-[10.5px] text-amber-600 dark:text-amber-400 leading-snug">
-                      提示：模型型号不能包含空格，请填写无空格的官方模型 ID（例如 gemini-3.1-flash-lite、gpt-4o-mini）。
-                    </p>
-                  ) : currentModelUsage ? (
-                    <div className="flex flex-wrap items-center gap-1.5 text-[10.5px] text-[#64748b] dark:text-[#7b93ad] pt-0.5">
-                      <span className="px-1.5 py-0.5 rounded bg-[#2481cc]/10 dark:bg-[#2ba0ff]/15 text-[#2481cc] dark:text-[#2ba0ff] font-medium">
-                        {currentModelUsage.tierTag}
-                      </span>
-                      <span>
-                        今日已用 <span className="font-mono font-semibold text-[#0f172a] dark:text-[#eef4fb]">{currentModelUsage.todayCount}</span> 次
-                      </span>
-                      {currentModelUsage.rateLimitRemaining && (
-                        <span className="text-emerald-600 dark:text-emerald-400">
-                          · 网关剩余 {currentModelUsage.rateLimitRemaining}
-                          {currentModelUsage.rateLimitLimit ? `/${currentModelUsage.rateLimitLimit}` : ''}
-                        </span>
-                      )}
-                    </div>
-                  ) : null}
+                  <span className="text-[10.5px] font-mono text-[#0284c7] dark:text-[#2ba0ff]">
+                    {selectedUiProtocol === 'auto'
+                      ? `自动识别 → ${
+                          detectedEffectiveProtocol === 'gemini'
+                            ? 'Gemini'
+                            : detectedEffectiveProtocol === 'anthropic'
+                            ? 'Anthropic'
+                            : 'OpenAI'
+                        }`
+                      : `已锁定：${
+                          selectedUiProtocol === 'gemini'
+                            ? 'Gemini'
+                            : selectedUiProtocol === 'anthropic'
+                            ? 'Anthropic'
+                            : 'OpenAI'
+                        }`}
+                  </span>
                 </div>
-              )}
+                <select
+                  value={selectedUiProtocol}
+                  onChange={(e) => {
+                    const nextProto = e.target.value as 'auto' | 'openai' | 'gemini' | 'anthropic';
+                    setFormData({ ...formData, protocol: nextProto });
+                    setTestResult(null);
+                  }}
+                  className="w-full bg-white dark:bg-[#090f19] border border-[#cbd5e1] dark:border-[#1e3148] rounded-lg px-3 py-1.5 text-xs text-[#0f172a] dark:text-[#eef4fb] focus:outline-none focus:border-[#2ba0ff]"
+                >
+                  <option value="auto">自动识别 (Auto · 按地址默认兼容)</option>
+                  <option value="openai">OpenAI 兼容 (/v1/chat/completions · OneAPI/NewAPI)</option>
+                  <option value="anthropic">Anthropic 协议 (/v1/messages · Claude 原生)</option>
+                  <option value="gemini">Google Gemini 协议 (:generateContent · 原生)</option>
+                </select>
+                <p className="text-[10.5px] text-[#64748b] dark:text-[#7b93ad] leading-snug">
+                  中转站（OneAPI / NewAPI / OpenRouter）通常使用 OpenAI 协议；如使用原生反代，请手动选择对应协议。
+                </p>
+              </div>
+
+              {/* Chat & Memory Model Selector (always accessible in Custom Gateway tab so model handshake can be tested directly) */}
+              <div className="space-y-1.5 pt-2 border-t border-[#e2e8f0] dark:border-[#18273a]">
+                <label className="text-xs font-semibold text-[#0f172a] dark:text-[#eef4fb] block">
+                  对话与记忆模型型号 (Model Name · 支持自由输入)
+                </label>
+                <select
+                  value={isPresetChatModel ? currentChatModel : '__custom__'}
+                  onChange={(e) => {
+                    if (e.target.value !== '__custom__') {
+                      setFormData({ ...formData, modelName: e.target.value });
+                    } else {
+                      setFormData({ ...formData, modelName: '' });
+                    }
+                  }}
+                  className="w-full bg-white dark:bg-[#090f19] border border-[#cbd5e1] dark:border-[#1e3148] rounded-lg px-3 py-1.5 text-xs text-[#0f172a] dark:text-[#eef4fb] focus:outline-none focus:border-[#2ba0ff]"
+                >
+                  {CHAT_MEMORY_MODEL_PRESETS.map((m) => (
+                    <option key={m.value} value={m.value}>
+                      {m.label}
+                    </option>
+                  ))}
+                  <option value="__custom__">自定义输入其他型号（或留空以探测可用列表）...</option>
+                </select>
+                <input
+                  type="text"
+                  value={formData.modelName ?? ''}
+                  onChange={(e) => setFormData({ ...formData, modelName: e.target.value })}
+                  placeholder={
+                    detectedEffectiveProtocol === 'gemini'
+                      ? '输入 Gemini 模型型号，如 gemini-2.5-flash（留空将先探测 /v1beta/models）'
+                      : detectedEffectiveProtocol === 'anthropic'
+                      ? '输入 Claude 模型型号，如 claude-3-5-sonnet-20241022'
+                      : '输入模型型号（填写后测试将真实发起推理握手校验），如 gpt-4o-mini'
+                  }
+                  className="w-full bg-white dark:bg-[#090f19] border border-[#cbd5e1] dark:border-[#1e3148] rounded-lg px-3 py-2 text-xs font-mono text-[#0284c7] dark:text-[#9ec2e6] placeholder-[#94a3b8] dark:placeholder-[#4e657e] focus:outline-none focus:border-[#2ba0ff]"
+                />
+                {/\s/.test((formData.modelName || '').trim()) ? (
+                  <p className="text-[10.5px] text-amber-600 dark:text-amber-400 leading-snug">
+                    提示：模型型号不能包含空格，请填写无空格的官方模型 ID（例如 gemini-3.1-flash-lite、gpt-4o-mini）。
+                  </p>
+                ) : currentModelUsage ? (
+                  <div className="flex flex-wrap items-center gap-1.5 text-[10.5px] text-[#64748b] dark:text-[#7b93ad] pt-0.5">
+                    <span className="px-1.5 py-0.5 rounded bg-[#2481cc]/10 dark:bg-[#2ba0ff]/15 text-[#2481cc] dark:text-[#2ba0ff] font-medium">
+                      {currentModelUsage.tierTag}
+                    </span>
+                    <span>
+                      今日已用 <span className="font-mono font-semibold text-[#0f172a] dark:text-[#eef4fb]">{currentModelUsage.todayCount}</span> 次
+                    </span>
+                    {currentModelUsage.rateLimitRemaining && (
+                      <span className="text-emerald-600 dark:text-emerald-400">
+                        · 网关剩余 {currentModelUsage.rateLimitRemaining}
+                        {currentModelUsage.rateLimitLimit ? `/${currentModelUsage.rateLimitLimit}` : ''}
+                      </span>
+                    )}
+                  </div>
+                ) : null}
+              </div>
             </div>
 
             {/* Custom Gateway Ping Test */}
@@ -807,7 +908,7 @@ export const CustomLLMModal: React.FC<CustomLLMModalProps> = ({
                           setFormData((prev) => ({
                             ...prev,
                             modelName: item.id,
-                            protocol: inferGatewayProtocolFromUrlAndModel(prev.baseUrl, item.id),
+                            protocol: normalizeUiProtocol(prev.protocol, 'custom'),
                           }));
                           setCurrentModelUsage(item.tierTag ? item : null);
                           setTestResult({

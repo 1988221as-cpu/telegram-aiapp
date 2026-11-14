@@ -14,8 +14,9 @@ import {
   X,
   Check,
   LogOut,
+  Sparkles,
 } from 'lucide-react';
-import { Account, MemberUser } from '../types';
+import { Account, AppThemeMode, MemberUser } from '../types';
 import { APP_VERSION, disconnectTelegramAccount } from '../services/apiService';
 
 interface TelegramMenuDrawerProps {
@@ -30,8 +31,9 @@ interface TelegramMenuDrawerProps {
   onOpenSystemSettings?: () => void;
   onSelectChat?: (chatId: string) => void;
   onDeleteAccount?: (id: string) => void;
-  theme: 'dark' | 'light';
+  theme: AppThemeMode;
   onToggleTheme: () => void;
+  onSelectTheme?: (theme: AppThemeMode) => void;
   onOpenNewGroup?: () => void;
   onOpenNewChannel?: () => void;
   onOpenContacts?: () => void;
@@ -54,6 +56,7 @@ export const TelegramMenuDrawer: React.FC<TelegramMenuDrawerProps> = ({
   onDeleteAccount,
   theme,
   onToggleTheme,
+  onSelectTheme,
   onOpenNewGroup,
   onOpenNewChannel,
   onOpenContacts,
@@ -101,9 +104,9 @@ export const TelegramMenuDrawer: React.FC<TelegramMenuDrawerProps> = ({
       />
 
       {/* Slide-out Drawer from Left */}
-      <div className="relative w-72 sm:w-80 h-full bg-white text-[#111827] dark:bg-[#17212b] dark:text-[#f5f7fa] flex flex-col shadow-2xl z-10 animate-in slide-in-from-left duration-250 select-none border-r border-[#e0e4e8] dark:border-[#0e1621] transition-colors">
+      <div className="relative w-72 sm:w-80 h-full bg-white text-[#111827] dark:bg-[#17212b] dark:text-[#f5f7fa] aurora:bg-[#0d171d] aurora:text-[#ecf6f8] flex flex-col shadow-2xl z-10 animate-in slide-in-from-left duration-250 select-none border-r border-[#e0e4e8] dark:border-[#0e1621] aurora:border-[#182b34] transition-colors">
         {/* 1. Profile Header */}
-        <div className="p-4 bg-[#2481cc] text-white flex flex-col justify-between shrink-0 relative overflow-hidden">
+        <div className="p-4 bg-[#2481cc] aurora:bg-gradient-to-br aurora:from-[#0f3d47] aurora:to-[#0a232b] text-white flex flex-col justify-between shrink-0 relative overflow-hidden">
           <div className="flex items-start justify-between mb-3">
             <div className="relative">
               <div
@@ -483,33 +486,57 @@ export const TelegramMenuDrawer: React.FC<TelegramMenuDrawerProps> = ({
 
           <div className="h-px bg-[#e0e4e8] dark:bg-[#202e3d] my-2 mx-1" />
 
-          {/* 3. 夜间模式与白天模式切换 (Night Mode Switch) */}
-          <div className="flex items-center justify-between px-3 py-2.5 rounded-xl text-[#222222] dark:text-[#cfdbe5] hover:bg-black/5 dark:hover:bg-[#243444] transition-colors">
-            <div className="flex items-center gap-4">
-              {theme === 'dark' ? (
-                <Moon className="w-5 h-5 text-[#2481cc] dark:text-[#2ba0ff]" />
-              ) : (
-                <Sun className="w-5 h-5 text-amber-500" />
-              )}
-              <span className="font-medium">夜间模式</span>
+          {/* 3. 外观色调模式切换 (亮白 / 夜间 / 极光青暗) */}
+          <div className="px-3 py-2.5 rounded-xl text-[#222222] dark:text-[#cfdbe5] aurora:text-[#d5ebee] space-y-2">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-3">
+                {theme === 'aurora' ? (
+                  <Sparkles className="w-5 h-5 text-[#2dd4bf]" />
+                ) : theme === 'dark' ? (
+                  <Moon className="w-5 h-5 text-[#2481cc] dark:text-[#2ba0ff]" />
+                ) : (
+                  <Sun className="w-5 h-5 text-amber-500" />
+                )}
+                <span className="font-medium">界面色调模式</span>
+              </div>
+              <span className="text-[11px] text-[#707579] dark:text-[#7f93a5] aurora:text-[#7e9aa5]">
+                {theme === 'aurora' ? '青夜' : theme === 'dark' ? '夜间' : '亮白'}
+              </span>
             </div>
 
-            {/* Telegram Toggle Switch */}
-            <button
-              onClick={onToggleTheme}
-              role="switch"
-              aria-checked={theme === 'dark'}
-              title={theme === 'dark' ? '切换为白天模式' : '切换为夜间模式'}
-              className={`w-11 h-6 rounded-full transition-colors relative cursor-pointer focus:outline-none ${
-                theme === 'dark' ? 'bg-[#2481cc]' : 'bg-[#c4c9cc]'
-              }`}
-            >
-              <span
-                className={`absolute top-1 left-1 w-4 h-4 rounded-full bg-white shadow-sm transition-transform ${
-                  theme === 'dark' ? 'translate-x-5' : 'translate-x-0'
-                }`}
-              />
-            </button>
+            <div className="grid grid-cols-3 gap-1 p-1 rounded-lg bg-[#f1f5f9] dark:bg-[#0f1722] aurora:bg-[#081014] border border-[#e2e8f0] dark:border-[#202e3d] aurora:border-[#182b34]">
+              {(
+                [
+                  { id: 'light', label: '亮白' },
+                  { id: 'dark', label: '夜间' },
+                  { id: 'aurora', label: '青夜' },
+                ] as const
+              ).map((opt) => {
+                const active = theme === opt.id;
+                return (
+                  <button
+                    key={opt.id}
+                    type="button"
+                    onClick={() => {
+                      if (onSelectTheme) {
+                        onSelectTheme(opt.id);
+                      } else {
+                        onToggleTheme();
+                      }
+                    }}
+                    className={`py-1 rounded-md text-xs font-medium transition-all cursor-pointer ${
+                      active
+                        ? opt.id === 'aurora'
+                          ? 'bg-[#112d36] text-[#5eead4] border border-[#2dd4bf]/45 shadow-xs'
+                          : 'bg-white dark:bg-[#2481cc] text-[#2481cc] dark:text-white shadow-xs'
+                        : 'text-[#64748b] dark:text-[#8ea4ba] aurora:text-[#7e9aa5] hover:text-[#111827] dark:hover:text-white'
+                    }`}
+                  >
+                    {opt.label}
+                  </button>
+                );
+              })}
+            </div>
           </div>
         </div>
 

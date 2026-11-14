@@ -166,7 +166,7 @@ export interface CustomLLMConfig {
   engineMode?: 'cloud' | 'custom';
   engineLicenseKey?: string;
   hasEngineLicenseKey?: boolean;
-  protocol: 'openai' | 'gemini' | 'anthropic';
+  protocol: 'auto' | 'openai' | 'gemini' | 'anthropic';
   baseUrl: string;
   apiKey: string;
   hasApiKey?: boolean;
@@ -365,4 +365,6 @@ export interface EvolutionLogItem {
   itemsLearned: number;
   createdAt: number;
 }
+
+export type AppThemeMode = 'light' | 'dark' | 'aurora';
 

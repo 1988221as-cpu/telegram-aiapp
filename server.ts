@@ -472,12 +472,16 @@ export function getGeminiCandidateModels(primaryModel?: string): string[] {
   return [chosen];
 }
 
-export function buildCustomGeminiUrl(baseUrl: string, modelName: string = 'gemini-4-hydrogen'): string {
+export function buildCustomGeminiUrl(baseUrl: string, modelName?: string): string {
   let clean = baseUrl.trim().replace(/\/+$/, '');
   if (clean.includes(':generateContent')) return clean;
+  const cleanModel = typeof modelName === 'string' ? modelName.trim() : '';
+  if (!cleanModel) {
+    throw new Error('自有 Gemini 协议网关未填写模型型号 (Model Name)，已拦截空模型请求');
+  }
   if (!clean.includes('/v1beta/models') && !clean.includes('/v1/models')) {
     clean = clean.replace(/\/v1beta$/i, '').replace(/\/v1$/i, '');
-    return `${clean}/v1beta/models/${modelName}:generateContent`;
+    return `${clean}/v1beta/models/${cleanModel}:generateContent`;
   }
   return `${clean}:generateContent`;
 }
@@ -488,18 +492,17 @@ export function inferGatewayProtocol(
   explicitProtocol?: string
 ): 'openai' | 'gemini' | 'anthropic' {
   const url = (baseUrl || '').toLowerCase();
-  const model = (modelName || '').toLowerCase();
+  const model = (modelName || '').toLowerCase().trim();
   if (url.includes('googleapis.com')) return 'gemini';
   if (url.includes('anthropic.com')) return 'anthropic';
-  if (
-    url &&
-    !url.includes('openai.com') &&
-    !url.includes('deepseek.com') &&
-    (explicitProtocol === 'gemini' || explicitProtocol === 'anthropic' || explicitProtocol === 'openai')
-  ) {
+  if (explicitProtocol === 'gemini' || explicitProtocol === 'anthropic' || explicitProtocol === 'openai') {
+    if (url.includes('openai.com') || url.includes('deepseek.com')) return 'openai';
     return explicitProtocol;
   }
+  if (url.includes('openai.com') || url.includes('deepseek.com')) return 'openai';
+  if (url.includes('/v1beta')) return 'gemini';
   if (!url && model.includes('claude')) return 'anthropic';
+  if (!url && (model.startsWith('gemini') || model.startsWith('gemma'))) return 'gemini';
   return 'openai';
 }
 
@@ -1066,7 +1069,13 @@ export async function callCustomLlm({
 
     try {
       if (!isCloudEngineMode && effectiveProtocol === 'gemini') {
-        const targetUrl = buildCustomGeminiUrl(cleanBaseUrl, customConfig.modelName || 'gemini-4-hydrogen');
+        const explicitGeminiModel = typeof customConfig.modelName === 'string' ? customConfig.modelName.trim() : '';
+        if (!explicitGeminiModel) {
+          lastErrorMsg = '自有 Gemini 协议网关未填写模型型号 (Model Name)，已拦截空模型请求，请填写具体 Gemini 模型 ID';
+          if (throwOnError) throw new Error(lastErrorMsg);
+          return null;
+        }
+        const targetUrl = buildCustomGeminiUrl(cleanBaseUrl, explicitGeminiModel);
 
         const contents = messages.map((m: any) => {
           const role =
@@ -1109,21 +1118,29 @@ export async function callCustomLlm({
             signal: controller.signal,
           });
           if (resGemini.ok) {
-            const d = await resGemini.json();
-            const replyText = d?.candidates?.[0]?.content?.parts?.[0]?.text?.trim();
-            if (replyText) {
-              recordCustomLlmModelUsage({
-                apiKey: cleanKey,
-                baseUrl: cleanBaseUrl,
-                modelName: customConfig.modelName || 'gemini-4-hydrogen',
-                headers: resGemini.headers,
-              }).catch(() => {});
-              return replyText;
+            const rawBody = await resGemini.text().catch(() => '');
+            const d = safeJsonParse<any>(rawBody, null);
+            if (d?.error) {
+              const errMsg = d.error?.message || (typeof d.error === 'string' ? d.error : JSON.stringify(d.error));
+              lastErrorMsg = `自定义 Gemini 网关返回错误: ${String(errMsg).slice(0, 400)}`;
+            } else {
+              const replyText = d?.candidates?.[0]?.content?.parts?.[0]?.text?.trim();
+              if (replyText) {
+                recordCustomLlmModelUsage({
+                  apiKey: cleanKey,
+                  baseUrl: cleanBaseUrl,
+                  modelName: explicitGeminiModel,
+                  headers: resGemini.headers,
+                }).catch(() => {});
+                return replyText;
+              }
+              lastErrorMsg = d
+                ? '自定义 Gemini 网关未返回有效文本内容'
+                : `自定义 Gemini 网关返回非 JSON 响应: ${rawBody.slice(0, 240)}`;
             }
-            lastErrorMsg = '自定义 Gemini 网关未返回有效文本内容';
           } else {
             const errBody = await resGemini.text().catch(() => '');
-            lastErrorMsg = `自定义 Gemini 网关返回 HTTP ${resGemini.status}${errBody ? `: ${errBody.slice(0, 160)}` : ''}`;
+            lastErrorMsg = `自定义 Gemini 网关返回 HTTP ${resGemini.status}${errBody ? `: ${errBody.slice(0, 400)}` : ''}`;
           }
         } catch (err: any) {
           lastErrorMsg = err?.message || String(err);
@@ -1161,7 +1178,13 @@ export async function callCustomLlm({
             });
 
             if (response.ok) {
-              const data = await response.json();
+              const rawBody = await response.text().catch(() => '');
+              const data = safeJsonParse<any>(rawBody, null);
+              if (data?.error) {
+                const errMsg = data.error?.message || (typeof data.error === 'string' ? data.error : JSON.stringify(data.error));
+                lastErrorMsg = `Anthropic 模型网关返回错误: ${String(errMsg).slice(0, 400)}`;
+                break;
+              }
               const replyText = Array.isArray(data?.content)
                 ? data.content
                     .filter((c: any) => c?.type === 'text' && typeof c?.text === 'string')
@@ -1178,10 +1201,12 @@ export async function callCustomLlm({
                 }).catch(() => {});
                 return replyText;
               }
-              lastErrorMsg = 'Anthropic 模型网关返回空内容';
+              lastErrorMsg = data
+                ? 'Anthropic 模型网关返回空内容'
+                : `Anthropic 模型网关返回非 JSON 响应: ${rawBody.slice(0, 240)}`;
             } else {
               const errBody = await response.text().catch(() => '');
-              lastErrorMsg = `Anthropic 模型网关返回 HTTP ${response.status}${errBody ? `: ${errBody.slice(0, 160)}` : ''}`;
+              lastErrorMsg = `Anthropic 模型网关返回 HTTP ${response.status}${errBody ? `: ${errBody.slice(0, 400)}` : ''}`;
             }
             if (response.status !== 404) break;
           } catch (e: any) {
@@ -1242,7 +1267,13 @@ export async function callCustomLlm({
             });
 
             if (response.ok) {
-              const data = await response.json();
+              const rawBody = await response.text().catch(() => '');
+              const data = safeJsonParse<any>(rawBody, null);
+              if (data?.error) {
+                const errMsg = data.error?.message || (typeof data.error === 'string' ? data.error : JSON.stringify(data.error));
+                lastErrorMsg = `自定义模型网关返回错误: ${String(errMsg).slice(0, 400)}`;
+                break;
+              }
               const replyText = data?.choices?.[0]?.message?.content?.trim();
               if (replyText) {
                 if (!isCloudEngineMode) {
@@ -1255,10 +1286,12 @@ export async function callCustomLlm({
                 }
                 return replyText;
               }
-              lastErrorMsg = '自定义模型网关返回空内容';
+              lastErrorMsg = data
+                ? '自定义模型网关返回空内容'
+                : `自定义模型网关返回非 JSON 响应: ${rawBody.slice(0, 240)}`;
             } else {
               const errBody = await response.text().catch(() => '');
-              lastErrorMsg = `自定义模型网关返回 HTTP ${response.status}${errBody ? `: ${errBody.slice(0, 160)}` : ''}`;
+              lastErrorMsg = `自定义模型网关返回 HTTP ${response.status}${errBody ? `: ${errBody.slice(0, 400)}` : ''}`;
             }
             if (response.status !== 404) break;
           } catch (e: any) {
@@ -1571,7 +1604,7 @@ export async function queryKnowledgeRAG(
       };
     }
 
-    const searchTerms = extractMultilingualRagTokens(queryText, 14);
+    const searchTerms = extractMultilingualRagTokens(queryText, 24);
     if (searchTerms.length === 0) {
       return {
         context: '',
@@ -7318,7 +7351,7 @@ export function buildActivePersonaAndEvolutionContext(
   };
 }
 
-// 3. Sandbox Real-time Simulation Test Reply (Strictly scoped by accountId)
+// 3. Sandbox Real-time Simulation Test Reply (Strictly scoped by accountId, unified with all 4 AI reply pipelines)
 app.post('/api/persona/test-reply', aiGenerationLimiter, requireTenantAuth, async (req: Request, res: Response) => {
   try {
     const scope = resolveScopedAiAccountId(req);
@@ -7327,50 +7360,8 @@ app.post('/api/persona/test-reply', aiGenerationLimiter, requireTenantAuth, asyn
     if (!message || typeof message !== 'string' || !message.trim()) {
       return res.status(400).json({ error: '测试客户发言不能为空' });
     }
+    const cleanIncomingMessage = message.trim();
 
-    const persona = await getGlobalPersonaFromDb(scope.accountId);
-    const evolution = await getEvolutionStateFromDb(scope.accountId);
-    const rag = await queryKnowledgeRAG(message, 3, scope.accountId);
-
-    const personaCtx = buildActivePersonaAndEvolutionContext(persona, evolution, stage, 5);
-    const activeStage = personaCtx.activeStage;
-    const activeHabitItems = personaCtx.activeHabitItems;
-    const activeHabitIds = personaCtx.activeHabitIds;
-
-    const customerRecordText = typeof chatTranscript === 'string' && chatTranscript.trim()
-      ? chatTranscript.trim()
-      : typeof recentChatHistory === 'string' && recentChatHistory.trim()
-      ? recentChatHistory.trim()
-      : Array.isArray(recentChatHistory) && recentChatHistory.length > 0
-      ? recentChatHistory.map((m: any) => `${m.sender || '客户'}: ${m.text || m.content || ''}`).join('\n')
-      : '';
-
-    const oralHabitMirrorDirective = customerRecordText ? `
-【客户整篇真实聊天记录（口语习惯与语气画像核心对照样本）】：
-"""
-${customerRecordText.slice(0, 2500)}
-"""
-
-【对照客户整篇记录的口语习惯进行同频沟通】：
-1. 使用自然生活化的手机私聊短句，避免生硬的 AI 模板腔、分点列项（1. 2. 3.）与客套套话。
-2. 观察上述上下文中对方的打字节奏、句式长短与语气特点，保持自然一致的回应温度。
-` : `
-【自然沟通与反 AI 机械感守则】：
-1. 使用自然真人口语化表达，避免 AI 助手说明书腔调、客套问候（“您好”、“有什么能帮您”）或分点列项（1. 2. 3.）。
-2. 回复简短自然（1~2 句），留出对话呼吸感。
-`;
-
-    const systemInstruction = `
-${personaCtx.hasConfiguredPersona ? personaCtx.context : '你是一位真诚自然、高效有温度的沟通助手，请严格依据用户的真实上下文进行自然回复。'}
-${!personaCtx.hasConfiguredPersona && personaCtx.context ? `\n${personaCtx.context}` : ''}
-
-${oralHabitMirrorDirective}
-
-${rag.matchedCount > 0 && rag.context ? `【专属知识库命中参考（自然融入，切勿生硬背书）】：\n${rag.context}` : ''}
-`.trim();
-
-    let reply = '';
-    let replySource = '';
     const bearerJwt = extractBearerToken(req);
     const serverPersonaCfg = await getServerCustomLlmConfig().catch(() => null);
     const effectivePersonaConfig =
@@ -7401,15 +7392,128 @@ ${rag.matchedCount > 0 && rag.context ? `【专属知识库命中参考（自然
       });
     }
 
+    const persona = await getGlobalPersonaFromDb(scope.accountId);
+    const evolution = await getEvolutionStateFromDb(scope.accountId);
+    const personaCtx = buildActivePersonaAndEvolutionContext(persona, evolution, stage, 3);
+    const activeStage = personaCtx.activeStage;
+    const activeHabitItems = personaCtx.activeHabitItems;
+    const activeHabitIds = personaCtx.activeHabitIds;
+
+    // Normalize up to 30 multi-turn conversation turns + current test message
+    const recent30Turns = normalizeTestReplyHistoryTurns(
+      recentChatHistory,
+      cleanIncomingMessage,
+      UNIFIED_REPLY_HISTORY_LIMIT
+    );
+    const ragQueryText = buildUnifiedRagQuery(recent30Turns, cleanIncomingMessage);
+
+    // Real Cloud RAG (when enabled, zero silent fallback) + Local SQL RAG
+    let knowledgeContext = '';
+    const matchedKnowledge: Array<{ id?: string; title: string; source: 'cloud_kb' | 'local_rag'; category?: string }> = [];
+    const cloudRagEnabled = isCloudKnowledgeBaseEnabled(effectivePersonaConfig);
+    let cloudRagMatchedCount = 0;
+
+    if (cloudRagEnabled) {
+      const kbUrl = effectivePersonaConfig?.knowledgeBaseApiUrl;
+      const kbApiKey = effectivePersonaConfig?.knowledgeBaseApiKey || effectivePersonaConfig?.apiKey;
+      const engineKey = effectivePersonaConfig?.engineLicenseKey;
+      let kbResult: RemoteKbSearchResult;
+      try {
+        kbResult = await searchRailwayKnowledgeBase(ragQueryText, kbUrl, kbApiKey, 5000, bearerJwt, engineKey);
+      } catch (kbErr: any) {
+        kbResult = {
+          ok: false,
+          connected: false,
+          context: '',
+          matchedCount: 0,
+          source: 'remote_cloud_kb_error',
+          error: kbErr?.message || '云端知识库检索异常',
+          statusCode: 502,
+        };
+      }
+      if (!kbResult.ok) {
+        const reason = kbResult.error || '云端知识库检索未连通或超时';
+        const httpStatus =
+          kbResult.statusCode && kbResult.statusCode >= 400 && kbResult.statusCode < 600
+            ? kbResult.statusCode
+            : 503;
+        return res.status(httpStatus).json({
+          success: false,
+          blocked: true,
+          source: 'cloud_kb_disconnection_guard',
+          error: `云端知识库检索断连或失败 (${reason})，已触发安全阻断并暂停人设试聊（如需纯本地检索，请在“模型”关闭 Cloud RAG 开关）。`,
+        });
+      }
+      if (kbResult.context) {
+        knowledgeContext += `\n${kbResult.context}\n`;
+      }
+      cloudRagMatchedCount = Number(kbResult.matchedCount) || 0;
+      if (Array.isArray(kbResult.matchedItems) && kbResult.matchedItems.length > 0) {
+        for (const item of kbResult.matchedItems) {
+          matchedKnowledge.push({
+            id: item.id,
+            title: item.title,
+            source: 'cloud_kb',
+            category: item.category,
+          });
+        }
+      } else if (cloudRagMatchedCount > 0) {
+        matchedKnowledge.push({
+          title: `云端知识库检索命中 (${cloudRagMatchedCount} 条)`,
+          source: 'cloud_kb',
+        });
+      }
+    }
+
+    const rag = await queryKnowledgeRAG(ragQueryText, 3, scope.accountId);
+    if (rag.matchedCount > 0 && rag.context) {
+      knowledgeContext += rag.context;
+    }
+    const localRagMatchedCount = Number(rag.matchedCount) || 0;
+    for (const item of rag.matchedItems || []) {
+      matchedKnowledge.push({
+        id: item.id,
+        title: item.title || '本地知识条目',
+        source: 'local_rag',
+        category: item.category,
+      });
+    }
+
+    const transcriptContext = await loadUnifiedTranscriptContext(
+      scope.accountId,
+      typeof chatTranscript === 'string' ? chatTranscript : undefined
+    );
+
+    const coldStartGuideline = buildUnifiedColdStartGuideline(true, []);
+    const antiAiDirective = buildUnifiedAntiAiDirective(UNIFIED_REPLY_HISTORY_LIMIT);
+    const budgeted = applyPromptCharacterBudget({
+      persona: personaCtx.hasConfiguredPersona
+        ? personaCtx.context
+        : '你是一位真诚自然、高效有温度的沟通助手，请严格依据用户的真实上下文进行自然回复。',
+      antiAi: antiAiDirective,
+      coldStartGuideline,
+      knowledge: knowledgeContext.trim(),
+      transcripts: transcriptContext.trim(),
+    });
+    const systemInstruction = budgeted.prompt;
+
+    const llmMessages = recent30Turns.map((t) => ({
+      role: t.sender === 'me' ? 'assistant' : 'user',
+      content: t.text,
+    }));
+
+    let reply = '';
+    let replySource = '';
+
     // 1. Strictly enforce Custom LLM / Cloud Brain when enabled — NEVER fall back to Gemini or fake templates
     if (effectivePersonaConfig?.enabled) {
       try {
         const customRes = await callCustomLlm({
           customConfig: effectivePersonaConfig,
           systemInstruction,
-          messages: [{ role: 'user', content: message }],
+          messages: llmMessages,
           temperature: 0.7,
-          maxTokens: 240,
+          maxTokens: 500,
           userJwt: bearerJwt,
           throwOnError: true,
           skipSync: true,
@@ -7447,9 +7551,16 @@ ${rag.matchedCount > 0 && rag.context ? `【专属知识库命中参考（自然
 
       try {
         const ai = createGeminiClient();
+        const contextTranscript = recent30Turns
+          .map((m) => `${m.sender === 'peer' ? '对方' : '我'}: ${m.text}`)
+          .join('\n');
+        const contentsPrompt =
+          recent30Turns.length > 1
+            ? `最近 ${recent30Turns.length} 条真实双方对话：\n${contextTranscript}\n\n请严格结合真实人设与上下文直接输出最新一条自然回复：`
+            : cleanIncomingMessage;
         const resp = await ai.models.generateContent({
           model: selectedModel,
-          contents: message,
+          contents: contentsPrompt,
           config: {
             systemInstruction,
             temperature: 0.75,
@@ -7482,7 +7593,12 @@ ${rag.matchedCount > 0 && rag.context ? `【专属知识库命中参考（自然
       reply,
       stage: activeStage,
       personaName: persona.personaName,
-      matchedKnowledge: rag.matchedItems,
+      matchedKnowledge,
+      ragSources: {
+        cloudRagEnabled,
+        cloudRagMatchedCount,
+        localRagMatchedCount,
+      },
       appliedHabits: activeHabitItems,
       source: replySource,
     });
@@ -8059,6 +8175,7 @@ export interface RemoteKbSearchResult {
   connected: boolean;
   context: string;
   matchedCount: number;
+  matchedItems?: Array<{ id?: string; title: string; source: 'cloud_kb'; category?: string }>;
   source: string;
   error?: string;
   statusCode?: number;
@@ -8067,6 +8184,7 @@ export interface RemoteKbSearchResult {
 interface CachedKbResult {
   context: string;
   matchedCount: number;
+  matchedItems?: Array<{ id?: string; title: string; source: 'cloud_kb'; category?: string }>;
   source: string;
   timestamp: number;
 }
@@ -8172,6 +8290,7 @@ export async function searchRailwayKnowledgeBase(
       connected: true,
       context: cached.context,
       matchedCount: cached.matchedCount,
+      matchedItems: cached.matchedItems,
       source: 'remote_cloud_kb_cache',
     };
   }
@@ -8295,13 +8414,38 @@ export async function searchRailwayKnowledgeBase(
 
     const context = rawContext ? `\n【HumanSense 云端训练引擎 · 专属聊天技巧与话术检索结果】：\n${rawContext}\n` : '';
     const matchedCount = resData.matchedCount ?? (resultList ? resultList.length : (context ? 1 : 0));
-    const result: RemoteKbSearchResult = { ok: true, connected: true, context, matchedCount, source: 'remote_cloud_kb' };
+    const matchedItems: Array<{ id?: string; title: string; source: 'cloud_kb'; category?: string }> = resultList
+      ? resultList
+          .map((r: any) => ({
+            id: r?.id ? String(r.id) : undefined,
+            title: String(r?.title || r?.name || r?.topic || '云端话术条目').trim(),
+            source: 'cloud_kb' as const,
+            category: r?.category ? String(r.category) : undefined,
+          }))
+          .filter((item: any) => Boolean(item.title))
+      : matchedCount > 0 && rawContext
+      ? [{ title: '云端知识库检索命中结果', source: 'cloud_kb' as const }]
+      : [];
+    const result: RemoteKbSearchResult = {
+      ok: true,
+      connected: true,
+      context,
+      matchedCount,
+      matchedItems,
+      source: 'remote_cloud_kb',
+    };
 
     if (railwayKbCache.size >= MAX_RAILWAY_KB_CACHE_SIZE) {
       const oldestKey = railwayKbCache.keys().next().value;
       if (oldestKey) railwayKbCache.delete(oldestKey);
     }
-    railwayKbCache.set(cacheKey, { context, matchedCount, source: result.source, timestamp: now });
+    railwayKbCache.set(cacheKey, {
+      context,
+      matchedCount,
+      matchedItems,
+      source: result.source,
+      timestamp: now,
+    });
     return result;
   }
 
@@ -10940,6 +11084,280 @@ function buildScopedAccountFilterVariants(accountId?: string | null): string[] {
   return Array.from(variants);
 }
 
+export const UNIFIED_REPLY_HISTORY_LIMIT = 30;
+export const UNIFIED_RAG_WINDOW_MESSAGES = 4;
+export const UNIFIED_TRANSCRIPT_SNIPPET_LINES = 14;
+export const UNIFIED_SYSTEM_PROMPT_BUDGET_CHARS = 14000;
+
+export function buildUnifiedRagQuery(
+  turns: Array<{ text?: string }>,
+  currentMessageText?: string
+): string {
+  const texts = (Array.isArray(turns) ? turns : [])
+    .map((t) => String(t?.text || '').trim())
+    .filter(Boolean);
+  const cleanCurrent = String(currentMessageText || '').trim();
+  if (cleanCurrent && texts[texts.length - 1] !== cleanCurrent) {
+    texts.push(cleanCurrent);
+  }
+  return texts.slice(-UNIFIED_RAG_WINDOW_MESSAGES).join(' ').trim();
+}
+
+export function isCustomerColdStartProfile(
+  profile: any,
+  likes: string[] = [],
+  memories: any[] = []
+): boolean {
+  if (!profile) return true;
+  const stage = String(profile.relationship_stage || '').trim();
+  if (!stage || stage === '尚未沟通' || stage === '初次接触' || stage === '初次沟通') {
+    return true;
+  }
+  return likes.length === 0 && memories.length === 0;
+}
+
+export function buildUnifiedColdStartGuideline(
+  isColdStart: boolean,
+  likes: string[] = []
+): string {
+  if (isColdStart) {
+    return '【冷启动客观留白准则】：当前客户处于初次结识/冷启动阶段，双方尚未深入交流。你必须保持礼貌得体、自然轻快、适度破冰的初识沟通风格，严禁凭空编造不存在的过往羁绊、熟人玩笑或虚假记忆！';
+  }
+  return `【深度熟人同频要求】：
+1. 你与对方已建立深入联系，必须完全自然地在对话中融入对客户真实爱好（${likes.slice(0, 2).join('、') || '沟通重点'}）与真实约定的感知，绝对不能说“作为AI”，回复毫无破绽，亲切自然！
+2. 篇幅短小精炼（1~2句短句），语气生动，适度使用微表情。`;
+}
+
+export function buildUnifiedAntiAiDirective(historyLimit = UNIFIED_REPLY_HISTORY_LIMIT): string {
+  return `【极简大白话与真人打字口吻（最高军规 · 严禁违背）】：
+1. 绝对杜绝 AI 机械感与客服腔调：
+   - 严禁出现“您好”、“有什么能帮您”、“希望以上信息对您有所帮助”、“综上所述”等任何客服机器人问答套话。
+   - 严禁使用 1. 2. 3.、小标题、分点列项或写成小作文。
+2. 纯正生活大白话与情绪呼吸感：
+   - 像一个活生生的人在用手机给微信或 Telegram 上的朋友打字，自然随性。
+   - 篇幅节奏克制：手机私聊单次通常为 1~2 个口语短句，言简意赅，留白让对方接话。
+3. 严格对照客户最近${historyLimit}条真实聊天记录进行【口语习惯同频镜像】：
+   - 仔细观察上方对话上下文中客户的打字习惯（对方说话字数多还是少、爱用什么语气、情绪是疲惫还是兴奋、是否爱用标点或表情）。
+   - 1:1 同频克隆对方的口语风格与聊天温度，让对方感受到高度投契的真实人类共鸣。`;
+}
+
+export function formatUnifiedTranscriptContext(
+  activeTranscripts: Array<{ title?: string; learned_style?: string; dialogue_text?: string }>,
+  extraSandboxTranscript?: string
+): string {
+  const parts: string[] = [];
+  if (Array.isArray(activeTranscripts) && activeTranscripts.length > 0) {
+    const formattedEntries = activeTranscripts
+      .map((t, idx) => {
+        const snippet = String(t?.dialogue_text || '')
+          .split('\n')
+          .map((l) => l.trimEnd())
+          .filter(Boolean)
+          .slice(-UNIFIED_TRANSCRIPT_SNIPPET_LINES)
+          .join('\n');
+        return `[整文示范 ${idx + 1}]：《${t?.title || '真实聊天范本'}》
+* 提炼的口语习惯与风格画像：${t?.learned_style || '自然生活化、简短口语表达、有分寸有温度'}
+* 真实整文示范片段：
+${snippet || '（暂无对话正文片段）'}`;
+      })
+      .join('\n\n');
+
+    parts.push(`【核心学习范本：整文知识库全篇对话实录与真实人类回复习惯】：
+系统内置了我们过去的真实聊天整文全篇记录。你必须深度学习这些整文中【我方】的打字口癖、用词节奏和互动分寸，绝对不要使用死板生硬的机器人腔调！
+
+${formattedEntries}`);
+  }
+
+  const cleanSandbox = String(extraSandboxTranscript || '').trim();
+  if (cleanSandbox) {
+    const sandboxSnippet = cleanSandbox
+      .split('\n')
+      .map((l) => l.trimEnd())
+      .filter(Boolean)
+      .slice(-UNIFIED_TRANSCRIPT_SNIPPET_LINES)
+      .join('\n');
+    parts.push(`【当前沙盒对照聊天整文片段】：\n${sandboxSnippet}`);
+  }
+
+  if (parts.length === 0) return '';
+
+  return `${parts.join('\n\n')}
+
+【回复习惯复刻准则】：
+1. 语言自然口语化：像在手机 Telegram 私聊一样自然打字，贴合人设与示范片段里的真实说话节奏。
+2. 严禁死板长文：禁止输出大段说教或使用 1. 2. 3. 这种客服机器人列点！手机聊天要短小精悍（1~2短句），偶尔分行。
+3. 真实接梗共情：准确理解对方情绪与真实意图，不答非所问，不做作也不强行硬撩。`;
+}
+
+export async function loadUnifiedTranscriptContext(
+  accountId: string,
+  extraSandboxTranscript?: string
+): Promise<string> {
+  try {
+    const accVariants = getScopedAccountIdVariants(accountId);
+    const placeholders = accVariants.map(() => '?').join(', ');
+    const activeTranscripts = (await db
+      .prepare(`
+        SELECT id, title, description, dialogue_text, learned_style
+        FROM chat_transcripts
+        WHERE is_active = 1 AND account_id IN (${placeholders})
+        ORDER BY updated_at DESC, created_at DESC
+        LIMIT 2
+      `)
+      .all(...accVariants)) as any[];
+    return formatUnifiedTranscriptContext(activeTranscripts, extraSandboxTranscript);
+  } catch (err) {
+    console.warn('Transcript retrieval failed:', err);
+    return formatUnifiedTranscriptContext([], extraSandboxTranscript);
+  }
+}
+
+export function normalizeTestReplyHistoryTurns(
+  recentChatHistory: any,
+  fallbackMessage?: string,
+  limit = UNIFIED_REPLY_HISTORY_LIMIT
+): NormalizedChatTurn[] {
+  const cappedLimit = Math.min(Math.max(1, Number(limit) || UNIFIED_REPLY_HISTORY_LIMIT), UNIFIED_REPLY_HISTORY_LIMIT);
+  const turns: NormalizedChatTurn[] = [];
+  const baseTs = Date.now() - 60000;
+
+  if (Array.isArray(recentChatHistory)) {
+    recentChatHistory.forEach((m: any, idx: number) => {
+      const normalized = normalizeMessageTurn(m, baseTs + idx);
+      if (normalized) turns.push(normalized);
+    });
+  } else if (typeof recentChatHistory === 'string' && recentChatHistory.trim()) {
+    const lines = recentChatHistory
+      .split('\n')
+      .map((l) => l.trim())
+      .filter(Boolean);
+    lines.forEach((line, idx) => {
+      const meMatch = line.match(/^(我方?|AI|助手|assistant|me)\s*[:：]\s*(.+)$/i);
+      const peerMatch = line.match(/^(客户|对方|用户|peer|user)\s*[:：]\s*(.+)$/i);
+      const sender: 'me' | 'peer' = meMatch ? 'me' : 'peer';
+      const text = (meMatch ? meMatch[2] : peerMatch ? peerMatch[2] : line).trim();
+      if (text) {
+        turns.push({
+          sender,
+          role: sender === 'me' ? 'assistant' : 'user',
+          text,
+          mediaType: 'text',
+          createdAt: baseTs + idx,
+        });
+      }
+    });
+  }
+
+  const cleanFallback = String(fallbackMessage || '').trim();
+  if (
+    cleanFallback &&
+    (turns.length === 0 ||
+      turns[turns.length - 1].sender !== 'peer' ||
+      turns[turns.length - 1].text.trim() !== cleanFallback)
+  ) {
+    turns.push({
+      sender: 'peer',
+      role: 'user',
+      text: cleanFallback,
+      mediaType: 'text',
+      createdAt: Date.now(),
+    });
+  }
+
+  return turns.slice(-cappedLimit);
+}
+
+function truncateSectionCleanly(text: string, maxLen: number): string {
+  const clean = String(text || '').trim();
+  if (!clean) return '';
+  if (maxLen <= 0) return '';
+  if (clean.length <= maxLen) return clean;
+  const suffix = '\n[...按总字符预算裁剪]';
+  if (maxLen <= suffix.length + 20) {
+    return clean.slice(0, maxLen);
+  }
+  const head = clean.slice(0, maxLen - suffix.length);
+  const lastNewline = head.lastIndexOf('\n');
+  const sliced = lastNewline > Math.floor(head.length * 0.6) ? head.slice(0, lastNewline) : head;
+  return `${sliced.trimEnd()}${suffix}`;
+}
+
+export function applyPromptCharacterBudget(
+  sections: {
+    persona?: string;
+    antiAi?: string;
+    coldStartGuideline?: string;
+    profile?: string;
+    knowledge?: string;
+    transcripts?: string;
+    langConstraint?: string;
+  },
+  maxChars = UNIFIED_SYSTEM_PROMPT_BUDGET_CHARS
+): {
+  prompt: string;
+  totalChars: number;
+  truncated: boolean;
+  trimmedSections: string[];
+} {
+  let persona = String(sections.persona || '').trim();
+  let antiAi = String(sections.antiAi || '').trim();
+  let coldStartGuideline = String(sections.coldStartGuideline || '').trim();
+  let profile = String(sections.profile || '').trim();
+  let knowledge = String(sections.knowledge || '').trim();
+  let transcripts = String(sections.transcripts || '').trim();
+  let langConstraint = String(sections.langConstraint || '').trim();
+
+  const joinCurrent = () =>
+    [persona, antiAi, coldStartGuideline, profile, knowledge, transcripts, langConstraint]
+      .filter(Boolean)
+      .join('\n\n');
+
+  let combined = joinCurrent();
+  if (combined.length <= maxChars) {
+    return {
+      prompt: combined,
+      totalChars: combined.length,
+      truncated: false,
+      trimmedSections: [],
+    };
+  }
+
+  const trimmedSections: string[] = [];
+  const trimTarget = (key: 'transcripts' | 'knowledge' | 'profile', currentVal: string): string => {
+    const excess = joinCurrent().length - maxChars;
+    if (excess <= 0 || !currentVal) return currentVal;
+    const nextMax = Math.max(0, currentVal.length - excess);
+    const nextVal = truncateSectionCleanly(currentVal, nextMax);
+    if (nextVal !== currentVal) {
+      trimmedSections.push(key);
+    }
+    return nextVal;
+  };
+
+  transcripts = trimTarget('transcripts', transcripts);
+  knowledge = trimTarget('knowledge', knowledge);
+  profile = trimTarget('profile', profile);
+
+  combined = joinCurrent();
+  if (combined.length > maxChars) {
+    // Safety cap if mandatory sections alone exceed maxChars
+    trimmedSections.push('mandatory_cap');
+    const langReserve = langConstraint ? langConstraint.length + 2 : 0;
+    const withoutLang = [persona, antiAi, coldStartGuideline, profile, knowledge, transcripts]
+      .filter(Boolean)
+      .join('\n\n');
+    const cappedHead = truncateSectionCleanly(withoutLang, Math.max(100, maxChars - langReserve));
+    combined = [cappedHead, langConstraint].filter(Boolean).join('\n\n').slice(0, maxChars);
+  }
+
+  return {
+    prompt: combined,
+    totalChars: combined.length,
+    truncated: true,
+    trimmedSections,
+  };
+}
+
 export async function extractRecentTwoWayMessages(
   customerId: string,
   altCustomerId: string,
@@ -11253,6 +11671,9 @@ app.post('/api/llm/chat', aiGenerationLimiter, requireTenantAuth, async (req: Re
       isColdStart: true,
     };
 
+    let customerLikes: string[] = [];
+    let customerMemories: any[] = [];
+
     if (customerId) {
       try {
         const p = await getScopedCustomerProfile(customerId, accountId);
@@ -11262,11 +11683,10 @@ app.post('/api/llm/chat', aiGenerationLimiter, requireTenantAuth, async (req: Re
           const likes = safeJsonParse<string[]>(p.likes_interests, []);
           const taboos = safeJsonParse<string[]>(p.dislikes_taboos, []);
           const memories = safeJsonParse<any[]>(p.key_memories, []);
+          customerLikes = Array.isArray(likes) ? likes : [];
+          customerMemories = Array.isArray(memories) ? memories : [];
 
-          const isColdStart =
-            p.relationship_stage === '尚未沟通' ||
-            p.relationship_stage === '初次接触' ||
-            (likes.length === 0 && memories.length === 0);
+          const isColdStart = isCustomerColdStartProfile(p, customerLikes, customerMemories);
 
           holographicPayload = {
             found: true,
@@ -11277,18 +11697,12 @@ app.post('/api/llm/chat', aiGenerationLimiter, requireTenantAuth, async (req: Re
             occupation: String(p.occupation || '').trim(),
             locationTimezone: String(p.location_timezone || '').trim(),
             toneStyle: String(p.tone_style || '').trim(),
-            likesInterests: Array.isArray(likes) ? likes : [],
+            likesInterests: customerLikes,
             dislikesTaboos: Array.isArray(taboos) ? taboos : [],
             emotionalNeeds: String(p.emotional_needs || '').trim(),
-            keyMemories: Array.isArray(memories) ? memories : [],
+            keyMemories: customerMemories,
             isColdStart,
           };
-
-          const memoryGuideline = isColdStart
-            ? `【冷启动客观留白准则】：当前客户处于初次结识/冷启动阶段，双方尚未深入交流。你必须保持礼貌得体、自然轻快、适度破冰的初识沟通风格，切勿凭空编造不存在的过往羁绊、熟人玩笑或虚假记忆！`
-            : `【极高要求】：
-1. 你与对方已建立深入联系，必须完全自然地在对话中融入对客户真实爱好（${likes.slice(0, 2).join('、') || '沟通重点'}）与真实约定的感知，绝对不能说“作为AI”，回复毫无破绽，亲切自然！
-2. 篇幅短小精炼（1~2句短句），语气生动，适度使用微表情。`;
 
           profileContext = `
 【数据库已载入该客户的全息专属画像与长期记忆档案】：
@@ -11296,18 +11710,21 @@ app.post('/api/llm/chat', aiGenerationLimiter, requireTenantAuth, async (req: Re
 - 客户昵称/称谓：${p.client_name}
 - 当前关系阶段：${p.relationship_stage}
 - 客户性格与语气风格：${p.tone_style}
-- 客户的核心喜好与爱聊话题：${likes.join('、')}
-- 客户的忌讳与敏感雷区：${taboos.join('、')}
+- 客户的核心喜好与爱聊话题：${customerLikes.join('、')}
+- 客户的忌讳与敏感雷区：${(Array.isArray(taboos) ? taboos : []).join('、')}
 - 客户内心深层情感诉求：${p.emotional_needs}
 - 过去双方经历的关键记忆与约定：
-${memories.map((m: any) => `  * [${m.date}] ${m.topic}: ${m.summary} (当时情绪: ${m.emotion || '共鸣'})`).join('\n')}
-
-${memoryGuideline}`;
+${customerMemories.map((m: any) => `  * [${m.date}] ${m.topic}: ${m.summary} (当时情绪: ${m.emotion || '共鸣'})`).join('\n')}`;
         }
       } catch (err) {
         console.warn('Could not read customer profile from db:', err);
       }
     }
+
+    const coldStartGuideline = buildUnifiedColdStartGuideline(
+      isCustomerColdStartProfile(customerProfileData, customerLikes, customerMemories),
+      customerLikes
+    );
 
     // Step 5: Extract recent 30 two-way messages (DB + client buffer, deduplicated, ordered, strictly scoped by accountId)
     const recent30Messages = await extractRecentTwoWayMessages(customerId, altCustomerId, messages, 30, accountId);
@@ -11328,10 +11745,10 @@ ${memoryGuideline}`;
       });
     }
 
-    // Optional Cloud KB / Local RAG / Transcript style context (unchanged core architecture)
+    // Optional Cloud KB / Local RAG / Transcript style context (unified 4-message RAG window)
     let knowledgeContext = '';
     let matchedKnowledgeCount = 0;
-    const recentChatText = recent30Messages.slice(-4).map((m) => m.text).join(' ');
+    const recentChatText = buildUnifiedRagQuery(recent30Messages);
     const userJwt = extractBearerToken(req);
 
     if (isCloudKnowledgeBaseEnabled(effectiveChatConfig)) {
@@ -11384,39 +11801,7 @@ ${memoryGuideline}`;
       console.warn('Knowledge RAG retrieval failed:', err);
     }
 
-    let transcriptContext = '';
-    try {
-      const chatAccVariants = getScopedAccountIdVariants(accountId);
-      const chatAccPlaceholders = chatAccVariants.map(() => '?').join(', ');
-      const activeTranscripts = (await db.prepare(`
-        SELECT id, title, description, dialogue_text, learned_style
-        FROM chat_transcripts
-        WHERE is_active = 1 AND account_id IN (${chatAccPlaceholders})
-        ORDER BY created_at DESC
-        LIMIT 2
-      `).all(...chatAccVariants)) as any[];
-
-      if (activeTranscripts.length > 0) {
-        transcriptContext = `
-【核心学习范本：整文知识库全篇对话实录与真实人类回复习惯】：
-系统内置了我们过去的真实聊天整文全篇记录。你必须深度学习这些整文中【我方】的打字口癖、口语助词、回复节奏和互动习惯，绝对不要使用任何死板生硬的机器人腔调！
-
-${activeTranscripts.map((t, idx) => `
-[整文示范 ${idx + 1}]：《${t.title}》
-* 提炼的口语习惯与风格画像：${t.learned_style || '极其生活化、高情商、爱用轻快语气助词与简短回复'}
-* 真实整文示范片段：
-${t.dialogue_text.split('\n').slice(-14).join('\n')}
-`).join('\n')}
-
-【回复习惯强制复刻准则】：
-1. 语言自然口语化：像在手机 Telegram/微信私聊一样打字，频繁自然使用“哈哈”、“呀”、“啦”、“呢”、“好滴好滴”、“小笨蛋”、“~”等口语助词。
-2. 严禁死板长文：禁止输出大段说教或使用 1. 2. 3. 这种客服机器人列点！手机聊天要短小精悍（1~2短句），偶尔分行。
-3. 真实接梗共情：对方累了先给情绪抚慰，对方开玩笑了调侃接梗，绝不答非所问，完全复刻上述整文样本中的说话习惯。
-`;
-      }
-    } catch (err) {
-      console.warn('Transcript retrieval failed:', err);
-    }
+    const transcriptContext = await loadUnifiedTranscriptContext(accountId);
 
     // Intelligent foreign-language detection & anti-drift lock
     let resolvedLang =
@@ -11452,27 +11837,21 @@ ${t.dialogue_text.split('\n').slice(-14).join('\n')}
     }
 
     const langRequirement = (resolvedLang && resolvedLang !== 'Chinese' && resolvedLang !== 'zh-CN')
-      ? `\n\n【语言强制防漂移锁定】：当前客户的沟通语言/母语为 ${resolvedLang}（如土耳其语、英语等）。你必须 100% 严格使用地道纯正的 ${resolvedLang} 回复对方，绝对禁止回复中文！`
+      ? `【语言强制防漂移锁定】：当前客户的沟通语言/母语为 ${resolvedLang}（如土耳其语、英语等）。你必须 100% 严格使用地道纯正的 ${resolvedLang} 回复对方，绝对禁止回复中文！`
       : '';
 
-    const oralAntiAiDirective = `
-【极简大白话与真人打字口吻（最高军规 · 严禁违背）】：
-1. 绝对杜绝 AI 机械感与客服腔调：
-   - 严禁出现“您好”、“有什么能帮您”、“希望以上信息对您有所帮助”、“综上所述”等任何客服机器人问答套话。
-   - 严禁使用 1. 2. 3.、小标题、分点列项或写成小作文。
-2. 纯正生活大白话与情绪呼吸感：
-   - 像一个活生生的人在用手机给微信或 Telegram 上的朋友打字，自然随性。
-   - 篇幅节奏克制：手机私聊单次通常为 1~2 个口语短句，言简意赅，留白让对方接话。
-3. 严格对照客户最近30条真实聊天记录进行【口语习惯同频镜像】：
-   - 仔细观察上方对话上下文中客户的打字习惯（对方说话字数多还是少、爱用什么语气、情绪是疲惫还是兴奋、是否爱用标点或表情）。
-   - 1:1 同频克隆对方的口语风格与聊天温度，让对方感受到高度投契的真实人类共鸣。
-`;
+    const oralAntiAiDirective = buildUnifiedAntiAiDirective(UNIFIED_REPLY_HISTORY_LIMIT);
 
-    const fullSystemInstruction = `${globalPersonaContext || personaPrompt || '你是一位真诚自然、高效有温度的沟通助手。'}
-${oralAntiAiDirective}
-${profileContext}
-${knowledgeContext}
-${transcriptContext}${langRequirement}`;
+    const budgetedChatPrompt = applyPromptCharacterBudget({
+      persona: globalPersonaContext || personaPrompt || '你是一位真诚自然、高效有温度的沟通助手。',
+      antiAi: oralAntiAiDirective,
+      coldStartGuideline,
+      profile: profileContext.trim(),
+      knowledge: knowledgeContext.trim(),
+      transcripts: transcriptContext.trim(),
+      langConstraint: langRequirement.trim(),
+    });
+    const fullSystemInstruction = budgetedChatPrompt.prompt;
 
     // Step 7: Build standardized structured JSON request payload
     const structuredJsonRequest = buildCloudReplyJsonRequest({
@@ -11537,8 +11916,29 @@ ${transcriptContext}${langRequirement}`;
           try { extraHeaders = JSON.parse(effectiveChatConfig.customHeaders); } catch {}
         }
 
+        let lastUpstreamStatus = 503;
+        let lastUpstreamError = '';
+        const extractUpstreamErrDetail = (rawText: string): string => {
+          const clean = String(rawText || '').trim();
+          if (!clean) return '';
+          const parsed = safeJsonParse<any>(clean, null);
+          const msg =
+            parsed?.error?.message ||
+            parsed?.message ||
+            (typeof parsed?.error === 'string' ? parsed.error : '');
+          return String(msg || clean).replace(/\s+/g, ' ').trim().slice(0, 400);
+        };
+
         if (!isCloudBrainChat && effectiveChatProtocol === 'gemini') {
-          const targetUrl = buildCustomGeminiUrl(cleanBaseUrl, effectiveChatConfig.modelName);
+          const cleanGeminiChatModel = String(effectiveChatConfig.modelName || '').trim();
+          if (!cleanBaseUrl.includes(':generateContent') && !cleanGeminiChatModel) {
+            return res.status(400).json({
+              error: '自有 Gemini 协议网关未填写模型型号 (Model Name)，已拦截空模型请求，请先在「模型」设置具体 Gemini 模型 ID。',
+              blocked: true,
+              source: 'custom_llm_missing_model',
+            });
+          }
+          const targetUrl = buildCustomGeminiUrl(cleanBaseUrl, cleanGeminiChatModel);
 
           const contents = recent30Messages.map((m) => ({
             role: m.sender === 'peer' ? 'user' : 'model',
@@ -11556,42 +11956,61 @@ ${transcriptContext}${langRequirement}`;
             ...extraHeaders,
           };
 
-          const resGemini = await fetchWithRetry(
-            targetUrl,
-            {
-              method: 'POST',
-              headers,
-              body: JSON.stringify({
-                contents,
-                systemInstruction: { parts: [{ text: fullSystemInstruction }] },
-                generationConfig: {
-                  temperature: effectiveChatConfig.temperature ?? 0.7,
-                  maxOutputTokens: 500,
-                },
-              }),
-            },
-            { timeoutMs: 15000, maxRetries: 2 }
-          );
+          try {
+            const resGemini = await fetchWithRetry(
+              targetUrl,
+              {
+                method: 'POST',
+                headers,
+                body: JSON.stringify({
+                  contents,
+                  systemInstruction: { parts: [{ text: fullSystemInstruction }] },
+                  generationConfig: {
+                    temperature: effectiveChatConfig.temperature ?? 0.7,
+                    maxOutputTokens: 500,
+                  },
+                }),
+              },
+              { timeoutMs: 15000, maxRetries: 2 }
+            );
 
-          if (resGemini.ok) {
-            const d = await resGemini.json();
-            const replyText = d?.candidates?.[0]?.content?.parts?.[0]?.text?.trim();
-            if (replyText) {
-              void incrementEvolutionHabitUsage(injectedHabitIds, accountId);
-              const cnTranslation = await getCnTranslationIfForeign(
-                replyText,
-                effectiveChatConfig,
-                userJwt,
-                chatTranslationTargetLang
-              );
-              return res.json({
-                replyText,
-                cnTranslation,
-                source: 'custom_llm',
-                model: effectiveChatConfig.modelName,
-                pipeline: pipelineMeta,
-              });
+            if (resGemini.ok) {
+              const rawBody = await resGemini.text().catch(() => '');
+              const d = safeJsonParse<any>(rawBody, null);
+              if (d?.error) {
+                lastUpstreamStatus = 502;
+                lastUpstreamError = `上游网关返回错误: ${extractUpstreamErrDetail(rawBody)}`;
+              } else {
+                const replyText = d?.candidates?.[0]?.content?.parts?.[0]?.text?.trim();
+                if (replyText) {
+                  void incrementEvolutionHabitUsage(injectedHabitIds, accountId);
+                  const cnTranslation = await getCnTranslationIfForeign(
+                    replyText,
+                    effectiveChatConfig,
+                    userJwt,
+                    chatTranslationTargetLang
+                  );
+                  return res.json({
+                    replyText,
+                    cnTranslation,
+                    source: 'custom_llm',
+                    model: effectiveChatConfig.modelName,
+                    pipeline: pipelineMeta,
+                  });
+                }
+                lastUpstreamStatus = 502;
+                lastUpstreamError = d
+                  ? '自有 Gemini 网关未返回有效回复内容'
+                  : `自有 Gemini 网关返回非 JSON 响应: ${rawBody.replace(/\s+/g, ' ').trim().slice(0, 200)}`;
+              }
+            } else {
+              const errBody = await resGemini.text().catch(() => '');
+              lastUpstreamStatus = resGemini.status;
+              const detail = extractUpstreamErrDetail(errBody);
+              lastUpstreamError = `HTTP ${resGemini.status}${detail ? `: ${detail}` : ''}`;
             }
+          } catch (e: any) {
+            lastUpstreamError = e?.message || String(e);
           }
         } else if (!isCloudBrainChat && effectiveChatProtocol === 'anthropic') {
           const candidateUrls = buildCustomAnthropicUrls(cleanBaseUrl);
@@ -11628,7 +12047,13 @@ ${transcriptContext}${langRequirement}`;
               );
 
               if (response.ok) {
-                const data = await response.json();
+                const rawBody = await response.text().catch(() => '');
+                const data = safeJsonParse<any>(rawBody, null);
+                if (data?.error) {
+                  lastUpstreamStatus = 502;
+                  lastUpstreamError = `上游网关返回错误: ${extractUpstreamErrDetail(rawBody)}`;
+                  break;
+                }
                 const replyText = Array.isArray(data?.content)
                   ? data.content
                       .filter((c: any) => c?.type === 'text' && typeof c?.text === 'string')
@@ -11652,9 +12077,20 @@ ${transcriptContext}${langRequirement}`;
                     pipeline: pipelineMeta,
                   });
                 }
+                lastUpstreamStatus = 502;
+                lastUpstreamError = data
+                  ? '自有 Anthropic 网关未返回有效回复内容'
+                  : `自有 Anthropic 网关返回非 JSON 响应: ${rawBody.replace(/\s+/g, ' ').trim().slice(0, 200)}`;
+                break;
               }
+              const errBody = await response.text().catch(() => '');
+              lastUpstreamStatus = response.status;
+              const detail = extractUpstreamErrDetail(errBody);
+              lastUpstreamError = `HTTP ${response.status}${detail ? `: ${detail}` : ''}`;
               if (response.status !== 404) break;
-            } catch {}
+            } catch (e: any) {
+              lastUpstreamError = e?.message || String(e);
+            }
           }
         } else {
           // OpenAI Protocol or LingXi Private Cloud Brain Gateway (carries structuredJsonRequest + 30 two-way turns)
@@ -11707,7 +12143,13 @@ ${transcriptContext}${langRequirement}`;
               );
 
               if (response.ok) {
-                const data = await response.json();
+                const rawBody = await response.text().catch(() => '');
+                const data = safeJsonParse<any>(rawBody, null);
+                if (data?.error) {
+                  lastUpstreamStatus = 502;
+                  lastUpstreamError = `上游网关返回错误: ${extractUpstreamErrDetail(rawBody)}`;
+                  break;
+                }
                 const replyText = data?.choices?.[0]?.message?.content?.trim();
                 if (replyText) {
                   void incrementEvolutionHabitUsage(injectedHabitIds, accountId);
@@ -11725,20 +12167,32 @@ ${transcriptContext}${langRequirement}`;
                     pipeline: pipelineMeta,
                   });
                 }
+                lastUpstreamStatus = 502;
+                lastUpstreamError = data
+                  ? '模型网关未返回有效回复内容'
+                  : `模型网关返回非 JSON 响应: ${rawBody.replace(/\s+/g, ' ').trim().slice(0, 200)}`;
+                break;
               }
+              const errBody = await response.text().catch(() => '');
+              lastUpstreamStatus = response.status;
+              const detail = extractUpstreamErrDetail(errBody);
+              lastUpstreamError = `HTTP ${response.status}${detail ? `: ${detail}` : ''}`;
               if (response.status !== 404) break;
-            } catch {
-              // try next candidate
+            } catch (e: any) {
+              lastUpstreamError = e?.message || String(e);
             }
           }
         }
 
-        return res.status(503).json({
+        const guardStatus = lastUpstreamStatus >= 400 && lastUpstreamStatus < 600 ? lastUpstreamStatus : 503;
+        return res.status(guardStatus).json({
           error: isCloudBrainChat
-            ? '云端训练引擎未连通或密钥未授权，严禁降级自动回复。控制台已保持静默防护。'
-            : '自有模型网关未连通、模型不可用或 API 密钥无效，已触发安全阻断并暂停自动回复。',
+            ? `云端训练引擎未连通或密钥未授权${lastUpstreamError ? ` (${lastUpstreamError})` : ''}，严禁降级自动回复。控制台已保持静默防护。`
+            : `自有模型网关调用失败${lastUpstreamError ? ` (${lastUpstreamError})` : ''}，已触发安全阻断并暂停自动回复。`,
           blocked: true,
           source: 'custom_llm_disconnection_guard',
+          upstreamError: lastUpstreamError || undefined,
+          upstreamStatus: guardStatus,
         });
       } catch (err: any) {
         console.warn('Custom LLM proxy failed:', err.message);
@@ -11748,6 +12202,7 @@ ${transcriptContext}${langRequirement}`;
             : `自有模型网关连通失败 (${err.message})，防护机制开启并暂停自动回复。`,
           blocked: true,
           source: 'custom_llm_disconnection_guard',
+          upstreamError: err?.message || String(err),
         });
       }
     }
@@ -12059,9 +12514,13 @@ function formatFriendlyPingError({
   let parsedErrMsg = '';
   try {
     const parsed = JSON.parse(errText);
-    parsedErrMsg = parsed?.error?.message || parsed?.message || '';
+    parsedErrMsg =
+      parsed?.error?.message ||
+      parsed?.message ||
+      (typeof parsed?.error === 'string' ? parsed.error : '');
   } catch {}
   const detailText = (parsedErrMsg || errText || '').replace(/\s+/g, ' ').trim();
+  const detailSuffix = detailText ? `（上游详情: ${detailText.slice(0, 320)}）` : '';
 
   if (
     status === 401 ||
@@ -12071,7 +12530,7 @@ function formatFriendlyPingError({
     lowerErr.includes('authentication_error') ||
     lowerErr.includes('incorrect api key')
   ) {
-    return `API 密钥鉴权失败 (${status})：请检查密钥是否正确粘贴、是否已过期或是否具备该接口访问权限。`;
+    return `API 密钥鉴权失败 (${status})：请检查密钥是否正确粘贴、是否已过期或是否具备该接口访问权限。${detailSuffix}`;
   }
 
   if (
@@ -12080,7 +12539,7 @@ function formatFriendlyPingError({
     lowerErr.includes('insufficient_quota') ||
     lowerErr.includes('rate_limit')
   ) {
-    return `请求频次超限或账号配额/余额不足 (429)：请检查当前密钥的额度或稍后重试。`;
+    return `请求频次超限或账号配额/余额不足 (429)：请检查当前密钥的额度或稍后重试。${detailSuffix}`;
   }
 
   const isModelFormatOrMissing =
@@ -12113,18 +12572,81 @@ function formatFriendlyPingError({
     }
 
     if (availableModels.length > 0) {
-      return `${reason} 已为您探测到当前密钥可用模型，点击下方推荐型号即可一键切换。`;
+      return `${reason} 已为您探测到当前密钥可用模型，点击下方推荐型号即可一键切换。${detailSuffix}`;
     }
-    return `${reason}${detailText ? `（详情: ${detailText.slice(0, 120)}）` : ''}`;
+    return `${reason}${detailSuffix}`;
   }
 
-  return `连接异常 (${status})：${detailText.slice(0, 160) || '请检查接入网址、API 密钥或模型名称'}`;
+  return `连接异常 (${status})：${detailText.slice(0, 400) || '请检查接入网址、API 密钥或模型名称'}`;
+}
+
+export function validatePingInferencePayload(
+  protocol: 'openai' | 'gemini' | 'anthropic',
+  rawBody: string
+): { ok: true; data: any } | { ok: false; errorText: string } {
+  const cleanRaw = String(rawBody || '').trim();
+  if (!cleanRaw) {
+    return { ok: false, errorText: '上游返回空响应体，未通过真实推理响应校验' };
+  }
+  const parsed = safeJsonParse<any>(cleanRaw, null);
+  if (!parsed || typeof parsed !== 'object') {
+    const looksHtml = /^<(?:!doctype|html|head|body)/i.test(cleanRaw);
+    return {
+      ok: false,
+      errorText: looksHtml
+        ? `上游返回了 HTML 页面而非 API JSON 响应（可能是接口路径错误）: ${cleanRaw.replace(/\s+/g, ' ').slice(0, 220)}`
+        : `上游返回非 JSON 响应: ${cleanRaw.replace(/\s+/g, ' ').slice(0, 220)}`,
+    };
+  }
+  if (parsed?.error) {
+    const msg =
+      parsed.error?.message ||
+      (typeof parsed.error === 'string' ? parsed.error : JSON.stringify(parsed.error));
+    return { ok: false, errorText: String(msg).slice(0, 400) };
+  }
+  if (parsed?.ok === false) {
+    return {
+      ok: false,
+      errorText: String(parsed?.message || parsed?.msg || cleanRaw).slice(0, 400),
+    };
+  }
+
+  if (protocol === 'gemini') {
+    if (!Array.isArray(parsed?.candidates) || parsed.candidates.length === 0) {
+      return {
+        ok: false,
+        errorText: `Gemini 协议响应缺少有效 candidates 字段: ${cleanRaw.replace(/\s+/g, ' ').slice(0, 240)}`,
+      };
+    }
+    return { ok: true, data: parsed };
+  }
+
+  if (protocol === 'anthropic') {
+    const validAnthropic =
+      Array.isArray(parsed?.content) ||
+      (typeof parsed?.id === 'string' && parsed?.type === 'message');
+    if (!validAnthropic) {
+      return {
+        ok: false,
+        errorText: `Anthropic 协议响应缺少有效 content/message 字段: ${cleanRaw.replace(/\s+/g, ' ').slice(0, 240)}`,
+      };
+    }
+    return { ok: true, data: parsed };
+  }
+
+  if (!Array.isArray(parsed?.choices) || parsed.choices.length === 0) {
+    return {
+      ok: false,
+      errorText: `OpenAI 协议响应缺少有效 choices 字段: ${cleanRaw.replace(/\s+/g, ' ').slice(0, 240)}`,
+    };
+  }
+  return { ok: true, data: parsed };
 }
 
 // 11. Ping Custom LLM or Private Cloud Brain (Rate-limited, SSRF protected, Key in header, URL hidden for cloud mode)
 app.post('/api/llm/ping', aiGenerationLimiter, requireTenantAuth, async (req: Request, res: Response) => {
   try {
-    const { baseUrl, apiKey, modelName, protocol = 'openai', customHeaders, engineMode, engineLicenseKey } = req.body;
+    const { baseUrl, apiKey, modelName, protocol = 'auto', customHeaders, engineMode, engineLicenseKey } = req.body;
     const savedCfgForPing = await getServerCustomLlmConfig().catch(() => null);
     const effectiveEngineLicenseKey = resolveSecretUpdate(
       engineLicenseKey,
@@ -12141,10 +12663,17 @@ app.post('/api/llm/ping', aiGenerationLimiter, requireTenantAuth, async (req: Re
       : (typeof baseUrl === 'string' ? baseUrl : '').replace(/[^\x20-\x7E]/g, '').trim().replace(/\/+$/, '');
     const cleanKey = sanitizeHttpHeaderValue(resolveSecretUpdate(apiKey, savedCfgForPing?.apiKey, false));
     const hasExplicitModel = Boolean(modelName && typeof modelName === 'string' && modelName.trim());
+    const effectiveProtocol = isCloudPing
+      ? 'openai'
+      : inferGatewayProtocol(cleanBaseUrl, typeof modelName === 'string' ? modelName : '', protocol);
     const effectiveModel = hasExplicitModel
       ? modelName.trim()
-      : isCloudPing || protocol === 'gemini'
+      : isCloudPing
       ? 'gemini-4-hydrogen'
+      : effectiveProtocol === 'gemini'
+      ? ''
+      : effectiveProtocol === 'anthropic'
+      ? 'claude-3-5-sonnet-20241022'
       : 'gpt-4o-mini';
 
     let extraHeaders: Record<string, string> = {};
@@ -12157,7 +12686,7 @@ app.post('/api/llm/ping', aiGenerationLimiter, requireTenantAuth, async (req: Re
     const timeoutId = setTimeout(() => controller.abort(), 6000);
 
     try {
-      if (!isCloudPing && protocol === 'gemini') {
+      if (!isCloudPing && effectiveProtocol === 'gemini') {
         const cleanGeminiBase = cleanBaseUrl.replace(/\/v1$/, '');
         const geminiHeaders: Record<string, string> = {
           'Content-Type': 'application/json',
@@ -12170,6 +12699,8 @@ app.post('/api/llm/ping', aiGenerationLimiter, requireTenantAuth, async (req: Re
         };
 
         if (!hasExplicitModel) {
+          let modelsProbeStatus = 400;
+          let modelsProbeErr = '';
           try {
             const modelsUrl = `${cleanGeminiBase.replace(/\/v1beta.*$/i, '')}/v1beta/models`;
             const modelsRes = await safeSsrfFetch(modelsUrl, {
@@ -12179,46 +12710,71 @@ app.post('/api/llm/ping', aiGenerationLimiter, requireTenantAuth, async (req: Re
             });
             const latency = Date.now() - startTime;
             if (modelsRes.ok) {
-              const payload = await modelsRes.json().catch(() => null);
-              const availableModels = extractModelIdsFromListPayload('gemini', payload);
-              const modelDetails = await buildModelUsageDetails({
-                modelIds: availableModels,
-                apiKey: cleanKey,
-                baseUrl: cleanBaseUrl,
-              });
-              return res.json({
-                ok: true,
-                latencyMs: latency,
-                suggestedModels: availableModels,
-                modelDetails,
-                message: `Gemini 网关鉴权与连通测试通过！(延迟 ${latency}ms${availableModels.length > 0 ? ` · 探测到 ${availableModels.length} 个最新对话模型` : ''})`,
-              });
+              const rawModelsBody = await modelsRes.text().catch(() => '');
+              const payload = safeJsonParse<any>(rawModelsBody, null);
+              if (payload && Array.isArray(payload?.models) && !payload?.error) {
+                const availableModels = extractModelIdsFromListPayload('gemini', payload);
+                const modelDetails = await buildModelUsageDetails({
+                  modelIds: availableModels,
+                  apiKey: cleanKey,
+                  baseUrl: cleanBaseUrl,
+                });
+                return res.json({
+                  ok: true,
+                  latencyMs: latency,
+                  protocol: 'gemini',
+                  suggestedModels: availableModels,
+                  modelDetails,
+                  message: `Gemini 网关鉴权与连通测试通过！(延迟 ${latency}ms${availableModels.length > 0 ? ` · 探测到 ${availableModels.length} 个最新对话模型` : ''})`,
+                });
+              }
+              modelsProbeStatus = 502;
+              modelsProbeErr = payload?.error?.message
+                ? String(payload.error.message)
+                : `GET /v1beta/models 未返回有效 models 列表 (${rawModelsBody.replace(/\s+/g, ' ').slice(0, 200)})`;
+            } else {
+              modelsProbeStatus = modelsRes.status;
+              modelsProbeErr = await modelsRes.text().catch(() => '');
             }
-            if (modelsRes.status === 401 || modelsRes.status === 403) {
-              const errTxt = await modelsRes.text().catch(() => '');
-              return res.status(modelsRes.status).json({
+          } catch (probeErr: any) {
+            modelsProbeStatus = 502;
+            modelsProbeErr = probeErr?.message || String(probeErr);
+          }
+
+          if (!cleanBaseUrl.includes(':generateContent')) {
+            const latency = Date.now() - startTime;
+            if (modelsProbeStatus === 401 || modelsProbeStatus === 403 || modelsProbeStatus === 429) {
+              return res.status(modelsProbeStatus).json({
                 ok: false,
                 latencyMs: latency,
+                protocol: 'gemini',
                 error: formatFriendlyPingError({
                   protocol: 'gemini',
-                  status: modelsRes.status,
-                  errText: errTxt,
+                  status: modelsProbeStatus,
+                  errText: modelsProbeErr,
                   modelName,
                   availableModels: [],
                 }),
               });
             }
-          } catch {}
-        }
-
-        let targetUrl = cleanGeminiBase;
-        if (!targetUrl.includes(':generateContent')) {
-          if (!targetUrl.includes('/v1beta/models') && !targetUrl.includes('/v1/models')) {
-            targetUrl = `${targetUrl.replace(/\/v1beta$/i, '').replace(/\/v1$/i, '')}/v1beta/models/${effectiveModel}:generateContent`;
-          } else {
-            targetUrl = `${targetUrl}:generateContent`;
+            const errSuffix = modelsProbeErr
+              ? `（GET /v1beta/models 状态 ${modelsProbeStatus}：${modelsProbeErr.replace(/\s+/g, ' ').trim().slice(0, 240)}）`
+              : '';
+            const statusCode = modelsProbeStatus >= 400 && modelsProbeStatus < 600 && modelsProbeStatus !== 404
+              ? modelsProbeStatus
+              : 400;
+            return res.status(statusCode).json({
+              ok: false,
+              latencyMs: latency,
+              protocol: 'gemini',
+              blocked: true,
+              source: 'custom_llm_missing_model',
+              error: `Gemini 协议网关未填写模型型号 (Model Name)，且无法通过 /v1beta/models 列出可用模型；已拦截空模型推理请求，请先填写具体 Gemini 模型 ID 后再测试。${errSuffix}`,
+            });
           }
         }
+
+        const targetUrl = buildCustomGeminiUrl(cleanGeminiBase, effectiveModel);
 
         const testRes = await safeSsrfFetch(targetUrl, {
           method: 'POST',
@@ -12231,25 +12787,42 @@ app.post('/api/llm/ping', aiGenerationLimiter, requireTenantAuth, async (req: Re
         });
         const latency = Date.now() - startTime;
         if (testRes.ok) {
-          await recordCustomLlmModelUsage({
-            apiKey: cleanKey,
-            baseUrl: cleanBaseUrl,
-            modelName: effectiveModel,
-            headers: testRes.headers,
-          });
-          const [currentUsage] = await buildModelUsageDetails({
-            modelIds: [effectiveModel],
-            apiKey: cleanKey,
-            baseUrl: cleanBaseUrl,
-          });
-          return res.json({
-            ok: true,
+          const rawBody = await testRes.text().catch(() => '');
+          const validated = validatePingInferencePayload('gemini', rawBody);
+          if (validated.ok) {
+            await recordCustomLlmModelUsage({
+              apiKey: cleanKey,
+              baseUrl: cleanBaseUrl,
+              modelName: effectiveModel,
+              headers: testRes.headers,
+            });
+            const [currentUsage] = await buildModelUsageDetails({
+              modelIds: [effectiveModel],
+              apiKey: cleanKey,
+              baseUrl: cleanBaseUrl,
+            });
+            return res.json({
+              ok: true,
+              latencyMs: latency,
+              protocol: 'gemini',
+              currentModelUsage: currentUsage,
+              message: `Gemini 协议真实推理握手成功！(${effectiveModel || '自定义端点'}) 延迟 ${latency}ms`,
+            });
+          }
+          return res.status(502).json({
+            ok: false,
             latencyMs: latency,
-            currentModelUsage: currentUsage,
-            message: `Gemini 协议握手成功！响应延迟 ${latency}ms`,
+            protocol: 'gemini',
+            error: formatFriendlyPingError({
+              protocol: 'gemini',
+              status: 502,
+              errText: validated.errorText,
+              modelName: effectiveModel,
+              availableModels: [],
+            }),
           });
         } else {
-          const errText = await testRes.text();
+          const errText = await testRes.text().catch(() => '');
           const availableModels =
             testRes.status === 400 || testRes.status === 404
               ? await fetchAvailableModelsForGateway({
@@ -12267,6 +12840,7 @@ app.post('/api/llm/ping', aiGenerationLimiter, requireTenantAuth, async (req: Re
           return res.status(testRes.status).json({
             ok: false,
             latencyMs: latency,
+            protocol: 'gemini',
             suggestedModels: availableModels,
             modelDetails,
             error: formatFriendlyPingError({
@@ -12278,7 +12852,7 @@ app.post('/api/llm/ping', aiGenerationLimiter, requireTenantAuth, async (req: Re
             }),
           });
         }
-      } else if (!isCloudPing && protocol === 'anthropic') {
+      } else if (!isCloudPing && effectiveProtocol === 'anthropic') {
         const candidateUrls = buildCustomAnthropicUrls(cleanBaseUrl);
         const headers: Record<string, string> = {
           'Content-Type': 'application/json',
@@ -12309,30 +12883,39 @@ app.post('/api/llm/ping', aiGenerationLimiter, requireTenantAuth, async (req: Re
             lastStatus = testRes.status;
 
             if (testRes.ok) {
-              await recordCustomLlmModelUsage({
-                apiKey: cleanKey,
-                baseUrl: cleanBaseUrl,
-                modelName: anthropicModel,
-                headers: testRes.headers,
-              });
-              const [currentUsage] = await buildModelUsageDetails({
-                modelIds: [anthropicModel],
-                apiKey: cleanKey,
-                baseUrl: cleanBaseUrl,
-              });
-              return res.json({
-                ok: true,
-                latencyMs: latency,
-                currentModelUsage: currentUsage,
-                message: `Anthropic 协议握手成功！(匹配路由: ${targetUrl}) 延迟 ${latency}ms`,
-              });
+              const rawBody = await testRes.text().catch(() => '');
+              const validated = validatePingInferencePayload('anthropic', rawBody);
+              if (validated.ok) {
+                await recordCustomLlmModelUsage({
+                  apiKey: cleanKey,
+                  baseUrl: cleanBaseUrl,
+                  modelName: anthropicModel,
+                  headers: testRes.headers,
+                });
+                const [currentUsage] = await buildModelUsageDetails({
+                  modelIds: [anthropicModel],
+                  apiKey: cleanKey,
+                  baseUrl: cleanBaseUrl,
+                });
+                return res.json({
+                  ok: true,
+                  latencyMs: latency,
+                  protocol: 'anthropic',
+                  currentModelUsage: currentUsage,
+                  message: `Anthropic 协议真实推理握手成功！(匹配路由: ${targetUrl}) 延迟 ${latency}ms`,
+                });
+              }
+              lastStatus = 502;
+              lastErrText = validated.errorText;
+              break;
             }
 
-            lastErrText = await testRes.text();
+            lastErrText = await testRes.text().catch(() => '');
             if (testRes.status !== 404) {
               break;
             }
           } catch (e: any) {
+            lastStatus = 502;
             lastErrText = e.message;
           }
         }
@@ -12355,6 +12938,7 @@ app.post('/api/llm/ping', aiGenerationLimiter, requireTenantAuth, async (req: Re
         return res.status(lastStatus).json({
           ok: false,
           latencyMs: latency,
+          protocol: 'anthropic',
           suggestedModels: availableModels,
           modelDetails,
           error: formatFriendlyPingError({
@@ -12367,10 +12951,7 @@ app.post('/api/llm/ping', aiGenerationLimiter, requireTenantAuth, async (req: Re
         });
       } else {
         // OpenAI Protocol or LingXi Cloud Brain
-        const hasExplicitModel = Boolean(modelName && typeof modelName === 'string' && modelName.trim());
-
-        // When pinging custom gateway without a specific model (图3 gateway-only verification),
-        // test GET /v1/models first so we verify URL + Key auth without guessing a model name.
+        // When pinging custom gateway without a specific model, test GET /v1/models first so we verify URL + Key auth without guessing a model name.
         if (!isCloudPing && !hasExplicitModel) {
           const modelsUrls = cleanBaseUrl.endsWith('/models')
             ? [cleanBaseUrl]
@@ -12390,26 +12971,32 @@ app.post('/api/llm/ping', aiGenerationLimiter, requireTenantAuth, async (req: Re
               });
               const latency = Date.now() - startTime;
               if (mRes.ok) {
-                const payload = await mRes.json().catch(() => null);
-                const availableModels = extractModelIdsFromListPayload('openai', payload);
-                const modelDetails = await buildModelUsageDetails({
-                  modelIds: availableModels,
-                  apiKey: cleanKey,
-                  baseUrl: cleanBaseUrl,
-                });
-                return res.json({
-                  ok: true,
-                  latencyMs: latency,
-                  suggestedModels: availableModels,
-                  modelDetails,
-                  message: `自有模型网关鉴权与连通测试通过！(延迟 ${latency}ms${availableModels.length > 0 ? ` · 探测到 ${availableModels.length} 个最新对话模型` : ''})`,
-                });
+                const rawModelsBody = await mRes.text().catch(() => '');
+                const payload = safeJsonParse<any>(rawModelsBody, null);
+                const hasValidList = payload && (Array.isArray(payload?.data) || Array.isArray(payload?.models)) && !payload?.error;
+                if (hasValidList) {
+                  const availableModels = extractModelIdsFromListPayload('openai', payload);
+                  const modelDetails = await buildModelUsageDetails({
+                    modelIds: availableModels,
+                    apiKey: cleanKey,
+                    baseUrl: cleanBaseUrl,
+                  });
+                  return res.json({
+                    ok: true,
+                    latencyMs: latency,
+                    protocol: 'openai',
+                    suggestedModels: availableModels,
+                    modelDetails,
+                    message: `自有模型网关鉴权与连通测试通过！(延迟 ${latency}ms${availableModels.length > 0 ? ` · 探测到 ${availableModels.length} 个最新对话模型` : ''})`,
+                  });
+                }
               }
               if (mRes.status === 401 || mRes.status === 403) {
                 const errTxt = await mRes.text().catch(() => '');
                 return res.status(mRes.status).json({
                   ok: false,
                   latencyMs: latency,
+                  protocol: 'openai',
                   error: formatFriendlyPingError({
                     protocol: 'openai',
                     status: mRes.status,
@@ -12423,14 +13010,7 @@ app.post('/api/llm/ping', aiGenerationLimiter, requireTenantAuth, async (req: Re
           }
         }
 
-        let candidateUrls: string[] = [];
-        if (cleanBaseUrl.endsWith('/chat/completions')) {
-          candidateUrls = [cleanBaseUrl];
-        } else if (cleanBaseUrl.endsWith('/v1')) {
-          candidateUrls = [`${cleanBaseUrl}/chat/completions`];
-        } else {
-          candidateUrls = [`${cleanBaseUrl}/v1/chat/completions`, `${cleanBaseUrl}/chat/completions`];
-        }
+        const candidateUrls = buildCustomOpenAiUrls(cleanBaseUrl);
 
         const userJwt = extractBearerToken(req);
         const headers: Record<string, string> = isCloudPing
@@ -12463,37 +13043,46 @@ app.post('/api/llm/ping', aiGenerationLimiter, requireTenantAuth, async (req: Re
             lastStatus = testRes.status;
 
             if (testRes.ok) {
-              if (!isCloudPing) {
-                await recordCustomLlmModelUsage({
-                  apiKey: cleanKey,
-                  baseUrl: cleanBaseUrl,
-                  modelName: effectiveModel,
-                  headers: testRes.headers,
-                });
-              }
-              const [currentUsage] = !isCloudPing
-                ? await buildModelUsageDetails({
-                    modelIds: [effectiveModel],
+              const rawBody = await testRes.text().catch(() => '');
+              const validated = validatePingInferencePayload('openai', rawBody);
+              if (validated.ok) {
+                if (!isCloudPing) {
+                  await recordCustomLlmModelUsage({
                     apiKey: cleanKey,
                     baseUrl: cleanBaseUrl,
-                  })
-                : [undefined];
-              return res.json({
-                ok: true,
-                latencyMs: latency,
-                currentModelUsage: currentUsage,
-                message: isCloudPing
-                  ? `HumanSense 云端训练引擎加密通道握手成功！延迟 ${latency}ms`
-                  : `自有模型网关握手成功！(匹配路由: ${targetUrl}) 延迟 ${latency}ms`,
-              });
+                    modelName: effectiveModel,
+                    headers: testRes.headers,
+                  });
+                }
+                const [currentUsage] = !isCloudPing
+                  ? await buildModelUsageDetails({
+                      modelIds: [effectiveModel],
+                      apiKey: cleanKey,
+                      baseUrl: cleanBaseUrl,
+                    })
+                  : [undefined];
+                return res.json({
+                  ok: true,
+                  latencyMs: latency,
+                  protocol: 'openai',
+                  currentModelUsage: currentUsage,
+                  message: isCloudPing
+                    ? `HumanSense 云端训练引擎加密通道握手成功！延迟 ${latency}ms`
+                    : `自有模型网关真实推理握手成功！(匹配路由: ${targetUrl}) 延迟 ${latency}ms`,
+                });
+              }
+              lastStatus = 502;
+              lastErrText = validated.errorText;
+              break;
             }
 
-            lastErrText = await testRes.text();
+            lastErrText = await testRes.text().catch(() => '');
             if (testRes.status !== 404) {
               // Not a 404 (e.g. 401 Unauthorized or 500), stop trying fallbacks
               break;
             }
           } catch (e: any) {
+            lastStatus = 502;
             lastErrText = e.message;
           }
         }
@@ -12518,10 +13107,11 @@ app.post('/api/llm/ping', aiGenerationLimiter, requireTenantAuth, async (req: Re
         return res.status(lastStatus).json({
           ok: false,
           latencyMs: latency,
+          protocol: 'openai',
           suggestedModels: availableModels,
           modelDetails,
           error: isCloudPing
-            ? `云端引擎异常 (${lastStatus}): ${lastErrText.slice(0, 180)}`
+            ? `云端引擎异常 (${lastStatus}): ${lastErrText.slice(0, 400)}`
             : formatFriendlyPingError({
                 protocol: 'openai',
                 status: lastStatus,
@@ -13499,12 +14089,7 @@ export async function transcribeAudioBufferStrictly(
       };
     }
 
-    const inferredProtocol =
-      serverCustomConfig?.protocol === 'gemini' || cleanBaseUrl.toLowerCase().includes('googleapis.com')
-        ? 'gemini'
-        : serverCustomConfig?.protocol === 'anthropic'
-        ? 'anthropic'
-        : 'openai';
+    const inferredProtocol = inferGatewayProtocol(cleanBaseUrl, undefined, serverCustomConfig?.protocol);
 
     if (inferredProtocol === 'anthropic') {
       return {
@@ -13960,7 +14545,7 @@ async function processTelegramMessageAsync(
       }
     }
 
-    // 1. Fetch the most recent 15 conversation messages for this chat in chronological order (strictly Bot / acc_1 scope)
+    // 1. Fetch the most recent 30 conversation messages for this chat in chronological order (strictly Bot / acc_1 scope)
     const altBotChatId = chatId.startsWith('tg_') ? chatId.replace(/^tg_/, '') : `tg_${chatId}`;
     const recentMessages = (await db.prepare(`
       SELECT sender, sender_name, text, stt_text, created_at
@@ -13969,7 +14554,7 @@ async function processTelegramMessageAsync(
         FROM messages
         WHERE (chat_id = ? OR chat_id = ?) AND account_id IN ('acc_telegram_bot', 'acc_1')
         ORDER BY created_at DESC
-        LIMIT 15
+        LIMIT 30
       ) sub
       ORDER BY created_at ASC
     `).all(chatId, altBotChatId)) as any[];
@@ -14020,34 +14605,41 @@ async function processTelegramMessageAsync(
     }
 
     const dialogueTranscript = conversationHistory.map((item) => `${item.sender}: ${item.text}`).join('\n');
-    const recentConvoText = conversationHistory.slice(-4).map((m) => m.text).join(' ');
 
     // 5. Build holographic memory prompt context
     let profileContext = '';
+    let webhookLikes: string[] = [];
+    let webhookMemories: any[] = [];
     try {
       const likes = safeJsonParse<string[]>(profile.likes_interests, []);
       const taboos = safeJsonParse<string[]>(profile.dislikes_taboos, []);
       const memories = safeJsonParse<any[]>(profile.key_memories, []);
+      webhookLikes = Array.isArray(likes) ? likes : [];
+      webhookMemories = Array.isArray(memories) ? memories : [];
 
       profileContext = `
 【全息客户画像与长期记忆档案】：
 - 客户姓名/称谓: ${profile.client_name}
 - 当前关系阶段: ${profile.relationship_stage || '初次结识'}
 - 性格与互动特征: ${profile.tone_style || '真实自然、随和礼貌'}
-- 核心喜好与兴趣: ${Array.isArray(likes) ? likes.join('、') : ''}
+- 核心喜好与兴趣: ${webhookLikes.join('、')}
 - 敏感雷区与禁忌: ${Array.isArray(taboos) ? taboos.join('、') : ''}
-- 核心情感需求: ${profile.emotional_needs || '渴望真诚及时的陪伴与真实人类共鸣'}
-- 过往核心共同记忆: ${Array.isArray(memories) ? memories.slice(-3).map((mem: any) => `[${mem.topic || '约定'}]: ${mem.summary || ''}`).join('；') : ''}
-`;
+- 核心情感需求: ${profile.emotional_needs || '暂无记录（待真实沟通后提炼）'}
+- 过往核心共同记忆: ${webhookMemories.slice(-3).map((mem: any) => `[${mem.topic || '约定'}]: ${mem.summary || ''}`).join('；')}`;
     } catch {
       // ignore JSON parse error
     }
 
-    // 6. RAG Knowledge Base Retrieval (Cloud Brain KB if enabled + Local SQL-level RAG — strictly genuine matches only)
+    const webhookColdStartGuideline = buildUnifiedColdStartGuideline(
+      isCustomerColdStartProfile(profile, webhookLikes, webhookMemories),
+      webhookLikes
+    );
+
+    // 6. RAG Knowledge Base Retrieval (Cloud Brain KB if enabled + Local SQL-level RAG — strictly genuine matches only, unified 4-msg window)
     const serverCustomConfig = await getServerCustomLlmConfig();
     let knowledgeContext = '';
     let genuineMatchedKnowledge: any[] = [];
-    const combinedText = `${recentConvoText} ${effectiveIncomingText}`.trim();
+    const combinedText = buildUnifiedRagQuery(conversationHistory, effectiveIncomingText);
     if (isCloudKnowledgeBaseEnabled(serverCustomConfig)) {
       let railwayRes: RemoteKbSearchResult;
       try {
@@ -14091,30 +14683,7 @@ async function processTelegramMessageAsync(
     }
 
     // 7. Full Dialogue Transcripts & Authentic Demonstrations (Strictly Bot Account Scoped)
-    let transcriptContext = '';
-    try {
-      const activeTranscripts = (await db.prepare(`
-        SELECT id, title, description, dialogue_text, learned_style
-        FROM chat_transcripts
-        WHERE is_active = 1 AND account_id = 'acc_telegram_bot'
-        ORDER BY created_at DESC
-        LIMIT 2
-      `).all()) as any[];
-
-      if (activeTranscripts.length > 0) {
-        transcriptContext = `
-【核心对话整文实录示范（真人回复习惯范本）】：
-${activeTranscripts.map((t, idx) => `
-[整文示范 ${idx + 1}]：《${t.title}》
-* 提炼说话习惯：${t.learned_style || '自然生活化、简短口语表达'}
-* 真实整文示范片段：
-${t.dialogue_text.split('\n').slice(-12).join('\n')}
-`).join('\n')}
-`;
-      }
-    } catch (transErr: any) {
-      console.warn('[Telegram Webhook RAG] Transcript retrieval failed:', transErr.message);
-    }
+    const transcriptContext = await loadUnifiedTranscriptContext('acc_telegram_bot');
 
     // 8. Generate intelligent AI response aligned with active Global Persona, Evolution Habits & Custom LLM (Strictly Bot Account Scoped)
     let replyText = '';
@@ -14159,10 +14728,10 @@ ${t.dialogue_text.split('\n').slice(-12).join('\n')}
       else if (tz.includes('utc+') || tz.includes('london') || tz.includes('america')) webhookTargetLangCode = 'en';
     }
     const webhookLangConstraint = (webhookTargetLangCode && webhookTargetLangCode !== 'zh-CN')
-      ? `\n【母语强制约束】：检测到对方当前发送的消息语言为 ${webhookTargetLangCode}。你必须 100% 严格使用地道纯正的对应母语回复对方，绝不允许漂移为中文！`
+      ? `【母语强制约束】：检测到对方当前发送的消息语言为 ${webhookTargetLangCode}。你必须 100% 严格使用地道纯正的对应母语回复对方，绝不允许漂移为中文！`
       : '';
 
-    const webhookSystemPrompt = `${
+    const webhookBasePersona = `${
       webhookPersonaContext.hasConfiguredPersona
         ? webhookPersonaContext.context
         : '你是一位真诚自然、高效有温度的 Telegram 沟通助手。'
@@ -14170,14 +14739,18 @@ ${t.dialogue_text.split('\n').slice(-12).join('\n')}
       !webhookPersonaContext.hasConfiguredPersona && webhookPersonaContext.context
         ? `\n\n${webhookPersonaContext.context}`
         : ''
-    }
-${profileContext}
-${knowledgeContext}
-${transcriptContext}${webhookLangConstraint}
-【回复核心准则】：
-1. 【多轮上下文与真人感】：结合多轮历史对话与客户真实需求，使用自然短句回复，避免 AI 机械客服腔调或 1.2.3. 分点列项。
-2. 【专业与真诚】：针对业务或日常交流提供清晰真诚的回应，绝不说“作为AI”。
-3. 【同语种地道原则】：若对方最新发送的消息是外语，使用同语种回复。`;
+    }`;
+
+    const budgetedWebhookPrompt = applyPromptCharacterBudget({
+      persona: webhookBasePersona,
+      antiAi: buildUnifiedAntiAiDirective(UNIFIED_REPLY_HISTORY_LIMIT),
+      coldStartGuideline: webhookColdStartGuideline,
+      profile: profileContext.trim(),
+      knowledge: knowledgeContext.trim(),
+      transcripts: transcriptContext.trim(),
+      langConstraint: webhookLangConstraint.trim(),
+    });
+    const webhookSystemPrompt = budgetedWebhookPrompt.prompt;
 
     const webhookPromptText = `【历史多轮连续对话记录】：
 ${dialogueTranscript}
@@ -14185,12 +14758,17 @@ ${dialogueTranscript}
 对方最新发送的消息: "${effectiveIncomingText}"
 请直接回复最新一条消息：`;
 
+    const webhookLlmMessages = conversationHistory.map((m) => ({
+      role: m.role,
+      content: m.text,
+    }));
+
     if (serverCustomConfig?.enabled) {
       try {
         const customReply = await callCustomLlm({
           customConfig: serverCustomConfig,
           systemInstruction: webhookSystemPrompt,
-          messages: [{ role: 'user', content: webhookPromptText }],
+          messages: webhookLlmMessages.length > 0 ? webhookLlmMessages : [{ role: 'user', content: webhookPromptText }],
           temperature: 0.7,
           maxTokens: 500,
           userJwt: lastActiveUserJwt || undefined,
@@ -14263,7 +14841,7 @@ ${dialogueTranscript}
         const webhookChatTargetLang = (await getScopedChatTargetLang(chatId, 'acc_telegram_bot')) || undefined;
         replyTranslatedToChinese = await getCnTranslationIfForeign(
           replyText,
-          undefined,
+          serverCustomConfig,
           lastActiveUserJwt || undefined,
           webhookChatTargetLang
         );
@@ -22635,26 +23213,12 @@ export function attachTelegramClientMessageListener(client: TelegramClient, phon
                 hasAutoConfiguredPersona = autoCtx.hasConfiguredPersona;
               } catch {}
 
-              let oralStyleContext = '';
-              try {
-                const autoAccVariants = getScopedAccountIdVariants(accountId);
-                const autoAccPlaceholders = autoAccVariants.map(() => '?').join(', ');
-                const activeTranscripts = (await db
-                  .prepare(
-                    `SELECT title, learned_style FROM chat_transcripts WHERE is_active = 1 AND account_id IN (${autoAccPlaceholders}) ORDER BY updated_at DESC LIMIT 2`
-                  )
-                  .all(...autoAccVariants)) as any[];
-                if (activeTranscripts.length > 0) {
-                  oralStyleContext =
-                    '\n【高匹配整文口语表达范式】:\n' +
-                    activeTranscripts.map((t) => `- ${t.title}: ${t.learned_style}`).join('\n');
-                }
-              } catch {}
+              const oralStyleContext = await loadUnifiedTranscriptContext(accountId);
 
-              // Retrieve recent 20 two-way conversation turns strictly scoped by accountId so replies never leak across accounts
+              // Retrieve recent 30 two-way conversation turns strictly scoped by accountId so replies never leak across accounts
               let recentHistoryTurns: NormalizedChatTurn[] = [];
               try {
-                recentHistoryTurns = await extractRecentTwoWayMessages(canonicalChatId, rawChatId, [], 20, accountId);
+                recentHistoryTurns = await extractRecentTwoWayMessages(canonicalChatId, rawChatId, [], 30, accountId);
                 // Avoid duplicating the current incoming turn if upsertSyncedMessageToDb already saved it
                 recentHistoryTurns = recentHistoryTurns.filter((t) => t.id !== messageId);
                 if (
@@ -22666,13 +23230,14 @@ export function attachTelegramClientMessageListener(client: TelegramClient, phon
                 }
               } catch {}
 
-              // Retrieve Cloud Brain Knowledge Base (if enabled) & local RAG context
+              // Retrieve Cloud Brain Knowledge Base (if enabled) & local RAG context (unified 4-msg window)
+              const autoRagQuery = buildUnifiedRagQuery(recentHistoryTurns, effectiveIncomingText);
               let kbContext = '';
               if (isCloudKnowledgeBaseEnabled(serverCustomConfig)) {
                 let railwayRes: RemoteKbSearchResult;
                 try {
                   railwayRes = await searchRailwayKnowledgeBase(
-                    effectiveIncomingText,
+                    autoRagQuery,
                     serverCustomConfig?.knowledgeBaseApiUrl,
                     serverCustomConfig?.knowledgeBaseApiKey || serverCustomConfig?.apiKey,
                     7000,
@@ -22701,7 +23266,7 @@ export function attachTelegramClientMessageListener(client: TelegramClient, phon
                 }
               }
               try {
-                const localRag = await queryKnowledgeRAG(effectiveIncomingText, 2, accountId);
+                const localRag = await queryKnowledgeRAG(autoRagQuery, 3, accountId);
                 if (localRag.matchedCount > 0 && localRag.context) {
                   kbContext += `\n${localRag.context}\n`;
                 }
@@ -22732,15 +23297,13 @@ export function attachTelegramClientMessageListener(client: TelegramClient, phon
                 else if (tz.includes('utc+') || tz.includes('london') || tz.includes('america')) targetLangCode = 'en';
               }
               const langConstraint = (targetLangCode && targetLangCode !== 'zh-CN')
-                ? `\n【母语强制约束】：检测到客户当前发送的消息语言为 ${targetLangCode}（如土耳其语、英语等）。你必须 100% 严格使用地道纯正的对应母语回复对方，绝不允许使用中文回复客户！`
+                ? `【母语强制约束】：检测到客户当前发送的消息语言为 ${targetLangCode}（如土耳其语、英语等）。你必须 100% 严格使用地道纯正的对应母语回复对方，绝不允许使用中文回复客户！`
                 : '';
 
-              const isColdStartAutopilot = !p || p.relationship_stage === '尚未沟通' || p.relationship_stage === '初次接触' || (likes.length === 0 && memories.length === 0);
-              const autopilotFamiliarity = isColdStartAutopilot
-                ? '当前客户处于初次结识冷启动阶段，回复请保持礼貌友好、自然破冰，严禁虚构未发生的熟人交情与过往记忆！'
-                : `自然融入对客户真实爱好（${likes.slice(0, 2).join('、') || '业务关注点'}）的了解与关心。`;
+              const isColdStartAutopilot = isCustomerColdStartProfile(p, likes, memories);
+              const autopilotColdStartGuideline = buildUnifiedColdStartGuideline(isColdStartAutopilot, likes);
 
-              const memoryPrompt = `${
+              const autoBasePersona = `${
                 hasAutoConfiguredPersona
                   ? autoPersonaContext
                   : '你是一位真诚自然、高效有温度的沟通助手。'
@@ -22748,21 +23311,26 @@ export function attachTelegramClientMessageListener(client: TelegramClient, phon
                 !hasAutoConfiguredPersona && autoPersonaContext
                   ? `\n\n${autoPersonaContext}`
                   : ''
-              }${oralStyleContext}
+              }`;
 
-【客户全息画像与长期记忆档案】：
+              const autoProfileSection = `【客户全息画像与长期记忆档案】：
 - 客户称谓: ${p?.client_name || '好友'}
 - 性格风格: ${p?.tone_style || '自然亲切、口语化交流'}
 - 喜好: ${likes.join('、')}
 - 忌讳雷区: ${taboos.join('、')}
 - 关键约定与共同记忆:
-${memories.slice(-3).map((m: any) => `  * [${m.date}] ${m.topic}: ${m.summary}`).join('\n')}
-${kbContext}${langConstraint}
+${memories.slice(-3).map((m: any) => `  * [${m.date}] ${m.topic}: ${m.summary}`).join('\n')}`;
 
-【强制要求】：
-1. 彻底使用纯正生活大白话，严禁任何 AI 客服机器人腔调（如“您好”、“有什么能帮您”）、严禁 1. 2. 3. 列点或长篇大论！
-2. 篇幅短小精炼（1~2句日常短句），像真人用手机 Telegram 私聊！
-3. ${autopilotFamiliarity}，绝不要说“作为AI”。`;
+              const budgetedAutopilotPrompt = applyPromptCharacterBudget({
+                persona: autoBasePersona,
+                antiAi: buildUnifiedAntiAiDirective(UNIFIED_REPLY_HISTORY_LIMIT),
+                coldStartGuideline: autopilotColdStartGuideline,
+                profile: autoProfileSection,
+                knowledge: kbContext.trim(),
+                transcripts: oralStyleContext.trim(),
+                langConstraint: langConstraint.trim(),
+              });
+              const memoryPrompt = budgetedAutopilotPrompt.prompt;
 
               const contextMessages = [
                 ...recentHistoryTurns.map((t) => ({
@@ -22780,7 +23348,7 @@ ${kbContext}${langConstraint}
                     systemInstruction: memoryPrompt,
                     messages: contextMessages,
                     temperature: 0.7,
-                    maxTokens: 200,
+                    maxTokens: 500,
                     userJwt: lastActiveUserJwt || undefined,
                     throwOnError: true,
                     skipSync: true,

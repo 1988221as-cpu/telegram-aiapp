@@ -1,9 +1,9 @@
 import React, { useState, useEffect } from 'react';
 import {
-  Lock,
   User,
   KeyRound,
   ArrowRight,
+  ArrowLeft,
   UserPlus,
   CheckCircle2,
   AlertCircle,
@@ -65,8 +65,8 @@ export const MemberAuthModal: React.FC<MemberAuthModalProps> = ({
 
   useEffect(() => {
     if (isOpen) {
-      if (initialTab) setActiveTab(initialTab);
-      if (initialError) setErrorMsg(initialError);
+      setActiveTab(initialTab || 'login');
+      setErrorMsg(initialError || null);
       setErrorCode(null);
       setSuccessMsg(null);
       setProxyNotice(null);
@@ -89,6 +89,13 @@ export const MemberAuthModal: React.FC<MemberAuthModalProps> = ({
   }, [isOpen, initialTab, initialError]);
 
   if (!isOpen) return null;
+
+  const switchTab = (nextTab: 'login' | 'register' | 'redeem') => {
+    setActiveTab(nextTab);
+    setErrorMsg(null);
+    setErrorCode(null);
+    setSuccessMsg(null);
+  };
 
   const handleSaveProxy = async () => {
     setProxyNotice(null);
@@ -267,57 +274,32 @@ export const MemberAuthModal: React.FC<MemberAuthModalProps> = ({
           )}
         </div>
 
-        {/* Tab Switcher */}
-        <div className="flex border-b border-[#1a2b3c] bg-[#0d1620]">
-          <button
-            type="button"
-            onClick={() => {
-              setActiveTab('login');
-              setErrorMsg(null);
-              setErrorCode(null);
-            }}
-            className={`flex-1 py-3 text-xs font-semibold flex items-center justify-center gap-1.5 transition-colors cursor-pointer border-b-2 ${
-              activeTab === 'login'
-                ? 'border-[#2ba0ff] text-[#2ba0ff] bg-[#142232]'
-                : 'border-transparent text-[#7e95ab] hover:text-white'
-            }`}
-          >
-            <Lock className="w-3.5 h-3.5" />
-            <span>会员登录</span>
-          </button>
-          <button
-            type="button"
-            onClick={() => {
-              setActiveTab('register');
-              setErrorMsg(null);
-              setErrorCode(null);
-            }}
-            className={`flex-1 py-3 text-xs font-semibold flex items-center justify-center gap-1.5 transition-colors cursor-pointer border-b-2 ${
-              activeTab === 'register'
-                ? 'border-[#2ba0ff] text-[#2ba0ff] bg-[#142232]'
-                : 'border-transparent text-[#7e95ab] hover:text-white'
-            }`}
-          >
-            <UserPlus className="w-3.5 h-3.5" />
-            <span>卡密注册</span>
-          </button>
-          <button
-            type="button"
-            onClick={() => {
-              setActiveTab('redeem');
-              setErrorMsg(null);
-              setErrorCode(null);
-            }}
-            className={`flex-1 py-3 text-xs font-semibold flex items-center justify-center gap-1.5 transition-colors cursor-pointer border-b-2 ${
-              activeTab === 'redeem'
-                ? 'border-[#2ba0ff] text-[#2ba0ff] bg-[#142232]'
-                : 'border-transparent text-[#7e95ab] hover:text-white'
-            }`}
-          >
-            <RefreshCw className="w-3.5 h-3.5" />
-            <span>卡密续费</span>
-          </button>
-        </div>
+        {/* Sub-view navigation header (shown only after clicking into 卡密注册 or 卡密续费; front view keeps only 会员登录) */}
+        {activeTab !== 'login' && (
+          <div className="flex items-center justify-between px-6 py-2.5 border-b border-[#1a2b3c] bg-[#0d1620]">
+            <button
+              type="button"
+              onClick={() => switchTab('login')}
+              className="inline-flex items-center gap-1.5 text-xs font-medium text-[#7e95ab] hover:text-white transition-colors cursor-pointer"
+            >
+              <ArrowLeft className="w-3.5 h-3.5" />
+              <span>返回会员登录</span>
+            </button>
+            <div className="inline-flex items-center gap-1.5 text-xs font-semibold text-[#2ba0ff]">
+              {activeTab === 'register' ? (
+                <>
+                  <UserPlus className="w-3.5 h-3.5" />
+                  <span>卡密注册</span>
+                </>
+              ) : (
+                <>
+                  <RefreshCw className="w-3.5 h-3.5" />
+                  <span>卡密续费</span>
+                </>
+              )}
+            </div>
+          </div>
+        )}
 
         {/* Form Body */}
         <form onSubmit={handleSubmit} className="p-6 space-y-3.5 max-h-[72vh] overflow-y-auto">
@@ -445,6 +427,56 @@ export const MemberAuthModal: React.FC<MemberAuthModalProps> = ({
               </>
             )}
           </button>
+
+          {/* Bottom-right entry actions for 卡密注册 & 卡密续费 right below the 登录 button */}
+          {activeTab === 'login' ? (
+            <div className="flex items-center justify-end gap-5 pt-0.5 text-xs">
+              <button
+                type="button"
+                onClick={() => switchTab('register')}
+                className="inline-flex items-center gap-1.5 text-[#7e95ab] hover:text-[#2ba0ff] transition-colors cursor-pointer font-medium"
+              >
+                <UserPlus className="w-3.5 h-3.5" />
+                <span>卡密注册</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => switchTab('redeem')}
+                className="inline-flex items-center gap-1.5 text-[#7e95ab] hover:text-[#2ba0ff] transition-colors cursor-pointer font-medium"
+              >
+                <RefreshCw className="w-3.5 h-3.5" />
+                <span>卡密续费</span>
+              </button>
+            </div>
+          ) : (
+            <div className="flex items-center justify-between pt-0.5 text-xs">
+              <button
+                type="button"
+                onClick={() => switchTab('login')}
+                className="inline-flex items-center gap-1 text-[#7e95ab] hover:text-white transition-colors cursor-pointer"
+              >
+                <ArrowLeft className="w-3.5 h-3.5" />
+                <span>返回会员登录</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => switchTab(activeTab === 'register' ? 'redeem' : 'register')}
+                className="inline-flex items-center gap-1.5 text-[#7e95ab] hover:text-[#2ba0ff] transition-colors cursor-pointer font-medium"
+              >
+                {activeTab === 'register' ? (
+                  <>
+                    <RefreshCw className="w-3.5 h-3.5" />
+                    <span>卡密续费</span>
+                  </>
+                ) : (
+                  <>
+                    <UserPlus className="w-3.5 h-3.5" />
+                    <span>卡密注册</span>
+                  </>
+                )}
+              </button>
+            </div>
+          )}
 
           {/* Pre-login Proxy Configuration Accordion */}
           <div className="pt-2 border-t border-[#1a2b3c]">

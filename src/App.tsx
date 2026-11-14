@@ -36,6 +36,7 @@ import {
   MemberUser,
   TelegramContact,
   TelegramCallRecord,
+  AppThemeMode,
 } from './types';
 import {
   fetchChatsFromDb,
@@ -451,8 +452,9 @@ export default function App() {
 
   // 2. Modals & Drawers Visibility State
   const [isTelegramMenuOpen, setIsTelegramMenuOpen] = useState(false);
-  const [theme, setTheme] = useState<'dark' | 'light'>(() => {
-    return (localStorage.getItem('tg_pro_theme') as 'dark' | 'light') || 'light';
+  const [theme, setTheme] = useState<AppThemeMode>(() => {
+    const saved = localStorage.getItem('tg_pro_theme');
+    return saved === 'dark' || saved === 'aurora' || saved === 'light' ? saved : 'light';
   });
   const [clientPrefs, setClientPrefs] = useState<TelegramClientPrefs>(() => {
     try {
@@ -643,11 +645,8 @@ export default function App() {
   // Sync theme to DOM and localStorage
   useEffect(() => {
     localStorage.setItem('tg_pro_theme', theme);
-    if (theme === 'dark') {
-      document.documentElement.classList.add('dark');
-    } else {
-      document.documentElement.classList.remove('dark');
-    }
+    document.documentElement.classList.toggle('dark', theme === 'dark' || theme === 'aurora');
+    document.documentElement.classList.toggle('theme-aurora', theme === 'aurora');
   }, [theme]);
 
   useEffect(() => {
@@ -894,7 +893,7 @@ export default function App() {
       if (isRestore) {
         setContacts(getScopedContacts(resolvedActiveAccId || activeAccountIdRef.current));
         const savedTheme = localStorage.getItem('tg_pro_theme');
-        if (savedTheme === 'dark' || savedTheme === 'light') {
+        if (savedTheme === 'dark' || savedTheme === 'light' || savedTheme === 'aurora') {
           setTheme(savedTheme);
         }
         try {
@@ -4002,7 +4001,7 @@ export default function App() {
   const currentAccount = accounts.find((a) => a.id === activeAccountId) || accounts[0];
 
   return (
-    <div className="flex h-screen w-screen overflow-hidden bg-[#f4f7fb] text-[#0f172a] dark:bg-[#05080f] dark:text-[#eef4fb] font-sans antialiased transition-colors">
+    <div className="flex h-screen w-screen overflow-hidden bg-[#f4f7fb] text-[#0f172a] dark:bg-[#05080f] dark:text-[#eef4fb] aurora:bg-[#081116] aurora:text-[#ecf6f8] font-sans antialiased transition-colors">
       {/* 1. Leftmost Features & Multi-Account Activity Rail (56px) */}
       <LeftSidebar
         accounts={accounts.map((a) => ({
@@ -4312,7 +4311,8 @@ export default function App() {
         onSelectChat={handleSelectChat}
         onDeleteAccount={handleDeleteAccount}
         theme={theme}
-        onToggleTheme={() => setTheme((prev) => (prev === 'dark' ? 'light' : 'dark'))}
+        onToggleTheme={() => setTheme((prev) => (prev === 'light' ? 'dark' : prev === 'dark' ? 'aurora' : 'light'))}
+        onSelectTheme={setTheme}
         onOpenNewGroup={() => setIsNewGroupOpen(true)}
         onOpenNewChannel={() => setIsNewChannelOpen(true)}
         onOpenContacts={() => setIsContactsOpen(true)}
@@ -4412,7 +4412,8 @@ export default function App() {
         currentAccount={currentAccount}
         onUpdateAccount={handleUpdateCurrentAccount}
         theme={theme}
-        onToggleTheme={() => setTheme((prev) => (prev === 'dark' ? 'light' : 'dark'))}
+        onToggleTheme={() => setTheme((prev) => (prev === 'light' ? 'dark' : prev === 'dark' ? 'aurora' : 'light'))}
+        onSelectTheme={setTheme}
         onOpenSystemAdmin={() => setIsSystemSettingsOpen(true)}
         clientPrefs={clientPrefs}
         onUpdateClientPrefs={setClientPrefs}

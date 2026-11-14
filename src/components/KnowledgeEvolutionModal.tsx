@@ -209,6 +209,11 @@ export const KnowledgeEvolutionModal: React.FC<KnowledgeEvolutionModalProps> = (
   const [sandboxResult, setSandboxResult] = useState<{
     reply: string;
     matchedKnowledge: any[];
+    ragSources?: {
+      cloudRagEnabled?: boolean;
+      cloudRagMatchedCount?: number;
+      localRagMatchedCount?: number;
+    };
     appliedHabits: any[];
     source: string;
   } | null>(null);
@@ -691,6 +696,7 @@ export const KnowledgeEvolutionModal: React.FC<KnowledgeEvolutionModalProps> = (
         setSandboxResult({
           reply: res.reply || '无回复内容',
           matchedKnowledge: res.matchedKnowledge || [],
+          ragSources: res.ragSources,
           appliedHabits: res.appliedHabits || [],
           source: res.source || 'lingxi-cloud',
         });
@@ -1966,12 +1972,19 @@ export const KnowledgeEvolutionModal: React.FC<KnowledgeEvolutionModalProps> = (
                 } bg-[#f8fafc] dark:bg-[#0e1726]/85 p-3.5 rounded-xl border border-[#e2e8f0] dark:border-[#18273a] flex flex-col justify-between space-y-4`}
               >
                 <div className="space-y-3">
-                  <div className="flex items-center justify-between border-b border-[#e2e8f0] dark:border-[#152234] pb-2">
+                  <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[#e2e8f0] dark:border-[#152234] pb-2">
                     <h4 className="text-xs font-bold text-[#0f172a] dark:text-[#eef4fb]">人设效果试聊输出</h4>
                     {sandboxResult && (
-                      <span className="text-[10px] font-mono text-[#64748b] dark:text-[#6c8297]">
-                        {sandboxResult.source}
-                      </span>
+                      <div className="flex flex-wrap items-center gap-1.5 text-[10px] font-mono text-[#64748b] dark:text-[#6c8297]">
+                        {sandboxResult.ragSources && (
+                          <span className="px-1.5 py-0.5 rounded bg-[#2ba0ff]/10 text-[#0284c7] dark:text-[#2ba0ff]">
+                            {sandboxResult.ragSources.cloudRagEnabled
+                              ? `云端RAG(${sandboxResult.ragSources.cloudRagMatchedCount ?? 0}) + 本地RAG(${sandboxResult.ragSources.localRagMatchedCount ?? 0})`
+                              : `本地RAG(${sandboxResult.ragSources.localRagMatchedCount ?? 0})`}
+                          </span>
+                        )}
+                        <span>{sandboxResult.source}</span>
+                      </div>
                     )}
                   </div>
 
@@ -1986,16 +1999,43 @@ export const KnowledgeEvolutionModal: React.FC<KnowledgeEvolutionModalProps> = (
 
                       {sandboxResult.matchedKnowledge && sandboxResult.matchedKnowledge.length > 0 && (
                         <div className="bg-white dark:bg-[#090f19] p-3 rounded-xl border border-[#e2e8f0] dark:border-[#18273a]">
-                          <span className="text-[11px] font-semibold text-[#475569] dark:text-[#8ea6bc] mb-1.5 flex items-center gap-1.5">
-                            <Cloud className="w-3.5 h-3.5 text-[#2ba0ff]" />
-                            <span>本次命中本地知识库要点：</span>
-                          </span>
-                          <div className="space-y-1">
-                            {sandboxResult.matchedKnowledge.map((k: any, i: number) => (
-                              <div key={i} className="text-xs text-[#475569] dark:text-[#a9bed1]">
-                                • <span className="font-medium text-[#0f172a] dark:text-white">{k.title || '知识条目'}</span>
+                          <div className="flex flex-wrap items-center justify-between gap-1.5 mb-1.5">
+                            <span className="text-[11px] font-semibold text-[#475569] dark:text-[#8ea6bc] flex items-center gap-1.5">
+                              <Cloud className="w-3.5 h-3.5 text-[#2ba0ff]" />
+                              <span>本次命中知识库要点：</span>
+                            </span>
+                            {sandboxResult.ragSources && (
+                              <div className="flex flex-wrap items-center gap-1 text-[10px]">
+                                {sandboxResult.ragSources.cloudRagEnabled && (
+                                  <span className="px-1.5 py-0.5 rounded bg-[#2ba0ff]/12 text-[#0284c7] dark:text-[#2ba0ff] font-medium">
+                                    云端知识库 (Cloud RAG): {sandboxResult.ragSources.cloudRagMatchedCount ?? 0} 条
+                                  </span>
+                                )}
+                                <span className="px-1.5 py-0.5 rounded bg-slate-500/10 text-[#475569] dark:text-[#8ea6bc] font-medium">
+                                  本地知识库: {sandboxResult.ragSources.localRagMatchedCount ?? 0} 条
+                                </span>
                               </div>
-                            ))}
+                            )}
+                          </div>
+                          <div className="space-y-1">
+                            {sandboxResult.matchedKnowledge.map((k: any, i: number) => {
+                              const isCloud = k?.source === 'cloud_kb';
+                              return (
+                                <div key={i} className="text-xs text-[#475569] dark:text-[#a9bed1] flex items-center gap-1.5">
+                                  <span>•</span>
+                                  <span
+                                    className={`px-1 py-0.2 rounded text-[10px] font-medium shrink-0 ${
+                                      isCloud
+                                        ? 'bg-[#2ba0ff]/12 text-[#0284c7] dark:text-[#2ba0ff]'
+                                        : 'bg-slate-500/10 text-[#64748b] dark:text-[#8ea6bc]'
+                                    }`}
+                                  >
+                                    {isCloud ? '云端' : '本地'}
+                                  </span>
+                                  <span className="font-medium text-[#0f172a] dark:text-white">{k.title || '知识条目'}</span>
+                                </div>
+                              );
+                            })}
                           </div>
                         </div>
                       )}
