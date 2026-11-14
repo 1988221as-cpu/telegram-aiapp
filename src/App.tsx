@@ -349,13 +349,17 @@ export default function App() {
   });
 
   const [activeAccountId, setActiveAccountId] = useState<string>(() => {
+    let resolved = accounts[0]?.id || '';
     try {
       const savedActive = localStorage.getItem('tg_pro_active_account_id') || '';
       if (savedActive && accounts.some((a) => a.id === savedActive)) {
-        return savedActive;
+        resolved = savedActive;
+      }
+      if (resolved && resolved !== savedActive) {
+        setActiveApiAccount(resolved);
       }
     } catch {}
-    return accounts[0]?.id || '';
+    return resolved;
   });
 
   const [chats, setChats] = useState<Chat[]>(() => {
@@ -777,10 +781,59 @@ export default function App() {
           ? (savedLLM as any).config
           : savedLLM;
 
+      const rawSavedTrans =
+        savedTrans && typeof savedTrans === 'object' && (savedTrans as any).settings && typeof (savedTrans as any).settings === 'object'
+          ? (savedTrans as any).settings
+          : savedTrans;
+
+      let serverLlmUnwrapped: any = null;
+      let serverTransUnwrapped: any = null;
+      if (isRestore) {
+        const [srvLlmRes, srvTransRes] = await Promise.all([
+          rawSavedLlm ? fetchCustomLLMConfigApi().catch(() => null) : Promise.resolve(null),
+          rawSavedTrans ? fetchTranslationSettingsApi().catch(() => null) : Promise.resolve(null),
+        ]);
+        if (srvLlmRes && typeof srvLlmRes === 'object') {
+          serverLlmUnwrapped =
+            (srvLlmRes as any).config && typeof (srvLlmRes as any).config === 'object'
+              ? (srvLlmRes as any).config
+              : srvLlmRes;
+        }
+        if (srvTransRes && typeof srvTransRes === 'object') {
+          serverTransUnwrapped =
+            (srvTransRes as any).settings && typeof (srvTransRes as any).settings === 'object'
+              ? (srvTransRes as any).settings
+              : srvTransRes;
+        }
+      }
+
       const normalizedSavedLlm: CustomLLMConfig | null = rawSavedLlm
         ? {
             ...INITIAL_CUSTOM_LLM,
             ...rawSavedLlm,
+            apiKey:
+              (typeof rawSavedLlm.apiKey === 'string' && rawSavedLlm.apiKey.trim()) ||
+              (isRestore && typeof serverLlmUnwrapped?.apiKey === 'string' ? serverLlmUnwrapped.apiKey : '') ||
+              '',
+            knowledgeBaseApiKey:
+              (typeof rawSavedLlm.knowledgeBaseApiKey === 'string' && rawSavedLlm.knowledgeBaseApiKey.trim()) ||
+              (isRestore && typeof serverLlmUnwrapped?.knowledgeBaseApiKey === 'string'
+                ? serverLlmUnwrapped.knowledgeBaseApiKey
+                : '') ||
+              '',
+            engineLicenseKey:
+              (typeof rawSavedLlm.engineLicenseKey === 'string' && rawSavedLlm.engineLicenseKey.trim()) ||
+              (isRestore && typeof serverLlmUnwrapped?.engineLicenseKey === 'string'
+                ? serverLlmUnwrapped.engineLicenseKey
+                : '') ||
+              '',
+            ...(isRestore && !rawSavedLlm.apiKey && serverLlmUnwrapped?.hasApiKey ? { hasApiKey: true } : {}),
+            ...(isRestore && !rawSavedLlm.knowledgeBaseApiKey && serverLlmUnwrapped?.hasKnowledgeBaseApiKey
+              ? { hasKnowledgeBaseApiKey: true }
+              : {}),
+            ...(isRestore && !rawSavedLlm.engineLicenseKey && serverLlmUnwrapped?.hasEngineLicenseKey
+              ? { hasEngineLicenseKey: true }
+              : {}),
             explicitlyDisabled: rawSavedLlm.enabled === false ? true : Boolean(rawSavedLlm.explicitlyDisabled),
             engineMode:
               rawSavedLlm.engineMode ||
@@ -799,11 +852,6 @@ export default function App() {
         setCustomLLMConfig(normalizedSavedLlm);
       }
 
-      const rawSavedTrans =
-        savedTrans && typeof savedTrans === 'object' && (savedTrans as any).settings && typeof (savedTrans as any).settings === 'object'
-          ? (savedTrans as any).settings
-          : savedTrans;
-
       if (rawSavedTrans) {
         const rawEngine = (rawSavedTrans as any).preferredEngine;
         const normalizedEngine: 'gemini' | 'google' | 'custom_llm' =
@@ -813,6 +861,18 @@ export default function App() {
         const mergedTrans: TranslationSettings = {
           ...INITIAL_TRANSLATION_SETTINGS,
           ...rawSavedTrans,
+          ...(isRestore && !rawSavedTrans.geminiApiKey && serverTransUnwrapped?.geminiApiKey
+            ? {
+                geminiApiKey: serverTransUnwrapped.geminiApiKey,
+                hasGeminiApiKey: Boolean(serverTransUnwrapped.hasGeminiApiKey),
+              }
+            : {}),
+          ...(isRestore && !rawSavedTrans.googleApiKey && serverTransUnwrapped?.googleApiKey
+            ? {
+                googleApiKey: serverTransUnwrapped.googleApiKey,
+                hasGoogleApiKey: Boolean(serverTransUnwrapped.hasGoogleApiKey),
+              }
+            : {}),
           preferredEngine: normalizedEngine,
           geminiModel: normalizedGemmaModel,
         };

@@ -564,8 +564,12 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
   const [activePersonaName, setActivePersonaName] = useState<string>('默认人设');
 
   useEffect(() => {
+    if (!currentAccountId) {
+      setActivePersonaName('默认人设');
+      return;
+    }
     let mounted = true;
-    fetchGlobalPersonaApi()
+    fetchGlobalPersonaApi(currentAccountId)
       .then((res) => {
         if (mounted) {
           setActivePersonaName(res?.success && res.persona?.personaName ? res.persona.personaName : '默认人设');

@@ -337,7 +337,7 @@ export const TranslationDrawer: React.FC<TranslationDrawerProps> = ({
                       return;
                     }
                     setModeGuardNotice(null);
-                    onUpdateSettings({ ...settings, preferredEngine: 'google', googleApiKey: '' });
+                    onUpdateSettings({ ...settings, preferredEngine: 'google' });
                   }}
                   className={`p-2.5 rounded-lg border text-xs text-left transition-colors ${
                     !allowed
@@ -380,7 +380,6 @@ export const TranslationDrawer: React.FC<TranslationDrawerProps> = ({
                     onUpdateSettings({
                       ...settings,
                       preferredEngine: 'gemini',
-                      geminiApiKey: '',
                       geminiModel:
                         settings.geminiModel === 'gemma-4-31b-it'
                           ? 'gemma-4-31b-it'
@@ -511,7 +510,6 @@ export const TranslationDrawer: React.FC<TranslationDrawerProps> = ({
                   onUpdateSettings({
                     ...settings,
                     geminiModel: e.target.value,
-                    geminiApiKey: '',
                   })
                 }
                 className="w-full bg-white dark:bg-[#090f19] border border-[#cbd5e1] dark:border-[#1e3148] rounded-lg px-3 py-1.5 text-xs text-[#0f172a] dark:text-[#eef4fb] focus:outline-none focus:border-[#2ba0ff]"

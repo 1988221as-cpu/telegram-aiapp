@@ -268,6 +268,9 @@ export const UnifiedRightDock: React.FC<UnifiedRightDockProps> = ({
               onClose={onClose}
               customConfig={customLLMConfig}
               activeAccountId={activeAccountId}
+              activeChatId={activeChatId}
+              currentChat={currentChat}
+              currentMessages={currentMessages}
             />
           )}
         </div>

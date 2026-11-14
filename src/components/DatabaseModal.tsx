@@ -41,9 +41,9 @@ function sanitizeBackupEntry(key: string, value: any): any {
   if (!value || typeof value !== 'object') return value;
   if (key === 'tg_pro_llm_config') {
     const clone = { ...value };
-    clone.apiKey = '';
-    clone.knowledgeBaseApiKey = '';
-    clone.engineLicenseKey = '';
+    delete clone.apiKey;
+    delete clone.knowledgeBaseApiKey;
+    delete clone.engineLicenseKey;
     delete clone.hasApiKey;
     delete clone.hasKnowledgeBaseApiKey;
     delete clone.hasEngineLicenseKey;

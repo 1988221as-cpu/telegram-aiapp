@@ -69,7 +69,8 @@
     "react": "^19.0.1",
     "react-dom": "^19.0.1",
     "socks": "2.8.10",
-    "telegram": "^2.26.22"
+    "telegram": "^2.26.22",
+    "unpdf": "^2.2.0"
   },
   "devDependencies": {
     "@tailwindcss/vite": "^4.3.3",

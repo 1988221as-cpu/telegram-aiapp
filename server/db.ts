@@ -371,6 +371,9 @@ export async function initDatabase() {
       round_count INTEGER DEFAULT 0,
       character_count INTEGER DEFAULT 0,
       is_active INTEGER DEFAULT 1,
+      source_chat_id TEXT,
+      content_hash TEXT,
+      last_message_created_at INTEGER DEFAULT 0,
       created_at INTEGER NOT NULL,
       updated_at INTEGER NOT NULL
     );
@@ -449,7 +452,19 @@ export async function initDatabase() {
     await db.exec(`ALTER TABLE chat_transcripts ADD COLUMN account_id TEXT DEFAULT 'global'`);
   } catch {}
   try {
+    await db.exec(`ALTER TABLE chat_transcripts ADD COLUMN source_chat_id TEXT`);
+  } catch {}
+  try {
+    await db.exec(`ALTER TABLE chat_transcripts ADD COLUMN content_hash TEXT`);
+  } catch {}
+  try {
+    await db.exec(`ALTER TABLE chat_transcripts ADD COLUMN last_message_created_at INTEGER DEFAULT 0`);
+  } catch {}
+  try {
     await db.exec(`CREATE INDEX IF NOT EXISTS idx_transcripts_account ON chat_transcripts (account_id)`);
+  } catch {}
+  try {
+    await db.exec(`CREATE INDEX IF NOT EXISTS idx_transcripts_hash ON chat_transcripts (account_id, content_hash)`);
   } catch {}
   try {
     await db.exec(`ALTER TABLE training_logs ADD COLUMN account_id TEXT DEFAULT 'global'`);
@@ -566,6 +581,8 @@ export const PERSONA_TEMPLATE_PRESET = {
 export const DEFAULT_EVOLUTION_STATE = {
   version: 'v1.0.0',
   lastEvolvedAt: 0,
+  lastLearnedMessageCreatedAt: 0,
+  learnedCorpusHashes: [] as string[],
   totalConversationsAnalyzed: 0,
   totalHabitsLearned: 0,
   autoEvolutionActive: true,
@@ -708,12 +725,22 @@ export async function exportDatabaseSnapshot() {
       return key !== 'telegram_api_credentials' && key !== 'custom_llm_config';
     })
     .map((row: any) => {
-      if (String(row?.key || '') === 'translation_settings' && typeof row?.value === 'string') {
+      const key = String(row?.key || '');
+      if (key === 'translation_settings' && typeof row?.value === 'string') {
         try {
           const parsed = JSON.parse(row.value);
           if (parsed && typeof parsed === 'object') {
             const { geminiApiKey: _g, googleApiKey: _gk, ...safeSettings } = parsed;
             return { ...row, value: JSON.stringify(safeSettings) };
+          }
+        } catch {}
+      }
+      if (key === 'network_proxy' && typeof row?.value === 'string') {
+        try {
+          const parsed = JSON.parse(row.value);
+          if (parsed && typeof parsed === 'object') {
+            const { password: _pwd, ...safeProxy } = parsed;
+            return { ...row, value: JSON.stringify(safeProxy) };
           }
         } catch {}
       }
@@ -980,10 +1007,43 @@ export async function restoreDatabaseSnapshot(snapshot: any): Promise<{ success:
         continue;
       }
       if (typeof c?.value !== 'string') continue;
+      let valueToSave = c.value;
+      if (cfgKey === 'translation_settings' || cfgKey === 'network_proxy') {
+        try {
+          const incomingObj = JSON.parse(c.value);
+          if (incomingObj && typeof incomingObj === 'object') {
+            const existingRow = (await db
+              .prepare('SELECT value FROM system_config WHERE key = ?')
+              .get(cfgKey)) as any;
+            const existingObj =
+              existingRow && typeof existingRow.value === 'string'
+                ? JSON.parse(existingRow.value)
+                : null;
+            if (existingObj && typeof existingObj === 'object') {
+              if (cfgKey === 'translation_settings') {
+                const merged = { ...incomingObj };
+                if (merged.geminiApiKey === undefined && existingObj.geminiApiKey) {
+                  merged.geminiApiKey = existingObj.geminiApiKey;
+                }
+                if (merged.googleApiKey === undefined && existingObj.googleApiKey) {
+                  merged.googleApiKey = existingObj.googleApiKey;
+                }
+                valueToSave = JSON.stringify(merged);
+              } else if (cfgKey === 'network_proxy') {
+                const merged = { ...incomingObj };
+                if (merged.password === undefined && existingObj.password) {
+                  merged.password = existingObj.password;
+                }
+                valueToSave = JSON.stringify(merged);
+              }
+            }
+          }
+        } catch {}
+      }
       await db.prepare(`
         INSERT OR REPLACE INTO system_config (key, value, updated_at)
         VALUES (?, ?, ?)
-      `).run(cfgKey, c.value, Number(c.updated_at) || Date.now());
+      `).run(cfgKey, valueToSave, Number(c.updated_at) || Date.now());
       restoredConfigCount++;
     }
   }

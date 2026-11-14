@@ -69,6 +69,18 @@ import {
   resetGlobalPersonaInDb,
 } from './server/db.ts';
 import { EMBEDDED_JWT_PUBLIC_KEY } from './server/authConfig.ts';
+import {
+  KnowledgeDocumentError,
+  parseKnowledgeDocument,
+  splitDocumentIntoSafeChunks,
+  buildKnowledgeItemFingerprint,
+  sha256Hex,
+  normalizeKnowledgeTextForHash,
+  escapeSqlLikeTerm,
+  extractMultilingualRagTokens,
+  canonicalizeCustomerChatId,
+  mergeCustomerProfileWithManualData,
+} from './server/knowledgeUtils.ts';
 
 dotenv.config();
 
@@ -895,7 +907,7 @@ function extractRateLimitFromHeaders(headers?: Headers | null): { remaining?: st
   return { remaining, limit, reset };
 }
 
-async function recordCustomLlmModelUsage({
+export async function recordCustomLlmModelUsage({
   apiKey,
   baseUrl,
   modelName,
@@ -1537,8 +1549,9 @@ export async function applyAudioPitchAndRateWithFfmpeg(
 /**
  * High-Performance SQL-level RAG Knowledge Search.
  * Avoids dumping the entire knowledge base table into Node.js process memory.
- * Uses parameterised SQL LIKE filtering to retrieve at most top 25 candidates directly from the database,
- * then performs refined scoring in memory on the tiny candidate slice.
+ * Retrieves active account-scoped knowledge items using Unicode multilingual tokenization,
+ * escaped SQL LIKE wildcard filtering, and recent-item recall so new zero-hit items are never shadowed
+ * by high-hit older entries.
  */
 export async function queryKnowledgeRAG(
   queryText: string,
@@ -1558,37 +1571,7 @@ export async function queryKnowledgeRAG(
       };
     }
 
-    const cleanText = queryText.toLowerCase();
-    const tokenSet = new Set<string>();
-
-    // 1. Match English words & terms (e.g. "caxton", "hedging", "anna")
-    const enWords = cleanText.match(/[a-z0-9_-]{2,20}/g) || [];
-    for (const w of enWords) {
-      if (w.length >= 2 && !['the', 'and', 'for', 'are', 'you', 'with', 'from'].includes(w)) {
-        tokenSet.add(w);
-      }
-    }
-
-    // 2. Segment CJK phrases and extract salient n-grams (do not chop ASCII English words into 2-letter substrings)
-    const cjkSegments = cleanText.match(/[\u4e00-\u9fff]{2,}/g) || [];
-    for (const seg of cjkSegments) {
-      if (seg.length <= 4) {
-        tokenSet.add(seg);
-      }
-      for (let len = 2; len <= Math.min(4, seg.length); len++) {
-        for (let i = 0; i <= seg.length - len && tokenSet.size < 20; i++) {
-          tokenSet.add(seg.substring(i, i + len));
-        }
-      }
-    }
-
-    const stopWords = new Set([
-      '今天', '一直', '去吗', '还去', '是在', '想喝', '这个', '那个', '什么', '可以',
-      '没有', '怎么', '我们', '你们', '他们', '现在', '明天', '昨天', '知道', '觉得',
-      '一下', '好的', '好的呀', '哈哈', '一个', '还是', '怎么会'
-    ]);
-    const searchTerms = Array.from(tokenSet).filter((t) => !stopWords.has(t)).slice(0, 8);
-
+    const searchTerms = extractMultilingualRagTokens(queryText, 14);
     if (searchTerms.length === 0) {
       return {
         context: '',
@@ -1597,24 +1580,50 @@ export async function queryKnowledgeRAG(
       };
     }
 
-    // 3. Query SQL with targeted LIKE conditions strictly scoped by accountId (never cross-account leak)
+    // 1. Query SQL with escaped LIKE conditions + recent active recall (never shadow new zero-hit entries)
     const cleanScopeAccount = typeof accountId === 'string' ? accountId.trim() : '';
     const scopeVariants = cleanScopeAccount ? getScopedAccountIdVariants(cleanScopeAccount) : ['global'];
     const scopePlaceholders = scopeVariants.map(() => '?').join(', ');
-    const whereParts = searchTerms.map(() => '(keywords LIKE ? OR title LIKE ? OR content LIKE ?)');
-    const sql = `
-      SELECT id, category, title, content, keywords, hit_count
+
+    const whereParts = searchTerms.map(
+      () => "(keywords LIKE ? ESCAPE '\\' OR title LIKE ? ESCAPE '\\' OR content LIKE ? ESCAPE '\\')"
+    );
+    const likeSql = `
+      SELECT id, category, title, content, keywords, hit_count, updated_at
       FROM knowledge_base
       WHERE is_active = 1 AND account_id IN (${scopePlaceholders}) AND (${whereParts.join(' OR ')})
-      ORDER BY hit_count DESC
-      LIMIT 25
+      ORDER BY updated_at DESC, hit_count DESC
+      LIMIT 200
     `;
-    const params: any[] = [...scopeVariants];
+    const likeParams: any[] = [...scopeVariants];
     for (const t of searchTerms) {
-      const pattern = `%${t}%`;
-      params.push(pattern, pattern, pattern);
+      const escaped = escapeSqlLikeTerm(t);
+      const pattern = `%${escaped}%`;
+      likeParams.push(pattern, pattern, pattern);
     }
-    const candidates = (await db.prepare(sql).all(...params)) as any[];
+
+    // Also recall up to 300 most recently updated active items so Unicode case-folding (Cyrillic, Turkish, etc.)
+    // and newly added zero-hit entries are always evaluated accurately in memory.
+    const recentSql = `
+      SELECT id, category, title, content, keywords, hit_count, updated_at
+      FROM knowledge_base
+      WHERE is_active = 1 AND account_id IN (${scopePlaceholders})
+      ORDER BY updated_at DESC
+      LIMIT 300
+    `;
+
+    const [likeCandidates, recentCandidates] = await Promise.all([
+      db.prepare(likeSql).all(...likeParams) as Promise<any[]>,
+      db.prepare(recentSql).all(...scopeVariants) as Promise<any[]>,
+    ]);
+
+    const candidateMap = new Map<string, any>();
+    for (const row of [...(recentCandidates || []), ...(likeCandidates || [])]) {
+      if (row?.id && !candidateMap.has(row.id)) {
+        candidateMap.set(row.id, row);
+      }
+    }
+    const candidates = Array.from(candidateMap.values());
 
     if (candidates.length === 0) {
       return {
@@ -1624,9 +1633,10 @@ export async function queryKnowledgeRAG(
       };
     }
 
-    // 4. Refined scoring on the matched candidate slice (strictly require score > 0)
+    // 2. Refined multilingual scoring (strictly require score > 0; hit_count is only a tiny tie-breaker)
     const scored = candidates.map((item) => {
       let score = 0;
+      let matchedTermsCount = 0;
       let kwList: string[] = [];
       try {
         kwList = JSON.parse(item.keywords || '[]');
@@ -1634,12 +1644,43 @@ export async function queryKnowledgeRAG(
         kwList = [];
       }
 
+      const lowerTitle = String(item.title || '').toLocaleLowerCase();
+      const lowerContent = String(item.content || '').toLocaleLowerCase();
+      const lowerKeywords = kwList.map((k) => String(k || '').toLocaleLowerCase()).filter(Boolean);
+
       for (const term of searchTerms) {
-        if (item.title && item.title.toLowerCase().includes(term)) score += 5;
-        if (kwList.some((k) => k.toLowerCase().includes(term) || term.includes(k.toLowerCase()))) score += 4;
-        if (item.content && item.content.toLowerCase().includes(term)) score += 2;
+        let termMatched = false;
+        if (lowerTitle && lowerTitle.includes(term)) {
+          score += 6;
+          termMatched = true;
+        }
+        if (lowerKeywords.some((k) => k === term)) {
+          score += 6;
+          termMatched = true;
+        } else if (lowerKeywords.some((k) => k.includes(term) || term.includes(k))) {
+          score += 4;
+          termMatched = true;
+        }
+        if (lowerContent && lowerContent.includes(term)) {
+          score += 2;
+          termMatched = true;
+        }
+        if (termMatched) {
+          matchedTermsCount++;
+        }
       }
-      return { item, score, isGenuineMatch: score > 0 };
+
+      if (matchedTermsCount > 1) {
+        score += matchedTermsCount * 2;
+      }
+
+      // Tiny tie-breaker only; never lets stale high-hit items outrank higher-relevance entries
+      const tieBreaker = Math.min(0.5, Math.max(0, Number(item.hit_count || 0)) * 0.002);
+      return {
+        item,
+        score: score > 0 ? score + tieBreaker : 0,
+        isGenuineMatch: score > 0,
+      };
     });
 
     const genuineMatches = scored.filter((s) => s.isGenuineMatch).sort((a, b) => b.score - a.score);
@@ -3702,6 +3743,8 @@ app.post('/api/database/restore', requireTenantAuth, async (req: Request, res: R
       return res.status(400).json({ error: '无效的数据快照格式，必须包含 tables 结构' });
     }
     const result = await restoreDatabaseSnapshot(snapshot);
+    activeServerTranslationSettings = null;
+    await loadSystemProxyConfigFromDb().catch(() => null);
     res.json({
       success: true,
       message: '数据快照恢复成功！',
@@ -3970,31 +4013,74 @@ export function resolveScopedAiAccountId(
 export async function getScopedCustomerProfile(chatId: string, accountId?: string): Promise<any | undefined> {
   const effAcc = String(accountId || 'acc_1').trim() || 'acc_1';
   const variants = getScopedAccountIdVariants(effAcc);
-  const altChatId = chatId.startsWith('tg_') ? chatId.replace(/^tg_/, '') : `tg_${chatId}`;
+  const canonicalId = canonicalizeCustomerChatId(chatId);
+  const altChatId = canonicalId.startsWith('tg_') ? canonicalId.replace(/^tg_/, '') : `tg_${canonicalId}`;
+  const rawInput = String(chatId || '').trim();
+  const chatCandidates = Array.from(new Set([canonicalId, altChatId, rawInput].filter(Boolean)));
+  const chatPh = chatCandidates.map(() => '?').join(', ');
   const placeholders = variants.map(() => '?').join(', ');
 
   try {
-    const scoped = (await db
+    const scopedRows = (await db
       .prepare(
         `SELECT * FROM account_customer_profiles
-         WHERE (chat_id = ? OR chat_id = ?) AND account_id IN (${placeholders})
-         ORDER BY updated_at DESC
-         LIMIT 1`
+         WHERE chat_id IN (${chatPh}) AND account_id IN (${placeholders})
+         ORDER BY CASE WHEN chat_id = ? THEN 0 ELSE 1 END, updated_at DESC`
       )
-      .get(chatId, altChatId, ...variants)) as any;
-    if (scoped) return scoped;
+      .all(...chatCandidates, ...variants, canonicalId)) as any[];
+    if (scopedRows && scopedRows.length > 0) {
+      if (scopedRows.length === 1) {
+        return { ...scopedRows[0], chat_id: canonicalId };
+      }
+      // Merge split rows (e.g. legacy 123 and tg_123) so no manual memories/tags are lost
+      const primary = scopedRows[0];
+      const merged = scopedRows.slice(1).reduce(
+        (acc, row) =>
+          mergeCustomerProfileWithManualData({
+            existingProfile: acc,
+            aiData: {
+              clientName: row.client_name,
+              relationshipStage: row.relationship_stage,
+              ageEstimate: row.age_estimate,
+              occupation: row.occupation,
+              locationTimezone: row.location_timezone,
+              toneStyle: row.tone_style,
+              likesInterests: safeJsonParse(row.likes_interests, []),
+              dislikesTaboos: safeJsonParse(row.dislikes_taboos, []),
+              emotionalNeeds: row.emotional_needs,
+              keyMemories: safeJsonParse(row.key_memories, []),
+            },
+            preserveOnSparse: true,
+          }),
+        primary as any
+      );
+      return {
+        ...primary,
+        chat_id: canonicalId,
+        client_name: merged.clientName,
+        relationship_stage: merged.relationshipStage,
+        age_estimate: merged.ageEstimate,
+        occupation: merged.occupation,
+        location_timezone: merged.locationTimezone,
+        tone_style: merged.toneStyle,
+        likes_interests: JSON.stringify(merged.likesInterests),
+        dislikes_taboos: JSON.stringify(merged.dislikesTaboos),
+        emotional_needs: merged.emotionalNeeds,
+        key_memories: JSON.stringify(merged.keyMemories),
+      };
+    }
   } catch {}
 
   try {
     const legacy = (await db
       .prepare(
         `SELECT * FROM customer_profiles
-         WHERE (chat_id = ? OR chat_id = ?) AND account_id IN (${placeholders})
-         ORDER BY updated_at DESC
+         WHERE chat_id IN (${chatPh}) AND account_id IN (${placeholders})
+         ORDER BY CASE WHEN chat_id = ? THEN 0 ELSE 1 END, updated_at DESC
          LIMIT 1`
       )
-      .get(chatId, altChatId, ...variants)) as any;
-    if (legacy) return legacy;
+      .get(...chatCandidates, ...variants, canonicalId)) as any;
+    if (legacy) return { ...legacy, chat_id: canonicalId };
   } catch {}
 
   return undefined;
@@ -4054,6 +4140,9 @@ export async function upsertScopedCustomerProfile(params: {
   updatedAt: number;
 }): Promise<void> {
   const effAcc = String(params.accountId || 'acc_1').trim() || 'acc_1';
+  const canonicalChatId = canonicalizeCustomerChatId(params.chatId);
+  const altChatId = canonicalChatId.startsWith('tg_') ? canonicalChatId.replace(/^tg_/, '') : '';
+
   await db
     .prepare(
       `INSERT INTO account_customer_profiles (
@@ -4077,7 +4166,7 @@ export async function upsertScopedCustomerProfile(params: {
     )
     .run(
       effAcc,
-      params.chatId,
+      canonicalChatId,
       params.clientName,
       params.relationshipStage,
       params.ageEstimate,
@@ -4092,6 +4181,15 @@ export async function upsertScopedCustomerProfile(params: {
       params.lastAnalyzedAt ?? 0,
       params.updatedAt
     );
+
+  // Consolidate legacy unprefixed duplicate row if canonicalized from bare numeric Telegram ID
+  if (altChatId && altChatId !== canonicalChatId) {
+    try {
+      await db
+        .prepare('DELETE FROM account_customer_profiles WHERE account_id = ? AND chat_id = ?')
+        .run(effAcc, altChatId);
+    } catch {}
+  }
 
   // Preserve compatibility with legacy customer_profiles table for single-account / bot records
   if (effAcc === 'acc_1' || effAcc === 'acc_telegram_bot') {
@@ -4118,7 +4216,7 @@ export async function upsertScopedCustomerProfile(params: {
           updated_at = excluded.updated_at`
       )
       .run(
-        params.chatId,
+        canonicalChatId,
         effAcc,
         params.clientName,
         params.relationshipStage,
@@ -4134,6 +4232,11 @@ export async function upsertScopedCustomerProfile(params: {
         params.lastAnalyzedAt ?? 0,
         params.updatedAt
       );
+    if (altChatId && altChatId !== canonicalChatId) {
+      try {
+        await db.prepare('DELETE FROM customer_profiles WHERE chat_id = ? AND account_id = ?').run(altChatId, effAcc);
+      } catch {}
+    }
   }
 }
 
@@ -4454,9 +4557,7 @@ export async function resolveUnifiedChatMessages(params: {
   const isTelegramPersonalChat =
     (chatId.startsWith('tg_') || /^-?\d+$/.test(chatId)) && accountId !== 'acc_telegram_bot';
   if (syncCloud && isTelegramPersonalChat) {
-    const connected =
-      resolveConnectedTelegramUser(accountId) ||
-      (accountId === 'acc_1' ? Array.from(connectedUserClients.values())[0] : undefined);
+    const connected = resolveConnectedTelegramUser(accountId);
     if (connected?.client) {
       try {
         const timeoutPromise = new Promise<any[]>((resolve) => setTimeout(() => resolve([]), 6000));
@@ -4486,12 +4587,16 @@ export async function resolveUnifiedEvolutionCorpus(params: {
   clientMessages?: any[];
   accountId?: string;
   limit?: number;
+  sinceCreatedAt?: number;
 }): Promise<{
   corpusText: string;
   analyzedConversationsCount: number;
   totalMessagesCount: number;
+  incrementalMessagesCount: number;
+  maxMessageCreatedAt: number;
+  corpusHash: string;
 }> {
-  const { sampleTexts = [], clientMessages = [], accountId, limit = 50 } = params;
+  const { sampleTexts = [], clientMessages = [], accountId, limit = 50, sinceCreatedAt = 0 } = params;
   const cleanAccountId = typeof accountId === 'string' ? accountId.trim() : '';
   const accVariants = cleanAccountId ? getScopedAccountIdVariants(cleanAccountId) : [];
 
@@ -4516,8 +4621,8 @@ export async function resolveUnifiedEvolutionCorpus(params: {
   const filteredClientMessages = Array.isArray(clientMessages)
     ? clientMessages.filter((m) => {
         if (!cleanAccountId) return false;
-        if (!m?.accountId) return true;
-        const msgAcc = String(m.accountId).trim();
+        const msgAcc = typeof m?.accountId === 'string' ? m.accountId.trim() : '';
+        if (!msgAcc) return false;
         return msgAcc === cleanAccountId || accVariantSet.has(msgAcc);
       })
     : [];
@@ -4564,25 +4669,46 @@ export async function resolveUnifiedEvolutionCorpus(params: {
 
   const merged = mergeUnifiedConversationMessages([dbMsgs, cloudMsgs, normalizedClient]);
   const distinctChatIds = new Set<string>();
-  const dialogueLines: string[] = [];
+  const allDialogueLines: string[] = [];
+  const incrementalChatIds = new Set<string>();
+  const incrementalDialogueLines: string[] = [];
+  let maxMessageCreatedAt = Number(sinceCreatedAt) || 0;
+
   for (const m of merged) {
     const rawText = String(m.sttText || m.text || '').trim();
     if (!rawText || /^\[(语音|图片|视频|多媒体)消息\]$|^Voice Message$/i.test(rawText)) continue;
+    const msgTs = Number(m.createdAt || 0);
+    if (msgTs > maxMessageCreatedAt) {
+      maxMessageCreatedAt = msgTs;
+    }
+    const line = `${m.sender === 'peer' ? '客户' : '我方'}: ${rawText}`;
     if (m.chatId) distinctChatIds.add(m.chatId);
-    dialogueLines.push(`${m.sender === 'peer' ? '客户' : '我方'}: ${rawText}`);
+    allDialogueLines.push(line);
+
+    if (!sinceCreatedAt || msgTs === 0 || msgTs > sinceCreatedAt) {
+      if (m.chatId) incrementalChatIds.add(m.chatId);
+      incrementalDialogueLines.push(line);
+    }
   }
 
   const validSampleTexts = Array.isArray(sampleTexts)
     ? sampleTexts.map((t: any) => String(t || '').trim()).filter(Boolean)
     : [];
 
-  const corpusText = [...dialogueLines, ...validSampleTexts].join('\n').trim();
-  const analyzedConversationsCount = distinctChatIds.size + (validSampleTexts.length > 0 ? 1 : 0);
+  const chosenLines = sinceCreatedAt > 0 ? incrementalDialogueLines : allDialogueLines;
+  const corpusText = [...chosenLines, ...validSampleTexts].join('\n').trim();
+  const analyzedConversationsCount =
+    (sinceCreatedAt > 0 ? incrementalChatIds.size : distinctChatIds.size) +
+    (validSampleTexts.length > 0 ? 1 : 0);
+  const corpusHash = corpusText ? sha256Hex(normalizeKnowledgeTextForHash(corpusText)) : '';
 
   return {
     corpusText,
     analyzedConversationsCount,
-    totalMessagesCount: dialogueLines.length,
+    totalMessagesCount: allDialogueLines.length,
+    incrementalMessagesCount: incrementalDialogueLines.length,
+    maxMessageCreatedAt,
+    corpusHash,
   };
 }
 
@@ -5955,20 +6081,24 @@ app.patch('/api/messages/:id/translation', requireTenantAuth, async (req: Reques
   }
 });
 
-// 4. Fetch Customer Profile & Long-Term Memory
+// 4. Fetch Customer Profile & Long-Term Memory (Canonical chatId + strictly account-scoped)
 app.get('/api/customer/profile/:chatId', requireTenantAuth, async (req: Request, res: Response) => {
   try {
-    const { chatId } = req.params;
-    const authContext = (req as any).auth;
-    const effectiveAccountId = authContext?.effectiveAccountId || 'acc_1';
-    let profile = await getScopedCustomerProfile(chatId, effectiveAccountId);
+    const scope = resolveScopedAiAccountId(req);
+    if (!scope.ok) return res.status(scope.status).json({ error: scope.error });
+    const canonicalChatId = canonicalizeCustomerChatId(req.params.chatId);
+    if (!canonicalChatId) {
+      return res.status(400).json({ error: '缺少有效的客户会话 chatId' });
+    }
+    const effectiveAccountId = scope.accountId;
+    let profile = await getScopedCustomerProfile(canonicalChatId, effectiveAccountId);
 
     if (!profile) {
       // Create a clean baseline profile without any fabricated attributes
       const now = Date.now();
       const defaultName = (req.query.title as string) || (req.query.clientName as string) || '新联系人';
       await upsertScopedCustomerProfile({
-        chatId,
+        chatId: canonicalChatId,
         accountId: effectiveAccountId,
         clientName: defaultName,
         relationshipStage: '尚未沟通',
@@ -5985,12 +6115,12 @@ app.get('/api/customer/profile/:chatId', requireTenantAuth, async (req: Request,
         updatedAt: now,
       });
 
-      profile = await getScopedCustomerProfile(chatId, effectiveAccountId);
+      profile = await getScopedCustomerProfile(canonicalChatId, effectiveAccountId);
     }
 
     res.json({
-      chatId: profile.chat_id,
-      accountId: profile.account_id,
+      chatId: canonicalChatId,
+      accountId: profile.account_id || effectiveAccountId,
       clientName: profile.client_name,
       relationshipStage: profile.relationship_stage,
       ageEstimate: profile.age_estimate,
@@ -6010,20 +6140,24 @@ app.get('/api/customer/profile/:chatId', requireTenantAuth, async (req: Request,
   }
 });
 
-// 5. Update Customer Profile & Memory Manually (UPSERT so new records are saved)
+// 5. Update Customer Profile & Memory Manually (UPSERT with canonical chatId + account isolation)
 app.post('/api/customer/profile/:chatId', requireTenantAuth, async (req: Request, res: Response) => {
   try {
-    const { chatId } = req.params;
+    const scope = resolveScopedAiAccountId(req);
+    if (!scope.ok) return res.status(scope.status).json({ error: scope.error });
+    const canonicalChatId = canonicalizeCustomerChatId(req.params.chatId);
+    if (!canonicalChatId) {
+      return res.status(400).json({ error: '缺少有效的客户会话 chatId' });
+    }
     const {
       clientName, relationshipStage, ageEstimate, occupation, locationTimezone,
       toneStyle, likesInterests, dislikesTaboos, emotionalNeeds, keyMemories
     } = req.body;
-    const authContext = (req as any).auth;
-    const effectiveAccountId = authContext?.effectiveAccountId || 'acc_1';
+    const effectiveAccountId = scope.accountId;
 
     const now = Date.now();
     await upsertScopedCustomerProfile({
-      chatId,
+      chatId: canonicalChatId,
       accountId: effectiveAccountId,
       clientName: clientName || 'VIP客户',
       relationshipStage: relationshipStage || '初次结识',
@@ -6040,19 +6174,25 @@ app.post('/api/customer/profile/:chatId', requireTenantAuth, async (req: Request
       updatedAt: now,
     });
 
-    res.json({ success: true });
+    res.json({ success: true, chatId: canonicalChatId, accountId: effectiveAccountId });
   } catch (error: any) {
     res.status(500).json({ error: error.message });
   }
 });
 
-// 6. AI Deep Analysis: Extract Customer Persona & Key Memories from Unified Cloud + Local + DB History
+// 6. AI Deep Analysis: Extract Customer Persona & Key Memories while preserving manually curated memories/tags
 app.post('/api/customer/analyze/:chatId', requireTenantAuth, async (req: Request, res: Response) => {
   try {
-    const { chatId } = req.params;
+    const scope = resolveScopedAiAccountId(req);
+    if (!scope.ok) return res.status(scope.status).json({ success: false, error: scope.error });
+    const canonicalChatId = canonicalizeCustomerChatId(req.params.chatId);
+    if (!canonicalChatId) {
+      return res.status(400).json({ success: false, error: '缺少有效的客户会话 chatId' });
+    }
     const { customConfig, messages: clientMessages, chatTitle } = req.body;
-    const authContext = (req as any).auth;
-    const effectiveAccountId = authContext?.effectiveAccountId || req.body?.accountId || 'acc_1';
+    const effectiveAccountId = scope.accountId;
+
+    const existingProfile = await getScopedCustomerProfile(canonicalChatId, effectiveAccountId);
 
     const serverCustomCfg = await getServerCustomLlmConfig().catch(() => null);
     const effectiveAnalyzeConfig =
@@ -6091,7 +6231,7 @@ app.post('/api/customer/analyze/:chatId', requireTenantAuth, async (req: Request
 
     // Unify messages from DB cache, Telegram Official Cloud, and client real-time local state
     const resolved = await resolveUnifiedChatMessages({
-      chatId,
+      chatId: canonicalChatId,
       accountId: effectiveAccountId,
       clientMessages,
       limit: 50,
@@ -6107,34 +6247,39 @@ app.post('/api/customer/analyze/:chatId', requireTenantAuth, async (req: Request
 
     const now = Date.now();
 
-    // If completely no messages exist (new contact), initialize a clean baseline profile without fake memories
+    // If completely no messages exist (new contact), initialize/preserve existing manual profile without erasing manual memories
     if (messageList.length === 0) {
-      const cleanEmptyProfile = {
-        clientName: chatTitle || '联系人',
-        relationshipStage: '尚未沟通',
-        ageEstimate: '待分析',
-        occupation: '待分析',
-        locationTimezone: '待确认',
-        toneStyle: '暂无对话数据',
-        likesInterests: [],
-        dislikesTaboos: [],
-        emotionalNeeds: '暂无足够对话记录',
-        keyMemories: [],
-      };
+      const mergedEmpty = mergeCustomerProfileWithManualData({
+        existingProfile,
+        aiData: {
+          clientName: chatTitle || '联系人',
+          relationshipStage: '尚未沟通',
+          ageEstimate: '待分析',
+          occupation: '待分析',
+          locationTimezone: '待确认',
+          toneStyle: '暂无对话数据',
+          likesInterests: [],
+          dislikesTaboos: [],
+          emotionalNeeds: '暂无足够对话记录',
+          keyMemories: [],
+        },
+        fallbackName: chatTitle || '联系人',
+        preserveOnSparse: true,
+      });
 
       await upsertScopedCustomerProfile({
-        chatId,
+        chatId: canonicalChatId,
         accountId: effectiveAccountId,
-        clientName: cleanEmptyProfile.clientName,
-        relationshipStage: cleanEmptyProfile.relationshipStage,
-        ageEstimate: cleanEmptyProfile.ageEstimate,
-        occupation: cleanEmptyProfile.occupation,
-        locationTimezone: cleanEmptyProfile.locationTimezone,
-        toneStyle: cleanEmptyProfile.toneStyle,
-        likesInterests: '[]',
-        dislikesTaboos: '[]',
-        emotionalNeeds: cleanEmptyProfile.emotionalNeeds,
-        keyMemories: '[]',
+        clientName: mergedEmpty.clientName,
+        relationshipStage: mergedEmpty.relationshipStage,
+        ageEstimate: mergedEmpty.ageEstimate,
+        occupation: mergedEmpty.occupation,
+        locationTimezone: mergedEmpty.locationTimezone,
+        toneStyle: mergedEmpty.toneStyle,
+        likesInterests: JSON.stringify(mergedEmpty.likesInterests),
+        dislikesTaboos: JSON.stringify(mergedEmpty.dislikesTaboos),
+        emotionalNeeds: mergedEmpty.emotionalNeeds,
+        keyMemories: JSON.stringify(mergedEmpty.keyMemories),
         lastAnalyzedAt: now,
         updatedAt: now,
       });
@@ -6142,43 +6287,49 @@ app.post('/api/customer/analyze/:chatId', requireTenantAuth, async (req: Request
       return res.json({
         success: true,
         profile: {
-          chatId,
+          chatId: canonicalChatId,
           accountId: effectiveAccountId,
-          ...cleanEmptyProfile,
+          ...mergedEmpty,
           lastAnalyzedAt: now,
         },
-        message: '当前会话暂无对话记录。真实沟通后系统将自动提炼全息画像与长效记忆。',
+        message: '当前会话暂无对话记录。已保留现有人工记录，真实沟通后系统将自动提炼补充全息画像与长效记忆。',
       });
     }
 
-    // If conversation is too sparse (fewer than 2 messages or under 12 characters), return clean objective baseline without AI hallucination
+    // If conversation is too sparse (fewer than 2 messages or under 12 characters), preserve existing manual entries without AI hallucination
     const totalCharCount = messageList.reduce((acc, m) => acc + (m.text || '').length, 0);
     if (messageList.length < 2 || totalCharCount < 12) {
-      const sparseProfile = {
-        clientName: chatTitle || '联系人',
-        relationshipStage: '初次接触',
-        ageEstimate: '未知',
-        occupation: '未知',
-        locationTimezone: '未提及',
-        toneStyle: '初次沟通，待积累更多对话数据',
-        likesInterests: [],
-        dislikesTaboos: [],
-        emotionalNeeds: '暂无足够对话记录',
-        keyMemories: [],
-      };
+      const mergedSparse = mergeCustomerProfileWithManualData({
+        existingProfile,
+        aiData: {
+          clientName: chatTitle || '联系人',
+          relationshipStage: '初次接触',
+          ageEstimate: '未知',
+          occupation: '未知',
+          locationTimezone: '未提及',
+          toneStyle: '初次沟通，待积累更多对话数据',
+          likesInterests: [],
+          dislikesTaboos: [],
+          emotionalNeeds: '暂无足够对话记录',
+          keyMemories: [],
+        },
+        fallbackName: chatTitle || '联系人',
+        preserveOnSparse: true,
+      });
+
       await upsertScopedCustomerProfile({
-        chatId,
+        chatId: canonicalChatId,
         accountId: effectiveAccountId,
-        clientName: sparseProfile.clientName,
-        relationshipStage: sparseProfile.relationshipStage,
-        ageEstimate: sparseProfile.ageEstimate,
-        occupation: sparseProfile.occupation,
-        locationTimezone: sparseProfile.locationTimezone,
-        toneStyle: sparseProfile.toneStyle,
-        likesInterests: '[]',
-        dislikesTaboos: '[]',
-        emotionalNeeds: sparseProfile.emotionalNeeds,
-        keyMemories: '[]',
+        clientName: mergedSparse.clientName,
+        relationshipStage: mergedSparse.relationshipStage,
+        ageEstimate: mergedSparse.ageEstimate,
+        occupation: mergedSparse.occupation,
+        locationTimezone: mergedSparse.locationTimezone,
+        toneStyle: mergedSparse.toneStyle,
+        likesInterests: JSON.stringify(mergedSparse.likesInterests),
+        dislikesTaboos: JSON.stringify(mergedSparse.dislikesTaboos),
+        emotionalNeeds: mergedSparse.emotionalNeeds,
+        keyMemories: JSON.stringify(mergedSparse.keyMemories),
         lastAnalyzedAt: now,
         updatedAt: now,
       });
@@ -6186,12 +6337,12 @@ app.post('/api/customer/analyze/:chatId', requireTenantAuth, async (req: Request
       return res.json({
         success: true,
         profile: {
-          chatId,
+          chatId: canonicalChatId,
           accountId: effectiveAccountId,
-          ...sparseProfile,
+          ...mergedSparse,
           lastAnalyzedAt: now,
         },
-        message: '当前会话对话记录过少（少于2条），已初始化客观基础档案，待深入沟通后提炼。',
+        message: '当前会话对话记录过少（少于2条），已保留人工记忆并初始化基础档案，待深入沟通后提炼。',
       });
     }
 
@@ -6365,20 +6516,27 @@ ${conversationTranscript}`;
       }
     }
 
-    // Save into database via account-isolated UPSERT
+    // Merge AI-extracted insights with manually curated memories, tags, and attributes
+    const mergedProfile = mergeCustomerProfileWithManualData({
+      existingProfile,
+      aiData: extractedData,
+      fallbackName: chatTitle || '客户',
+      preserveOnSparse: false,
+    });
+
     await upsertScopedCustomerProfile({
-      chatId,
+      chatId: canonicalChatId,
       accountId: effectiveAccountId,
-      clientName: extractedData.clientName || chatTitle || '客户',
-      relationshipStage: extractedData.relationshipStage || '初次接触',
-      ageEstimate: extractedData.ageEstimate || '',
-      occupation: extractedData.occupation || '',
-      locationTimezone: extractedData.locationTimezone || '',
-      toneStyle: extractedData.toneStyle || '',
-      likesInterests: JSON.stringify(extractedData.likesInterests || []),
-      dislikesTaboos: JSON.stringify(extractedData.dislikesTaboos || []),
-      emotionalNeeds: extractedData.emotionalNeeds || '',
-      keyMemories: JSON.stringify(extractedData.keyMemories || []),
+      clientName: mergedProfile.clientName,
+      relationshipStage: mergedProfile.relationshipStage,
+      ageEstimate: mergedProfile.ageEstimate,
+      occupation: mergedProfile.occupation,
+      locationTimezone: mergedProfile.locationTimezone,
+      toneStyle: mergedProfile.toneStyle,
+      likesInterests: JSON.stringify(mergedProfile.likesInterests),
+      dislikesTaboos: JSON.stringify(mergedProfile.dislikesTaboos),
+      emotionalNeeds: mergedProfile.emotionalNeeds,
+      keyMemories: JSON.stringify(mergedProfile.keyMemories),
       lastAnalyzedAt: now,
       updatedAt: now,
     });
@@ -6386,8 +6544,9 @@ ${conversationTranscript}`;
     res.json({
       success: true,
       profile: {
-        chatId,
-        ...extractedData,
+        chatId: canonicalChatId,
+        accountId: effectiveAccountId,
+        ...mergedProfile,
         lastAnalyzedAt: now,
       },
     });
@@ -6505,13 +6664,23 @@ app.post('/api/knowledge', requireTenantAuth, async (req: Request, res: Response
   try {
     const scope = resolveScopedAiAccountId(req);
     if (!scope.ok) return res.status(scope.status).json({ error: scope.error });
-    const { category = 'dating_playbook', title, content, keywords = [] } = req.body;
-    if (!title || !content) {
+    const { category = 'life_emotion', title, content, keywords = [] } = req.body;
+    const cleanTitle = String(title || '').trim();
+    const cleanContent = String(content || '').trim();
+    if (!cleanTitle || !cleanContent) {
       return res.status(400).json({ error: '标题与知识内容为必填项' });
     }
 
-    const id = `know_${Date.now()}`;
+    const validCategories = ['icebreaker', 'life_emotion', 'wealth_investment', 'trust_defense'];
+    const resolvedCategory = validCategories.includes(String(category || '').trim())
+      ? String(category).trim()
+      : 'life_emotion';
+
     const now = Date.now();
+    const id = `know_${now}_${crypto.randomBytes(3).toString('hex')}`;
+    const normalizedKeywords = (Array.isArray(keywords) ? keywords : [keywords])
+      .map((k: any) => String(k || '').trim())
+      .filter(Boolean);
 
     await db.prepare(`
       INSERT INTO knowledge_base (
@@ -6520,10 +6689,10 @@ app.post('/api/knowledge', requireTenantAuth, async (req: Request, res: Response
     `).run(
       id,
       scope.accountId,
-      category,
-      title,
-      content,
-      JSON.stringify(Array.isArray(keywords) ? keywords : [keywords]),
+      resolvedCategory,
+      cleanTitle,
+      cleanContent,
+      JSON.stringify(normalizedKeywords),
       'manual_text',
       'manual_input',
       1,
@@ -6536,58 +6705,160 @@ app.post('/api/knowledge', requireTenantAuth, async (req: Request, res: Response
       INSERT INTO training_logs (id, account_id, log_type, details, items_learned, created_at)
       VALUES (?, ?, ?, ?, ?, ?)
     `).run(
-      `log_${now}`,
+      `log_${now}_${crypto.randomBytes(2).toString('hex')}`,
       scope.accountId,
       'manual_add',
-      `人工添加并训练新知识条目: 【${title}】`,
+      `人工添加并训练新知识条目: 【${cleanTitle}】`,
       1,
       now
     );
 
-    res.json({ success: true, id });
+    res.json({ success: true, id, category: resolvedCategory });
   } catch (error: any) {
     res.status(500).json({ error: error.message });
   }
 });
 
-// Upload and train custom file knowledge with real AI categorization (no regex fallback)
+async function extractUploadPayloadFromRequest(req: Request): Promise<{
+  fileName: string;
+  fileBase64?: string;
+  fileBuffer?: Buffer;
+  fileContent?: string;
+  mimeType?: string;
+  category: string;
+  customConfig?: any;
+  accountId?: string;
+}> {
+  const contentType = String(req.headers['content-type'] || '').toLowerCase();
+  if (contentType.includes('multipart/form-data')) {
+    return await new Promise((resolve, reject) => {
+      const fields: Record<string, string> = {};
+      let fileBuffer: Buffer | undefined;
+      let fileName = 'uploaded_doc.txt';
+      let mimeType = '';
+      let fileTooLarge = false;
+
+      const bb = busboy({
+        headers: req.headers,
+        limits: {
+          fileSize: 20 * 1024 * 1024,
+          files: 1,
+          fields: 20,
+        },
+      });
+
+      bb.on('file', (_fieldname, file, info) => {
+        if (info?.filename) fileName = info.filename;
+        if (info?.mimeType) mimeType = info.mimeType;
+        const chunks: Buffer[] = [];
+        file.on('data', (chunk: Buffer) => chunks.push(chunk));
+        file.on('limit', () => {
+          fileTooLarge = true;
+          file.resume();
+        });
+        file.on('end', () => {
+          if (!fileTooLarge) {
+            fileBuffer = Buffer.concat(chunks);
+          }
+        });
+      });
+
+      bb.on('field', (name, val) => {
+        fields[name] = val;
+      });
+
+      bb.on('error', (err) => reject(err));
+      bb.on('finish', () => {
+        if (fileTooLarge) {
+          return reject(new KnowledgeDocumentError('上传文件体积超过 20MB 上限，请拆分后再上传'));
+        }
+        let parsedCustomConfig: any = undefined;
+        if (fields.customConfig) {
+          try {
+            parsedCustomConfig = JSON.parse(fields.customConfig);
+          } catch {}
+        }
+        resolve({
+          fileName: fields.fileName || fileName,
+          fileBuffer,
+          fileContent: fields.fileContent,
+          mimeType,
+          category: fields.category || 'auto',
+          customConfig: parsedCustomConfig,
+          accountId: fields.accountId,
+        });
+      });
+
+      req.pipe(bb);
+    });
+  }
+
+  const body = req.body || {};
+  return {
+    fileName: body.fileName || 'uploaded_doc.txt',
+    fileBase64: body.fileBase64,
+    fileContent: body.fileContent,
+    mimeType: body.mimeType,
+    category: body.category || 'auto',
+    customConfig: body.customConfig,
+    accountId: body.accountId,
+  };
+}
+
+// Upload and train custom file knowledge with real format/encoding parsing, safe chunking, & real AI categorization
 app.post('/api/knowledge/upload', requireTenantAuth, async (req: Request, res: Response) => {
   try {
+    const uploadPayload = await extractUploadPayloadFromRequest(req);
+    if (uploadPayload.accountId && (!req.body || !req.body.accountId)) {
+      req.body = { ...(req.body || {}), accountId: uploadPayload.accountId };
+    }
     const scope = resolveScopedAiAccountId(req);
     if (!scope.ok) return res.status(scope.status).json({ success: false, error: scope.error });
-    const { fileName, fileContent, category = 'auto', customConfig } = req.body;
-    if (!fileContent || typeof fileContent !== 'string' || !fileContent.trim()) {
-      return res.status(400).json({ success: false, error: '文件内容不能为空' });
-    }
-    if (fileContent.length > 40000) {
-      return res.status(400).json({
-        success: false,
-        error: '文档内容超过 40000 字符上限，请拆分后再上传以确保大模型准确切片与分类',
-      });
+
+    const { fileName, category = 'auto', customConfig } = uploadPayload;
+    const parsedDoc = await parseKnowledgeDocument({
+      fileName: uploadPayload.fileName,
+      fileBase64: uploadPayload.fileBase64,
+      fileBuffer: uploadPayload.fileBuffer,
+      fileContent: uploadPayload.fileContent,
+      mimeType: uploadPayload.mimeType,
+    });
+
+    const chunks = splitDocumentIntoSafeChunks(parsedDoc.extractedText, {
+      maxChunkChars: 5500,
+      maxChunks: 35,
+    });
+    if (chunks.length === 0) {
+      return res.status(400).json({ success: false, error: '文档未提取到可分段的有效内容' });
     }
 
     const now = Date.now();
-    const baseName = (fileName || '文档知识').replace(/\.[^/.]+$/, '');
+    const baseName = (parsedDoc.fileName || '文档知识').replace(/\.[^/.]+$/, '');
     const bearerJwt = extractBearerToken(req);
+    const validCategories = ['icebreaker', 'life_emotion', 'wealth_investment', 'trust_defense'];
     const isExplicitCategory = Boolean(
-      category && category !== 'auto' && category !== 'custom_doc' &&
-      ['icebreaker', 'life_emotion', 'wealth_investment', 'trust_defense'].includes(category)
+      category && category !== 'auto' && category !== 'custom_doc' && validCategories.includes(category)
     );
 
-    const prompt = `你是一个专业的人设知识库与客服话术解析分类引擎。
-请将以下整篇文档内容进行智能切片，提炼成若干条独立的知识点/话术对${
-      isExplicitCategory
-        ? `（用户指定归属分类为 "${category}"）`
-        : `，并为每一条指定最契合的阶段分类：
+    const parsedItems: Array<{ title: string; category: string; content: string; keywords: string[] }> = [];
+    let modelUsed = '';
+
+    for (let cIdx = 0; cIdx < chunks.length; cIdx++) {
+      const chunkText = chunks[cIdx];
+      const prompt = `你是一个专业的人设知识库与客服话术解析分类引擎。
+请将以下文档片段（第 ${cIdx + 1}/${chunks.length} 段）进行智能切片，提炼成若干条独立的知识点/话术对${
+        isExplicitCategory
+          ? `（用户指定归属分类为 "${category}"）`
+          : `，并为每一条指定最契合的阶段分类：
 - 严格必须从以下4个标准分类中选择其一：
   1. "icebreaker": 初识破冰、打招呼、兴趣试探、开场聊客。
   2. "life_emotion": 生活美学、美食咖啡、情绪价值、日常关怀、暧昧拉扯。
   3. "wealth_investment": 资产投资、量化波段、理财逻辑、宏观分析、生息配置。
   4. "trust_defense": 安全感化解、身份疑虑、真实性背书、消除顾虑与戒备。`
-    }
+      }
 
-文档内容：
-${fileContent}
+文档片段内容：
+${chunkText}
 
 请严格返回以下格式的合法 JSON 数组，严禁返回任何多余的解释或包裹字符：
 [
@@ -6599,40 +6870,49 @@ ${fileContent}
   }
 ]`;
 
-    let parsedItems: Array<{ title: string; category: string; content: string; keywords: string[] }> = [];
-    let modelUsed = '';
-    try {
-      const llmRes = await invokeEvolutionOrAnalysisLlm({
-        prompt,
-        customConfig,
-        userJwt: bearerJwt,
-        timeoutMs: 25000,
-      });
-      modelUsed = llmRes.source;
-      const rawJson = llmRes.text.trim().replace(/^```json\s*/i, '').replace(/\s*```$/i, '');
-      const jsonMatch = rawJson.match(/\[[\s\S]*\]/);
-      const result = JSON.parse(jsonMatch ? jsonMatch[0] : rawJson);
-      if (!Array.isArray(result) || result.length === 0) {
-        return res.status(502).json({
+      try {
+        const llmRes = await invokeEvolutionOrAnalysisLlm({
+          prompt,
+          customConfig,
+          userJwt: bearerJwt,
+          timeoutMs: 30000,
+          maxTokens: 1800,
+        });
+        modelUsed = llmRes.source;
+        const rawJson = llmRes.text.trim().replace(/^```json\s*/i, '').replace(/\s*```$/i, '');
+        const jsonMatch = rawJson.match(/\[[\s\S]*\]/);
+        const result = JSON.parse(jsonMatch ? jsonMatch[0] : rawJson);
+        if (!Array.isArray(result)) {
+          throw new Error(`第 ${cIdx + 1} 段返回非数组 JSON`);
+        }
+        const validChunkItems = result.filter((item) => item?.content && String(item.content).trim().length > 5);
+        parsedItems.push(...validChunkItems);
+      } catch (llmErr: any) {
+        const msg = llmErr?.message || String(llmErr);
+        const isUnconfigured = /未配置|未启用/.test(msg);
+        return res.status(isUnconfigured ? 400 : 503).json({
           success: false,
-          error: `大模型 (${modelUsed}) 未返回有效的知识切片数组，已中止入库（严禁正则降级分类）`,
+          error: `大模型文档第 ${cIdx + 1}/${chunks.length} 段切片与分类失败（已中止入库，严禁降级写入半成品或正则兜底）：${msg}`,
         });
       }
-      parsedItems = result.filter((item) => item?.content && String(item.content).trim().length > 5);
-      if (parsedItems.length === 0) {
-        return res.status(502).json({
-          success: false,
-          error: `大模型 (${modelUsed}) 解析出的有效知识条目为空，已中止入库`,
-        });
-      }
-    } catch (llmErr: any) {
-      const msg = llmErr?.message || String(llmErr);
-      const isUnconfigured = /未配置|未启用/.test(msg);
-      return res.status(isUnconfigured ? 400 : 503).json({
+    }
+
+    if (parsedItems.length === 0) {
+      return res.status(502).json({
         success: false,
-        error: `大模型知识切片与分类失败（已禁用正则降级）：${msg}`,
+        error: `大模型 (${modelUsed || 'LLM'}) 解析出的有效知识条目为空，已中止入库`,
       });
     }
+
+    // Deduplicate against existing scoped items and across document chunks
+    const scopeVariants = getScopedAccountIdVariants(scope.accountId);
+    const scopePlaceholders = scopeVariants.map(() => '?').join(', ');
+    const existingRows = (await db
+      .prepare(`SELECT title, content FROM knowledge_base WHERE account_id IN (${scopePlaceholders})`)
+      .all(...scopeVariants)) as any[];
+    const seenFingerprints = new Set<string>(
+      (existingRows || []).map((r) => buildKnowledgeItemFingerprint(String(r.title || ''), String(r.content || '')))
+    );
 
     const insert = db.prepare(`
       INSERT INTO knowledge_base (
@@ -6641,9 +6921,18 @@ ${fileContent}
     `);
 
     let count = 0;
-    const validCategories = ['icebreaker', 'life_emotion', 'wealth_investment', 'trust_defense'];
+    let skippedDuplicates = 0;
     for (let i = 0; i < parsedItems.length; i++) {
       const item = parsedItems[i];
+      const itemTitle = String(item.title || `${baseName} (第${i + 1}条)`).trim();
+      const itemContent = String(item.content).trim();
+      const fp = buildKnowledgeItemFingerprint(itemTitle, itemContent);
+      if (seenFingerprints.has(fp)) {
+        skippedDuplicates++;
+        continue;
+      }
+      seenFingerprints.add(fp);
+
       const finalCat = isExplicitCategory
         ? category
         : validCategories.includes(item.category)
@@ -6651,14 +6940,18 @@ ${fileContent}
         : 'life_emotion';
 
       await insert.run(
-        `know_doc_${now}_${i}`,
+        `know_doc_${now}_${i}_${crypto.randomBytes(3).toString('hex')}`,
         scope.accountId,
         finalCat,
-        String(item.title || `${baseName} (第${i + 1}条)`).trim(),
-        String(item.content).trim(),
-        JSON.stringify(Array.isArray(item.keywords) ? item.keywords : []),
+        itemTitle,
+        itemContent,
+        JSON.stringify(
+          Array.isArray(item.keywords)
+            ? item.keywords.map((k: any) => String(k || '').trim()).filter(Boolean)
+            : []
+        ),
         'file_upload',
-        fileName || 'uploaded_doc.txt',
+        parsedDoc.fileName,
         1,
         0,
         now,
@@ -6671,16 +6964,33 @@ ${fileContent}
       INSERT INTO training_logs (id, account_id, log_type, details, items_learned, created_at)
       VALUES (?, ?, ?, ?, ?, ?)
     `).run(
-      `log_upload_${now}`,
+      `log_upload_${now}_${crypto.randomBytes(2).toString('hex')}`,
       scope.accountId,
       'file_import',
-      `导入文档《${fileName || '知识文档'}》，经大模型 (${modelUsed}) 智能分类入库 ${count} 个知识切片`,
+      `导入文档《${parsedDoc.fileName}》（${parsedDoc.detectedEncoding}，${chunks.length} 段），经大模型 (${modelUsed}) 提炼入库 ${count} 个知识切片${skippedDuplicates > 0 ? `（去重跳过 ${skippedDuplicates} 条）` : ''}`,
       count,
       now
     );
 
-    res.json({ success: true, itemsLearned: count, autoClassified: true, modelUsed });
+    res.json({
+      success: true,
+      itemsLearned: count,
+      skippedDuplicates,
+      totalChunks: chunks.length,
+      detectedEncoding: parsedDoc.detectedEncoding,
+      extractedChars: parsedDoc.charCount,
+      pageCount: parsedDoc.pageCount,
+      autoClassified: true,
+      modelUsed,
+    });
   } catch (error: any) {
+    if (error instanceof KnowledgeDocumentError) {
+      return res.status(error.statusCode).json({
+        success: false,
+        code: error.code,
+        error: error.message,
+      });
+    }
     res.status(500).json({ success: false, error: error.message });
   }
 });
@@ -7209,11 +7519,13 @@ export async function invokeEvolutionOrAnalysisLlm({
   customConfig,
   userJwt,
   timeoutMs = 20000,
+  maxTokens = 1200,
 }: {
   prompt: string;
   customConfig?: any;
   userJwt?: string;
   timeoutMs?: number;
+  maxTokens?: number;
 }): Promise<{ text: string; source: string; usedBackendCustomLlm: boolean }> {
   const serverCustomCfg = await getServerCustomLlmConfig().catch(() => null);
   const resolvedIncomingCustomConfig =
@@ -7257,7 +7569,7 @@ export async function invokeEvolutionOrAnalysisLlm({
       customConfig: normalizedEffectiveConfig,
       messages: [{ role: 'user', content: prompt }],
       temperature: 0.2,
-      maxTokens: 1200,
+      maxTokens,
       timeoutMs,
       userJwt: userJwt || lastActiveUserJwt || undefined,
       throwOnError: true,
@@ -7475,7 +7787,7 @@ async function incrementEvolutionHabitUsage(habitIds: string[], accountId?: stri
   } catch {}
 }
 
-// 5. Trigger Self-Training & Habit Self-Evolution Engine (Strictly account-scoped, zero cross-account sampling)
+// 5. Trigger Self-Training & Habit Self-Evolution Engine (Strictly account-scoped, watermark + fingerprint deduplicated)
 app.post('/api/evolution/learn', aiGenerationLimiter, requireTenantAuth, async (req: Request, res: Response) => {
   try {
     const scope = resolveScopedAiAccountId(req);
@@ -7489,24 +7801,50 @@ app.post('/api/evolution/learn', aiGenerationLimiter, requireTenantAuth, async (
       });
     }
     const currentState = await getEvolutionStateFromDb(targetEvolutionAccountId);
+    const prevWatermark = Number(currentState.lastLearnedMessageCreatedAt || 0);
+    const knownCorpusHashes: string[] = Array.isArray(currentState.learnedCorpusHashes)
+      ? currentState.learnedCorpusHashes
+      : [];
     const now = Date.now();
     const bearerJwt = extractBearerToken(req);
 
-    // Collect genuine unified conversation corpus strictly scoped to targetEvolutionAccountId
+    const hasManualSamples = Array.isArray(sampleTexts) && sampleTexts.some((t: any) => String(t || '').trim().length > 0);
+
+    // Collect genuine unified conversation corpus strictly scoped to targetEvolutionAccountId & watermark
     const corpusResult = await resolveUnifiedEvolutionCorpus({
       sampleTexts,
       clientMessages,
       accountId: targetEvolutionAccountId,
       limit: 50,
+      sinceCreatedAt: prevWatermark,
     });
     const messagesCorpus = corpusResult.corpusText;
     const analyzedConversationsCount = corpusResult.analyzedConversationsCount;
 
-    // Strictly refuse to inject hardcoded Elena fake conversations when real data is insufficient
+    if (!hasManualSamples && prevWatermark > 0 && corpusResult.incrementalMessagesCount === 0) {
+      return res.status(409).json({
+        success: false,
+        alreadyLearned: true,
+        error: '自上次进化学习以来暂无新增真实对话记录，无需重复学习（如有新示范语料可手动补充后提交）',
+      });
+    }
+
+    // Strictly refuse to inject hardcoded fake conversations when real data is insufficient
     if (!messagesCorpus || messagesCorpus.length < 50) {
       return res.status(400).json({
         success: false,
-        error: '当前真实聊天语料不足（少于 50 字），请先积累真实会话记录或输入示范语料后再执行进化学习（严禁注入虚假对话）',
+        error:
+          prevWatermark > 0 && corpusResult.totalMessagesCount > 0
+            ? '自上次学习水位线之后新增对话语料不足 50 字，请积累更多新对话或补充示范语料后再执行进化学习'
+            : '当前真实聊天语料不足（少于 50 字），请先积累真实会话记录或输入示范语料后再执行进化学习（严禁注入虚假对话）',
+      });
+    }
+
+    if (corpusResult.corpusHash && knownCorpusHashes.includes(corpusResult.corpusHash)) {
+      return res.status(409).json({
+        success: false,
+        alreadyLearned: true,
+        error: '当前语料指纹已学习过（内容完全重复），已跳过重复提炼',
       });
     }
 
@@ -7558,7 +7896,7 @@ ${messagesCorpus.slice(0, 3500)}
           const rawScore = Number(item.confidenceScore);
           const boundedScore = Number.isFinite(rawScore) ? Math.min(1, Math.max(0, rawScore)) : 0;
           return {
-            id: `h_evolved_${now}_${idx + 1}`,
+            id: `h_evolved_${now}_${idx + 1}_${crypto.randomBytes(2).toString('hex')}`,
             type: item.type || 'oral_slang',
             title: String(item.title || '实战沟通习惯').trim(),
             description: String(item.description || '').trim(),
@@ -7585,46 +7923,84 @@ ${messagesCorpus.slice(0, 3500)}
       });
     }
 
-    // 2. Sync distilled chat skills & styles directly into the Backend LLM Brain
-    const backendSyncResult = await syncLearnedPatternsToBackendLlm({
-      patterns: newlyLearnedHabits,
-      source: 'evolution_learn',
-      userJwt: bearerJwt,
-      customConfig,
-    });
+    // Deduplicate newly extracted habits against existing habits using normalized fingerprint
+    const existingHabitSignatures = new Set<string>();
+    const existingHabitTitleKeys = new Set<string>();
+    for (const h of Array.isArray(currentState.habits) ? currentState.habits : []) {
+      const sig = buildKnowledgeItemFingerprint(`${h?.type || ''}:${h?.title || ''}`, h?.description || '');
+      existingHabitSignatures.add(sig);
+      const titleKey = `${String(h?.type || '').toLowerCase()}::${normalizeKnowledgeTextForHash(String(h?.title || ''))}`;
+      if (titleKey) existingHabitTitleKeys.add(titleKey);
+    }
 
-    // 3. Merge into scoped evolution state with real counters
-    const mergedHabits = [...newlyLearnedHabits, ...(currentState.habits || [])].slice(0, 30);
+    const uniqueNewHabits: any[] = [];
+    let skippedDuplicateHabits = 0;
+    for (const h of newlyLearnedHabits) {
+      const sig = buildKnowledgeItemFingerprint(`${h.type}:${h.title}`, h.description);
+      const titleKey = `${String(h.type).toLowerCase()}::${normalizeKnowledgeTextForHash(h.title)}`;
+      if (existingHabitSignatures.has(sig) || existingHabitTitleKeys.has(titleKey)) {
+        skippedDuplicateHabits++;
+        continue;
+      }
+      existingHabitSignatures.add(sig);
+      existingHabitTitleKeys.add(titleKey);
+      uniqueNewHabits.push(h);
+    }
+
+    // Sync distilled unique skills to Backend LLM Brain
+    const backendSyncResult =
+      uniqueNewHabits.length > 0
+        ? await syncLearnedPatternsToBackendLlm({
+            patterns: uniqueNewHabits,
+            source: 'evolution_learn',
+            userJwt: bearerJwt,
+            customConfig,
+          })
+        : { synced: false, syncedCount: 0, error: '全部提取技巧已存在于现有习惯库中' };
+
+    const nextWatermark = Math.max(prevWatermark, Number(corpusResult.maxMessageCreatedAt || 0));
+    const nextCorpusHashes = corpusResult.corpusHash
+      ? Array.from(new Set([...knownCorpusHashes, corpusResult.corpusHash])).slice(-100)
+      : knownCorpusHashes;
+
+    // Merge into scoped evolution state with real counters and updated watermark
+    const mergedHabits = [...uniqueNewHabits, ...(currentState.habits || [])].slice(0, 30);
     const updatedState = {
       ...currentState,
       version: `v1.${Math.floor(now / 100000) % 100}.0-adaptive`,
       lastEvolvedAt: now,
+      lastLearnedMessageCreatedAt: nextWatermark,
+      learnedCorpusHashes: nextCorpusHashes,
       totalConversationsAnalyzed: (currentState.totalConversationsAnalyzed || 0) + analyzedConversationsCount,
-      totalHabitsLearned: (currentState.totalHabitsLearned || 0) + newlyLearnedHabits.length,
+      totalHabitsLearned: (currentState.totalHabitsLearned || 0) + uniqueNewHabits.length,
       habits: mergedHabits,
     };
 
     await saveEvolutionStateToDb(updatedState, targetEvolutionAccountId);
 
-    // 4. Record truthful training log scoped to targetEvolutionAccountId
+    // Record truthful training log scoped to targetEvolutionAccountId
     await db.prepare(`
       INSERT INTO training_logs (id, account_id, log_type, details, items_learned, created_at)
       VALUES (?, ?, ?, ?, ?, ?)
     `).run(
-      `log_evo_${now}`,
+      `log_evo_${now}_${crypto.randomBytes(2).toString('hex')}`,
       targetEvolutionAccountId,
       'evolution_learn',
-      `经大模型 (${extractionSource}) 从 ${analyzedConversationsCount} 组真实会话语料提炼 ${newlyLearnedHabits.length} 项沟通技巧与风格${
-        backendSyncResult.synced ? '，并已同步强化云端后台大模型' : ''
-      }`,
-      newlyLearnedHabits.length,
+      uniqueNewHabits.length > 0
+        ? `经大模型 (${extractionSource}) 从 ${analyzedConversationsCount} 组增量会话语料提炼 ${uniqueNewHabits.length} 项新沟通技巧${
+            skippedDuplicateHabits > 0 ? `（去重跳过 ${skippedDuplicateHabits} 项）` : ''
+          }${backendSyncResult.synced ? '，并已同步强化云端后台大模型' : ''}`
+        : `经大模型 (${extractionSource}) 核查 ${analyzedConversationsCount} 组增量会话语料，已更新学习水位线（无重复外的新增技巧）`,
+      uniqueNewHabits.length,
       now
     );
 
     res.json({
       success: true,
-      newHabitsLearned: newlyLearnedHabits.length,
+      newHabitsLearned: uniqueNewHabits.length,
+      skippedDuplicateHabits,
       analyzedConversationsCount,
+      lastLearnedMessageCreatedAt: nextWatermark,
       modelUsed: extractionSource,
       syncedToBackendLlm: backendSyncResult.synced,
       backendSyncMessage: backendSyncResult.synced
@@ -7760,7 +8136,12 @@ export function buildRemoteKbCacheKey(
     .update(`${effectiveLicense}|${effectiveApiKey}|${effectiveUserJwt}`)
     .digest('hex')
     .slice(0, 24);
-  return `${targetUrl}::cred_${credHash}::${cleanQuery.toLowerCase().slice(0, 120)}`;
+  const queryHash = crypto
+    .createHash('sha256')
+    .update(cleanQuery.toLowerCase())
+    .digest('hex')
+    .slice(0, 32);
+  return `${targetUrl}::cred_${credHash}::q_${queryHash}`;
 }
 
 export async function searchRailwayKnowledgeBase(
@@ -8107,24 +8488,46 @@ app.get('/api/transcripts', requireTenantAuth, async (req: Request, res: Respons
   }
 });
 
-// 2. Add or upload full chat transcript with genuine LLM style distillation & backend LLM sync (Account-scoped)
+// 2. Add or upload full chat transcript with content-hash deduplication & genuine LLM style distillation
 app.post('/api/transcripts', requireTenantAuth, async (req: Request, res: Response) => {
   try {
     const scope = resolveScopedAiAccountId(req);
     if (!scope.ok) return res.status(scope.status).json({ success: false, error: scope.error });
 
     const { title, description = '', dialogueText, learnedStyle, customConfig } = req.body;
-    if (!title || !dialogueText || !String(dialogueText).trim()) {
+    const cleanTitle = String(title || '').trim();
+    const cleanDialogue = String(dialogueText || '').trim();
+    if (!cleanTitle || !cleanDialogue) {
       return res.status(400).json({ success: false, error: '标题与整篇对话文本为必填项' });
     }
 
+    const contentHash = sha256Hex(normalizeKnowledgeTextForHash(cleanDialogue));
+    const variants = getScopedAccountIdVariants(scope.accountId);
+    const placeholders = variants.map(() => '?').join(', ');
+    const duplicate = (await db
+      .prepare(
+        `SELECT id, title FROM chat_transcripts
+         WHERE account_id IN (${placeholders}) AND content_hash = ?
+         LIMIT 1`
+      )
+      .get(...variants, contentHash)) as any;
+
+    if (duplicate) {
+      return res.status(409).json({
+        success: false,
+        duplicate: true,
+        existingId: duplicate.id,
+        error: `整文范本库中已存在完全相同的对话文本《${duplicate.title}》，已跳过重复录入`,
+      });
+    }
+
     const now = Date.now();
-    const id = `trans_${now}`;
+    const id = `trans_${now}_${crypto.randomBytes(3).toString('hex')}`;
     const bearerJwt = extractBearerToken(req);
 
-    const lines = String(dialogueText).split('\n').filter((l: string) => l.trim().length > 0);
+    const lines = cleanDialogue.split('\n').filter((l: string) => l.trim().length > 0);
     const roundCount = Math.max(1, Math.round(lines.length / 2));
-    const characterCount = String(dialogueText).length;
+    const characterCount = cleanDialogue.length;
 
     let extractedStyle = typeof learnedStyle === 'string' ? learnedStyle.trim() : '';
     let styleModelUsed = '';
@@ -8132,7 +8535,7 @@ app.post('/api/transcripts', requireTenantAuth, async (req: Request, res: Respon
       const stylePrompt = `请客观深入地分析以下整篇对话实录，提炼出其中说话人的真实聊天技巧、口语语气词偏好、句式节奏与情感推进策略（用 2~3 句简洁中文概括，直接输出总结正文，不要套话或 Markdown）：
 
 对话实录：
-${String(dialogueText).slice(0, 5000)}`;
+${cleanDialogue.slice(0, 5000)}`;
 
       try {
         const llmRes = await invokeEvolutionOrAnalysisLlm({
@@ -8155,18 +8558,22 @@ ${String(dialogueText).slice(0, 5000)}`;
 
     await db.prepare(`
       INSERT INTO chat_transcripts (
-        id, account_id, title, description, dialogue_text, learned_style, round_count, character_count, is_active, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        id, account_id, title, description, dialogue_text, learned_style, round_count, character_count, is_active,
+        source_chat_id, content_hash, last_message_created_at, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       id,
       scope.accountId,
-      title,
+      cleanTitle,
       description,
-      dialogueText,
+      cleanDialogue,
       extractedStyle,
       roundCount,
       characterCount,
       1,
+      null,
+      contentHash,
+      0,
       now,
       now
     );
@@ -8176,7 +8583,7 @@ ${String(dialogueText).slice(0, 5000)}`;
         {
           id,
           type: 'transcript_style',
-          title: String(title).trim(),
+          title: cleanTitle,
           description: extractedStyle,
           examplePattern: lines.slice(-2).join(' / ').slice(0, 220),
         },
@@ -8190,10 +8597,10 @@ ${String(dialogueText).slice(0, 5000)}`;
       INSERT INTO training_logs (id, account_id, log_type, details, items_learned, created_at)
       VALUES (?, ?, ?, ?, ?, ?)
     `).run(
-      `log_trans_${now}`,
+      `log_trans_${now}_${crypto.randomBytes(2).toString('hex')}`,
       scope.accountId,
       'transcript_import',
-      `新增整篇对话示范《${title}》（共 ${roundCount} 轮，${characterCount} 字），经${styleModelUsed ? `大模型 (${styleModelUsed})` : '人工指定'}提炼沟通风格${syncRes.synced ? '并同步至后台大模型' : ''}`,
+      `新增整篇对话示范《${cleanTitle}》（共 ${roundCount} 轮，${characterCount} 字），经${styleModelUsed ? `大模型 (${styleModelUsed})` : '人工指定'}提炼沟通风格${syncRes.synced ? '并同步至后台大模型' : ''}`,
       1,
       now
     );
@@ -8210,18 +8617,21 @@ ${String(dialogueText).slice(0, 5000)}`;
   }
 });
 
-// 3. Import full transcript directly from an existing customer's unified cloud + local + DB chat with real LLM style distillation
+// 3. Import full transcript directly from an existing customer's unified chat with content fingerprint & watermark dedup
 app.post('/api/transcripts/import-from-chat/:chatId', requireTenantAuth, async (req: Request, res: Response) => {
   try {
     const scope = resolveScopedAiAccountId(req);
     if (!scope.ok) return res.status(scope.status).json({ success: false, error: scope.error });
-    const { chatId } = req.params;
+    const canonicalChatId = canonicalizeCustomerChatId(req.params.chatId);
+    if (!canonicalChatId) {
+      return res.status(400).json({ success: false, error: '缺少有效的客户会话 chatId' });
+    }
     const { customTitle, chatTitle, customConfig, messages: clientMessages } = req.body || {};
     const effectiveAccountId = scope.accountId;
     const bearerJwt = extractBearerToken(req);
 
     const resolved = await resolveUnifiedChatMessages({
-      chatId,
+      chatId: canonicalChatId,
       accountId: effectiveAccountId,
       clientMessages,
       limit: 100,
@@ -8234,8 +8644,8 @@ app.post('/api/transcripts/import-from-chat/:chatId', requireTenantAuth, async (
       return res.status(400).json({ success: false, error: '该客户暂无对话记录，无法导入整文知识库' });
     }
 
-    const clientProfile = await getScopedCustomerProfile(chatId, effectiveAccountId);
-    const clientName = clientProfile?.client_name || chatTitle || chatId;
+    const clientProfile = await getScopedCustomerProfile(canonicalChatId, effectiveAccountId);
+    const clientName = clientProfile?.client_name || chatTitle || canonicalChatId;
 
     const formattedLines = messages.map((m) => {
       const role = m.sender === 'peer' ? `[客户 ${clientName}]` : '[我]';
@@ -8243,9 +8653,55 @@ app.post('/api/transcripts/import-from-chat/:chatId', requireTenantAuth, async (
       return `${role}: ${content}`;
     });
 
-    const dialogueText = formattedLines.join('\n');
+    const dialogueText = formattedLines.join('\n').trim();
+    const contentHash = sha256Hex(normalizeKnowledgeTextForHash(dialogueText));
+    const maxMessageCreatedAt = messages.reduce((maxTs, m) => {
+      const ts = Number(m?.createdAt || 0);
+      return ts > maxTs ? ts : maxTs;
+    }, 0);
+
+    const variants = getScopedAccountIdVariants(effectiveAccountId);
+    const accPlaceholders = variants.map(() => '?').join(', ');
+    const altChatId = canonicalChatId.startsWith('tg_') ? canonicalChatId.replace(/^tg_/, '') : `tg_${canonicalChatId}`;
+
+    const existingRows = (await db
+      .prepare(
+        `SELECT id, title, dialogue_text, source_chat_id, content_hash, last_message_created_at
+         FROM chat_transcripts
+         WHERE account_id IN (${accPlaceholders})
+           AND (content_hash = ? OR source_chat_id IN (?, ?))
+         ORDER BY created_at DESC`
+      )
+      .all(...variants, contentHash, canonicalChatId, altChatId)) as any[];
+
+    const matchedHashRow = (existingRows || []).find(
+      (r) =>
+        r.content_hash === contentHash ||
+        normalizeKnowledgeTextForHash(r.dialogue_text || '') === normalizeKnowledgeTextForHash(dialogueText)
+    );
+    if (matchedHashRow) {
+      return res.status(409).json({
+        success: false,
+        duplicate: true,
+        existingId: matchedHashRow.id,
+        error: `客户【${clientName}】当前对话内容与已导入整文《${matchedHashRow.title}》完全一致，已跳过重复导入`,
+      });
+    }
+
+    const prevWatermark = (existingRows || []).reduce(
+      (maxTs, r) => Math.max(maxTs, Number(r?.last_message_created_at || 0)),
+      0
+    );
+    if (prevWatermark > 0 && maxMessageCreatedAt > 0 && maxMessageCreatedAt <= prevWatermark) {
+      return res.status(409).json({
+        success: false,
+        duplicate: true,
+        error: `客户【${clientName}】自上次导入水位线后暂无新增对话消息，无需重复导入`,
+      });
+    }
+
     const now = Date.now();
-    const id = `trans_from_chat_${now}`;
+    const id = `trans_from_chat_${now}_${crypto.randomBytes(3).toString('hex')}`;
     const title = customTitle || `与客户【${clientName}】的历史真实整文聊天记录 (${messages.length} 条消息)`;
     const roundCount = Math.max(1, Math.round(messages.length / 2));
     const characterCount = dialogueText.length;
@@ -8272,8 +8728,9 @@ app.post('/api/transcripts/import-from-chat/:chatId', requireTenantAuth, async (
 
     await db.prepare(`
       INSERT INTO chat_transcripts (
-        id, account_id, title, description, dialogue_text, learned_style, round_count, character_count, is_active, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        id, account_id, title, description, dialogue_text, learned_style, round_count, character_count, is_active,
+        source_chat_id, content_hash, last_message_created_at, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       id,
       effectiveAccountId,
@@ -8284,6 +8741,9 @@ app.post('/api/transcripts/import-from-chat/:chatId', requireTenantAuth, async (
       roundCount,
       characterCount,
       1,
+      canonicalChatId,
+      contentHash,
+      maxMessageCreatedAt,
       now,
       now
     );
@@ -8307,7 +8767,7 @@ app.post('/api/transcripts/import-from-chat/:chatId', requireTenantAuth, async (
       INSERT INTO training_logs (id, account_id, log_type, details, items_learned, created_at)
       VALUES (?, ?, ?, ?, ?, ?)
     `).run(
-      `log_chat_import_${now}`,
+      `log_chat_import_${now}_${crypto.randomBytes(2).toString('hex')}`,
       effectiveAccountId,
       'chat_to_transcript',
       `成功将客户 ${clientName} 的全篇对话（共 ${messages.length} 条）转化为整文示范并经 (${styleModelUsed}) 提炼习惯${syncRes.synced ? '，已同步强化后台大模型' : ''}`,
@@ -8315,7 +8775,17 @@ app.post('/api/transcripts/import-from-chat/:chatId', requireTenantAuth, async (
       now
     );
 
-    res.json({ success: true, id, title, roundCount, characterCount, learnedStyle, syncedToBackendLlm: syncRes.synced });
+    res.json({
+      success: true,
+      id,
+      title,
+      roundCount,
+      characterCount,
+      learnedStyle,
+      contentHash,
+      lastMessageCreatedAt: maxMessageCreatedAt,
+      syncedToBackendLlm: syncRes.synced,
+    });
   } catch (error: any) {
     res.status(500).json({ success: false, error: error.message });
   }
@@ -10369,14 +10839,14 @@ export function resolveCanonicalChatIds(
   chatId?: string | number | null,
   accountId?: string | null
 ): { customerId: string; altCustomerId: string; accountId: string } {
-  const raw = String(chatId ?? '').trim();
-  const altCustomerId = raw
-    ? raw.startsWith('tg_')
-      ? raw.replace(/^tg_/, '')
-      : `tg_${raw}`
+  const customerId = canonicalizeCustomerChatId(chatId);
+  const altCustomerId = customerId
+    ? customerId.startsWith('tg_')
+      ? customerId.replace(/^tg_/, '')
+      : `tg_${customerId}`
     : '';
   return {
-    customerId: raw,
+    customerId,
     altCustomerId,
     accountId: String(accountId || 'acc_1').trim() || 'acc_1',
   };
@@ -12077,10 +12547,14 @@ app.post('/api/llm/usage-stats', requireTenantAuth, async (req: Request, res: Re
     if (!cleanModel) {
       return res.json({ ok: true, usage: null });
     }
+    const savedCfg = await getServerCustomLlmConfig().catch(() => null);
+    const effectiveApiKey = resolveSecretUpdate(apiKey, savedCfg?.apiKey, false);
+    const effectiveBaseUrl =
+      typeof baseUrl === 'string' && baseUrl.trim() ? baseUrl.trim() : (savedCfg?.baseUrl || '');
     const [usage] = await buildModelUsageDetails({
       modelIds: [cleanModel],
-      apiKey: typeof apiKey === 'string' ? apiKey : '',
-      baseUrl: typeof baseUrl === 'string' ? baseUrl : '',
+      apiKey: effectiveApiKey,
+      baseUrl: effectiveBaseUrl,
     });
     return res.json({ ok: true, date: getTodayUsageDateKey(), usage });
   } catch (err: any) {

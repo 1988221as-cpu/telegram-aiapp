@@ -5,6 +5,7 @@ import {
   GlobalPersonaConfig,
   EvolutionEngineState,
   KnowledgeBaseItem,
+  EvolutionLogItem,
   ChatTranscriptItem,
   MemberUser,
   TelegramContact,
@@ -1994,8 +1995,9 @@ export async function retryMessageDelivery(
 export async function fetchCustomerProfile(chatId: string, accountId?: string): Promise<CustomerProfile | null> {
   const effectiveAccountId = accountId || currentActiveAccountId;
   try {
+    const query = effectiveAccountId ? `?accountId=${encodeURIComponent(effectiveAccountId)}` : '';
     const res = await fetchWithTimeout(
-      `/api/customer/profile/${chatId}`,
+      `/api/customer/profile/${encodeURIComponent(chatId)}${query}`,
       {
         headers: getAuthHeaders(effectiveAccountId),
       },
@@ -2027,7 +2029,7 @@ export async function saveCustomerProfile(chatId: string, profile: Partial<Custo
       saveLocalCustomerProfile(chatId, { ...existing, ...cleanProfile, chatId, accountId: effectiveAccountId } as CustomerProfile, effectiveAccountId);
     } catch {}
     const res = await fetchWithTimeout(
-      `/api/customer/profile/${chatId}`,
+      `/api/customer/profile/${encodeURIComponent(chatId)}`,
       {
         method: 'POST',
         headers: getAuthHeaders(effectiveAccountId),
@@ -2103,7 +2105,7 @@ export async function analyzeCustomerMemory(
 ): Promise<CustomerProfile | null> {
   try {
     const res = await fetchWithTimeout(
-      `/api/customer/analyze/${chatId}`,
+      `/api/customer/analyze/${encodeURIComponent(chatId)}`,
       {
         method: 'POST',
         headers: getAuthHeaders(accountId),
@@ -3924,53 +3926,63 @@ export async function toggleAutopilot(
 
 // ==================== GLOBAL PERSONA & STAGED PROMPT APIS ====================
 
-export async function fetchGlobalPersonaApi(): Promise<{ success: boolean; persona?: GlobalPersonaConfig; error?: string }> {
+export async function fetchGlobalPersonaApi(accountId?: string): Promise<{ success: boolean; persona?: GlobalPersonaConfig; error?: string }> {
   try {
     const res = await fetchWithTimeout('/api/persona/config', {
-      headers: getAuthHeaders(),
+      headers: getAuthHeaders(accountId),
       credentials: 'include',
     }, 12000);
-    return await res.json();
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) return { success: false, error: data?.error || `读取人设失败 (HTTP ${res.status})` };
+    return data;
   } catch (err: any) {
     return { success: false, error: err.message };
   }
 }
 
-export async function saveGlobalPersonaApi(persona: GlobalPersonaConfig): Promise<{ success: boolean; persona?: GlobalPersonaConfig; error?: string }> {
+export async function saveGlobalPersonaApi(persona: GlobalPersonaConfig, accountId?: string): Promise<{ success: boolean; persona?: GlobalPersonaConfig; error?: string }> {
   try {
     const res = await fetchWithTimeout('/api/persona/config', {
       method: 'POST',
-      headers: getAuthHeaders(),
-      body: JSON.stringify(persona),
+      headers: getAuthHeaders(accountId),
+      body: JSON.stringify({ ...persona, accountId: accountId || currentActiveAccountId }),
       credentials: 'include',
     }, 15000);
-    return await res.json();
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) return { success: false, error: data?.error || `保存人设失败 (HTTP ${res.status})` };
+    return data;
   } catch (err: any) {
     return { success: false, error: err.message };
   }
 }
 
-export async function resetGlobalPersonaApi(): Promise<{ success: boolean; persona?: GlobalPersonaConfig; error?: string }> {
+export async function resetGlobalPersonaApi(accountId?: string): Promise<{ success: boolean; persona?: GlobalPersonaConfig; error?: string }> {
   try {
     const res = await fetchWithTimeout('/api/persona/reset', {
       method: 'POST',
-      headers: getAuthHeaders(),
+      headers: getAuthHeaders(accountId),
+      body: JSON.stringify({ accountId: accountId || currentActiveAccountId }),
       credentials: 'include',
     }, 12000);
-    return await res.json();
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) return { success: false, error: data?.error || `清空人设失败 (HTTP ${res.status})` };
+    return data;
   } catch (err: any) {
     return { success: false, error: err.message };
   }
 }
 
-export async function importPersonaTemplateApi(): Promise<{ success: boolean; persona?: GlobalPersonaConfig; error?: string }> {
+export async function importPersonaTemplateApi(accountId?: string): Promise<{ success: boolean; persona?: GlobalPersonaConfig; error?: string }> {
   try {
     const res = await fetchWithTimeout('/api/persona/import-template', {
       method: 'POST',
-      headers: getAuthHeaders(),
+      headers: getAuthHeaders(accountId),
+      body: JSON.stringify({ accountId: accountId || currentActiveAccountId }),
       credentials: 'include',
     }, 15000);
-    return await res.json();
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) return { success: false, error: data?.error || `导入模板失败 (HTTP ${res.status})` };
+    return data;
   } catch (err: any) {
     return { success: false, error: err.message };
   }
@@ -3982,6 +3994,7 @@ export async function testPersonaReplyApi(params: {
   chatTranscript?: string;
   recentChatHistory?: string | Array<{ sender: string; text: string }>;
   customConfig?: CustomLLMConfig;
+  accountId?: string;
 }): Promise<{
   success: boolean;
   reply?: string;
@@ -3995,14 +4008,17 @@ export async function testPersonaReplyApi(params: {
   try {
     const res = await fetchWithTimeout('/api/persona/test-reply', {
       method: 'POST',
-      headers: getAuthHeaders(),
+      headers: getAuthHeaders(params.accountId),
       body: JSON.stringify({
         ...params,
+        accountId: params.accountId || currentActiveAccountId,
         customConfig: buildSafeLlmConfigPayload(params.customConfig),
       }),
       credentials: 'include',
     }, 30000);
-    return await res.json();
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) return { success: false, error: data?.error || `试聊失败 (HTTP ${res.status})` };
+    return data;
   } catch (err: any) {
     return { success: false, error: err.message };
   }
@@ -4010,18 +4026,24 @@ export async function testPersonaReplyApi(params: {
 
 // ==================== HABIT & EVOLUTION ENGINE APIS ====================
 
-export async function fetchEvolutionStatusApi(): Promise<{
+export async function fetchEvolutionStatusApi(accountId?: string): Promise<{
   success: boolean;
   state?: EvolutionEngineState;
-  logs?: any[];
+  logs?: EvolutionLogItem[];
   error?: string;
 }> {
   try {
-    const res = await fetchWithTimeout('/api/evolution/status', {
-      headers: getAuthHeaders(),
+    const acc = accountId || currentActiveAccountId;
+    const query = acc ? `?accountId=${encodeURIComponent(acc)}` : '';
+    const res = await fetchWithTimeout(`/api/evolution/status${query}`, {
+      headers: getAuthHeaders(acc),
       credentials: 'include',
     }, 12000);
-    return await res.json();
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      return { success: false, error: data?.error || `获取进化状态失败 (HTTP ${res.status})` };
+    }
+    return data;
   } catch (err: any) {
     return { success: false, error: err.message };
   }
@@ -4065,6 +4087,7 @@ export function collectLocalSyncedMessages(
           sttText: m.sttText,
           translatedText: m.translatedText,
           timestamp: m.timestamp,
+          createdAt: m.createdAt,
         });
       }
       if (collected.length >= maxTotal) break;
@@ -4078,33 +4101,43 @@ export function collectLocalSyncedMessages(
 export async function triggerEvolutionLearnApi(
   sampleTexts?: string[],
   customConfig?: CustomLLMConfig,
-  messages?: Partial<Message>[]
+  messages?: Partial<Message>[],
+  accountId?: string
 ): Promise<{
   success: boolean;
   newHabitsLearned?: number;
+  skippedDuplicateHabits?: number;
   analyzedConversationsCount?: number;
+  lastLearnedMessageCreatedAt?: number;
+  alreadyLearned?: boolean;
   syncedToBackendLlm?: boolean;
   backendSyncMessage?: string;
   state?: EvolutionEngineState;
   error?: string;
 }> {
   try {
+    const acc = accountId || currentActiveAccountId;
     const syncedMessages = Array.isArray(messages)
       ? messages
-      : collectLocalSyncedMessages(20, 50, currentActiveAccountId);
+      : collectLocalSyncedMessages(20, 50, acc);
     const res = await fetchWithTimeout('/api/evolution/learn', {
       method: 'POST',
-      headers: getAuthHeaders(),
+      headers: getAuthHeaders(acc),
       body: JSON.stringify({
+        accountId: acc,
         sampleTexts,
         messages: syncedMessages.length > 0 ? syncedMessages : undefined,
         customConfig: buildSafeLlmConfigPayload(customConfig),
       }),
       credentials: 'include',
     }, 35000);
-    const data = await res.json();
+    const data = await res.json().catch(() => ({}));
     if (!res.ok) {
-      return { success: false, error: data?.error || `进化学习失败 (HTTP ${res.status})` };
+      return {
+        success: false,
+        alreadyLearned: Boolean(data?.alreadyLearned),
+        error: data?.error || `进化学习失败 (HTTP ${res.status})`,
+      };
     }
     return data;
   } catch (err: any) {
@@ -4112,19 +4145,27 @@ export async function triggerEvolutionLearnApi(
   }
 }
 
-export async function toggleEvolutionHabitApi(habitId: string): Promise<{
+export async function toggleEvolutionHabitApi(
+  habitId: string,
+  accountId?: string
+): Promise<{
   success: boolean;
   state?: EvolutionEngineState;
   error?: string;
 }> {
   try {
+    const acc = accountId || currentActiveAccountId;
     const res = await fetchWithTimeout('/api/evolution/toggle-habit', {
       method: 'POST',
-      headers: getAuthHeaders(),
-      body: JSON.stringify({ habitId }),
+      headers: getAuthHeaders(acc),
+      body: JSON.stringify({ habitId, accountId: acc }),
       credentials: 'include',
     }, 12000);
-    return await res.json();
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      return { success: false, error: data?.error || `切换习惯状态失败 (HTTP ${res.status})` };
+    }
+    return data;
   } catch (err: any) {
     return { success: false, error: err.message };
   }
@@ -4132,9 +4173,9 @@ export async function toggleEvolutionHabitApi(habitId: string): Promise<{
 
 // ==================== KNOWLEDGE BASE ENHANCED APIS ====================
 
-export async function fetchKnowledgeItemsApi(): Promise<{
+export async function fetchKnowledgeItemsApi(accountId?: string): Promise<{
   items: KnowledgeBaseItem[];
-  logs?: any[];
+  logs?: EvolutionLogItem[];
   stats?: {
     totalItems: number;
     activeItemsCount?: number;
@@ -4145,15 +4186,20 @@ export async function fetchKnowledgeItemsApi(): Promise<{
   error?: string;
 }> {
   try {
-    const res = await fetchWithTimeout('/api/knowledge', {
-      headers: getAuthHeaders(),
+    const acc = accountId || currentActiveAccountId;
+    const query = acc ? `?accountId=${encodeURIComponent(acc)}` : '';
+    const res = await fetchWithTimeout(`/api/knowledge${query}`, {
+      headers: getAuthHeaders(acc),
       credentials: 'include',
     }, 15000);
-    const data = await res.json();
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      return { items: [], error: data?.error || `加载知识库失败 (HTTP ${res.status})` };
+    }
     return {
-      items: data.items || [],
-      logs: data.logs || [],
-      stats: data.stats,
+      items: Array.isArray(data?.items) ? data.items : [],
+      logs: Array.isArray(data?.logs) ? data.logs : [],
+      stats: data?.stats,
     };
   } catch (err: any) {
     return { items: [], error: err.message };
@@ -4165,39 +4211,19 @@ export async function createKnowledgeItemApi(item: {
   title: string;
   content: string;
   keywords: string[];
+  accountId?: string;
 }): Promise<{ success: boolean; id?: string; error?: string }> {
   try {
+    const acc = item.accountId || currentActiveAccountId;
     const res = await fetchWithTimeout('/api/knowledge', {
       method: 'POST',
-      headers: getAuthHeaders(),
-      body: JSON.stringify(item),
+      headers: getAuthHeaders(acc),
+      body: JSON.stringify({ ...item, accountId: acc }),
       credentials: 'include',
     }, 15000);
-    return await res.json();
-  } catch (err: any) {
-    return { success: false, error: err.message };
-  }
-}
-
-export async function uploadKnowledgeDocApi(params: {
-  fileName: string;
-  fileContent: string;
-  category?: string;
-  customConfig?: CustomLLMConfig;
-}): Promise<{ success: boolean; itemsLearned?: number; error?: string }> {
-  try {
-    const res = await fetchWithTimeout('/api/knowledge/upload', {
-      method: 'POST',
-      headers: getAuthHeaders(),
-      body: JSON.stringify({
-        ...params,
-        customConfig: buildSafeLlmConfigPayload(params.customConfig),
-      }),
-      credentials: 'include',
-    }, 30000);
-    const data = await res.json();
+    const data = await res.json().catch(() => ({}));
     if (!res.ok) {
-      return { success: false, error: data?.error || `文档分类上传失败 (HTTP ${res.status})` };
+      return { success: false, error: data?.error || `新增知识条目失败 (HTTP ${res.status})` };
     }
     return data;
   } catch (err: any) {
@@ -4205,14 +4231,88 @@ export async function uploadKnowledgeDocApi(params: {
   }
 }
 
-export async function toggleKnowledgeItemApi(id: string): Promise<{ success: boolean; error?: string }> {
+function arrayBufferToBase64(buffer: ArrayBuffer): string {
+  const bytes = new Uint8Array(buffer);
+  const chunkSize = 0x8000;
+  let binary = '';
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    const slice = bytes.subarray(i, Math.min(i + chunkSize, bytes.length));
+    binary += String.fromCharCode(...slice);
+  }
+  return btoa(binary);
+}
+
+export async function uploadKnowledgeDocApi(params: {
+  file?: File;
+  fileName?: string;
+  fileBase64?: string;
+  fileContent?: string;
+  mimeType?: string;
+  category?: string;
+  customConfig?: CustomLLMConfig;
+  accountId?: string;
+}): Promise<{
+  success: boolean;
+  itemsLearned?: number;
+  skippedDuplicates?: number;
+  totalChunks?: number;
+  detectedEncoding?: string;
+  extractedChars?: number;
+  pageCount?: number;
+  error?: string;
+}> {
   try {
-    const res = await fetchWithTimeout(`/api/knowledge/${encodeURIComponent(id)}/toggle`, {
+    const acc = params.accountId || currentActiveAccountId;
+    let fileName = params.fileName || params.file?.name || 'uploaded_doc.txt';
+    let fileBase64 = params.fileBase64;
+    let mimeType = params.mimeType || params.file?.type || '';
+
+    if (params.file) {
+      const buf = await params.file.arrayBuffer();
+      fileBase64 = arrayBufferToBase64(buf);
+    }
+
+    const res = await fetchWithTimeout('/api/knowledge/upload', {
+      method: 'POST',
+      headers: getAuthHeaders(acc),
+      body: JSON.stringify({
+        accountId: acc,
+        fileName,
+        fileBase64,
+        fileContent: params.fileContent,
+        mimeType,
+        category: params.category || 'auto',
+        customConfig: buildSafeLlmConfigPayload(params.customConfig),
+      }),
+      credentials: 'include',
+    }, 180000);
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      return { success: false, error: data?.error || `文档解析与上传训练失败 (HTTP ${res.status})` };
+    }
+    return data;
+  } catch (err: any) {
+    return { success: false, error: err.message };
+  }
+}
+
+export async function toggleKnowledgeItemApi(
+  id: string,
+  accountId?: string
+): Promise<{ success: boolean; error?: string }> {
+  try {
+    const acc = accountId || currentActiveAccountId;
+    const query = acc ? `?accountId=${encodeURIComponent(acc)}` : '';
+    const res = await fetchWithTimeout(`/api/knowledge/${encodeURIComponent(id)}/toggle${query}`, {
       method: 'PATCH',
-      headers: getAuthHeaders(),
+      headers: getAuthHeaders(acc),
       credentials: 'include',
     }, 12000);
-    return await res.json();
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      return { success: false, error: data?.error || `切换知识条目状态失败 (HTTP ${res.status})` };
+    }
+    return data;
   } catch (err: any) {
     return { success: false, error: err.message };
   }
@@ -4226,45 +4326,70 @@ export async function updateKnowledgeItemApi(
     content: string;
     keywords: string[];
     isActive?: boolean;
+    accountId?: string;
   }
 ): Promise<{ success: boolean; error?: string }> {
   try {
+    const acc = item.accountId || currentActiveAccountId;
     const res = await fetchWithTimeout(`/api/knowledge/${encodeURIComponent(id)}`, {
       method: 'PUT',
-      headers: getAuthHeaders(),
-      body: JSON.stringify(item),
+      headers: getAuthHeaders(acc),
+      body: JSON.stringify({ ...item, accountId: acc }),
       credentials: 'include',
     }, 15000);
-    return await res.json();
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      return { success: false, error: data?.error || `更新知识条目失败 (HTTP ${res.status})` };
+    }
+    return data;
   } catch (err: any) {
     return { success: false, error: err.message };
   }
 }
 
-export async function deleteKnowledgeItemApi(id: string): Promise<{ success: boolean; error?: string }> {
+export async function deleteKnowledgeItemApi(
+  id: string,
+  accountId?: string
+): Promise<{ success: boolean; error?: string }> {
   try {
-    const res = await fetchWithTimeout(`/api/knowledge/${encodeURIComponent(id)}`, {
+    const acc = accountId || currentActiveAccountId;
+    const query = acc ? `?accountId=${encodeURIComponent(acc)}` : '';
+    const res = await fetchWithTimeout(`/api/knowledge/${encodeURIComponent(id)}${query}`, {
       method: 'DELETE',
-      headers: getAuthHeaders(),
+      headers: getAuthHeaders(acc),
       credentials: 'include',
     }, 12000);
-    return await res.json();
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      return { success: false, error: data?.error || `删除知识条目失败 (HTTP ${res.status})` };
+    }
+    return data;
   } catch (err: any) {
     return { success: false, error: err.message };
   }
 }
 
-export async function clearAllKnowledgeApi(category?: string): Promise<{ success: boolean; error?: string }> {
+export async function clearAllKnowledgeApi(
+  category?: string,
+  accountId?: string
+): Promise<{ success: boolean; error?: string }> {
   try {
-    const url = category && category !== 'all'
-      ? `/api/knowledge/clear-all?category=${encodeURIComponent(category)}`
-      : '/api/knowledge/clear-all';
+    const acc = accountId || currentActiveAccountId;
+    const params = new URLSearchParams();
+    if (category && category !== 'all') params.set('category', category);
+    if (acc) params.set('accountId', acc);
+    const qs = params.toString();
+    const url = qs ? `/api/knowledge/clear-all?${qs}` : '/api/knowledge/clear-all';
     const res = await fetchWithTimeout(url, {
       method: 'DELETE',
-      headers: getAuthHeaders(),
+      headers: getAuthHeaders(acc),
       credentials: 'include',
     }, 15000);
-    return await res.json();
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      return { success: false, error: data?.error || `清空知识库失败 (HTTP ${res.status})` };
+    }
+    return data;
   } catch (err: any) {
     return { success: false, error: err.message };
   }
@@ -4277,7 +4402,11 @@ export async function seedDefaultKnowledgeApi(): Promise<{ success: boolean; cou
       headers: getAuthHeaders(),
       credentials: 'include',
     }, 15000);
-    return await res.json();
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      return { success: false, error: data?.error || `操作失败 (HTTP ${res.status})` };
+    }
+    return data;
   } catch (err: any) {
     return { success: false, error: err.message };
   }
@@ -4285,13 +4414,20 @@ export async function seedDefaultKnowledgeApi(): Promise<{ success: boolean; cou
 
 // ==================== FULL DIALOGUE TRANSCRIPTS & ORAL HABIT APIS ====================
 
-export async function fetchTranscriptsApi(): Promise<{ success: boolean; transcripts?: ChatTranscriptItem[]; error?: string }> {
+export async function fetchTranscriptsApi(
+  accountId?: string
+): Promise<{ success: boolean; transcripts?: ChatTranscriptItem[]; error?: string }> {
   try {
-    const res = await fetchWithTimeout('/api/transcripts', {
-      headers: getAuthHeaders(),
+    const acc = accountId || currentActiveAccountId;
+    const query = acc ? `?accountId=${encodeURIComponent(acc)}` : '';
+    const res = await fetchWithTimeout(`/api/transcripts${query}`, {
+      headers: getAuthHeaders(acc),
       credentials: 'include',
     }, 12000);
-    const data = await res.json();
+    const data = await res.json().catch(() => null);
+    if (!res.ok) {
+      return { success: false, error: data?.error || `获取整文范本失败 (HTTP ${res.status})` };
+    }
     return { success: true, transcripts: Array.isArray(data) ? data : [] };
   } catch (err: any) {
     return { success: false, error: err.message };
@@ -4304,18 +4440,21 @@ export async function createTranscriptApi(payload: {
   dialogueText: string;
   learnedStyle?: string;
   customConfig?: CustomLLMConfig;
+  accountId?: string;
 }): Promise<{ success: boolean; id?: string; learnedStyle?: string; syncedToBackendLlm?: boolean; error?: string }> {
   try {
+    const acc = payload.accountId || currentActiveAccountId;
     const res = await fetchWithTimeout('/api/transcripts', {
       method: 'POST',
-      headers: getAuthHeaders(),
+      headers: getAuthHeaders(acc),
       body: JSON.stringify({
         ...payload,
+        accountId: acc,
         customConfig: buildSafeLlmConfigPayload(payload.customConfig),
       }),
       credentials: 'include',
     }, 30000);
-    const data = await res.json();
+    const data = await res.json().catch(() => ({}));
     if (!res.ok) {
       return { success: false, error: data?.error || `整文风格提炼失败 (HTTP ${res.status})` };
     }
@@ -4325,27 +4464,91 @@ export async function createTranscriptApi(payload: {
   }
 }
 
-export async function deleteTranscriptApi(id: string): Promise<{ success: boolean; error?: string }> {
+export async function importTranscriptFromChatApi(payload: {
+  chatId: string;
+  accountId?: string;
+  customTitle?: string;
+  chatTitle?: string;
+  messages?: Partial<Message>[];
+  customConfig?: CustomLLMConfig;
+}): Promise<{
+  success: boolean;
+  id?: string;
+  title?: string;
+  roundCount?: number;
+  characterCount?: number;
+  learnedStyle?: string;
+  duplicate?: boolean;
+  syncedToBackendLlm?: boolean;
+  error?: string;
+}> {
   try {
-    const res = await fetchWithTimeout(`/api/transcripts/${encodeURIComponent(id)}`, {
-      method: 'DELETE',
-      headers: getAuthHeaders(),
+    const acc = payload.accountId || currentActiveAccountId;
+    const res = await fetchWithTimeout(`/api/transcripts/import-from-chat/${encodeURIComponent(payload.chatId)}`, {
+      method: 'POST',
+      headers: getAuthHeaders(acc),
+      body: JSON.stringify({
+        accountId: acc,
+        customTitle: payload.customTitle,
+        chatTitle: payload.chatTitle,
+        messages: Array.isArray(payload.messages) ? payload.messages.slice(-100) : undefined,
+        customConfig: buildSafeLlmConfigPayload(payload.customConfig),
+      }),
       credentials: 'include',
-    }, 12000);
-    return await res.json();
+    }, 35000);
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      return {
+        success: false,
+        duplicate: Boolean(data?.duplicate),
+        error: data?.error || `导入当前客户整文失败 (HTTP ${res.status})`,
+      };
+    }
+    return data;
   } catch (err: any) {
     return { success: false, error: err.message };
   }
 }
 
-export async function toggleTranscriptApi(id: string): Promise<{ success: boolean; error?: string }> {
+export async function deleteTranscriptApi(
+  id: string,
+  accountId?: string
+): Promise<{ success: boolean; error?: string }> {
   try {
-    const res = await fetchWithTimeout(`/api/transcripts/${encodeURIComponent(id)}/toggle`, {
-      method: 'PATCH',
-      headers: getAuthHeaders(),
+    const acc = accountId || currentActiveAccountId;
+    const query = acc ? `?accountId=${encodeURIComponent(acc)}` : '';
+    const res = await fetchWithTimeout(`/api/transcripts/${encodeURIComponent(id)}${query}`, {
+      method: 'DELETE',
+      headers: getAuthHeaders(acc),
       credentials: 'include',
     }, 12000);
-    return await res.json();
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      return { success: false, error: data?.error || `删除整文范本失败 (HTTP ${res.status})` };
+    }
+    return data;
+  } catch (err: any) {
+    return { success: false, error: err.message };
+  }
+}
+
+export async function toggleTranscriptApi(
+  id: string,
+  accountId?: string
+): Promise<{ success: boolean; error?: string }> {
+  try {
+    const acc = accountId || currentActiveAccountId;
+    const query = acc ? `?accountId=${encodeURIComponent(acc)}` : '';
+    const res = await fetchWithTimeout(`/api/transcripts/${encodeURIComponent(id)}/toggle${query}`, {
+      method: 'PATCH',
+      headers: getAuthHeaders(acc),
+      credentials: 'include',
+    }, 12000);
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      return { success: false, error: data?.error || `切换整文状态失败 (HTTP ${res.status})` };
+    }
+    return data;
   } catch (err: any) {
     return { success: false, error: err.message };
   }

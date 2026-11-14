@@ -307,16 +307,17 @@ export interface GlobalPersonaConfig {
 
 export interface KnowledgeBaseItem {
   id: string;
+  accountId?: string;
   category: 'icebreaker' | 'life_emotion' | 'wealth_investment' | 'trust_defense' | string;
   title: string;
   content: string;
   keywords: string[];
-  source_type: 'manual_text' | 'import_file' | 'evolved_extraction';
-  source_file?: string;
-  is_active: number;
-  hit_count: number;
-  created_at: number;
-  updated_at: number;
+  sourceType: 'manual_text' | 'file_upload' | 'auto_chat_distill' | 'manual_distill' | string;
+  sourceFile?: string;
+  isActive: boolean;
+  hitCount: number;
+  createdAt: number;
+  updatedAt: number;
 }
 
 export interface EvolutionHabitItem {
@@ -333,6 +334,7 @@ export interface EvolutionHabitItem {
 
 export interface ChatTranscriptItem {
   id: string;
+  accountId?: string;
   title: string;
   description: string;
   dialogueText: string;
@@ -347,6 +349,7 @@ export interface ChatTranscriptItem {
 export interface EvolutionEngineState {
   version: string;
   lastEvolvedAt: number;
+  lastLearnedMessageCreatedAt?: number;
   totalConversationsAnalyzed: number;
   totalHabitsLearned: number;
   autoEvolutionActive: boolean;
@@ -356,9 +359,10 @@ export interface EvolutionEngineState {
 
 export interface EvolutionLogItem {
   id: string;
-  log_type: string;
+  accountId?: string;
+  logType: string;
   details: string;
-  items_learned: number;
-  created_at: number;
+  itemsLearned: number;
+  createdAt: number;
 }
 

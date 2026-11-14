@@ -6140,6 +6140,8 @@ test('Section 4 P0: backup secret stripping, config secret masking/preservation,
     saveGlobalPersonaToDb,
     getEvolutionStateFromDb,
     saveEvolutionStateToDb,
+    exportDatabaseSnapshot,
+    restoreDatabaseSnapshot,
     DEFAULT_GLOBAL_PERSONA,
     DEFAULT_EVOLUTION_STATE,
   } = await import('../server/db.ts');
@@ -6151,6 +6153,8 @@ test('Section 4 P0: backup secret stripping, config secret masking/preservation,
     getServerTranslationSettings,
     queryKnowledgeRAG,
     buildRemoteKbCacheKey,
+    recordCustomLlmModelUsage,
+    resolveUnifiedEvolutionCorpus,
   } = await import('../server.ts');
 
   // 1. DatabaseModal backup export strips all secret keys from both decrypted and local fallback payloads
@@ -6162,8 +6166,11 @@ test('Section 4 P0: backup secret stripping, config secret masking/preservation,
   }
   const customLlmModalSrc = readFileSync(resolve(process.cwd(), 'src/components/CustomLLMModal.tsx'), 'utf8');
   assert.match(customLlmModalSrc, /当前为脱敏显示/);
+  const transDrawerSrc = readFileSync(resolve(process.cwd(), 'src/components/TranslationDrawer.tsx'), 'utf8');
+  assert.equal(transDrawerSrc.includes("googleApiKey: ''"), false, 'TranslationDrawer must not wipe googleApiKey');
+  assert.equal(transDrawerSrc.includes("geminiApiKey: ''"), false, 'TranslationDrawer must not wipe geminiApiKey');
 
-  // 2. buildRemoteKbCacheKey isolates cache entries by credential SHA-256 hash
+  // 2. buildRemoteKbCacheKey isolates cache entries by credential SHA-256 hash AND full query (>120 chars)
   const ck1 = buildRemoteKbCacheKey('https://kb.example/search', 'hello', 'key-A', 'jwt-1', 'lic-1');
   const ck2 = buildRemoteKbCacheKey('https://kb.example/search', 'hello', 'key-B', 'jwt-1', 'lic-1');
   const ck3 = buildRemoteKbCacheKey('https://kb.example/search', 'hello', 'key-A', 'jwt-2', 'lic-1');
@@ -6176,6 +6183,10 @@ test('Section 4 P0: backup secret stripping, config secret masking/preservation,
   assert.equal(ck1.includes('key-A'), false);
   assert.equal(ck1.includes('jwt-1'), false);
   assert.equal(ck1.includes('lic-1'), false);
+  const sharedLongPrefix = 'a'.repeat(150);
+  const longCk1 = buildRemoteKbCacheKey('https://kb.example/search', `${sharedLongPrefix} question alpha`, 'key-A', 'jwt-1', 'lic-1');
+  const longCk2 = buildRemoteKbCacheKey('https://kb.example/search', `${sharedLongPrefix} question beta`, 'key-A', 'jwt-1', 'lic-1');
+  assert.notEqual(longCk1, longCk2, 'Long queries with identical 150-char prefix must not collide');
 
   // 3. Runtime HTTP tests for secret masking & multi-account AI isolation
   const prevJwtSecret = process.env.JWT_SECRET;
@@ -6407,11 +6418,94 @@ test('Section 4 P0: backup secret stripping, config secret masking/preservation,
     const freshPersona = await getGlobalPersonaFromDb(freshAcc);
     assert.equal(freshPersona.personaName, DEFAULT_GLOBAL_PERSONA.personaName);
 
-    await saveEvolutionStateToDb({ ...DEFAULT_EVOLUTION_STATE, evolutionLevel: 7 }, accA);
+    await saveEvolutionStateToDb({ ...DEFAULT_EVOLUTION_STATE, totalHabitsLearned: 7 }, accA);
     const evoB = await getEvolutionStateFromDb(accB);
-    assert.equal(evoB.evolutionLevel, DEFAULT_EVOLUTION_STATE.evolutionLevel);
+    assert.equal(evoB.totalHabitsLearned, DEFAULT_EVOLUTION_STATE.totalHabitsLearned);
     const evoA = await getEvolutionStateFromDb(accA);
-    assert.equal(evoA.evolutionLevel, 7);
+    assert.equal(evoA.totalHabitsLearned, 7);
+
+    // 3e. POST /api/llm/usage-stats unmasks masked apiKey to hit the real usage bucket
+    await syncServerCustomLlmConfig({
+      enabled: true,
+      engineMode: 'custom',
+      protocol: 'openai',
+      baseUrl: 'https://usage-test.example.com/v1',
+      apiKey: 'sk-usage-real-secret-9988',
+      modelName: 'gpt-4o-mini',
+    });
+    await recordCustomLlmModelUsage({
+      apiKey: 'sk-usage-real-secret-9988',
+      baseUrl: 'https://usage-test.example.com/v1',
+      modelName: 'gpt-4o-mini',
+    });
+    const usageRes = await fetch(`http://127.0.0.1:${port}/api/llm/usage-stats`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${memberJwt}`, 'X-Account-Id': accA },
+      body: JSON.stringify({
+        baseUrl: 'https://usage-test.example.com/v1',
+        apiKey: 'sk-u****9988',
+        modelName: 'gpt-4o-mini',
+      }),
+    });
+    assert.equal(usageRes.status, 200);
+    const usageJson = (await usageRes.json()) as any;
+    assert.ok(usageJson.usage?.todayCount >= 1, 'usage-stats must resolve masked apiKey to real bucket');
+
+    // 3f. exportDatabaseSnapshot strips network_proxy.password and restoreDatabaseSnapshot preserves existing secrets
+    const prevProxyRow = (await db.prepare("SELECT value FROM system_config WHERE key = 'network_proxy'").get()) as any;
+    await db
+      .prepare("INSERT OR REPLACE INTO system_config (key, value, updated_at) VALUES ('network_proxy', ?, ?)")
+      .run(
+        JSON.stringify({ enabled: true, type: 'socks5', host: '127.0.0.1', port: 1080, username: 'u1', password: 'proxy_secret_pw_xyz' }),
+        Date.now()
+      );
+    try {
+      const exported = await exportDatabaseSnapshot();
+      const exportedProxy = (exported.tables.system_config || []).find((r: any) => r.key === 'network_proxy');
+      assert.ok(exportedProxy);
+      const exportedProxyVal = JSON.parse(exportedProxy.value);
+      assert.equal(exportedProxyVal.password, undefined, 'network_proxy password must be stripped from backup');
+      assert.equal(exportedProxyVal.username, 'u1');
+
+      const exportedTrans = (exported.tables.system_config || []).find((r: any) => r.key === 'translation_settings');
+      assert.ok(exportedTrans);
+      const exportedTransVal = JSON.parse(exportedTrans.value);
+      assert.equal(exportedTransVal.geminiApiKey, undefined);
+      assert.equal(exportedTransVal.googleApiKey, undefined);
+
+      // Restoring the sanitized snapshot onto same machine MUST preserve existing DB secrets
+      await restoreDatabaseSnapshot({
+        tables: {
+          system_config: [exportedProxy, exportedTrans],
+        },
+      });
+      const restoredProxyRow = (await db.prepare("SELECT value FROM system_config WHERE key = 'network_proxy'").get()) as any;
+      assert.equal(JSON.parse(restoredProxyRow.value).password, 'proxy_secret_pw_xyz');
+      const restoredTransRow = (await db.prepare("SELECT value FROM system_config WHERE key = 'translation_settings'").get()) as any;
+      assert.equal(JSON.parse(restoredTransRow.value).geminiApiKey, 'AIza-real-gemini-123456');
+      assert.equal(JSON.parse(restoredTransRow.value).googleApiKey, 'AIza-real-google-654321');
+    } finally {
+      if (prevProxyRow?.value) {
+        await db
+          .prepare("INSERT OR REPLACE INTO system_config (key, value, updated_at) VALUES ('network_proxy', ?, ?)")
+          .run(prevProxyRow.value, Date.now());
+      } else {
+        await db.prepare("DELETE FROM system_config WHERE key = 'network_proxy'").run();
+      }
+    }
+
+    // 3g. resolveUnifiedEvolutionCorpus rejects client messages without matching accountId
+    const unlabeledEvo = await resolveUnifiedEvolutionCorpus({
+      accountId: accA,
+      clientMessages: [
+        { id: `unlabeled_${Date.now()}`, chatId: 'tg_999', sender: 'peer', text: 'UnlabeledSecretTextShouldNotEnterCorpus' },
+      ],
+    });
+    assert.equal(unlabeledEvo.corpusText.includes('UnlabeledSecretTextShouldNotEnterCorpus'), false);
+
+    // 3h. Server source must not contain acc_1 -> connectedUserClients[0] cross-account fallback
+    const serverSrcNow = readFileSync(resolve(process.cwd(), 'server.ts'), 'utf8');
+    assert.equal(serverSrcNow.includes("accountId === 'acc_1' ? Array.from(connectedUserClients.values())[0]"), false);
   } finally {
     try {
       if (kbIdA) await db.prepare('DELETE FROM knowledge_base WHERE id = ?').run(kbIdA);
@@ -6434,6 +6528,598 @@ test('Section 4 P0: backup secret stripping, config secret masking/preservation,
     else process.env.JWT_SECRET = prevJwtSecret;
   }
 });
+
+// Helper to build a genuine minimal single-page PDF 1.4 buffer with a real uncompressed content stream
+function buildMinimalTestPdfBuffer(textLines: string[]): Buffer {
+  const escapedLines = textLines.map((line) =>
+    String(line || '').replace(/\\/g, '\\\\').replace(/\(/g, '\\(').replace(/\)/g, '\\)')
+  );
+  const contentOps = escapedLines
+    .map((line, i) => `BT /F1 12 Tf 72 ${720 - i * 18} Td (${line}) Tj ET`)
+    .join('\n');
+  const contentBuf = Buffer.from(contentOps, 'latin1');
+
+  const objs = [
+    '1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n',
+    '2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n',
+    '3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>\nendobj\n',
+    `4 0 obj\n<< /Length ${contentBuf.length} >>\nstream\n${contentOps}\nendstream\nendobj\n`,
+    '5 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n',
+  ];
+
+  let body = '%PDF-1.4\n';
+  const offsets: number[] = [0];
+  for (const obj of objs) {
+    offsets.push(Buffer.byteLength(body, 'latin1'));
+    body += obj;
+  }
+  const xrefOffset = Buffer.byteLength(body, 'latin1');
+  let xref = `xref\n0 ${objs.length + 1}\n0000000000 65535 f \n`;
+  for (let i = 1; i <= objs.length; i++) {
+    xref += `${String(offsets[i]).padStart(10, '0')} 00000 n \n`;
+  }
+  const trailer = `trailer\n<< /Size ${objs.length + 1} /Root 1 0 R >>\nstartxref\n${xrefOffset}\n%%EOF\n`;
+  return Buffer.from(body + xref + trailer, 'latin1');
+}
+
+test('P1 Fix 4-6: Real document parsing (UTF-8/UTF-16/GB18030/CSV/JSON/PDF), chunking, multilingual RAG, dedup/watermarking & customer profile preservation', async () => {
+  const http = await import('node:http');
+  const { createHmac } = await import('node:crypto');
+  const { readFileSync } = await import('node:fs');
+  const { resolve } = await import('node:path');
+  const { db, getEvolutionStateFromDb } = await import('../server/db.ts');
+  const {
+    KnowledgeDocumentError,
+    decodeTextBufferStrict,
+    parseCsvToReadableKnowledgeText,
+    parseJsonToReadableKnowledgeText,
+    parsePdfBufferStrict,
+    parseKnowledgeDocument,
+    splitDocumentIntoSafeChunks,
+    escapeSqlLikeTerm,
+    extractMultilingualRagTokens,
+    canonicalizeCustomerChatId,
+    mergeCustomerProfileWithManualData,
+  } = await import('../server/knowledgeUtils.ts');
+  const {
+    app,
+    queryKnowledgeRAG,
+    getServerCustomLlmConfig,
+    syncServerCustomLlmConfig,
+  } = await import('../server.ts');
+
+  // 1. Strict text decoding & rejection of binary/corrupted/mojibake payloads
+  const utf8Sample = '这是标准的 UTF-8 中文知识库测试文档内容，用于验证编码识别。';
+  assert.equal(decodeTextBufferStrict(Buffer.from(utf8Sample, 'utf8')).encoding, 'utf-8');
+
+  const utf8BomBuf = Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), Buffer.from(utf8Sample, 'utf8')]);
+  assert.equal(decodeTextBufferStrict(utf8BomBuf).encoding, 'utf-8-bom');
+
+  const utf16LeBomBuf = Buffer.concat([
+    Buffer.from([0xff, 0xfe]),
+    Buffer.from('Hello UTF16LE knowledge base entry 2026', 'utf16le'),
+  ]);
+  const utf16Res = decodeTextBufferStrict(utf16LeBomBuf);
+  assert.equal(utf16Res.encoding, 'utf-16le-bom');
+  assert.ok(utf16Res.text.includes('Hello UTF16LE knowledge base entry 2026'));
+
+  // Reject NUL binary bytes
+  assert.throws(
+    () => decodeTextBufferStrict(Buffer.from([0x48, 0x65, 0x00, 0x6c, 0x6c, 0x6f, 0x20, 0x77, 0x6f, 0x72])),
+    (e: any) => e instanceof KnowledgeDocumentError
+  );
+  // Reject invalid UTF-8 + invalid GB18030 trailing half-byte (0xff 0xfe-ish invalid sequence)
+  assert.throws(
+    () => decodeTextBufferStrict(Buffer.from([0xff, 0x80, 0xff, 0x80, 0xff, 0x80, 0x41, 0x42, 0x43, 0x44])),
+    (e: any) => e instanceof KnowledgeDocumentError
+  );
+  // Reject explicit Unicode replacement character mojibake (U+FFFD)
+  assert.throws(
+    () => decodeTextBufferStrict(Buffer.from('损坏文档内容\uFFFD\uFFFD不能入库', 'utf8')),
+    (e: any) => e instanceof KnowledgeDocumentError
+  );
+
+  // 2. Real CSV & JSON parsing + syntax error rejection
+  const csvParsed = parseCsvToReadableKnowledgeText(
+    '标题;话术内容;备注\n"报价规则";"VIP客户享9折，支持USDT结算";"重点""核心"""\n售后说明;7x24小时响应;常规'
+  );
+  assert.ok(csvParsed.includes('标题: 报价规则'));
+  assert.ok(csvParsed.includes('VIP客户享9折，支持USDT结算'));
+  assert.ok(csvParsed.includes('重点"核心"'));
+  assert.throws(
+    () => parseCsvToReadableKnowledgeText('标题,内容\n"未闭合引号,坏数据行内容'),
+    (e: any) => e instanceof KnowledgeDocumentError
+  );
+
+  const jsonParsed = parseJsonToReadableKnowledgeText(
+    JSON.stringify({ faq: [{ q: '如何充值', a: '支持TRC20自动到账，免额外手续费' }] })
+  );
+  assert.ok(jsonParsed.includes('q: 如何充值'));
+  assert.ok(jsonParsed.includes('a: 支持TRC20自动到账'));
+  assert.throws(
+    () => parseJsonToReadableKnowledgeText('{ "broken": [1, 2, '),
+    (e: any) => e instanceof KnowledgeDocumentError
+  );
+
+  // 3. Real PDF extraction + explicit rejection of invalid/corrupted/encrypted/empty PDFs
+  const realPdfBuf = buildMinimalTestPdfBuffer([
+    'HumanSense Knowledge Base Verification Document 2026',
+    'VIP pricing rule: Standard plan is 99 USD per month.',
+  ]);
+  const pdfExtracted = await parsePdfBufferStrict(realPdfBuf);
+  assert.equal(pdfExtracted.pageCount, 1);
+  assert.ok(pdfExtracted.text.includes('HumanSense Knowledge Base Verification Document 2026'));
+  assert.ok(pdfExtracted.text.includes('Standard plan is 99 USD per month'));
+
+  const docParsedPdf = await parseKnowledgeDocument({
+    fileName: 'pricing_guide.pdf',
+    fileBase64: realPdfBuf.toString('base64'),
+    mimeType: 'application/pdf',
+  });
+  assert.equal(docParsedPdf.detectedEncoding, 'pdf-text-stream');
+  assert.ok(docParsedPdf.extractedText.includes('VIP pricing rule'));
+
+  // Invalid header
+  await assert.rejects(
+    () => parsePdfBufferStrict(Buffer.from('NOT_A_REAL_PDF_FILE_CONTENT_123456', 'utf8')),
+    (e: any) => e instanceof KnowledgeDocumentError
+  );
+  // Corrupted PDF body
+  await assert.rejects(
+    () => parsePdfBufferStrict(Buffer.from('%PDF-1.4\ncorrupted garbage xref missing %%EOF', 'latin1')),
+    (e: any) => e instanceof KnowledgeDocumentError
+  );
+  // Scanned / blank PDF (no text stream content)
+  const emptyPdfBuf = buildMinimalTestPdfBuffer(['   ']);
+  await assert.rejects(
+    () => parsePdfBufferStrict(emptyPdfBuf),
+    (e: any) => e instanceof KnowledgeDocumentError && /扫描图片型|空白|有效文本/.test(e.message)
+  );
+  // Unsupported extension
+  await assert.rejects(
+    () => parseKnowledgeDocument({ fileName: 'malware.exe', fileContent: 'binary executable stub text' }),
+    (e: any) => e instanceof KnowledgeDocumentError
+  );
+
+  // 4. Safe document chunking
+  const longSection = Array.from({ length: 18 }, (_, i) => `### 第${i + 1}章 客户沟通规范\n${'核心话术细节与真实业务推进规则。'.repeat(130)}`).join('\n\n');
+  assert.ok(longSection.length > 35_000);
+  const chunks = splitDocumentIntoSafeChunks(longSection, { maxChunkChars: 5500, maxChunks: 35 });
+  assert.ok(chunks.length >= 6 && chunks.length <= 35);
+  for (const ch of chunks) {
+    assert.ok(ch.length <= 5500, `Chunk length ${ch.length} exceeded 5500`);
+  }
+  assert.throws(
+    () => splitDocumentIntoSafeChunks(longSection, { maxChunkChars: 1200, maxChunks: 5 }),
+    (e: any) => e instanceof KnowledgeDocumentError
+  );
+
+  // 5. Unicode multilingual RAG tokenization + SQL wildcard escaping + zero-hit non-shadowing
+  assert.equal(escapeSqlLikeTerm('100%_test\\path'), '100\\%\\_test\\\\path');
+  const multiTokens = extractMultilingualRagTokens('Кибербезопасность الأمن การชำระเงิน güvenlik 量化策略');
+  assert.ok(multiTokens.includes('кибербезопасность'));
+  assert.ok(multiTokens.includes('الأمن'));
+  assert.ok(multiTokens.includes('การชำระเงิน'));
+  assert.ok(multiTokens.includes('güvenlik'));
+  assert.ok(multiTokens.includes('量化'));
+
+  // 6. Customer chatId canonicalization & manual memory/tag preservation
+  assert.equal(canonicalizeCustomerChatId('123456789'), 'tg_123456789');
+  assert.equal(canonicalizeCustomerChatId('-100987654321'), 'tg_-100987654321');
+  assert.equal(canonicalizeCustomerChatId('tg_123456789'), 'tg_123456789');
+
+  const mergedProfile = mergeCustomerProfileWithManualData({
+    existingProfile: {
+      client_name: '陈总（人工备注）',
+      age_estimate: '35岁左右',
+      occupation: '跨境电商创始人',
+      location_timezone: '新加坡 UTC+8',
+      likes_interests: JSON.stringify(['手冲咖啡', '量化对冲']),
+      dislikes_taboos: JSON.stringify(['催单', '电话骚扰']),
+      key_memories: JSON.stringify([
+        { id: 'manual_mem_1', date: '2026-01-10', topic: '人工记录偏好', summary: '仅周末方便看详细方案', emotion: '信任' },
+      ]),
+    },
+    aiData: {
+      clientName: '陈先生',
+      relationshipStage: '合作推进',
+      ageEstimate: '未知',
+      occupation: '未知',
+      locationTimezone: '未提及',
+      toneStyle: '简洁务实',
+      likesInterests: ['量化对冲', '宏观美债'],
+      dislikesTaboos: ['夸大宣传'],
+      emotionalNeeds: '关注资金安全与风控细节',
+      keyMemories: [
+        { id: 'ai_mem_1', date: '近期', topic: '风控问询', summary: '希望提供月度回撤报告', emotion: '谨慎' },
+      ],
+    },
+  });
+  assert.equal(mergedProfile.clientName, '陈总（人工备注）');
+  assert.equal(mergedProfile.ageEstimate, '35岁左右');
+  assert.equal(mergedProfile.occupation, '跨境电商创始人');
+  assert.equal(mergedProfile.locationTimezone, '新加坡 UTC+8');
+  assert.equal(mergedProfile.relationshipStage, '合作推进');
+  assert.deepEqual(mergedProfile.likesInterests, ['手冲咖啡', '量化对冲', '宏观美债']);
+  assert.deepEqual(mergedProfile.dislikesTaboos, ['催单', '电话骚扰', '夸大宣传']);
+  assert.equal(mergedProfile.keyMemories.length, 2);
+  assert.ok(mergedProfile.keyMemories.some((m: any) => m.id === 'manual_mem_1'));
+  assert.ok(mergedProfile.keyMemories.some((m: any) => m.id === 'ai_mem_1'));
+
+  // 7. End-to-End HTTP + DB integration tests (RAG non-shadowing, wildcard safety, /api/knowledge/upload, /api/transcripts/import-from-chat, /api/evolution/learn, /api/customer/*)
+  const prevJwtSecret = process.env.JWT_SECRET;
+  const prevCustomCfg = await getServerCustomLlmConfig().catch(() => null);
+  process.env.JWT_SECRET = 'p1_verification_jwt_secret';
+
+  let llmCallCount = 0;
+  let lastLlmPrompt = '';
+  const mockLlmSrv = http.createServer(async (req, res) => {
+    const chunksBody: Buffer[] = [];
+    for await (const c of req) chunksBody.push(c);
+    const body = JSON.parse(Buffer.concat(chunksBody).toString('utf8') || '{}');
+    llmCallCount++;
+    const prompt = String(body?.messages?.[0]?.content || '');
+    lastLlmPrompt = prompt;
+
+    let assistantContent = 'OK';
+    if (prompt.includes('人设知识库与客服话术解析分类引擎')) {
+      const segMatch = prompt.match(/第\s*(\d+)\//);
+      const segNum = segMatch ? segMatch[1] : String(llmCallCount);
+      assistantContent = JSON.stringify([
+        {
+          title: `PDF提炼知识点-${segNum}`,
+          category: 'wealth_investment',
+          content: `从文档第${segNum}段真实提取的核心业务规则与报价说明内容（含合规校验）`,
+          keywords: [`文档片段${segNum}`, 'VIP报价'],
+        },
+        {
+          // Duplicate across chunks to verify cross-chunk deduplication
+          title: '跨段去重共享规则',
+          category: 'trust_defense',
+          content: '所有客户资金均支持可验证流水审计，严禁虚假承诺。',
+          keywords: ['去重', '资金审计'],
+        },
+      ]);
+    } else if (prompt.includes('真实沟通技巧、大白话聊天习惯')) {
+      assistantContent = JSON.stringify([
+        {
+          type: 'oral_slang',
+          title: '自然口语过渡',
+          description: '先共情对方的忙碌状态再自然切入方案，避免生硬推销感',
+          examplePattern: '刚忙完吧？先把重点给你梳理好啦，有空扫一眼就行',
+          confidenceScore: 0.91,
+        },
+        {
+          type: 'pacing_breath',
+          title: '短句分段节奏',
+          description: '单条回复控制在一到两句内，模拟真人手机打字节奏',
+          examplePattern: '嗯对的，这块风控确实最关键',
+          confidenceScore: 0.88,
+        },
+      ]);
+    } else if (prompt.includes('客观总结以下真实历史对话')) {
+      assistantContent = '说话风格简洁自然，善于先确认对方核心风控诉求再给出明确时间约定。';
+    } else if (prompt.includes('客户画像与长期记忆提炼助手')) {
+      assistantContent = JSON.stringify({
+        clientName: '林先生',
+        relationshipStage: '需求沟通',
+        ageEstimate: '未知',
+        occupation: '未知',
+        locationTimezone: '未提及',
+        toneStyle: '务实谨慎',
+        likesInterests: ['月度结算'],
+        dislikesTaboos: [],
+        emotionalNeeds: '确认SLA与响应时效',
+        keyMemories: [
+          { id: 'ai_sla_1', date: '近期', topic: 'SLA确认', summary: '周五前需发送SLA正式文本', emotion: '认真' },
+        ],
+      });
+    }
+
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(
+      JSON.stringify({
+        id: `chatcmpl-p1-${llmCallCount}`,
+        object: 'chat.completion',
+        choices: [{ index: 0, message: { role: 'assistant', content: assistantContent }, finish_reason: 'stop' }],
+      })
+    );
+  });
+
+  const srv = http.createServer(app);
+  await new Promise<void>((r) => mockLlmSrv.listen(0, '127.0.0.1', r));
+  await new Promise<void>((r) => srv.listen(0, '127.0.0.1', r));
+  const llmPort = (mockLlmSrv.address() as any).port;
+  const port = (srv.address() as any).port;
+
+  const headerB64 = Buffer.from(JSON.stringify({ alg: 'HS256', typ: 'JWT' })).toString('base64url');
+  const payloadB64 = Buffer.from(
+    JSON.stringify({ sub: 'member_p1', username: 'member_p1', role: 'member', exp: Math.floor(Date.now() / 1000) + 3600 })
+  ).toString('base64url');
+  const sigB64 = createHmac('sha256', process.env.JWT_SECRET).update(`${headerB64}.${payloadB64}`).digest('base64url');
+  const memberJwt = `${headerB64}.${payloadB64}.${sigB64}`;
+
+  const testAcc = `acc_tg_p1_${Date.now()}`;
+  const rawChatNum = `${Date.now()}`.slice(-9);
+  const canonicalChat = `tg_${rawChatNum}`;
+  const testCustomCfg = {
+    enabled: true,
+    engineMode: 'custom',
+    protocol: 'openai',
+    baseUrl: `http://127.0.0.1:${llmPort}/v1`,
+    apiKey: 'sk-p1-local-test',
+    modelName: 'gpt-4o-mini',
+  };
+  const headersAuth = {
+    'Content-Type': 'application/json',
+    Authorization: `Bearer ${memberJwt}`,
+    'X-Account-Id': testAcc,
+  };
+
+  try {
+    // 7a. RAG: 30 high-hit distractors MUST NOT shadow a fresh zero-hit match, and SQL %/_/\ must not wildcard-match
+    const ragNow = Date.now();
+    const insertKb = db.prepare(
+      `INSERT INTO knowledge_base (id, account_id, category, title, content, keywords, source_type, is_active, hit_count, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, 'manual', 1, ?, ?, ?)`
+    );
+    for (let i = 0; i < 30; i++) {
+      await insertKb.run(
+        `know_distract_${ragNow}_${i}`,
+        testAcc,
+        'life_emotion',
+        `无关高频干扰条目 ${i}`,
+        `这是日常问候语干扰文本 序号${i} testXitem`,
+        JSON.stringify(['无关词汇']),
+        500,
+        ragNow - 10_000 - i,
+        ragNow - 10_000 - i
+      );
+    }
+    await insertKb.run(
+      `know_fresh_zero_${ragNow}`,
+      testAcc,
+      'wealth_investment',
+      'Кибербезопасность & test_exact',
+      '全新零命中安全条款：Кибербезопасность การชำระเงิน test_exact 100%_vault',
+      JSON.stringify(['Кибербезопасность', 'การชำระเงิน', 'test_exact']),
+      0,
+      ragNow + 1000,
+      ragNow + 1000
+    );
+
+    const ragCyrillic = await queryKnowledgeRAG('Нужна консультация: кибербезопасность и การชำระเงิน', 3, testAcc);
+    assert.ok(ragCyrillic.matchedCount >= 1);
+    assert.ok(ragCyrillic.context.includes('Кибербезопасность & test_exact'), 'Zero-hit item must not be shadowed by 30 high-hit distractors');
+
+    const ragWildcardProbe = await queryKnowledgeRAG('test_exact', 5, testAcc);
+    assert.equal(ragWildcardProbe.matchedItems.some((m: any) => String(m.content || '').includes('testXitem')), false, 'Underscore _ must be escaped in SQL LIKE');
+    assert.equal(ragWildcardProbe.matchedItems.some((m: any) => m.id === `know_fresh_zero_${ragNow}`), true);
+
+    // 7b. POST /api/knowledge/upload: rejects corrupted PDF before LLM, succeeds on real multi-chunk text & real PDF
+    const callsBeforeCorrupt = llmCallCount;
+    const corruptPdfRes = await fetch(`http://127.0.0.1:${port}/api/knowledge/upload`, {
+      method: 'POST',
+      headers: headersAuth,
+      body: JSON.stringify({
+        fileName: 'damaged.pdf',
+        fileBase64: Buffer.from('%PDF-1.4\n/Encrypt <<>> broken data', 'latin1').toString('base64'),
+        customConfig: testCustomCfg,
+      }),
+    });
+    assert.equal(corruptPdfRes.status, 400);
+    assert.equal(llmCallCount, callsBeforeCorrupt, 'Corrupted PDF must be rejected before calling LLM');
+
+    const pdfUploadRes = await fetch(`http://127.0.0.1:${port}/api/knowledge/upload`, {
+      method: 'POST',
+      headers: headersAuth,
+      body: JSON.stringify({
+        fileName: 'real_pricing.pdf',
+        fileBase64: realPdfBuf.toString('base64'),
+        mimeType: 'application/pdf',
+        customConfig: testCustomCfg,
+      }),
+    });
+    assert.equal(pdfUploadRes.status, 200);
+    const pdfUploadJson = (await pdfUploadRes.json()) as any;
+    assert.equal(pdfUploadJson.success, true);
+    assert.equal(pdfUploadJson.detectedEncoding, 'pdf-text-stream');
+    assert.equal(pdfUploadJson.pageCount, 1);
+    assert.equal(pdfUploadJson.itemsLearned, 2);
+
+    // Multi-chunk text upload (> 12,000 chars -> 3 chunks, verifying cross-chunk dedup of shared rule)
+    const multiChunkText = Array.from(
+      { length: 3 },
+      (_, idx) => `## 模块 ${idx + 1}\n${'客户资金隔离与透明结算说明，支持实时对账。'.repeat(165)}`
+    ).join('\n\n');
+    const multiUploadRes = await fetch(`http://127.0.0.1:${port}/api/knowledge/upload`, {
+      method: 'POST',
+      headers: headersAuth,
+      body: JSON.stringify({
+        fileName: 'multi_chunk_manual.md',
+        fileBase64: Buffer.from(multiChunkText, 'utf8').toString('base64'),
+        customConfig: testCustomCfg,
+      }),
+    });
+    assert.equal(multiUploadRes.status, 200);
+    const multiUploadJson = (await multiUploadRes.json()) as any;
+    assert.equal(multiUploadJson.success, true);
+    assert.ok(multiUploadJson.totalChunks >= 2, 'Oversized document must split into multiple chunks');
+    // "跨段去重共享规则" already inserted once in pdfUploadRes -> skipped across all chunks!
+    assert.ok(multiUploadJson.skippedDuplicates >= 2, 'Duplicate items across chunks / existing KB must be skipped');
+
+    // 7c. /api/customer/* canonicalization & manual memory/tag preservation
+    const saveManualRes = await fetch(`http://127.0.0.1:${port}/api/customer/profile/${rawChatNum}`, {
+      method: 'POST',
+      headers: headersAuth,
+      body: JSON.stringify({
+        clientName: '林总（VIP手工标注）',
+        ageEstimate: '40岁',
+        occupation: '供应链总监',
+        locationTimezone: '香港 UTC+8',
+        likesInterests: ['准时交付', '高尔夫'],
+        dislikesTaboos: ['深夜发消息'],
+        keyMemories: [
+          { id: 'manual_k1', date: '2026-02-01', topic: '人工核心备忘', summary: '合同必须双语版', emotion: '认真' },
+        ],
+      }),
+    });
+    assert.equal(saveManualRes.status, 200);
+    const saveManualJson = (await saveManualRes.json()) as any;
+    assert.equal(saveManualJson.chatId, canonicalChat);
+
+    // Seed real messages under canonical chatId
+    const msgBaseTs = Date.now() - 5000;
+    await db
+      .prepare(
+        `INSERT INTO messages (id, chat_id, account_id, sender, sender_name, text, timestamp, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+      )
+      .run(`msg_p1_1_${msgBaseTs}`, canonicalChat, testAcc, 'peer', '林总', '你好，我们想确认一下月度结算方案和SLA响应时效要求，最好周五前发我。', '10:00', msgBaseTs);
+    await db
+      .prepare(
+        `INSERT INTO messages (id, chat_id, account_id, sender, sender_name, text, timestamp, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+      )
+      .run(`msg_p1_2_${msgBaseTs}`, canonicalChat, testAcc, 'me', '我方', '好的林总，周四下午先把SLA中文版发您确认细节。', '10:02', msgBaseTs + 1000);
+
+    const analyzeRes = await fetch(`http://127.0.0.1:${port}/api/customer/analyze/${rawChatNum}`, {
+      method: 'POST',
+      headers: headersAuth,
+      body: JSON.stringify({ customConfig: testCustomCfg, chatTitle: '林总' }),
+    });
+    assert.equal(analyzeRes.status, 200);
+    const analyzeJson = (await analyzeRes.json()) as any;
+    assert.equal(analyzeJson.profile.chatId, canonicalChat);
+    assert.equal(analyzeJson.profile.clientName, '林总（VIP手工标注）');
+    assert.equal(analyzeJson.profile.ageEstimate, '40岁', 'Manual age must not be overwritten by AI 未知');
+    assert.equal(analyzeJson.profile.occupation, '供应链总监', 'Manual occupation must not be overwritten by AI 未知');
+    assert.equal(analyzeJson.profile.locationTimezone, '香港 UTC+8', 'Manual location must not be overwritten by AI 未提及');
+    assert.ok(analyzeJson.profile.likesInterests.includes('准时交付'));
+    assert.ok(analyzeJson.profile.likesInterests.includes('月度结算'));
+    assert.ok(analyzeJson.profile.dislikesTaboos.includes('深夜发消息'));
+    assert.ok(analyzeJson.profile.keyMemories.some((m: any) => m.id === 'manual_k1'));
+    assert.ok(analyzeJson.profile.keyMemories.some((m: any) => m.id === 'ai_sla_1'));
+
+    // 7d. /api/transcripts/import-from-chat/:chatId content hash & watermark dedup
+    const importTrans1 = await fetch(`http://127.0.0.1:${port}/api/transcripts/import-from-chat/${rawChatNum}`, {
+      method: 'POST',
+      headers: headersAuth,
+      body: JSON.stringify({ customConfig: testCustomCfg, chatTitle: '林总' }),
+    });
+    assert.equal(importTrans1.status, 200);
+    const importTrans1Json = (await importTrans1.json()) as any;
+    assert.equal(importTrans1Json.success, true);
+    assert.equal(importTrans1Json.lastMessageCreatedAt, msgBaseTs + 1000);
+
+    // Repeating same chat import returns 409 duplicate
+    const importTransDup = await fetch(`http://127.0.0.1:${port}/api/transcripts/import-from-chat/${canonicalChat}`, {
+      method: 'POST',
+      headers: headersAuth,
+      body: JSON.stringify({ customConfig: testCustomCfg, chatTitle: '林总' }),
+    });
+    assert.equal(importTransDup.status, 409);
+
+    // Adding a newer message allows incremental re-import
+    await db
+      .prepare(
+        `INSERT INTO messages (id, chat_id, account_id, sender, sender_name, text, timestamp, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+      )
+      .run(`msg_p1_3_${msgBaseTs}`, canonicalChat, testAcc, 'peer', '林总', '收到，麻烦顺便附上对公账户抬头和税号信息。', '10:05', msgBaseTs + 3000);
+
+    const importTrans2 = await fetch(`http://127.0.0.1:${port}/api/transcripts/import-from-chat/${canonicalChat}`, {
+      method: 'POST',
+      headers: headersAuth,
+      body: JSON.stringify({ customConfig: testCustomCfg, chatTitle: '林总' }),
+    });
+    assert.equal(importTrans2.status, 200);
+    const importTrans2Json = (await importTrans2.json()) as any;
+    assert.equal(importTrans2Json.lastMessageCreatedAt, msgBaseTs + 3000);
+
+    // 7e. /api/evolution/learn watermark + corpusHash + habit dedup
+    const evo1Res = await fetch(`http://127.0.0.1:${port}/api/evolution/learn`, {
+      method: 'POST',
+      headers: headersAuth,
+      body: JSON.stringify({ customConfig: testCustomCfg }),
+    });
+    assert.equal(evo1Res.status, 200);
+    const evo1Json = (await evo1Res.json()) as any;
+    assert.equal(evo1Json.newHabitsLearned, 2);
+    assert.equal(evo1Json.lastLearnedMessageCreatedAt, msgBaseTs + 3000);
+    assert.ok(lastLlmPrompt.includes('月度结算方案'));
+
+    // Repeating with no new messages returns 409 alreadyLearned
+    const evoDupNoNew = await fetch(`http://127.0.0.1:${port}/api/evolution/learn`, {
+      method: 'POST',
+      headers: headersAuth,
+      body: JSON.stringify({ customConfig: testCustomCfg }),
+    });
+    assert.equal(evoDupNoNew.status, 409);
+
+    // Too-short manual sample (< 50 chars) must be rejected with 400 instead of fabricating corpus
+    const evoShortSample = await fetch(`http://127.0.0.1:${port}/api/evolution/learn`, {
+      method: 'POST',
+      headers: headersAuth,
+      body: JSON.stringify({ sampleTexts: ['太短了'], customConfig: testCustomCfg }),
+    });
+    assert.equal(evoShortSample.status, 400);
+
+    // Repeating identical manual sampleTexts (>= 50 chars) returns 409 after first learn
+    const manualSamples = [
+      '客户：最近行情波动这么大，你们一般怎么控制回撤呀？\n我：嗯呢，稳字当头先控好仓位节奏最重要啦，咱们分批进场不急着重仓。',
+    ];
+    const evoManual1 = await fetch(`http://127.0.0.1:${port}/api/evolution/learn`, {
+      method: 'POST',
+      headers: headersAuth,
+      body: JSON.stringify({ sampleTexts: manualSamples, customConfig: testCustomCfg }),
+    });
+    assert.equal(evoManual1.status, 200);
+    const evoManual1Json = (await evoManual1.json()) as any;
+    // Mock LLM returned the exact same 2 habit titles/descriptions -> habit dedup keeps newHabitsLearned === 0
+    assert.equal(evoManual1Json.newHabitsLearned, 0);
+    assert.equal(evoManual1Json.skippedDuplicateHabits, 2);
+
+    const evoManualDup = await fetch(`http://127.0.0.1:${port}/api/evolution/learn`, {
+      method: 'POST',
+      headers: headersAuth,
+      body: JSON.stringify({ sampleTexts: manualSamples, customConfig: testCustomCfg }),
+    });
+    assert.equal(evoManualDup.status, 409);
+
+    const finalEvoState = await getEvolutionStateFromDb(testAcc);
+    assert.equal(finalEvoState.totalHabitsLearned, 2);
+
+    // 8. Verify frontend wiring & zero native alert/confirm in updated P1 files
+    const modalSrc = readFileSync(resolve(process.cwd(), 'src/components/KnowledgeEvolutionModal.tsx'), 'utf8');
+    const dockSrc = readFileSync(resolve(process.cwd(), 'src/components/UnifiedRightDock.tsx'), 'utf8');
+    const apiSrc = readFileSync(resolve(process.cwd(), 'src/services/apiService.ts'), 'utf8');
+    assert.equal(modalSrc.includes('uploadKnowledgeDocApi'), true);
+    assert.equal(modalSrc.includes('importTranscriptFromChatApi'), true);
+    assert.equal(modalSrc.includes('triggerEvolutionLearnApi'), true);
+    assert.equal(modalSrc.includes('toggleEvolutionHabitApi'), true);
+    assert.equal(/window\.(alert|confirm)/.test(modalSrc), false);
+    assert.equal(dockSrc.includes('activeChatId={activeChatId}'), true);
+    assert.equal(apiSrc.includes('arrayBufferToBase64'), true);
+  } finally {
+    try {
+      await db.prepare('DELETE FROM knowledge_base WHERE account_id = ?').run(testAcc);
+      await db.prepare('DELETE FROM chat_transcripts WHERE account_id = ?').run(testAcc);
+      await db.prepare('DELETE FROM training_logs WHERE account_id = ?').run(testAcc);
+      await db.prepare('DELETE FROM customer_profiles WHERE account_id = ?').run(testAcc);
+      await db.prepare('DELETE FROM messages WHERE account_id = ?').run(testAcc);
+      await db
+        .prepare('DELETE FROM system_config WHERE key IN (?, ?)')
+        .run(`global_persona_config::${testAcc}`, `evolution_engine_state::${testAcc}`);
+    } catch {}
+    await syncServerCustomLlmConfig(prevCustomCfg || { enabled: true, engineMode: 'cloud', apiKey: '', engineLicenseKey: '' });
+    await new Promise<void>((r) => srv.close(() => r()));
+    await new Promise<void>((r) => mockLlmSrv.close(() => r()));
+    if (prevJwtSecret === undefined) delete process.env.JWT_SECRET;
+    else process.env.JWT_SECRET = prevJwtSecret;
+  }
+});
+
 
 
 
