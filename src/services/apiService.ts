@@ -764,11 +764,16 @@ export function inferGatewayProtocolFromUrlAndModel(
 const MAX_TRANSLATE_CACHE = 300;
 const TRANSLATE_CACHE_TTL_MS = 10 * 60 * 1000;
 const MAX_TRANSLATE_CONCURRENCY = 3;
+const MAX_HISTORY_TRANSLATE_CONCURRENCY = 2;
+const HISTORY_TRANSLATE_MIN_INTERVAL_MS = 220;
 
 const translateCache = new Map<string, { value: string; expiresAt: number }>();
 const inFlightTranslations = new Map<string, Promise<string>>();
 let activeTranslationRequests = 0;
 const translationWaitQueue: Array<() => void> = [];
+let activeHistoryTranslations = 0;
+const historyTranslationWaitQueue: Array<() => void> = [];
+let lastHistoryTranslateStartAt = 0;
 
 function getTranslateCache(key: string): string | null {
   const hit = translateCache.get(key);
@@ -797,21 +802,33 @@ function normalizeClientLangCode(lang?: string): string {
   return normalizeLanguageCode(lang);
 }
 
-async function runQueuedTranslation<T>(fn: () => Promise<T>, signal?: AbortSignal): Promise<T> {
+async function runQueuedTranslation<T>(
+  fn: () => Promise<T>,
+  signal?: AbortSignal,
+  purpose: 'realtime' | 'history' = 'realtime'
+): Promise<T> {
   if (signal?.aborted) {
     const abortErr = new Error('请求已取消');
     abortErr.name = 'AbortError';
     throw abortErr;
   }
-  if (activeTranslationRequests >= MAX_TRANSLATE_CONCURRENCY) {
+
+  const isHistory = purpose === 'history';
+  const isBusy = () =>
+    isHistory
+      ? activeHistoryTranslations >= MAX_HISTORY_TRANSLATE_CONCURRENCY
+      : activeTranslationRequests >= MAX_TRANSLATE_CONCURRENCY;
+  const waitQueue = isHistory ? historyTranslationWaitQueue : translationWaitQueue;
+
+  if (isBusy()) {
     await new Promise<void>((resolve, reject) => {
       const release = () => {
         if (signal) signal.removeEventListener('abort', onAbort);
         resolve();
       };
       const onAbort = () => {
-        const idx = translationWaitQueue.indexOf(release);
-        if (idx >= 0) translationWaitQueue.splice(idx, 1);
+        const idx = waitQueue.indexOf(release);
+        if (idx >= 0) waitQueue.splice(idx, 1);
         const abortErr = new Error('请求已取消');
         abortErr.name = 'AbortError';
         reject(abortErr);
@@ -819,15 +836,51 @@ async function runQueuedTranslation<T>(fn: () => Promise<T>, signal?: AbortSigna
       if (signal) {
         signal.addEventListener('abort', onAbort, { once: true });
       }
-      translationWaitQueue.push(release);
+      waitQueue.push(release);
     });
   }
-  activeTranslationRequests++;
+
+  if (isHistory) {
+    activeHistoryTranslations++;
+  } else {
+    activeTranslationRequests++;
+  }
+
   try {
+    if (isHistory) {
+      const now = Date.now();
+      const waitMs = Math.max(0, lastHistoryTranslateStartAt + HISTORY_TRANSLATE_MIN_INTERVAL_MS - now);
+      lastHistoryTranslateStartAt = now + waitMs;
+      if (waitMs > 0) {
+        await new Promise<void>((resolve, reject) => {
+          if (signal?.aborted) {
+            const abortErr = new Error('请求已取消');
+            abortErr.name = 'AbortError';
+            reject(abortErr);
+            return;
+          }
+          const timer = setTimeout(() => {
+            if (signal) signal.removeEventListener('abort', onAbort);
+            resolve();
+          }, waitMs);
+          const onAbort = () => {
+            clearTimeout(timer);
+            const abortErr = new Error('请求已取消');
+            abortErr.name = 'AbortError';
+            reject(abortErr);
+          };
+          if (signal) signal.addEventListener('abort', onAbort, { once: true });
+        });
+      }
+    }
     return await fn();
   } finally {
-    activeTranslationRequests = Math.max(0, activeTranslationRequests - 1);
-    const next = translationWaitQueue.shift();
+    if (isHistory) {
+      activeHistoryTranslations = Math.max(0, activeHistoryTranslations - 1);
+    } else {
+      activeTranslationRequests = Math.max(0, activeTranslationRequests - 1);
+    }
+    const next = waitQueue.shift();
     if (next) next();
   }
 }
@@ -975,17 +1028,19 @@ export async function translateText(
     return decoded;
   };
 
+  const queuePurpose: 'realtime' | 'history' = isHistoryTranslation ? 'history' : 'realtime';
+
   if (!options?.signal && !options?.bypassCache) {
     const inFlight = inFlightTranslations.get(cacheKey);
     if (inFlight) return inFlight;
-    const promise = runQueuedTranslation(executeRequest).finally(() => {
+    const promise = runQueuedTranslation(executeRequest, undefined, queuePurpose).finally(() => {
       inFlightTranslations.delete(cacheKey);
     });
     inFlightTranslations.set(cacheKey, promise);
     return promise;
   }
 
-  return await runQueuedTranslation(executeRequest, options?.signal);
+  return await runQueuedTranslation(executeRequest, options?.signal, queuePurpose);
 }
 
 export async function transcribeAudio(audioBase64: string, mimeType: string = 'audio/webm', customConfig?: CustomLLMConfig): Promise<string> {
@@ -1902,6 +1957,55 @@ export async function saveCustomerProfile(chatId: string, profile: Partial<Custo
   }
 }
 
+export function buildSafeLlmConfigPayload(customConfig?: CustomLLMConfig): CustomLLMConfig | undefined {
+  if (!customConfig) return undefined;
+  const isDualOff = customConfig.enabled === false || Boolean(customConfig.explicitlyDisabled);
+  if (isDualOff) {
+    return {
+      ...customConfig,
+      enabled: false,
+      explicitlyDisabled: true,
+      engineMode: 'cloud',
+      baseUrl: '',
+      apiKey: '',
+      enableKnowledgeBaseRAG: false,
+      knowledgeBaseApiUrl: '',
+      knowledgeBaseApiKey: '',
+    };
+  }
+  if (customConfig.engineMode === 'custom') {
+    const cleanModel = (customConfig.modelName || '').trim() || 'gpt-4o-mini';
+    return {
+      ...customConfig,
+      enabled: true,
+      explicitlyDisabled: false,
+      engineMode: 'custom',
+      protocol: inferGatewayProtocolFromUrlAndModel(customConfig.baseUrl, cleanModel),
+      modelName: cleanModel,
+      enableKnowledgeBaseRAG: false,
+      knowledgeBaseApiUrl: '',
+      knowledgeBaseApiKey: '',
+    };
+  }
+  const cloudModel =
+    customConfig.modelName && /^(gemini|gemma)/i.test(String(customConfig.modelName).trim())
+      ? String(customConfig.modelName).trim()
+      : 'gemini-4-hydrogen';
+  return {
+    ...customConfig,
+    enabled: true,
+    explicitlyDisabled: false,
+    engineMode: 'cloud',
+    protocol: 'openai',
+    baseUrl: '',
+    apiKey: '',
+    modelName: cloudModel,
+    enableKnowledgeBaseRAG: true,
+    knowledgeBaseApiUrl: '',
+    knowledgeBaseApiKey: '',
+  };
+}
+
 export async function analyzeCustomerMemory(
   chatId: string,
   customConfig?: CustomLLMConfig,
@@ -1916,7 +2020,7 @@ export async function analyzeCustomerMemory(
         method: 'POST',
         headers: getAuthHeaders(accountId),
         body: JSON.stringify({
-          customConfig,
+          customConfig: buildSafeLlmConfigPayload(customConfig),
           accountId: accountId || currentActiveAccountId,
           messages: Array.isArray(messages) ? messages.slice(-50) : undefined,
           chatTitle,
@@ -2225,6 +2329,38 @@ export async function uploadDatabaseRestore(snapshot: any): Promise<{ success: b
   }
 }
 
+export async function purgeDatabaseApi(): Promise<{
+  success: boolean;
+  message?: string;
+  deletedRows?: Record<string, number>;
+  error?: string;
+}> {
+  try {
+    const res = await fetchWithTimeout(
+      '/api/database/purge?confirm=true',
+      {
+        method: 'POST',
+        headers: getAuthHeaders(),
+        credentials: 'include',
+        body: JSON.stringify({ confirm: true }),
+      },
+      30000
+    );
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      return { success: false, error: data?.error || `数据库清理失败 (HTTP ${res.status})` };
+    }
+    return {
+      success: Boolean(data?.success ?? true),
+      message: data?.message,
+      deletedRows: data?.deletedRows,
+    };
+  } catch (err: any) {
+    console.error('purgeDatabaseApi error:', err);
+    return { success: false, error: err?.message || '数据库清理请求失败' };
+  }
+}
+
 import {
   secureGetItemSync,
   secureSetItemSync,
@@ -2234,10 +2370,9 @@ import {
   purgeCryptoSeed
 } from './cryptoStorage';
 
-// ==================== ZERO-DB ENCRYPTED LOCAL STORAGE REPOSITORY ====================
-// In accordance with user security specification: Chat messages, transcripts, accounts, and customer notes
-// exist locally encrypted with Web Crypto API (AES-256-GCM) to prevent plain-text inspection in DevTools,
-// capped at MAX_LOCAL_MESSAGES_PER_CHAT per chat so Chromium localStorage never hits 5MB limits.
+// ==================== LOCAL ENCRYPTED STORAGE REPOSITORY ====================
+// Chat messages, transcripts, accounts, and customer notes are stored locally using a 256-bit salted stream cipher
+// (and WebCrypto AES-256-GCM for async reads/writes), capped at MAX_LOCAL_MESSAGES_PER_CHAT per chat.
 
 export const MAX_LOCAL_MESSAGES_PER_CHAT = 100;
 
@@ -3768,7 +3903,10 @@ export async function testPersonaReplyApi(params: {
     const res = await fetchWithTimeout('/api/persona/test-reply', {
       method: 'POST',
       headers: getAuthHeaders(),
-      body: JSON.stringify(params),
+      body: JSON.stringify({
+        ...params,
+        customConfig: buildSafeLlmConfigPayload(params.customConfig),
+      }),
       credentials: 'include',
     }, 30000);
     return await res.json();
@@ -3866,7 +4004,7 @@ export async function triggerEvolutionLearnApi(
       body: JSON.stringify({
         sampleTexts,
         messages: syncedMessages.length > 0 ? syncedMessages : undefined,
-        customConfig: customConfig?.enabled ? customConfig : undefined,
+        customConfig: buildSafeLlmConfigPayload(customConfig),
       }),
       credentials: 'include',
     }, 35000);
@@ -3959,7 +4097,7 @@ export async function uploadKnowledgeDocApi(params: {
       headers: getAuthHeaders(),
       body: JSON.stringify({
         ...params,
-        customConfig: params.customConfig?.enabled ? params.customConfig : undefined,
+        customConfig: buildSafeLlmConfigPayload(params.customConfig),
       }),
       credentials: 'include',
     }, 30000);
@@ -4079,7 +4217,7 @@ export async function createTranscriptApi(payload: {
       headers: getAuthHeaders(),
       body: JSON.stringify({
         ...payload,
-        customConfig: payload.customConfig?.enabled ? payload.customConfig : undefined,
+        customConfig: buildSafeLlmConfigPayload(payload.customConfig),
       }),
       credentials: 'include',
     }, 30000);

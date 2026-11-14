@@ -731,6 +731,8 @@ export default function App() {
     }
   };
 
+  const prevPersistedMessagesMapRef = useRef<Record<string, Message[]>>({});
+
   // Hydrate encrypted local storage data asynchronously to guarantee zero data loss
   useEffect(() => {
     let active = true;
@@ -756,6 +758,21 @@ export default function App() {
     if (!isHydrated) return;
     secureSetItemSync('tg_pro_chats', chats);
   }, [chats, isHydrated]);
+
+  // Post-commit message bucket persistence (eliminates StrictMode double-writes & updater side-effects)
+  useEffect(() => {
+    if (!isHydrated) return;
+    const prevMap = prevPersistedMessagesMapRef.current;
+    for (const [bKey, list] of Object.entries(messagesMap)) {
+      if (prevMap[bKey] !== list && Array.isArray(list)) {
+        const sepIdx = bKey.indexOf('::');
+        const bAcc = sepIdx >= 0 ? bKey.slice(0, sepIdx) : activeAccountIdRef.current;
+        const bChat = sepIdx >= 0 ? bKey.slice(sepIdx + 2) : bKey;
+        setLocalMessages(bChat, list, bAcc);
+      }
+    }
+    prevPersistedMessagesMapRef.current = messagesMap;
+  }, [messagesMap, isHydrated]);
 
   useEffect(() => {
     if (!isHydrated) return;
@@ -1247,7 +1264,6 @@ export default function App() {
               cloudMsgs,
               { accountId: targetAccId, chatId: targetChatId }
             );
-            setLocalMessages(targetChatId, merged, targetAccId);
             return { ...prev, [bucketKey]: merged };
           });
         }
@@ -1286,7 +1302,6 @@ export default function App() {
               allowEmptyCloudPrune: !cloudRes.fromLocalFallback,
             }
           );
-          setLocalMessages(targetChatId, merged, targetAccId);
           return { ...prev, [bucketKey]: merged };
         });
       }).catch(() => {});
@@ -1363,6 +1378,10 @@ export default function App() {
   }, [activeChatId]);
 
   const attemptedInboundBackfillRef = useRef<Set<string>>(new Set());
+  const backfillRetryCountRef = useRef<Map<string, number>>(new Map());
+  const backfillCooldownUntilRef = useRef<Map<string, number>>(new Map());
+  const backfillRetryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [backfillRetryNonce, setBackfillRetryNonce] = useState(0);
   const backfillAbortRef = useRef<AbortController | null>(null);
   const backfillScopeKeyRef = useRef<string>('');
 
@@ -1386,6 +1405,10 @@ export default function App() {
 
   useEffect(() => {
     return () => {
+      if (backfillRetryTimerRef.current) {
+        clearTimeout(backfillRetryTimerRef.current);
+        backfillRetryTimerRef.current = null;
+      }
       if (backfillAbortRef.current) {
         backfillAbortRef.current.abort();
         backfillAbortRef.current = null;
@@ -1393,7 +1416,7 @@ export default function App() {
     };
   }, [backfillScopeKey]);
 
-  // Auto-backfill ALL untranslated historical messages (no count cap) strictly via Google Translate
+  // Auto-backfill ALL untranslated historical messages (no count cap) strictly via rate-paced Google Translate with backoff retry
   useEffect(() => {
     if (!isMemberAuthenticated || !activeChatId || !activeAccountId) return;
     if (translationSettings.autoTranslateInbound === false) return;
@@ -1412,6 +1435,7 @@ export default function App() {
     const currentMsgs = getBucketMessages(messagesMap, targetAccountId, targetChatId);
     if (currentMsgs.length === 0) return;
 
+    const nowTs = Date.now();
     const targetNorm = normalizeLanguageCode(backfillTargetLang);
     const candidates: Array<{ msg: Message; rawText: string; dedupeKey: string }> = [];
 
@@ -1423,7 +1447,7 @@ export default function App() {
         !m.translationError!.includes('历史') &&
         !m.translationError!.includes('谷歌') &&
         typeof m.createdAt === 'number' &&
-        Date.now() - m.createdAt < 60_000;
+        nowTs - m.createdAt < 60_000;
       if ((m.translatedText || '').trim() || m.isTranslating || isFreshLiveTranslationError) continue;
       const rawText = (m.sttText || m.text || m.imageCaption || '').trim();
       if (
@@ -1443,6 +1467,8 @@ export default function App() {
       }
       const dedupeKey = `${targetAccountId}::${targetChatId}::${m.id}::${backfillTargetLang}::${backfillHistoryEngine}`;
       if (attemptedInboundBackfillRef.current.has(dedupeKey)) continue;
+      const cooldownUntil = backfillCooldownUntilRef.current.get(dedupeKey) || 0;
+      if (nowTs < cooldownUntil) continue;
       candidates.push({ msg: m, rawText, dedupeKey });
     }
 
@@ -1470,21 +1496,6 @@ export default function App() {
       if (controller.signal.aborted || pendingUpdates.size === 0) return;
       const batch = new Map(pendingUpdates);
       pendingUpdates.clear();
-
-      const latestBucket = getBucketMessages(messagesMapRef.current, targetAccountId, targetChatId);
-      let anyPersistChange = false;
-      const nextPersistList = latestBucket.map((item) => {
-        const patch = batch.get(item.id);
-        if (!patch || (item.translatedText || '').trim()) return item;
-        anyPersistChange = true;
-        if (patch.translatedText !== undefined) {
-          return { ...item, translatedText: patch.translatedText, translationError: undefined };
-        }
-        return { ...item, translationError: patch.translationError };
-      });
-      if (anyPersistChange) {
-        setLocalMessages(targetChatId, nextPersistList, targetAccountId);
-      }
 
       setMessagesMap((prevMap) => {
         const list = getBucketMessages(prevMap, targetAccountId, targetChatId);
@@ -1522,6 +1533,16 @@ export default function App() {
       }
     };
 
+    const scheduleBackfillRetryWakeup = (delayMs: number) => {
+      if (controller.signal.aborted || backfillRetryTimerRef.current) return;
+      backfillRetryTimerRef.current = setTimeout(() => {
+        backfillRetryTimerRef.current = null;
+        if (!controller.signal.aborted) {
+          setBackfillRetryNonce((n) => n + 1);
+        }
+      }, delayMs);
+    };
+
     const onAbort = () => {
       if (flushTimer) {
         clearTimeout(flushTimer);
@@ -1546,6 +1567,8 @@ export default function App() {
       )
         .then((trans) => {
           if (controller.signal.aborted) return;
+          backfillRetryCountRef.current.delete(dedupeKey);
+          backfillCooldownUntilRef.current.delete(dedupeKey);
           const cleanTrans = (trans || '').trim();
           if (cleanTrans && cleanTrans.toLowerCase() !== rawText.toLowerCase()) {
             pendingUpdates.set(msg.id, { msg, translatedText: trans });
@@ -1557,6 +1580,14 @@ export default function App() {
             attemptedInboundBackfillRef.current.delete(dedupeKey);
             remaining = Math.max(0, remaining - 1);
             return;
+          }
+          const retries = backfillRetryCountRef.current.get(dedupeKey) || 0;
+          if (retries < 2) {
+            const backoffMs = retries === 0 ? 4000 : 12000;
+            backfillRetryCountRef.current.set(dedupeKey, retries + 1);
+            backfillCooldownUntilRef.current.set(dedupeKey, Date.now() + backoffMs);
+            attemptedInboundBackfillRef.current.delete(dedupeKey);
+            scheduleBackfillRetryWakeup(backoffMs + 150);
           }
           const errMsg = err?.message || '历史消息谷歌机翻失败';
           pendingUpdates.set(msg.id, { msg, translationError: errMsg });
@@ -1573,6 +1604,7 @@ export default function App() {
     backfillSourceLang,
     translationSettings.autoTranslateInbound,
     translationSettings.googleApiKey,
+    backfillRetryNonce,
   ]);
 
   // Real-time polling for incoming Telegram MTProto / Bot updates into pure local storage
@@ -1647,7 +1679,6 @@ export default function App() {
                   return m;
                 });
                 if (!changed) return prev;
-                setLocalMessages(targetChatId, updated, targetAccountId);
                 return { ...prev, [targetBucketKey]: updated };
               });
               return;
@@ -1660,6 +1691,27 @@ export default function App() {
                   : []
               );
               if (deletedTgIds.size === 0) return;
+              const matchesDeletedTgId = (m: Message) => {
+                const msgTgId = resolveClientTelegramMessageId(m);
+                return msgTgId !== undefined && deletedTgIds.has(msgTgId);
+              };
+              const refSnapshot = messagesMapRef.current;
+              const candidateKeysForRecord = rawChatId
+                ? [msgBucketKey(targetAccountId, targetChatId)]
+                : Object.keys(refSnapshot).filter((k) => {
+                    const matchesAcc = k.startsWith(`${targetAccountId}::`) || k === targetChatId;
+                    if (!matchesAcc) return false;
+                    const chatPart = k.includes('::') ? k.split('::').slice(1).join('::') : k;
+                    return !chatPart.startsWith('tg_-100') && !chatPart.startsWith('-100');
+                  });
+              for (const key of candidateKeysForRecord) {
+                const list = refSnapshot[key];
+                if (!Array.isArray(list) || list.length === 0) continue;
+                const chatKey = key.includes('::') ? key.split('::').slice(1).join('::') : key;
+                list.filter(matchesDeletedTgId).forEach((m) =>
+                  recordDeletedMessageId(m.id, targetAccountId, m.chatId || chatKey)
+                );
+              }
               setMessagesMap((prev) => {
                 const next = { ...prev };
                 let anyChanged = false;
@@ -1672,20 +1724,12 @@ export default function App() {
                       // UpdateDeleteMessages only applies to private/basic-group dialogs, never tg_-100* supergroups/channels
                       return !chatPart.startsWith('tg_-100') && !chatPart.startsWith('-100');
                     });
-                const matchesDeletedTgId = (m: Message) => {
-                  const msgTgId = resolveClientTelegramMessageId(m);
-                  return msgTgId !== undefined && deletedTgIds.has(msgTgId);
-                };
                 for (const key of candidateKeys) {
                   const list = prev[key];
                   if (!Array.isArray(list) || list.length === 0) continue;
-                  const chatKey = key.includes('::') ? key.split('::').slice(1).join('::') : key;
-                  const removed = list.filter(matchesDeletedTgId);
-                  if (removed.length === 0) continue;
-                  anyChanged = true;
-                  removed.forEach((m) => recordDeletedMessageId(m.id, targetAccountId, m.chatId || chatKey));
                   const remaining = list.filter((m) => !matchesDeletedTgId(m));
-                  setLocalMessages(chatKey, remaining, targetAccountId);
+                  if (remaining.length === list.length) continue;
+                  anyChanged = true;
                   next[key] = remaining;
                 }
                 return anyChanged ? next : prev;
@@ -1728,7 +1772,6 @@ export default function App() {
                   return m;
                 });
                 if (!changed) return prev;
-                setLocalMessages(targetChatId, updated, targetAccountId);
                 return { ...prev, [targetBucketKey]: updated };
               });
               return;
@@ -1757,7 +1800,6 @@ export default function App() {
                   return m;
                 });
                 if (!changed) return prev;
-                setLocalMessages(targetChatId, updated, targetAccountId);
                 return { ...prev, [targetBucketKey]: updated };
               });
               return;
@@ -1904,14 +1946,15 @@ export default function App() {
                 const existing = currentList[foundIdx];
                 const needsTranslation = Boolean(incomingMsg.translatedText && !existing.translatedText);
                 const needsTgId = Boolean(incomingTgId !== undefined && !existing.telegramMessageId);
-                if (needsTranslation || needsTgId) {
+                const needsStt = Boolean(incomingMsg.sttText && !existing.sttText);
+                if (needsTranslation || needsTgId || needsStt) {
                   const updated = [...currentList];
                   updated[foundIdx] = {
                     ...existing,
                     ...(needsTranslation ? { translatedText: incomingMsg.translatedText } : {}),
                     ...(needsTgId ? { telegramMessageId: incomingTgId } : {}),
+                    ...(needsStt ? { sttText: incomingMsg.sttText } : {}),
                   };
-                  saveLocalMessage(targetChatId, updated[foundIdx], targetAccountId);
                   return {
                     ...prev,
                     [targetBucketKey]: updated,
@@ -1920,7 +1963,6 @@ export default function App() {
                 return prev;
               }
 
-              saveLocalMessage(targetChatId, incomingMsg, targetAccountId);
               return {
                 ...prev,
                 [targetBucketKey]: [...currentList, incomingMsg],
@@ -2132,7 +2174,6 @@ export default function App() {
           chatId: realSavedChat.id,
           allowEmptyCloudPrune: true,
         });
-        setLocalMessages(realSavedChat.id, merged, targetAccId);
         return { ...prev, [bucketKey]: merged };
       });
       setActiveChatId(realSavedChat.id);
@@ -2299,7 +2340,6 @@ export default function App() {
               }
             : m
         );
-        setLocalMessages(targetChatId, updated, targetAccountId);
         return { ...prev, [bucketKey]: updated };
       });
       scheduleRevokeBlobUrls(replacedBlobUrls);
@@ -2319,7 +2359,6 @@ export default function App() {
       const updated = list.map((m) =>
         m.id === messageId ? { ...m, deliveryStatus: 'retrying' as const } : m
       );
-      setLocalMessages(targetChatId, updated, targetAccountId);
       return { ...prev, [bucketKey]: updated };
     });
 
@@ -2381,7 +2420,6 @@ export default function App() {
             }
           : m
       );
-      setLocalMessages(targetChatId, updated, targetAccountId);
       return { ...prev, [bucketKey]: updated };
     });
     scheduleRevokeBlobUrls(replacedBlobUrls);
@@ -2628,34 +2666,34 @@ export default function App() {
     recordDeletedMessageId(messageId, targetAccountId, targetChatId);
     deleteLocalMessage(targetChatId, messageId, targetAccountId);
 
+    const snapshotRemaining = getBucketMessages(messagesMapRef.current, targetAccountId, targetChatId).filter(
+      (m) => m.id !== messageId
+    );
     setMessagesMap((prev) => {
       const currentList = getBucketMessages(prev, targetAccountId, targetChatId);
       const updated = currentList.filter((m) => m.id !== messageId);
-      setLocalMessages(targetChatId, updated, targetAccountId);
-
-      // Synchronously update contact list summary if the deleted message was the last one
-      if (updated.length > 0) {
-        const last = updated[updated.length - 1];
-        const summary = formatChatMessageSummary(last);
-        setChats((chatList) =>
-          chatList.map((c) =>
-            c.id === targetChatId && (!targetAccountId || c.accountId === targetAccountId)
-              ? { ...c, lastMessage: summary, lastTime: last.timestamp || c.lastTime }
-              : c
-          )
-        );
-      } else {
-        setChats((chatList) =>
-          chatList.map((c) =>
-            c.id === targetChatId && (!targetAccountId || c.accountId === targetAccountId)
-              ? { ...c, lastMessage: '暂无消息' }
-              : c
-          )
-        );
-      }
-
       return { ...prev, [bucketKey]: updated };
     });
+
+    if (snapshotRemaining.length > 0) {
+      const last = snapshotRemaining[snapshotRemaining.length - 1];
+      const summary = formatChatMessageSummary(last);
+      setChats((chatList) =>
+        chatList.map((c) =>
+          c.id === targetChatId && (!targetAccountId || c.accountId === targetAccountId)
+            ? { ...c, lastMessage: summary, lastTime: last.timestamp || c.lastTime }
+            : c
+        )
+      );
+    } else {
+      setChats((chatList) =>
+        chatList.map((c) =>
+          c.id === targetChatId && (!targetAccountId || c.accountId === targetAccountId)
+            ? { ...c, lastMessage: '暂无消息' }
+            : c
+        )
+      );
+    }
 
     return { ok: true };
   };
@@ -2711,32 +2749,32 @@ export default function App() {
       }
     });
     scheduleRevokeBlobUrls(deletedBlobUrls);
+    const snapshotBatchRemaining = currentList.filter((m) => !idSet.has(m.id));
     setMessagesMap((prev) => {
       const list = getBucketMessages(prev, targetAccountId, targetChatId);
       const updated = list.filter((m) => !idSet.has(m.id));
-      setLocalMessages(targetChatId, updated, targetAccountId);
-
-      if (updated.length > 0) {
-        const last = updated[updated.length - 1];
-        const summary = formatChatMessageSummary(last);
-        setChats((chatList) =>
-          chatList.map((c) =>
-            c.id === targetChatId && (!targetAccountId || c.accountId === targetAccountId)
-              ? { ...c, lastMessage: summary, lastTime: last.timestamp || c.lastTime }
-              : c
-          )
-        );
-      } else {
-        setChats((chatList) =>
-          chatList.map((c) =>
-            c.id === targetChatId && (!targetAccountId || c.accountId === targetAccountId)
-              ? { ...c, lastMessage: '暂无消息' }
-              : c
-          )
-        );
-      }
       return { ...prev, [bucketKey]: updated };
     });
+
+    if (snapshotBatchRemaining.length > 0) {
+      const last = snapshotBatchRemaining[snapshotBatchRemaining.length - 1];
+      const summary = formatChatMessageSummary(last);
+      setChats((chatList) =>
+        chatList.map((c) =>
+          c.id === targetChatId && (!targetAccountId || c.accountId === targetAccountId)
+            ? { ...c, lastMessage: summary, lastTime: last.timestamp || c.lastTime }
+            : c
+        )
+      );
+    } else {
+      setChats((chatList) =>
+        chatList.map((c) =>
+          c.id === targetChatId && (!targetAccountId || c.accountId === targetAccountId)
+            ? { ...c, lastMessage: '暂无消息' }
+            : c
+        )
+      );
+    }
 
     return { ok: true };
   };
@@ -2796,7 +2834,6 @@ export default function App() {
                 allowEmptyCloudPrune: !syncRes.fromLocalFallback,
               }
             );
-            setLocalMessages(payload.toChatId, merged, targetAccountId);
             return { ...prev, [toBucketKey]: merged };
           });
         })
@@ -2823,7 +2860,6 @@ export default function App() {
     setMessagesMap((prev) => {
       const existing = getBucketMessages(prev, targetAccountId, payload.toChatId);
       const next = [...existing, ...cloned];
-      setLocalMessages(payload.toChatId, next, targetAccountId);
       return { ...prev, [toBucketKey]: next };
     });
     const lastCloned = cloned[cloned.length - 1];
@@ -2883,7 +2919,6 @@ export default function App() {
             accountId: targetAccountId,
             chatId,
           });
-          setLocalMessages(chatId, merged, targetAccountId);
           return { ...prev, [bucketKey]: merged };
         });
       }
@@ -2914,7 +2949,6 @@ export default function App() {
         accountId: targetAccountId,
         chatId,
       });
-      setLocalMessages(chatId, merged, targetAccountId);
       return { ...prev, [bucketKey]: merged };
     });
     return { ok: true, count: res.messages.length, hasMore: res.hasMore };
@@ -2962,7 +2996,6 @@ export default function App() {
             }
           : m
       );
-      setLocalMessages(targetChatId, updated, targetAccountId);
       return { ...prev, [bucketKey]: updated };
     });
     return { ok: true };
@@ -2978,7 +3011,6 @@ export default function App() {
       const updated = currentList.map((m) =>
         m.id === messageId ? { ...m, ...patch } : m
       );
-      setLocalMessages(targetChatId, updated, targetAccountId);
       return { ...prev, [bucketKey]: updated };
     });
   };
@@ -3072,7 +3104,6 @@ export default function App() {
               }
             : m
         );
-        setLocalMessages(targetChatId, updated, targetAccountId);
         return { ...prev, [bucketKey]: updated };
       });
       await updateMessageTranslationInDb(messageId, finalTranslatedText, {
@@ -3087,7 +3118,6 @@ export default function App() {
         const updated = list.map((m) =>
           m.id === messageId ? { ...m, isTranslating: false, translationError: errMsg } : m
         );
-        setLocalMessages(targetChatId, updated, targetAccountId);
         return { ...prev, [bucketKey]: updated };
       });
       showCloudError(errMsg);
@@ -3116,9 +3146,6 @@ export default function App() {
         }
         return c;
       });
-      if (anyChatChanged && isHydrated) {
-        secureSetItemSync('tg_pro_chats', updated);
-      }
       return anyChatChanged ? updated : prev;
     });
 
@@ -3146,10 +3173,6 @@ export default function App() {
         if (bucketChanged) {
           anyBucketChanged = true;
           nextMap[bKey] = updatedList;
-          const sepIdx = bKey.indexOf('::');
-          const bAcc = sepIdx >= 0 ? bKey.slice(0, sepIdx) : targetAccId;
-          const bChat = sepIdx >= 0 ? bKey.slice(sepIdx + 2) : bKey;
-          setLocalMessages(bChat, updatedList, bAcc);
         }
       }
       return anyBucketChanged ? nextMap : prev;
@@ -3199,7 +3222,6 @@ export default function App() {
           return { ...m, reactions, myReactions: [...myReactions, emoji] };
         }
       });
-      setLocalMessages(targetChatId, updated, targetAccountId);
       return { ...prev, [bucketKey]: updated };
     });
   };
@@ -3231,7 +3253,6 @@ export default function App() {
       const updated = currentList.map((m) =>
         m.id === messageId ? { ...m, isPinned: willPin } : m
       );
-      setLocalMessages(targetChatId, updated, targetAccountId);
       return { ...prev, [bucketKey]: updated };
     });
   };
@@ -3851,7 +3872,6 @@ export default function App() {
                       allowEmptyCloudPrune: !meta?.fromLocalFallback,
                     }
                   );
-                  setLocalMessages(activeChatId, merged, activeAccountId);
                   return {
                     ...prev,
                     [bucketKey]: merged,

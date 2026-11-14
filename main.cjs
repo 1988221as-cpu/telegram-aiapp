@@ -206,7 +206,7 @@ const SPLASH_HTML = `data:text/html;charset=utf-8,` + encodeURIComponent(`
     <div class="spinner"></div>
     <h2>HumanSense 客户端启动中</h2>
     <p>正在初始化本地加密通信与数据引擎，请稍候片刻...</p>
-    <div class="badge">AES-256-GCM 本地加密引擎已就绪</div>
+    <div class="badge">本地数据与凭据加密引擎已就绪</div>
   </div>
 </body>
 </html>

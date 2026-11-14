@@ -43,21 +43,21 @@ const CHAT_MEMORY_MODEL_PRESETS: Array<{ value: string; label: string }> = [
   { value: 'gemini-flash-latest', label: 'gemini-flash-latest (Google Gemini 官方最新)' },
   { value: 'gemini-2.5-flash', label: 'gemini-2.5-flash (Google Gemini 2.5 高速)' },
   { value: 'gemini-2.5-pro', label: 'gemini-2.5-pro (Google Gemini 2.5 旗舰)' },
-  { value: 'gemini-4-hydrogen', label: 'gemini-4-hydrogen' },
 ];
 
 function sanitizeConfigForUi(cfg: CustomLLMConfig): CustomLLMConfig {
   const baseUrl = isBuiltInCloudGatewayUrl(cfg.baseUrl) ? '' : cfg.baseUrl || '';
   const engineMode: 'cloud' | 'custom' = cfg.engineMode === 'custom' ? 'custom' : 'cloud';
   const enabled = Boolean(cfg.enabled);
-  const modelName = (cfg.modelName || '').trim() || 'gpt-4o-mini';
+  const rawModel = (cfg.modelName || '').trim();
+  const modelName = engineMode === 'custom' ? rawModel || 'gpt-4o-mini' : rawModel;
   return {
     ...cfg,
     enabled,
     explicitlyDisabled: enabled ? false : Boolean(cfg.explicitlyDisabled || cfg.enabled === false),
     engineMode,
     modelName,
-    protocol: inferGatewayProtocolFromUrlAndModel(baseUrl, modelName),
+    protocol: engineMode === 'custom' ? inferGatewayProtocolFromUrlAndModel(baseUrl, modelName) : 'openai',
     baseUrl,
     knowledgeBaseApiUrl: '',
     enableKnowledgeBaseRAG: engineMode === 'cloud' && enabled,
@@ -316,8 +316,10 @@ export const CustomLLMModal: React.FC<CustomLLMModalProps> = ({
       explicitlyDisabled: !Boolean(formData.enabled),
       baseUrl: cleanBaseUrl,
       apiKey: cleanApiKey,
-      modelName: cleanModelName || 'gpt-4o-mini',
-      protocol: inferGatewayProtocolFromUrlAndModel(cleanBaseUrl, cleanModelName || 'gpt-4o-mini'),
+      modelName: savingCustomPriority ? cleanModelName || 'gpt-4o-mini' : cleanModelName,
+      protocol: savingCustomPriority
+        ? inferGatewayProtocolFromUrlAndModel(cleanBaseUrl, cleanModelName || 'gpt-4o-mini')
+        : 'openai',
       enableKnowledgeBaseRAG: !savingCustomPriority && Boolean(formData.enabled),
     });
 

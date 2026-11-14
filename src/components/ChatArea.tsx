@@ -87,7 +87,10 @@ export function getLanguageDisplayName(code: string): string {
   if (code === 'Indonesian' || code === 'id') return '印尼语';
   if (code === 'Portuguese' || code === 'pt') return '葡萄牙语';
   if (code === 'Italian' || code === 'it') return '意大利语';
-  const found = SUPPORTED_LANGUAGES.find((l) => l.code === code);
+  const norm = normalizeLanguageCode(code);
+  const found =
+    SUPPORTED_LANGUAGES.find((l) => l.code === code) ||
+    SUPPORTED_LANGUAGES.find((l) => normalizeLanguageCode(l.code) === norm);
   if (found) {
     const match = found.name.match(/\(([^)]+)\)/);
     if (match && match[1]) {
@@ -110,11 +113,11 @@ export function detectClientLangCode(text: string): string {
     .trim();
   if (!stripped || !/\p{L}/u.test(stripped)) return '';
 
+  if (/[\u3040-\u30ff]/.test(stripped)) return 'ja';
+  if (/[\uac00-\ud7af]/.test(stripped)) return 'ko';
   if (/[\u4e00-\u9fa5]/.test(stripped)) return 'zh-CN';
   if (/[іїєґІЇЄҐ]/.test(stripped) && /[\u0400-\u04FF]/.test(stripped)) return 'uk';
   if (/[\u0400-\u04FF]/.test(stripped)) return 'ru';
-  if (/[\u3040-\u30ff]/.test(stripped)) return 'ja';
-  if (/[\uac00-\ud7af]/.test(stripped)) return 'ko';
   if (/[پچژگک]/.test(stripped) && /[\u0600-\u06FF]/.test(stripped)) return 'fa';
   if (/[\u0600-\u06FF]/.test(stripped)) return 'ar';
   if (/[\u0590-\u05FF]/.test(stripped)) return 'he';
@@ -173,16 +176,16 @@ export function detectClientLangCode(text: string): string {
     return 'pl';
   }
   if (
-    /ß/.test(stripped) ||
-    (/\b(guten tag|guten morgen|danke|bitte|wie geht|hallo|tschüss|tschuess|auf wiedersehen|ich bin|nicht|sehr gut)\b/i.test(stripped) &&
-      !/\b(goedemorgen|dank je|hoe gaat)\b/i.test(stripped))
-  ) {
-    return 'de';
-  }
-  if (
-    /\b(goedemorgen|goedemiddag|goedenavond|hoe gaat het|met jou|dank je|dank u|alsjeblieft|alstublieft|tot ziens|welkom|graag|vandaag|nederlands|ik ben|ik wil|jij bent|het is)\b/i.test(stripped)
+    /\b(goedemorgen|goedemiddag|goedenavond|hoe gaat|hoe is het|met jou|dank je|dank u|alsjeblieft|alstublieft|tot ziens|welkom|graag|vandaag|nederlands|ik ben|ik wil|jij bent|het is)\b/i.test(stripped)
   ) {
     return 'nl';
+  }
+  if (
+    /ß/.test(stripped) ||
+    (/\b(guten tag|guten morgen|danke|bitte|wie geht|hallo|tschüss|tschuess|auf wiedersehen|ich bin|nicht|sehr gut)\b/i.test(stripped) &&
+      !/\b(goedemorgen|goedemiddag|goedenavond|hoe gaat|hoe is het|met jou|dank je|dank u|alsjeblieft|alstublieft|tot ziens|welkom|graag|vandaag|nederlands|ik ben|ik wil|jij bent|het is)\b/i.test(stripped))
+  ) {
+    return 'de';
   }
   if (
     /[åÅ]/.test(stripped) ||
@@ -241,6 +244,62 @@ export function detectClientLangCode(text: string): string {
   return '';
 }
 
+export function hasTranslatableLetters(text: string): boolean {
+  if (!text || typeof text !== 'string') return false;
+  const stripped = text
+    .trim()
+    .replace(/https?:\/\/\S+/gi, ' ')
+    .replace(/\bwww\.\S+/gi, ' ')
+    .replace(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi, ' ')
+    .replace(/@[a-zA-Z0-9_]+/g, ' ')
+    .trim();
+  return Boolean(stripped && /\p{L}/u.test(stripped));
+}
+
+const DETECTED_CODE_TO_LANGUAGE_NAME: Record<string, string> = {
+  'zh-CN': 'Chinese',
+  'zh-TW': 'Traditional Chinese',
+  en: 'English',
+  ru: 'Russian',
+  es: 'Spanish',
+  ar: 'Arabic',
+  ja: 'Japanese',
+  ko: 'Korean',
+  pt: 'Portuguese',
+  vi: 'Vietnamese',
+  fr: 'French',
+  de: 'German',
+  id: 'Indonesian',
+  th: 'Thai',
+  tr: 'Turkish',
+  it: 'Italian',
+  nl: 'Dutch',
+  pl: 'Polish',
+  uk: 'Ukrainian',
+  hi: 'Hindi',
+  ms: 'Malay',
+  tl: 'Filipino',
+  my: 'Burmese',
+  km: 'Khmer',
+  lo: 'Lao',
+  fa: 'Persian',
+  he: 'Hebrew',
+  el: 'Greek',
+  sv: 'Swedish',
+  da: 'Danish',
+  no: 'Norwegian',
+  fi: 'Finnish',
+  cs: 'Czech',
+  hu: 'Hungarian',
+  ro: 'Romanian',
+  bn: 'Bengali',
+  ta: 'Tamil',
+  te: 'Telugu',
+  ka: 'Georgian',
+  hy: 'Armenian',
+  am: 'Amharic',
+};
+
 export function getOutboundTargetLanguage(
   chat?: Chat | null,
   settings?: TranslationSettings | null,
@@ -260,20 +319,7 @@ export function getOutboundTargetLanguage(
     const lastPeerMsg = peerMessages[peerMessages.length - 1];
     if (lastPeerMsg?.text) {
       const code = detectClientLangCode(lastPeerMsg.text);
-      if (code === 'tr') return 'Turkish';
-      if (code === 'ru') return 'Russian';
-      if (code === 'ja') return 'Japanese';
-      if (code === 'ko') return 'Korean';
-      if (code === 'ar') return 'Arabic';
-      if (code === 'es') return 'Spanish';
-      if (code === 'pt') return 'Portuguese';
-      if (code === 'fr') return 'French';
-      if (code === 'de') return 'German';
-      if (code === 'vi') return 'Vietnamese';
-      if (code === 'th') return 'Thai';
-      if (code === 'id') return 'Indonesian';
-      if (code === 'en') return 'English';
-      if (code) return code;
+      if (code) return DETECTED_CODE_TO_LANGUAGE_NAME[code] || code;
     }
   }
 
@@ -1167,7 +1213,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
     }
 
     const queryText = inputText.trim();
-    if (!queryText || translationSettings?.autoTranslateOutbound === false || (editingMessage && !translateOnEdit)) {
+    if (!queryText || !hasTranslatableLetters(queryText) || translationSettings?.autoTranslateOutbound === false || (editingMessage && !translateOnEdit)) {
       setTranslatedPreview('');
       setTranslatedPreviewSource('');
       setPreviewError('');
@@ -1255,10 +1301,11 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
         !bypassTranslation &&
         translationSettings?.autoTranslateOutbound !== false &&
         (!editingMessage || translateOnEdit);
+      const hasTextToTranslate = hasTranslatableLetters(textToSend);
       let targetText = textToSend;
       let translationOfTarget = '';
 
-      if (shouldAutoTranslate) {
+      if (shouldAutoTranslate && hasTextToTranslate) {
         const inputNormCode = normalizeChatLangCode(detectClientLangCode(textToSend));
         const targetNormCode = normalizeChatLangCode(outboundTargetLang);
         const inboundNormCode = normalizeChatLangCode(inboundTargetLang);
@@ -2541,7 +2588,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                           type="button"
                           onClick={() => {
                             if (lang.code === 'Auto') {
-                              onUpdateChatLanguage?.(chat.id, 'Auto', 'Auto');
+                              onUpdateChatLanguage?.(chat.id, 'Auto', chat.targetLang || 'Auto');
                             } else {
                               onUpdateChatLanguage?.(chat.id, lang.code, chat.targetLang || 'Auto');
                             }

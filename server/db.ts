@@ -1,6 +1,7 @@
 import { createClient, type Client } from '@libsql/client';
 import path from 'path';
 import fs from 'fs';
+import os from 'os';
 import { fileURLToPath } from 'url';
 import dotenv from 'dotenv';
 
@@ -114,8 +115,11 @@ export function resolveDatabaseLocation(): {
     // ignore
   }
 
-  // 6. Local project fallback
-  const localDir = path.resolve(__dirname, '../data');
+  // 6. Local project fallback (never attempt to write SQLite inside read-only app.asar bundle)
+  let localDir = path.resolve(__dirname, '../data');
+  if (/[\\/]app\.asar([\\/]|$)/i.test(localDir)) {
+    localDir = path.join(os.homedir(), '.humansense', 'data');
+  }
   if (!fs.existsSync(localDir)) {
     try { fs.mkdirSync(localDir, { recursive: true }); } catch { /* ignore */ }
   }
@@ -261,14 +265,14 @@ export async function initDatabase() {
       chat_id TEXT PRIMARY KEY,
       account_id TEXT NOT NULL,
       client_name TEXT NOT NULL,
-      relationship_stage TEXT DEFAULT '活跃联系人',
+      relationship_stage TEXT DEFAULT '初次接触',
       age_estimate TEXT DEFAULT '-',
-      occupation TEXT DEFAULT '商务合作客户',
+      occupation TEXT DEFAULT '',
       location_timezone TEXT DEFAULT 'UTC+8',
-      tone_style TEXT DEFAULT '沟通清晰简洁',
-      likes_interests TEXT DEFAULT '["高效沟通", "产品方案", "项目细节"]',
-      dislikes_taboos TEXT DEFAULT '["拖沓回复"]',
-      emotional_needs TEXT DEFAULT '关注服务效率与沟通质量',
+      tone_style TEXT DEFAULT '',
+      likes_interests TEXT DEFAULT '[]',
+      dislikes_taboos TEXT DEFAULT '[]',
+      emotional_needs TEXT DEFAULT '',
       key_memories TEXT DEFAULT '[]',
       total_messages_count INTEGER DEFAULT 0,
       last_analyzed_at INTEGER DEFAULT 0,
@@ -280,14 +284,14 @@ export async function initDatabase() {
       account_id TEXT NOT NULL,
       chat_id TEXT NOT NULL,
       client_name TEXT NOT NULL,
-      relationship_stage TEXT DEFAULT '活跃联系人',
+      relationship_stage TEXT DEFAULT '初次接触',
       age_estimate TEXT DEFAULT '-',
-      occupation TEXT DEFAULT '商务合作客户',
+      occupation TEXT DEFAULT '',
       location_timezone TEXT DEFAULT 'UTC+8',
-      tone_style TEXT DEFAULT '沟通清晰简洁',
-      likes_interests TEXT DEFAULT '["高效沟通", "产品方案", "项目细节"]',
-      dislikes_taboos TEXT DEFAULT '["拖沓回复"]',
-      emotional_needs TEXT DEFAULT '关注服务效率与沟通质量',
+      tone_style TEXT DEFAULT '',
+      likes_interests TEXT DEFAULT '[]',
+      dislikes_taboos TEXT DEFAULT '[]',
+      emotional_needs TEXT DEFAULT '',
       key_memories TEXT DEFAULT '[]',
       total_messages_count INTEGER DEFAULT 0,
       last_analyzed_at INTEGER DEFAULT 0,
@@ -635,7 +639,18 @@ export const snapshotFilePath = path.join(dbDir, 'telegram_pro_snapshot.json');
 
 // Export entire database contents into a portable JSON snapshot (Excludes sensitive telegram_user_sessions)
 export async function exportDatabaseSnapshot() {
-  const [messages, profiles, accountProfiles, knowledge, transcripts, config, chatLangPrefs] = await Promise.all([
+  const [
+    messages,
+    profiles,
+    accountProfiles,
+    knowledge,
+    transcripts,
+    config,
+    chatLangPrefs,
+    mediaMaterials,
+    personaScheduleVault,
+    trainingLogs,
+  ] = await Promise.all([
     turso.execute('SELECT * FROM messages'),
     turso.execute('SELECT * FROM customer_profiles'),
     turso.execute('SELECT * FROM account_customer_profiles'),
@@ -643,6 +658,9 @@ export async function exportDatabaseSnapshot() {
     turso.execute('SELECT * FROM chat_transcripts'),
     turso.execute('SELECT * FROM system_config'),
     turso.execute('SELECT * FROM chat_language_prefs').catch(() => ({ rows: [] as any[] })),
+    turso.execute('SELECT * FROM media_materials').catch(() => ({ rows: [] as any[] })),
+    turso.execute('SELECT * FROM persona_schedule_vault').catch(() => ({ rows: [] as any[] })),
+    turso.execute('SELECT * FROM training_logs').catch(() => ({ rows: [] as any[] })),
   ]);
 
   const safeConfigRows = (config.rows || [])
@@ -675,6 +693,9 @@ export async function exportDatabaseSnapshot() {
       knowledge: knowledge.rows.length,
       transcripts: transcripts.rows.length,
       chatLanguagePrefs: (chatLangPrefs?.rows || []).length,
+      materials: (mediaMaterials?.rows || []).length,
+      personas: (personaScheduleVault?.rows || []).length,
+      trainingLogs: (trainingLogs?.rows || []).length,
       userSessions: 0, // Explicitly excluded for security: sessions must never be exported
     },
     tables: {
@@ -685,6 +706,9 @@ export async function exportDatabaseSnapshot() {
       chat_transcripts: transcripts.rows,
       system_config: safeConfigRows,
       chat_language_prefs: chatLangPrefs?.rows || [],
+      media_materials: mediaMaterials?.rows || [],
+      persona_schedule_vault: personaScheduleVault?.rows || [],
+      training_logs: trainingLogs?.rows || [],
       // telegram_user_sessions & sensitive credentials intentionally excluded to protect authentication credentials
     },
   };
@@ -747,11 +771,11 @@ export async function restoreDatabaseSnapshot(snapshot: any): Promise<{ success:
         p.chat_id ?? '',
         p.account_id ?? 'acc_1',
         p.client_name ?? '',
-        p.relationship_stage ?? '活跃联系人',
+        p.relationship_stage ?? '初次接触',
         p.age_estimate ?? '-',
-        p.occupation ?? '商务合作客户',
+        p.occupation ?? '',
         p.location_timezone ?? 'UTC+8',
-        p.tone_style ?? '沟通清晰简洁',
+        p.tone_style ?? '',
         p.likes_interests ?? '[]',
         p.dislikes_taboos ?? '[]',
         p.emotional_needs ?? '',
@@ -775,11 +799,11 @@ export async function restoreDatabaseSnapshot(snapshot: any): Promise<{ success:
         p.account_id ?? 'acc_1',
         p.chat_id ?? '',
         p.client_name ?? '',
-        p.relationship_stage ?? '活跃联系人',
+        p.relationship_stage ?? '初次接触',
         p.age_estimate ?? '-',
-        p.occupation ?? '商务合作客户',
+        p.occupation ?? '',
         p.location_timezone ?? 'UTC+8',
-        p.tone_style ?? '沟通清晰简洁',
+        p.tone_style ?? '',
         p.likes_interests ?? '[]',
         p.dislikes_taboos ?? '[]',
         p.emotional_needs ?? '',
@@ -817,32 +841,56 @@ export async function restoreDatabaseSnapshot(snapshot: any): Promise<{ success:
     }
   }
 
-  if (Array.isArray(tables.media_materials)) {
-    for (const m of tables.media_materials) {
-      await db.prepare(`
-        INSERT OR REPLACE INTO media_materials (
-          id, category, title, description, tags, image_url, usage_count, last_used_at, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `).run(
-        m.id, m.category, m.title, m.description, m.tags, m.image_url,
-        m.usage_count, m.last_used_at, m.created_at
-      );
+  if (Array.isArray(tables.media_materials) && tables.media_materials.length > 0) {
+    try {
+      for (const m of tables.media_materials) {
+        await db.prepare(`
+          INSERT OR REPLACE INTO media_materials (
+            id, category, title, description, tags, image_url, usage_count, last_used_at, created_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `).run(
+          m.id, m.category, m.title, m.description, m.tags, m.image_url,
+          m.usage_count, m.last_used_at, m.created_at
+        );
+      }
+    } catch (e: any) {
+      console.warn('[Snapshot Restore] Skipping optional media_materials restore:', e?.message || e);
     }
   }
 
-  if (Array.isArray(tables.persona_schedule_vault)) {
-    for (const p of tables.persona_schedule_vault) {
-      await db.prepare(`
-        INSERT OR REPLACE INTO persona_schedule_vault (
-          id, account_id, persona_name, occupation, city, timezone, weather_condition,
-          temperature, current_status, weekly_schedule, daily_timeline, tone_style,
-          reply_rhythm_rules, is_active, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `).run(
-        p.id, p.account_id, p.persona_name, p.occupation, p.city, p.timezone, p.weather_condition,
-        p.temperature, p.current_status, p.weekly_schedule, p.daily_timeline, p.tone_style,
-        p.reply_rhythm_rules, p.is_active, p.updated_at
-      );
+  if (Array.isArray(tables.persona_schedule_vault) && tables.persona_schedule_vault.length > 0) {
+    try {
+      for (const p of tables.persona_schedule_vault) {
+        await db.prepare(`
+          INSERT OR REPLACE INTO persona_schedule_vault (
+            id, account_id, persona_name, occupation, city, timezone, weather_condition,
+            temperature, current_status, weekly_schedule, daily_timeline, tone_style,
+            reply_rhythm_rules, is_active, updated_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `).run(
+          p.id, p.account_id, p.persona_name, p.occupation, p.city, p.timezone, p.weather_condition,
+          p.temperature, p.current_status, p.weekly_schedule, p.daily_timeline, p.tone_style,
+          p.reply_rhythm_rules, p.is_active, p.updated_at
+        );
+      }
+    } catch (e: any) {
+      console.warn('[Snapshot Restore] Skipping optional persona_schedule_vault restore:', e?.message || e);
+    }
+  }
+
+  if (Array.isArray(tables.training_logs) && tables.training_logs.length > 0) {
+    try {
+      for (const tl of tables.training_logs) {
+        await db.prepare(`
+          INSERT OR REPLACE INTO training_logs (
+            id, log_type, details, items_learned, created_at
+          ) VALUES (?, ?, ?, ?, ?)
+        `).run(
+          tl.id, tl.log_type ?? 'manual', tl.details ?? '', Number(tl.items_learned) || 0, Number(tl.created_at) || Date.now()
+        );
+      }
+    } catch (e: any) {
+      console.warn('[Snapshot Restore] Skipping training_logs restore:', e?.message || e);
     }
   }
 
@@ -929,6 +977,7 @@ export async function restoreDatabaseSnapshot(snapshot: any): Promise<{ success:
       transcripts: tables.chat_transcripts?.length || 0,
       materials: tables.media_materials?.length || 0,
       personas: tables.persona_schedule_vault?.length || 0,
+      trainingLogs: tables.training_logs?.length || 0,
       systemConfig: restoredConfigCount,
       chatLanguagePrefs: restoredLangPrefCount,
       userSessions: tables.telegram_user_sessions?.length || 0,
@@ -954,4 +1003,74 @@ export async function autoRestoreSnapshotIfAvailable(): Promise<boolean> {
   }
   return false;
 }
+
+// Completely shred all local business tables & disk snapshot (keeps membership/Telegram API auth config intact)
+export async function purgeDatabaseBusinessData(): Promise<{
+  deletedMessages: number;
+  deletedProfiles: number;
+  deletedKnowledge: number;
+  deletedTranscripts: number;
+}> {
+  const countTable = async (tableName: string): Promise<number> => {
+    try {
+      const row = (await db.prepare(`SELECT count(*) as count FROM ${tableName}`).get()) as any;
+      return Number(row?.count || 0);
+    } catch {
+      return 0;
+    }
+  };
+
+  const deletedMessages = await countTable('messages');
+  const deletedProfiles =
+    (await countTable('customer_profiles')) + (await countTable('account_customer_profiles'));
+  const deletedKnowledge = await countTable('knowledge_base');
+  const deletedTranscripts = await countTable('chat_transcripts');
+
+  const tablesToClear = [
+    'messages',
+    'customer_profiles',
+    'account_customer_profiles',
+    'knowledge_base',
+    'chat_transcripts',
+    'media_materials',
+    'persona_schedule_vault',
+    'chat_language_prefs',
+    'training_logs',
+    'custom_llm_daily_usage',
+  ];
+
+  for (const tbl of tablesToClear) {
+    try {
+      await db.execute(`DELETE FROM ${tbl}`);
+    } catch {
+      // ignore if table does not exist yet
+    }
+  }
+
+  // Also clear global persona / evolution state entries in system_config while preserving auth & API gateway settings
+  try {
+    await db.execute(
+      `DELETE FROM system_config WHERE key IN ('global_persona', 'global_persona_config', 'evolution_engine_state', 'evolution_state')`
+    );
+  } catch {
+    // ignore
+  }
+
+  // Remove disk snapshot file so shredded records do not auto-restore on next boot
+  try {
+    if (fs.existsSync(snapshotFilePath)) {
+      fs.unlinkSync(snapshotFilePath);
+    }
+  } catch (err: any) {
+    console.warn('[Database Purge] Failed to remove snapshot file:', err.message);
+  }
+
+  return {
+    deletedMessages,
+    deletedProfiles,
+    deletedKnowledge,
+    deletedTranscripts,
+  };
+}
+
 

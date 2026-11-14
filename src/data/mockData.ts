@@ -13,7 +13,7 @@ export const INITIAL_CUSTOM_LLM: CustomLLMConfig = {
   protocol: 'openai',
   baseUrl: '',
   apiKey: '',
-  modelName: 'gpt-4o-mini',
+  modelName: '',
   temperature: 0.7,
   customHeaders: '',
   useForTranslation: true,

@@ -956,7 +956,7 @@ test('callCustomLlm throws explicitly when throwOnError=true and custom gateway 
         throwOnError: true,
         skipSync: true,
       }),
-    /自定义大模型未启用/
+    /双关状态|自定义大模型未启用/
   );
 
   await assert.rejects(
@@ -1713,7 +1713,7 @@ test('Issue #16: server routes default cloud brain requests through Cloudflare W
   assert.equal(workerSrc.includes("'X-Engine-License'"), true);
   assert.equal(workerSrc.includes("'X-License-Key'"), true);
   assert.equal(workerSrc.includes('telegram-messages-reply-to-large-models-production.up.railway.app'), false);
-  assert.match(serverSrc, /searchRailwayKnowledgeBase\(\s*text,[\s\S]*?lastActiveUserJwt \|\| undefined/);
+  assert.match(serverSrc, /searchRailwayKnowledgeBase\(\s*(?:text|effectiveIncomingText),[\s\S]*?lastActiveUserJwt \|\| undefined/);
   assert.match(serverSrc, /searchRailwayKnowledgeBase\(\s*combinedText,[\s\S]*?lastActiveUserJwt \|\| undefined/);
   assert.match(serverSrc, /callCustomLlm\(\{\s*customConfig: serverCustomConfig,[\s\S]*?userJwt: lastActiveUserJwt \|\| undefined/);
 });
@@ -4796,5 +4796,353 @@ test('Audit #2 & #3 regressions: translateText 3-state race elimination, /api/au
   }
 });
 
+test('Audit P2 (#5-#8): Dutch vs German detection, non-letter skip, non-Latin getCnTranslationIfForeign, and ChatArea outbound/Auto UX fixes', async () => {
+  const { readFileSync } = await import('node:fs');
+  const { resolve } = await import('node:path');
+  const { initDatabase } = await import('./db.ts');
+  const {
+    detectSourceLangCode,
+    getCnTranslationIfForeign,
+    syncServerCustomLlmConfig,
+    getServerCustomLlmConfig,
+    syncServerTranslationSettings,
+    getServerTranslationSettings,
+  } = await import('../server.ts');
+  const {
+    detectClientLangCode,
+    hasTranslatableLetters,
+    getOutboundTargetLanguage,
+    getLanguageDisplayName,
+  } = await import('../src/components/ChatArea.tsx');
 
+  await initDatabase();
 
+  // #5: Dutch 'hallo' phrases must NOT be hijacked by German, while German still detects as 'de'
+  for (const nlSample of ['Hallo, ik ben Jan', 'Hallo, alsjeblieft', 'Hallo, hoe is het']) {
+    assert.equal(detectSourceLangCode(nlSample), 'nl', `server detectSourceLangCode failed for: ${nlSample}`);
+    assert.equal(detectClientLangCode(nlSample), 'nl', `client detectClientLangCode failed for: ${nlSample}`);
+  }
+  assert.equal(detectSourceLangCode('Hallo, wie geht es dir?'), 'de');
+  assert.equal(detectClientLangCode('Hallo, wie geht es dir?'), 'de');
+  // Mixed Kanji + Kana Japanese must resolve to 'ja', not 'zh-CN'
+  assert.equal(detectSourceLangCode('確認しました。ありがとうございます！'), 'ja');
+  assert.equal(detectClientLangCode('確認しました。ありがとうございます！'), 'ja');
+
+  // #6: hasTranslatableLetters skips pure digits, URLs, emails, @mentions, emojis
+  assert.equal(hasTranslatableLetters('123456'), false);
+  assert.equal(hasTranslatableLetters('https://t.me/abc'), false);
+  assert.equal(hasTranslatableLetters('www.example.com/order/99'), false);
+  assert.equal(hasTranslatableLetters('user@example.com'), false);
+  assert.equal(hasTranslatableLetters('@alice_bot'), false);
+  assert.equal(hasTranslatableLetters('100.50 👍'), false);
+  assert.equal(hasTranslatableLetters('Hello @alice'), true);
+  assert.equal(hasTranslatableLetters('订单号 123456'), true);
+
+  const chatAreaSrc = readFileSync(resolve(process.cwd(), 'src/components/ChatArea.tsx'), 'utf8');
+  assert.match(chatAreaSrc, /!queryText \|\| !hasTranslatableLetters\(queryText\)/);
+  assert.match(chatAreaSrc, /const hasTextToTranslate = hasTranslatableLetters\(textToSend\);/);
+  assert.match(chatAreaSrc, /if \(shouldAutoTranslate && hasTextToTranslate\)/);
+
+  // #8: getOutboundTargetLanguage returns full names for nl/pl/sv/uk/fa, getLanguageDisplayName renders Chinese label, and Auto reset preserves chat.targetLang
+  assert.equal(
+    getOutboundTargetLanguage({ id: 'c1', sourceLang: 'Auto', targetLang: 'Chinese' } as any, { defaultSourceLang: 'Auto' } as any, [
+      { id: 'm1', sender: 'peer', text: 'Hallo, ik ben Jan', timestamp: '10:00' } as any,
+    ]),
+    'Dutch'
+  );
+  assert.equal(
+    getOutboundTargetLanguage({ id: 'c2', sourceLang: 'Auto', targetLang: 'Chinese' } as any, { defaultSourceLang: 'Auto' } as any, [
+      { id: 'm2', sender: 'peer', text: 'Dzień dobry, jak się masz?', timestamp: '10:00' } as any,
+    ]),
+    'Polish'
+  );
+  assert.equal(
+    getOutboundTargetLanguage({ id: 'c3', sourceLang: 'Auto', targetLang: 'Chinese' } as any, { defaultSourceLang: 'Auto' } as any, [
+      { id: 'm3', sender: 'peer', text: 'Hej, hur mår du?', timestamp: '10:00' } as any,
+    ]),
+    'Swedish'
+  );
+  assert.equal(getLanguageDisplayName('Dutch'), '荷兰语');
+  assert.equal(getLanguageDisplayName('Polish'), '波兰语');
+  assert.equal(getLanguageDisplayName('Swedish'), '瑞典语');
+  assert.match(chatAreaSrc, /if \(lang\.code === 'Auto'\)\s*\{\s*onUpdateChatLanguage\?\.\(chat\.id,\s*'Auto',\s*chat\.targetLang \|\| 'Auto'\);/);
+
+  // #7: getCnTranslationIfForeign detects ja/ko/th/he/el and honors non-Chinese defaultTargetLang, skipping only same-language & non-letter texts
+  const serverSrc = readFileSync(resolve(process.cwd(), 'server.ts'), 'utf8');
+  assert.equal(serverSrc.includes("if (replyText && !/[\\u4e00-\\u9fa5]/.test(replyText))"), false);
+
+  const prevTransSettings = await getServerTranslationSettings();
+  const prevCfg = await getServerCustomLlmConfig();
+  const prevFetch = globalThis.fetch;
+  let fetchCalls = 0;
+
+  try {
+    await syncServerCustomLlmConfig({
+      enabled: false,
+      explicitlyDisabled: true,
+      engineMode: 'cloud',
+    });
+
+    await syncServerTranslationSettings({
+      preferredEngine: 'google',
+      defaultTargetLang: 'Chinese',
+      defaultSourceLang: 'Auto',
+    });
+
+    globalThis.fetch = (async (input: any) => {
+      fetchCalls++;
+      const url = new URL(String(input));
+      const tl = url.searchParams.get('tl') || 'zh-CN';
+      const q = url.searchParams.get('q') || '';
+      return new Response(JSON.stringify([[[`[TRANS:${tl}] ${q}`]]]), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }) as any;
+
+    for (const sample of [
+      '確認しました。ありがとうございます！',
+      '안녕하세요',
+      'สวัสดีครับ',
+      'שלום חבר',
+      'Γεια σας',
+    ]) {
+      const before = fetchCalls;
+      const out = await getCnTranslationIfForeign(sample);
+      assert.equal(fetchCalls, before + 1, `Expected translation call for ${sample}`);
+      assert.match(out, /^\[TRANS:zh-CN\]/);
+    }
+
+    // Same-language Chinese and non-letter inputs must skip translation without calling fetch
+    const callsBeforeSkip = fetchCalls;
+    assert.equal(await getCnTranslationIfForeign('你好，请稍等'), '');
+    assert.equal(await getCnTranslationIfForeign('123456'), '');
+    assert.equal(await getCnTranslationIfForeign('https://t.me/abc @alice'), '');
+    assert.equal(fetchCalls, callsBeforeSkip);
+
+    // Non-Chinese defaultTargetLang ('English'): Chinese reply MUST translate to English; English reply MUST skip
+    await syncServerTranslationSettings({
+      preferredEngine: 'google',
+      defaultTargetLang: 'English',
+      defaultSourceLang: 'Auto',
+    });
+
+    const zhToEn = await getCnTranslationIfForeign('你好，请稍等');
+    assert.match(zhToEn, /^\[TRANS:en\]/);
+
+    const callsBeforeEnSkip = fetchCalls;
+    assert.equal(await getCnTranslationIfForeign('Hello, how can I help you today?'), '');
+    assert.equal(fetchCalls, callsBeforeEnSkip);
+  } finally {
+    globalThis.fetch = prevFetch;
+    await syncServerTranslationSettings(
+      prevTransSettings || { preferredEngine: 'gemini', defaultTargetLang: 'Chinese', defaultSourceLang: 'Auto' }
+    );
+    await syncServerCustomLlmConfig(prevCfg || { enabled: true, explicitlyDisabled: false, engineMode: 'cloud', enableKnowledgeBaseRAG: true });
+  }
+});
+
+test('H1: extractRecentTwoWayMessages, /api/llm/chat, MTProto autopilot, and Bot webhook strictly isolate chat history by account_id', async () => {
+  const { readFileSync } = await import('node:fs');
+  const { resolve } = await import('node:path');
+  const { db } = await import('../server/db.ts');
+  const { extractRecentTwoWayMessages } = await import('../server.ts');
+
+  const peerNumericId = `${Date.now()}${Math.floor(Math.random() * 1000)}`;
+  const sharedChatId = `tg_${peerNumericId}`;
+  const baseTs = Date.now() - 50000;
+
+  try {
+    const insertStmt = db.prepare(`
+      INSERT INTO messages (
+        id, chat_id, account_id, sender, text, stt_text, image_caption, timestamp, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+
+    await insertStmt.run(
+      `h1_a1_${peerNumericId}`,
+      sharedChatId,
+      'acc_tg_1001',
+      'peer',
+      'Secret message from Account A peer',
+      '',
+      '',
+      '10:00',
+      baseTs + 100
+    );
+    await insertStmt.run(
+      `h1_a2_${peerNumericId}`,
+      peerNumericId,
+      '1001',
+      'me',
+      'Reply from Account A variant',
+      '',
+      '',
+      '10:01',
+      baseTs + 200
+    );
+    await insertStmt.run(
+      `h1_b1_${peerNumericId}`,
+      sharedChatId,
+      'acc_tg_2002',
+      'peer',
+      'Confidential message from Account B peer',
+      '',
+      '',
+      '10:02',
+      baseTs + 300
+    );
+    await insertStmt.run(
+      `h1_bot_${peerNumericId}`,
+      sharedChatId,
+      'acc_telegram_bot',
+      'peer',
+      'Bot-only message',
+      '',
+      '',
+      '10:03',
+      baseTs + 400
+    );
+
+    const turnsA = await extractRecentTwoWayMessages(
+      sharedChatId,
+      peerNumericId,
+      [
+        { id: `h1_client_a_${peerNumericId}`, accountId: 'acc_tg_1001', sender: 'me', text: 'Account A client buffer', createdAt: baseTs + 500 },
+        { id: `h1_client_b_${peerNumericId}`, accountId: 'acc_tg_2002', sender: 'peer', text: 'Foreign Account B client leak', createdAt: baseTs + 600 },
+      ],
+      30,
+      'acc_tg_1001'
+    );
+    assert.deepEqual(
+      turnsA.map((t) => t.text),
+      ['Secret message from Account A peer', 'Reply from Account A variant', 'Account A client buffer']
+    );
+
+    const turnsB = await extractRecentTwoWayMessages(sharedChatId, peerNumericId, [], 30, 'acc_tg_2002');
+    assert.deepEqual(turnsB.map((t) => t.text), ['Confidential message from Account B peer']);
+
+    const turnsBot = await extractRecentTwoWayMessages(sharedChatId, peerNumericId, [], 30, 'acc_telegram_bot');
+    assert.deepEqual(turnsBot.map((t) => t.text), ['Bot-only message']);
+
+    const serverSrc = readFileSync(resolve(process.cwd(), 'server.ts'), 'utf8');
+    assert.equal(
+      serverSrc.includes('extractRecentTwoWayMessages(customerId, altCustomerId, messages, 30, accountId)'),
+      true,
+      'Expected /api/llm/chat to pass accountId into extractRecentTwoWayMessages'
+    );
+    assert.equal(
+      serverSrc.includes('extractRecentTwoWayMessages(canonicalChatId, rawChatId, [], 20, accountId)'),
+      true,
+      'Expected MTProto autopilot to pass accountId into extractRecentTwoWayMessages'
+    );
+    assert.equal(
+      serverSrc.includes("WHERE (chat_id = ? OR chat_id = ?) AND account_id IN ('acc_telegram_bot', 'acc_1')"),
+      true,
+      'Expected processTelegramMessageAsync to restrict recentMessages query to Bot/acc_1 scope'
+    );
+  } finally {
+    await db
+      .prepare('DELETE FROM messages WHERE chat_id IN (?, ?)')
+      .run(sharedChatId, peerNumericId)
+      .catch(() => {});
+  }
+});
+
+test('H2: trust proxy avoids ERR_ERL_PERMISSIVE_TRUST_PROXY, removes admin password log, aligns snapshot/purge tables, and allows member DB backup/restore/purge', async () => {
+  const { createHmac } = await import('node:crypto');
+  const { readFileSync } = await import('node:fs');
+  const { resolve } = await import('node:path');
+  const http = await import('node:http');
+  const {
+    db,
+    exportDatabaseSnapshot,
+    restoreDatabaseSnapshot,
+    purgeDatabaseBusinessData,
+    saveGlobalPersonaToDb,
+    getGlobalPersonaFromDb,
+  } = await import('../server/db.ts');
+  const { app, TELEGRAM_WEBHOOK_SECRET } = await import('../server.ts');
+
+  // 1. trust proxy must not be boolean true (desktop/local uses 'loopback', Railway uses 1)
+  assert.notEqual(app.get('trust proxy'), true);
+
+  // 2. Dead admin plaintext password initialization & console.log must be removed; package.json & db.ts guard app.asar
+  const serverSrc = readFileSync(resolve(process.cwd(), 'server.ts'), 'utf8');
+  assert.equal(serverSrc.includes('generatedAdminPlaintext'), false);
+  assert.equal(serverSrc.includes('Admin password initialized:'), false);
+
+  const pkgJson = JSON.parse(readFileSync(resolve(process.cwd(), 'package.json'), 'utf8'));
+  const asarUnpack: string[] = pkgJson?.build?.asarUnpack || [];
+  assert.equal(asarUnpack.includes('node_modules/@libsql/**/*'), true);
+  assert.equal(asarUnpack.includes('node_modules/ffmpeg-static/**/*'), true);
+
+  const dbSrc = readFileSync(resolve(process.cwd(), 'server/db.ts'), 'utf8');
+  assert.match(dbSrc, /app\.asar/);
+
+  // 3. Snapshot export includes media_materials, persona_schedule_vault, training_logs, and restore/purge handle them cleanly
+  const prevPersona = await getGlobalPersonaFromDb();
+  const prevSnapshot = await exportDatabaseSnapshot();
+  assert.equal(Array.isArray((prevSnapshot.tables as any).media_materials), true);
+  assert.equal(Array.isArray((prevSnapshot.tables as any).persona_schedule_vault), true);
+  assert.equal(Array.isArray((prevSnapshot.tables as any).training_logs), true);
+
+  // 4. Test /api/database/backup & /api/database/purge permissions + rate limiters (member JWT allowed, bot webhook 403)
+  const prevJwtSecret = process.env.JWT_SECRET;
+  process.env.JWT_SECRET = 'h2_test_jwt_secret';
+  const srv = http.createServer(app);
+  await new Promise<void>((r) => srv.listen(0, '127.0.0.1', r));
+  const port = (srv.address() as any).port;
+
+  const headerB64 = Buffer.from(JSON.stringify({ alg: 'HS256', typ: 'JWT' })).toString('base64url');
+  const payloadB64 = Buffer.from(
+    JSON.stringify({ sub: 'member_h2', username: 'member_h2', role: 'member', exp: Math.floor(Date.now() / 1000) + 3600 })
+  ).toString('base64url');
+  const sigB64 = createHmac('sha256', process.env.JWT_SECRET).update(`${headerB64}.${payloadB64}`).digest('base64url');
+  const memberJwt = `${headerB64}.${payloadB64}.${sigB64}`;
+
+  try {
+    // Trigger aiGenerationLimiter with X-Forwarded-For to verify no ERR_ERL_PERMISSIVE_TRUST_PROXY / XFF error
+    const chatRes = await fetch(`http://127.0.0.1:${port}/api/llm/chat`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${memberJwt}`,
+        'X-Forwarded-For': '203.0.113.9',
+      },
+      body: JSON.stringify({ chatId: '', messages: [] }),
+    });
+    assert.notEqual(chatRes.status, 500);
+
+    // Member JWT can export backup (200)
+    const backupRes = await fetch(`http://127.0.0.1:${port}/api/database/backup`, {
+      headers: { Authorization: `Bearer ${memberJwt}` },
+    });
+    assert.equal(backupRes.status, 200);
+
+    // Bot Webhook session MUST be denied (403) on backup / restore / purge
+    const botBackupRes = await fetch(`http://127.0.0.1:${port}/api/database/backup`, {
+      headers: { 'x-telegram-bot-api-secret-token': TELEGRAM_WEBHOOK_SECRET },
+    });
+    assert.equal(botBackupRes.status, 403);
+
+    // 5. purgeDatabaseBusinessData clears global_persona_config too
+    await saveGlobalPersonaToDb({ ...prevPersona, personaName: 'H2_TEMP_PERSONA_NAME' });
+    const beforePurgePersona = await getGlobalPersonaFromDb();
+    assert.equal(beforePurgePersona.personaName, 'H2_TEMP_PERSONA_NAME');
+
+    await purgeDatabaseBusinessData();
+    const rowAfterPurge = await db.prepare("SELECT value FROM system_config WHERE key = 'global_persona_config'").get();
+    assert.equal(rowAfterPurge, undefined);
+    const afterPurgePersona = await getGlobalPersonaFromDb();
+    assert.equal(afterPurgePersona.personaName, '');
+  } finally {
+    await new Promise<void>((r) => srv.close(() => r()));
+    await restoreDatabaseSnapshot(prevSnapshot).catch(() => {});
+    if (prevPersona) {
+      await saveGlobalPersonaToDb(prevPersona).catch(() => {});
+    }
+    if (prevJwtSecret === undefined) delete process.env.JWT_SECRET;
+    else process.env.JWT_SECRET = prevJwtSecret;
+  }
+});

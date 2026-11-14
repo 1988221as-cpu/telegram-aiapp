@@ -6,11 +6,16 @@ import {
   RefreshCw,
   X,
   Trash2,
-  Laptop,
+  Database,
+  AlertTriangle,
 } from 'lucide-react';
 import {
   getLocalStorageMetrics,
-  purgeAllLocalChatData
+  purgeAllLocalChatData,
+  fetchDatabaseStatus,
+  downloadDatabaseBackup,
+  uploadDatabaseRestore,
+  purgeDatabaseApi,
 } from '../services/apiService';
 import { clearCryptoStorageCache } from '../services/cryptoStorage';
 
@@ -45,45 +50,73 @@ interface DatabaseModalProps {
 
 export const DatabaseModal: React.FC<DatabaseModalProps> = ({ isOpen, onClose, onPurgeComplete, onRestoreComplete }) => {
   const [localMetrics, setLocalMetrics] = useState({ totalMessages: 0, totalChats: 0, approxBytes: 0 });
+  const [dbStatus, setDbStatus] = useState<{
+    status: string;
+    dbType?: string;
+    totalMessages: number;
+    totalProfiles: number;
+    sizeBytes: number;
+  } | null>(null);
   const [loading, setLoading] = useState(false);
   const [backupLoading, setBackupLoading] = useState(false);
+  const [restoreLoading, setRestoreLoading] = useState(false);
+  const [purgeLoading, setPurgeLoading] = useState(false);
+  const [showPurgeConfirm, setShowPurgeConfirm] = useState(false);
   const [actionNotice, setActionNotice] = useState<{ success: boolean; message: string } | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     if (isOpen) {
-      loadStats();
+      setShowPurgeConfirm(false);
+      void loadStats();
     }
   }, [isOpen]);
 
-  const loadStats = () => {
+  const loadStats = async () => {
     setLoading(true);
     setLocalMetrics(getLocalStorageMetrics());
+    const statusRes = await fetchDatabaseStatus();
+    if (statusRes) {
+      setDbStatus({
+        status: statusRes.status || 'connected',
+        dbType: statusRes.dbType,
+        totalMessages: Number(statusRes.totalMessages || 0),
+        totalProfiles: Number(statusRes.totalProfiles || 0),
+        sizeBytes: Number(statusRes.sizeBytes || 0),
+      });
+    } else {
+      setDbStatus(null);
+    }
     setLoading(false);
   };
 
-  const handleExportLocalBackup = () => {
+  const handleExportFullBackup = async () => {
     try {
       setBackupLoading(true);
-      const backupData: Record<string, any> = {
-        exportedAt: new Date().toISOString(),
-        version: 'tg_desktop_safe_v2.4',
-        type: 'Zero_DB_Local_Workstation_Backup',
-        payload: {}
-      };
+      setActionNotice(null);
+      const sqliteSnapshot = await downloadDatabaseBackup();
 
+      const localPayload: Record<string, string | null> = {};
       for (let i = 0; i < localStorage.length; i++) {
         const key = localStorage.key(i) || '';
         if (shouldBackupLocalKey(key)) {
-          backupData.payload[key] = localStorage.getItem(key);
+          localPayload[key] = localStorage.getItem(key);
         }
       }
+
+      const backupData = {
+        exportedAt: new Date().toISOString(),
+        version: 'humansense_full_v3.0',
+        type: 'HumanSense_Full_Desktop_Backup',
+        sqliteSnapshot,
+        payload: localPayload,
+      };
 
       const blob = new Blob([JSON.stringify(backupData, null, 2)], { type: 'application/json' });
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
-      a.download = `tg_desktop_local_backup_${new Date().toISOString().slice(0, 10)}.json`;
+      a.download = `humansense_full_backup_${new Date().toISOString().slice(0, 10)}.json`;
       document.body.appendChild(a);
       a.click();
       document.body.removeChild(a);
@@ -91,32 +124,61 @@ export const DatabaseModal: React.FC<DatabaseModalProps> = ({ isOpen, onClose, o
 
       setActionNotice({
         success: true,
-        message: '本地私密备份已导出！聊天记录仅存在于您导出的本地文件中，云端零留存。'
+        message: '全量私密备份导出成功！已完整打包本地 SQLite 数据库（知识库、人设、进化习惯、客户画像与历史消息）及本地会话缓存。',
       });
     } catch (err: any) {
-      setActionNotice({ success: false, message: '导出失败: ' + err.message });
+      setActionNotice({ success: false, message: '导出失败: ' + (err?.message || '未知错误') });
     } finally {
       setBackupLoading(false);
     }
   };
 
-  const handleImportLocalBackup = async (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleImportFullBackup = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
 
     try {
+      setRestoreLoading(true);
+      setActionNotice(null);
       const text = await file.text();
       const parsed = JSON.parse(text);
-      if (!parsed.payload || typeof parsed.payload !== 'object') {
-        throw new Error('无效的 HumanSense 本地备份文件');
+
+      const snapshotToRestore =
+        parsed?.sqliteSnapshot?.tables
+          ? parsed.sqliteSnapshot
+          : parsed?.tables
+          ? parsed
+          : null;
+      const hasLocalPayload = Boolean(parsed?.payload && typeof parsed.payload === 'object');
+
+      if (!snapshotToRestore && !hasLocalPayload) {
+        throw new Error('无效的 HumanSense 备份文件（未检测到 SQLite 快照或本地会话数据）');
       }
 
-      let restoredKeys = 0;
-      for (const [k, v] of Object.entries(parsed.payload)) {
-        if (typeof v === 'string' && !EXCLUDED_BACKUP_KEYS.has(k)) {
-          localStorage.setItem(k, v);
-          restoredKeys++;
+      const summaryParts: string[] = [];
+
+      if (snapshotToRestore) {
+        const restoreRes = await uploadDatabaseRestore(snapshotToRestore);
+        if (!restoreRes.success) {
+          throw new Error(restoreRes.message || 'SQLite 数据库快照恢复失败');
         }
+        const counts = restoreRes.restoredCounts || {};
+        const totalSqlRows = Object.values(counts).reduce<number>(
+          (sum, v) => sum + (typeof v === 'number' ? v : 0),
+          0
+        );
+        summaryParts.push(`SQLite 数据库记录 ${totalSqlRows} 条`);
+      }
+
+      if (hasLocalPayload) {
+        let restoredKeys = 0;
+        for (const [k, v] of Object.entries(parsed.payload)) {
+          if (typeof v === 'string' && !EXCLUDED_BACKUP_KEYS.has(k) && shouldBackupLocalKey(k)) {
+            localStorage.setItem(k, v);
+            restoredKeys++;
+          }
+        }
+        summaryParts.push(`本地加密缓存 ${restoredKeys} 项`);
       }
 
       clearCryptoStorageCache();
@@ -124,33 +186,53 @@ export const DatabaseModal: React.FC<DatabaseModalProps> = ({ isOpen, onClose, o
 
       setActionNotice({
         success: true,
-        message: `本地恢复成功！已还原 ${restoredKeys} 项本地会话及配置数据。`
+        message: `备份恢复成功！已还原 ${summaryParts.join('、')}。`,
       });
-      loadStats();
+      await loadStats();
       if (onRestoreComplete) {
         onRestoreComplete();
       }
     } catch (err: any) {
-      setActionNotice({ success: false, message: '恢复失败: ' + err.message });
+      setActionNotice({ success: false, message: '恢复失败: ' + (err?.message || '无效文件') });
     } finally {
+      setRestoreLoading(false);
       if (fileInputRef.current) fileInputRef.current.value = '';
     }
   };
 
-  const handlePurgeLocalData = () => {
-    if (window.confirm('⚠️ 确定要彻底粉碎本机所有聊天记录和客户画像吗？\n\n此操作将清空本机浏览器所有聊天历史，不留任何痕迹且无法撤销。')) {
+  const handleConfirmPurgeAllData = async () => {
+    try {
+      setPurgeLoading(true);
+      setActionNotice(null);
+      const dbRes = await purgeDatabaseApi();
+      if (!dbRes.success) {
+        setActionNotice({
+          success: false,
+          message: `数据库粉碎失败，已中止清理：${dbRes.error || '请稍后重试'}`,
+        });
+        return;
+      }
+
       purgeAllLocalChatData();
       clearCryptoStorageCache();
+      setShowPurgeConfirm(false);
       setActionNotice({
         success: true,
-        message: '已彻底粉碎清除本机所有聊天历史与本地画像！零残留。'
+        message: '已彻底粉碎本地 SQLite 数据库业务记录（消息、客户画像、知识库、人设、演进记录）与本机加密缓存！登录态与系统凭据已保留。',
       });
-      loadStats();
+      await loadStats();
       if (onPurgeComplete) onPurgeComplete();
+    } catch (err: any) {
+      setActionNotice({ success: false, message: '粉碎清理异常: ' + (err?.message || '未知错误') });
+    } finally {
+      setPurgeLoading(false);
     }
   };
 
   if (!isOpen) return null;
+
+  const totalSqliteKb = dbStatus ? Math.max(Math.round(dbStatus.sizeBytes / 1024), 1) : null;
+  const totalLocalKb = Math.max(Math.round(localMetrics.approxBytes / 1024), 1);
 
   return (
     <div className="fixed inset-0 bg-black/75 backdrop-blur-xs flex items-center justify-center z-50 p-4 select-none">
@@ -162,7 +244,7 @@ export const DatabaseModal: React.FC<DatabaseModalProps> = ({ isOpen, onClose, o
               <ShieldCheck className="w-5 h-5" />
             </div>
             <div>
-              <h2 className="text-sm font-bold text-white">本地数据与安全中心</h2>
+              <h2 className="text-sm font-bold text-white">本地数据库与安全备份中心</h2>
             </div>
           </div>
           <button
@@ -175,76 +257,123 @@ export const DatabaseModal: React.FC<DatabaseModalProps> = ({ isOpen, onClose, o
 
         {/* Content */}
         <div className="p-6 overflow-y-auto space-y-4">
-          {/* Local Workstation Storage KPI Cards */}
+          {/* Storage KPI Cards */}
           <div className="grid grid-cols-3 gap-3">
             <div className="bg-[#0e1621] p-3.5 rounded-xl border border-[#202e3d]">
-              <span className="text-[11px] text-[#7f91a4] block">运行环境</span>
-              <div className="text-sm font-bold text-white mt-1 flex items-center gap-1.5">
-                <Laptop className="w-3.5 h-3.5 text-blue-400" />
-                <span>桌面客户端</span>
+              <span className="text-[11px] text-[#7f91a4] block">本地数据库引擎</span>
+              <div className="text-xs font-bold text-white mt-1.5 flex items-center gap-1.5">
+                <Database className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                <span className="truncate">{dbStatus?.dbType || 'SQLite (Local)'}</span>
+              </div>
+              <div className="text-[10px] text-[#7f91a4] mt-1 tabular-nums">
+                库容 {totalSqliteKb !== null ? `${totalSqliteKb} KB` : '--'} · 缓存 {totalLocalKb} KB
               </div>
             </div>
 
             <div className="bg-[#0e1621] p-3.5 rounded-xl border border-[#202e3d]">
-              <span className="text-[11px] text-[#7f91a4] block">本地消息数</span>
+              <span className="text-[11px] text-[#7f91a4] block">全库持久化消息</span>
               <div className="text-lg font-bold text-[#2481cc] mt-1 tabular-nums font-mono">
-                {localMetrics.totalMessages} <span className="text-xs font-normal text-white">条</span>
+                {dbStatus ? dbStatus.totalMessages : localMetrics.totalMessages}{' '}
+                <span className="text-xs font-normal text-white">条</span>
+              </div>
+              <div className="text-[10px] text-[#7f91a4] mt-0.5 tabular-nums">
+                本地活跃窗口 {localMetrics.totalMessages} 条
               </div>
             </div>
 
             <div className="bg-[#0e1621] p-3.5 rounded-xl border border-[#202e3d]">
-              <span className="text-[11px] text-[#7f91a4] block">本地存储占用</span>
+              <span className="text-[11px] text-[#7f91a4] block">全息客户档案</span>
               <div className="text-lg font-bold text-purple-400 mt-1 tabular-nums font-mono">
-                {Math.max(Math.round(localMetrics.approxBytes / 1024), 1)} <span className="text-xs font-normal text-white">KB</span>
+                {dbStatus ? dbStatus.totalProfiles : '--'}{' '}
+                <span className="text-xs font-normal text-white">份</span>
+              </div>
+              <div className="text-[10px] text-[#7f91a4] mt-0.5 tabular-nums">
+                活跃会话 {localMetrics.totalChats} 个
               </div>
             </div>
           </div>
 
-          {/* Local Backup & Privacy Shredder Action Area */}
+          {/* Full Backup & Privacy Shredder Action Area */}
           <div className="p-4 bg-[#0e1621] rounded-xl border border-[#202e3d] space-y-3">
-            <div className="text-xs font-bold text-white">本地数据备份与清理</div>
+            <div className="text-xs font-bold text-white">全量数据库备份、还原与彻底粉碎</div>
+            <p className="text-[11px] text-[#7f91a4] leading-relaxed">
+              导出文件将同时打包本机 SQLite 持久化表（知识库、全局人设、进化习惯、客户全息画像、消息记录）与前端本地加密缓存；已自动剔除敏感会员与 Telegram 会话密钥。
+            </p>
 
             <div className="flex items-center gap-2">
               <button
-                onClick={handleExportLocalBackup}
-                disabled={backupLoading}
-                className="flex-1 py-2 px-3 rounded-lg bg-[#202e3d] hover:bg-[#2b3d52] text-white text-xs font-medium flex items-center justify-center gap-1.5 cursor-pointer transition-colors"
+                onClick={handleExportFullBackup}
+                disabled={backupLoading || restoreLoading || purgeLoading}
+                className="flex-1 py-2 px-3 rounded-lg bg-[#202e3d] hover:bg-[#2b3d52] disabled:opacity-50 text-white text-xs font-medium flex items-center justify-center gap-1.5 cursor-pointer transition-colors"
               >
                 <Download className="w-3.5 h-3.5 text-emerald-400" />
-                <span>{backupLoading ? '正在导出...' : '导出本地私密备份 (JSON)'}</span>
+                <span>{backupLoading ? '正在打包导出...' : '导出全量备份 (JSON)'}</span>
               </button>
 
               <input
                 type="file"
                 ref={fileInputRef}
-                onChange={handleImportLocalBackup}
+                onChange={handleImportFullBackup}
                 accept=".json"
                 className="hidden"
               />
               <button
                 onClick={() => fileInputRef.current?.click()}
-                className="flex-1 py-2 px-3 rounded-lg bg-[#202e3d] hover:bg-[#2b3d52] text-white text-xs font-medium flex items-center justify-center gap-1.5 cursor-pointer transition-colors"
+                disabled={backupLoading || restoreLoading || purgeLoading}
+                className="flex-1 py-2 px-3 rounded-lg bg-[#202e3d] hover:bg-[#2b3d52] disabled:opacity-50 text-white text-xs font-medium flex items-center justify-center gap-1.5 cursor-pointer transition-colors"
               >
                 <Upload className="w-3.5 h-3.5 text-blue-400" />
-                <span>导入本地备份还原</span>
+                <span>{restoreLoading ? '正在导入还原...' : '导入备份还原'}</span>
               </button>
 
               <button
-                onClick={handlePurgeLocalData}
-                className="py-2 px-3 rounded-lg bg-red-500/20 hover:bg-red-500/30 text-red-300 border border-red-500/30 text-xs font-medium flex items-center gap-1.5 cursor-pointer transition-colors"
-                title="彻底粉碎本机所有聊天记录"
+                onClick={() => setShowPurgeConfirm((v) => !v)}
+                disabled={backupLoading || restoreLoading || purgeLoading}
+                className="py-2 px-3 rounded-lg bg-red-500/20 hover:bg-red-500/30 disabled:opacity-50 text-red-300 border border-red-500/30 text-xs font-medium flex items-center gap-1.5 cursor-pointer transition-colors"
+                title="彻底粉碎本机 SQLite 业务数据与本地缓存"
               >
                 <Trash2 className="w-3.5 h-3.5 text-red-400" />
                 <span>一键粉碎</span>
               </button>
             </div>
 
+            {showPurgeConfirm && (
+              <div className="p-3 rounded-xl bg-red-500/12 border border-red-500/40 space-y-2.5">
+                <div className="flex items-start gap-2 text-xs text-red-200 leading-relaxed">
+                  <AlertTriangle className="w-4 h-4 text-red-400 shrink-0 mt-0.5" />
+                  <span>
+                    确定要彻底粉碎本机所有业务数据吗？此操作将清空 SQLite 数据库及本地缓存中的聊天记录、客户全息画像、知识库文档、人设与进化记录且无法撤销（会员登录与 Telegram 会话密钥会保留）。
+                  </span>
+                </div>
+                <div className="flex items-center justify-end gap-2">
+                  <button
+                    type="button"
+                    disabled={purgeLoading}
+                    onClick={() => setShowPurgeConfirm(false)}
+                    className="px-3 py-1.5 rounded-lg bg-[#202e3d] hover:bg-[#2b3d52] text-xs text-[#cfdbe5] cursor-pointer"
+                  >
+                    取消
+                  </button>
+                  <button
+                    type="button"
+                    disabled={purgeLoading}
+                    onClick={handleConfirmPurgeAllData}
+                    className="px-3 py-1.5 rounded-lg bg-red-600 hover:bg-red-700 disabled:opacity-50 text-xs text-white font-semibold cursor-pointer"
+                  >
+                    {purgeLoading ? '正在粉碎...' : '确认彻底粉碎'}
+                  </button>
+                </div>
+              </div>
+            )}
+
             {actionNotice && (
-              <div className={`p-2.5 rounded-lg text-[11px] ${
-                actionNotice.success
-                  ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30'
-                  : 'bg-red-500/20 text-red-300 border border-red-500/30'
-              }`}>
+              <div
+                className={`p-2.5 rounded-lg text-[11px] leading-relaxed ${
+                  actionNotice.success
+                    ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30'
+                    : 'bg-red-500/20 text-red-300 border border-red-500/30'
+                }`}
+              >
                 {actionNotice.message}
               </div>
             )}
@@ -254,7 +383,7 @@ export const DatabaseModal: React.FC<DatabaseModalProps> = ({ isOpen, onClose, o
         {/* Footer */}
         <div className="px-5 py-3 border-t border-[#2b3d52] bg-[#131c27] flex items-center justify-between">
           <button
-            onClick={loadStats}
+            onClick={() => void loadStats()}
             disabled={loading}
             className="flex items-center gap-1.5 text-xs text-[#7f91a4] hover:text-white cursor-pointer"
           >

@@ -11,6 +11,7 @@ import crypto from 'crypto';
 import { spawn } from 'child_process';
 import { SocksClient } from 'socks';
 import { fileURLToPath } from 'url';
+import { createRequire } from 'module';
 import dotenv from 'dotenv';
 import busboy from 'busboy';
 
@@ -57,6 +58,7 @@ import {
   exportDatabaseSnapshot,
   restoreDatabaseSnapshot,
   autoRestoreSnapshotIfAvailable,
+  purgeDatabaseBusinessData,
   DEFAULT_GLOBAL_PERSONA,
   PERSONA_TEMPLATE_PRESET,
   DEFAULT_EVOLUTION_STATE,
@@ -89,7 +91,7 @@ const PORT = parseInt(getArg('--port') || process.env.PORT || '3000', 10);
 const HOST = getArg('--host') || process.env.HOST || '0.0.0.0';
 
 export const app = express();
-app.set('trust proxy', true);
+app.set('trust proxy', isRailway ? 1 : 'loopback');
 
 // Security Headers & Content Security Policy via Helmet
 app.use(
@@ -208,7 +210,6 @@ export const translationLimiter = rateLimit({
     String(req.body?.engine || '').trim().toLowerCase() === 'google',
   standardHeaders: true,
   legacyHeaders: false,
-  validate: { trustProxy: false },
   message: {
     error: 'Too Many Requests',
     message: '翻译请求频率过高，触发速率保护限制（单 IP 每分钟最多 600 次）。请稍后再试。',
@@ -900,6 +901,10 @@ export async function callCustomLlm({
   const isCloudEngineMode =
     customConfig?.engineMode === 'cloud' ||
     (customConfig?.enabled && customConfig?.engineMode !== 'custom' && !customConfig?.baseUrl?.trim());
+  if (customConfig?.explicitlyDisabled || customConfig?.enabled === false) {
+    if (throwOnError) throw new Error('当前处于双关状态（官方大模型与自有密钥均已关闭），严禁调用大模型');
+    return null;
+  }
   if (!customConfig?.enabled && !customConfig?.engineLicenseKey) {
     if (throwOnError) throw new Error('自定义大模型未启用');
     return null;
@@ -1091,6 +1096,12 @@ export async function callCustomLlm({
           });
         }
 
+        const resolvedRequestModel = isCloudEngineMode
+          ? (customConfig.modelName && /^(gemini|gemma)/i.test(String(customConfig.modelName).trim())
+              ? String(customConfig.modelName).trim()
+              : 'gemini-4-hydrogen')
+          : (customConfig.modelName || 'gpt-4o-mini');
+
         for (const targetUrl of candidateUrls) {
           try {
             const response = await safeSsrfFetch(targetUrl, {
@@ -1098,7 +1109,7 @@ export async function callCustomLlm({
               headers,
               body: JSON.stringify({
                 ...(extraPayload || {}),
-                model: customConfig.modelName || 'gpt-4o-mini',
+                model: resolvedRequestModel,
                 messages: formattedMessages,
                 temperature: customConfig.temperature ?? temperature,
                 max_tokens: maxTokens,
@@ -1150,6 +1161,36 @@ export async function callCustomLlm({
  * Transcodes arbitrary audio (PCM WAV, MP3, etc.) to Telegram native standard OGG Opus format.
  * Telegram Bot API /sendVoice strictly requires audio/ogg with Opus codec to render native round voice bubbles with waveforms.
  */
+const nodeRequire = createRequire(import.meta.url);
+let cachedFfmpegBinaryPath: string | null = null;
+
+export function resolveFfmpegBinaryPath(): string {
+  if (cachedFfmpegBinaryPath) return cachedFfmpegBinaryPath;
+  const envPath = (process.env.FFMPEG_PATH || '').trim();
+  if (envPath && fs.existsSync(envPath)) {
+    cachedFfmpegBinaryPath = envPath;
+    return envPath;
+  }
+  try {
+    const rawStaticPath = nodeRequire('ffmpeg-static') as string | null;
+    if (typeof rawStaticPath === 'string' && rawStaticPath.trim()) {
+      const unpackedPath = /app\.asar(?=[\\/])/i.test(rawStaticPath)
+        ? rawStaticPath.replace(/app\.asar(?=[\\/])/i, 'app.asar.unpacked')
+        : rawStaticPath;
+      if (fs.existsSync(unpackedPath)) {
+        cachedFfmpegBinaryPath = unpackedPath;
+        return unpackedPath;
+      }
+      if (fs.existsSync(rawStaticPath)) {
+        cachedFfmpegBinaryPath = rawStaticPath;
+        return rawStaticPath;
+      }
+    }
+  } catch {}
+  cachedFfmpegBinaryPath = 'ffmpeg';
+  return 'ffmpeg';
+}
+
 export async function convertAudioToOggOpus(input: Buffer | string): Promise<Buffer> {
   const isFilePath = typeof input === 'string';
   if (isFilePath) {
@@ -1206,7 +1247,8 @@ export async function convertAudioToOggOpus(input: Buffer | string): Promise<Buf
             'pipe:1',
           ];
 
-      const proc = spawn('ffmpeg', ffmpegArgs);
+      const ffmpegBin = resolveFfmpegBinaryPath();
+      const proc = spawn(ffmpegBin, ffmpegArgs);
 
       const chunks: Buffer[] = [];
       const errChunks: Buffer[] = [];
@@ -1217,7 +1259,7 @@ export async function convertAudioToOggOpus(input: Buffer | string): Promise<Buf
       proc.on('error', (err) => {
         if (!finished) {
           finished = true;
-          reject(new Error(`音频转码器 ffmpeg 启动失败: ${err.message}`));
+          reject(new Error(`内置音频转码器 (${ffmpegBin}) 启动失败: ${err.message}`));
         }
       });
 
@@ -2289,27 +2331,6 @@ export function verifyPasswordScrypt(password: string, storedHash: string): bool
     return crypto.timingSafeEqual(keyBuf, derivedKey);
   } catch {
     return false;
-  }
-}
-
-// Admin password configuration:
-// If ADMIN_PASSWORD_HASH is provided in environment, verify against it.
-// If ADMIN_PASSWORD is provided, hash it.
-// Otherwise, a random admin password is generated for single-tenant isolation.
-let effectiveAdminHash = process.env.ADMIN_PASSWORD_HASH || '';
-let generatedAdminPlaintext = '';
-
-if (!effectiveAdminHash) {
-  if (process.env.ADMIN_PASSWORD && process.env.ADMIN_PASSWORD.trim().length > 0) {
-    effectiveAdminHash = hashPasswordScrypt(process.env.ADMIN_PASSWORD.trim());
-  } else {
-    // Generate a secure random password for admin access
-    generatedAdminPlaintext = crypto.randomBytes(12).toString('hex');
-    effectiveAdminHash = hashPasswordScrypt(generatedAdminPlaintext);
-    console.log('------------------------------------------------------------');
-    console.log(`🔐 [ADMIN CREDENTIALS] Admin password initialized: ${generatedAdminPlaintext}`);
-    console.log('💡 Tip: Set ADMIN_PASSWORD_HASH in environment variables to customize');
-    console.log('------------------------------------------------------------');
   }
 }
 
@@ -3402,12 +3423,13 @@ app.get('/api/database/status', requireTenantAuth, async (req: Request, res: Res
   }
 });
 
-// 1.1 Export Database Full Snapshot (Protected: Master Administrator Only, Excludes Sessions)
+// 1.1 Export Database Full Snapshot (Protected: Authenticated Desktop Member Only, Blocks Bot Webhook)
 app.get('/api/database/backup', requireTenantAuth, async (req: Request, res: Response) => {
   try {
-    const session = (req as any).auth?.session;
-    if (!session?.isMaster) {
-      return res.status(403).json({ error: '权限不足：仅管理员有权导出数据库备份' });
+    const authContext = (req as any).auth;
+    const session = authContext?.session;
+    if (!session || session.isBot || authContext?.isBot) {
+      return res.status(403).json({ error: '权限不足：仅客户端已登录会员有权导出数据库备份' });
     }
     const snapshot = await exportDatabaseSnapshot();
     res.setHeader('Content-Disposition', `attachment; filename="telegram_pro_backup_${Date.now()}.json"`);
@@ -3418,12 +3440,13 @@ app.get('/api/database/backup', requireTenantAuth, async (req: Request, res: Res
   }
 });
 
-// 1.2 Restore Database from Full Snapshot (Protected: Master Administrator Only with Two-Factor confirmation)
+// 1.2 Restore Database from Full Snapshot (Protected: Authenticated Desktop Member Only with Two-Factor confirmation)
 app.post('/api/database/restore', requireTenantAuth, async (req: Request, res: Response) => {
   try {
-    const session = (req as any).auth?.session;
-    if (!session?.isMaster) {
-      return res.status(403).json({ error: '权限不足：仅管理员有权恢复数据库备份' });
+    const authContext = (req as any).auth;
+    const session = authContext?.session;
+    if (!session || session.isBot || authContext?.isBot) {
+      return res.status(403).json({ error: '权限不足：仅客户端已登录会员有权恢复数据库备份' });
     }
 
     const { confirm = false } = req.query;
@@ -3443,6 +3466,32 @@ app.post('/api/database/restore', requireTenantAuth, async (req: Request, res: R
       success: true,
       message: '数据快照恢复成功！',
       restoredCounts: result.restoredCounts,
+    });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 1.3 Complete Local SQLite Business Data Shredder (Protected: Authenticated Desktop Member Only with confirm=true)
+app.post('/api/database/purge', requireTenantAuth, async (req: Request, res: Response) => {
+  try {
+    const authContext = (req as any).auth;
+    const session = authContext?.session;
+    if (!session || session.isBot || authContext?.isBot) {
+      return res.status(403).json({ error: '权限不足：仅客户端已登录会员有权执行本地数据库粉碎' });
+    }
+    const { confirm = false } = req.query;
+    if (confirm !== 'true' && req.body?.confirm !== true) {
+      return res.status(400).json({
+        error: '粉碎确认缺失：清空本地数据库不可撤销，必须携带 confirm=true 二次确认',
+        requiresConfirmation: true,
+      });
+    }
+    const result = await purgeDatabaseBusinessData();
+    res.json({
+      success: true,
+      message: '本地 SQLite 数据库所有业务记录已彻底粉碎清空！',
+      ...result,
     });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
@@ -5695,7 +5744,12 @@ app.post('/api/customer/analyze/:chatId', requireTenantAuth, async (req: Request
                 : Boolean(customConfig.explicitlyDisabled ?? serverCustomCfg?.explicitlyDisabled),
             baseUrl: (customConfig.baseUrl || serverCustomCfg?.baseUrl || '').trim(),
             apiKey: (customConfig.apiKey || serverCustomCfg?.apiKey || '').trim(),
-            modelName: (customConfig.modelName || serverCustomCfg?.modelName || 'gpt-4o-mini').trim(),
+            modelName:
+              (customConfig.engineMode || serverCustomCfg?.engineMode) === 'custom'
+                ? (customConfig.modelName || serverCustomCfg?.modelName || 'gpt-4o-mini').trim()
+                : (customConfig.modelName && /^(gemini|gemma)/i.test(String(customConfig.modelName).trim())
+                    ? String(customConfig.modelName).trim()
+                    : 'gemini-4-hydrogen'),
           }
         : serverCustomCfg;
 
@@ -6781,28 +6835,47 @@ export async function invokeEvolutionOrAnalysisLlm({
     throw new Error('未配置可用的大模型（当前处于双关状态：官方大模型与自有密钥均已关闭，请在「模型」开启任一引擎）');
   }
 
-  const effectiveCustomConfig = customConfig?.enabled ? customConfig : serverCustomCfg;
+  let effectiveCustomConfig = customConfig?.enabled ? customConfig : serverCustomCfg;
+  if (!effectiveCustomConfig && (userJwt || lastActiveUserJwt || (process.env.RAILWAY_BRAIN_KEY || '').trim())) {
+    effectiveCustomConfig = {
+      enabled: true,
+      explicitlyDisabled: false,
+      engineMode: 'cloud',
+      modelName: 'gemini-4-hydrogen',
+      enableKnowledgeBaseRAG: true,
+    };
+  }
 
   if (effectiveCustomConfig?.enabled) {
+    const isPriorityCustom = effectiveCustomConfig.engineMode === 'custom';
+    const normalizedEffectiveConfig = isPriorityCustom
+      ? effectiveCustomConfig
+      : {
+          ...effectiveCustomConfig,
+          engineMode: 'cloud',
+          baseUrl: '',
+          apiKey: '',
+          modelName:
+            effectiveCustomConfig.modelName && /^(gemini|gemma)/i.test(String(effectiveCustomConfig.modelName).trim())
+              ? String(effectiveCustomConfig.modelName).trim()
+              : 'gemini-4-hydrogen',
+        };
     const reply = await callCustomLlm({
-      customConfig: effectiveCustomConfig,
+      customConfig: normalizedEffectiveConfig,
       messages: [{ role: 'user', content: prompt }],
       temperature: 0.2,
       maxTokens: 1200,
       timeoutMs,
-      userJwt,
+      userJwt: userJwt || lastActiveUserJwt || undefined,
       throwOnError: true,
       skipSync: true,
     });
     if (!reply || !reply.trim()) {
       throw new Error('后台/自定义大模型未返回有效分析内容');
     }
-    const isCloud =
-      effectiveCustomConfig.engineMode === 'cloud' ||
-      (effectiveCustomConfig.engineMode !== 'custom' && !effectiveCustomConfig.baseUrl?.trim());
     return {
       text: reply.trim(),
-      source: isCloud ? 'lingxi_cloud_brain' : `custom_llm:${effectiveCustomConfig.modelName || 'custom'}`,
+      source: isPriorityCustom ? `custom_llm:${normalizedEffectiveConfig.modelName || 'custom'}` : 'lingxi_cloud_brain',
       usedBackendCustomLlm: true,
     };
   }
@@ -7189,55 +7262,12 @@ app.post('/api/evolution/toggle-habit', requireTenantAuth, async (req: Request, 
   }
 });
 
-// 7. Seed Love & Investment Knowledge Presets
-app.post('/api/knowledge/seed-defaults', requireTenantAuth, async (req: Request, res: Response) => {
-  try {
-    const now = Date.now();
-    const defaults = [
-      {
-        id: `know_seed_${now}_1`,
-        category: 'icebreaker',
-        title: '新好友初识：朋友圈日常与美术馆话题',
-        content: '“刚去看了新加坡国家美术馆的特展，有幅光影作品让我驻足了好久。翻列表看到你，感觉你的审美也很有品味，今天过得开心吗？”保持松弛与边界感。',
-        keywords: JSON.stringify(['初识', '美术馆', '朋友圈', '松弛感', '好品味']),
-      },
-      {
-        id: `know_seed_${now}_2`,
-        category: 'life_emotion',
-        title: '生活美学：顶级黑皮诺红酒与慢生活',
-        content: '“晚上下厨煎了份和牛眼肉，醒了一瓶勃艮第的黑皮诺。红果香气慢慢化开的感觉太解压了。平时工作那么拼，生活里一定要留点取悦自己的时刻呢。”',
-        keywords: JSON.stringify(['红酒', '黑皮诺', '慢生活', '和牛', '解压']),
-      },
-      {
-        id: `know_seed_${now}_3`,
-        category: 'wealth_investment',
-        title: '投资探讨：以防守为核心的跨资产对冲',
-        content: '“在资本市场生存的第一准则就是‘敬畏不确定性’。把主资金放在稳健对冲策略里，只拿极小的风险敞口去博取确定性波段。这样不论牛熊，每晚都能睡个踏实觉。”',
-        keywords: JSON.stringify(['跨资产对冲', '风险控制', '稳健收益', '敬畏市场', '安心']),
-      },
-      {
-        id: `know_seed_${now}_4`,
-        category: 'trust_defense',
-        title: '安全感建设：从容面对试探的君子之交',
-        content: '“投资和感情一样，最忌讳勉强和急躁。我从不劝身边朋友做任何投资决策，认知到了自然就同频了。哪怕只是单纯聊聊美食生活，我也觉得很投缘呀。”',
-        keywords: JSON.stringify(['不勉强', '认知同频', '君子之交', '安全感', '真诚']),
-      },
-    ];
-
-    const insert = db.prepare(`
-      INSERT INTO knowledge_base (
-        id, category, title, content, keywords, source_type, source_file, is_active, hit_count, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, 1, 0, ?, ?)
-    `);
-
-    for (const d of defaults) {
-      await insert.run(d.id, d.category, d.title, d.content, d.keywords, 'manual_text', 'preset_pack.md', now, now);
-    }
-
-    res.json({ success: true, count: defaults.length });
-  } catch (err: any) {
-    res.status(500).json({ error: err.message });
-  }
+// 7. Legacy Preset Seeder Retired (Strictly zero fake preset injection)
+app.post('/api/knowledge/seed-defaults', requireTenantAuth, async (_req: Request, res: Response) => {
+  return res.status(410).json({
+    success: false,
+    error: '示例预设话术包已下线：请上传或手动录入您的真实业务知识文档。',
+  });
 });
 
 // ==================== RAILWAY KNOWLEDGE BASE ADAPTER & LRU CACHE ====================
@@ -8313,11 +8343,11 @@ export function detectSourceLangCode(text: string): string {
     .trim();
   if (!stripped || !/\p{L}/u.test(stripped)) return '';
 
+  if (/[\u3040-\u30ff]/.test(stripped)) return 'ja';
+  if (/[\uac00-\ud7af]/.test(stripped)) return 'ko';
   if (/[\u4e00-\u9fa5]/.test(stripped)) return 'zh-CN';
   if (/[іїєґІЇЄҐ]/.test(stripped) && /[\u0400-\u04FF]/.test(stripped)) return 'uk';
   if (/[\u0400-\u04FF]/.test(stripped)) return 'ru';
-  if (/[\u3040-\u30ff]/.test(stripped)) return 'ja';
-  if (/[\uac00-\ud7af]/.test(stripped)) return 'ko';
   if (/[پچژگک]/.test(stripped) && /[\u0600-\u06FF]/.test(stripped)) return 'fa';
   if (/[\u0600-\u06FF]/.test(stripped)) return 'ar';
   if (/[\u0590-\u05FF]/.test(stripped)) return 'he';
@@ -8376,16 +8406,16 @@ export function detectSourceLangCode(text: string): string {
     return 'pl';
   }
   if (
-    /ß/.test(stripped) ||
-    (/\b(guten tag|guten morgen|danke|bitte|wie geht|hallo|tschüss|tschuess|auf wiedersehen|ich bin|nicht|sehr gut)\b/i.test(stripped) &&
-      !/\b(goedemorgen|dank je|hoe gaat)\b/i.test(stripped))
-  ) {
-    return 'de';
-  }
-  if (
-    /\b(goedemorgen|goedemiddag|goedenavond|hoe gaat het|met jou|dank je|dank u|alsjeblieft|alstublieft|tot ziens|welkom|graag|vandaag|nederlands|ik ben|ik wil|jij bent|het is)\b/i.test(stripped)
+    /\b(goedemorgen|goedemiddag|goedenavond|hoe gaat|hoe is het|met jou|dank je|dank u|alsjeblieft|alstublieft|tot ziens|welkom|graag|vandaag|nederlands|ik ben|ik wil|jij bent|het is)\b/i.test(stripped)
   ) {
     return 'nl';
+  }
+  if (
+    /ß/.test(stripped) ||
+    (/\b(guten tag|guten morgen|danke|bitte|wie geht|hallo|tschüss|tschuess|auf wiedersehen|ich bin|nicht|sehr gut)\b/i.test(stripped) &&
+      !/\b(goedemorgen|goedemiddag|goedenavond|hoe gaat|hoe is het|met jou|dank je|dank u|alsjeblieft|alstublieft|tot ziens|welkom|graag|vandaag|nederlands|ik ben|ik wil|jij bent|het is)\b/i.test(stripped))
+  ) {
+    return 'de';
   }
   if (
     /[åÅ]/.test(stripped) ||
@@ -9115,37 +9145,96 @@ app.post('/api/audio/transcribe', aiGenerationLimiter, requireTenantAuth, async 
       });
     }
 
-    // Cloud Priority Mode: strictly official Gemini STT
-    const selectedModel = resolveGeminiModel(model, 'transcribe');
-    if (!isGeminiAvailable()) {
-      const circuit = getGeminiCircuitStatus();
-      return res.status(circuit.isBlocked ? 503 : 400).json({
-        error: circuit.isBlocked
-          ? `语音转文字引擎不可用: ${circuit.reason}`
-          : '未配置 Gemini API 密钥，无法执行语音识别',
-      });
+    // Cloud Priority Mode: try Cloud Brain gateway first, then local Gemini fallback if configured
+    const bearerJwt = extractBearerToken(req) || lastActiveUserJwt || undefined;
+    const effectiveEngineKey =
+      (typeof effectiveCustomConfig?.engineLicenseKey === 'string' && effectiveCustomConfig.engineLicenseKey.trim()) ||
+      (typeof savedCustomConfig?.engineLicenseKey === 'string' && savedCustomConfig.engineLicenseKey.trim()) ||
+      (process.env.RAILWAY_BRAIN_KEY || '').trim() ||
+      undefined;
+
+    let cloudSttStatus = 0;
+    let cloudSttErr = '';
+    if (bearerJwt || effectiveEngineKey) {
+      try {
+        const ext = effectiveMimeType.includes('ogg')
+          ? 'ogg'
+          : effectiveMimeType.includes('mpeg') || effectiveMimeType.includes('mp3')
+          ? 'mp3'
+          : effectiveMimeType.includes('wav')
+          ? 'wav'
+          : effectiveMimeType.includes('mp4') || effectiveMimeType.includes('m4a')
+          ? 'm4a'
+          : 'webm';
+        const form = new FormData();
+        form.append('file', new Blob([new Uint8Array(audioBuf)], { type: effectiveMimeType }), `audio.${ext}`);
+        form.append('model', resolveGeminiModel(model, 'transcribe'));
+        const encodedForm = new Response(form);
+        const formBuf = Buffer.from(await encodedForm.arrayBuffer());
+        const formContentType = encodedForm.headers.get('content-type') || 'multipart/form-data';
+        const cloudHeaders = buildRailwayAuthHeaders(undefined, bearerJwt, effectiveEngineKey);
+        delete cloudHeaders['Content-Type'];
+        cloudHeaders['Content-Type'] = formContentType;
+
+        const cloudRes = await safeSsrfFetch(
+          `${getRailwayBrainBaseUrl()}/v1/audio/transcriptions`,
+          {
+            method: 'POST',
+            headers: cloudHeaders,
+            body: formBuf,
+            signal: AbortSignal.timeout(25000),
+          }
+        );
+        cloudSttStatus = cloudRes.status;
+        if (cloudRes.ok) {
+          const json = await cloudRes.json().catch(() => null);
+          const cloudText = typeof json?.text === 'string' ? json.text.trim() : '';
+          if (cloudText) {
+            return res.json({ text: cloudText, modelUsed: json?.model || 'lingxi_cloud_brain_stt' });
+          }
+          cloudSttErr = '云端语音转文字网关返回空文本';
+        } else {
+          const errTxt = await cloudRes.text().catch(() => '');
+          cloudSttErr = `HTTP ${cloudRes.status}${errTxt ? `: ${errTxt.slice(0, 160)}` : ''}`;
+        }
+      } catch (cloudErr: any) {
+        cloudSttStatus = 503;
+        cloudSttErr = cloudErr?.message || String(cloudErr);
+      }
     }
 
-    try {
-      const ai = createGeminiClient();
-      const response = await ai.models.generateContent({
-        model: selectedModel,
-        contents: {
-          parts: [
-            { inlineData: { mimeType: effectiveMimeType, data: cleanBase64 } },
-            { text: 'Transcribe this voice message accurately into text verbatim.' },
-          ],
-        },
-      });
-      const text = response.text?.trim();
-      if (!text) {
-        return res.status(502).json({ error: `Gemini(${selectedModel}) 未返回有效语音识别文本` });
+    const selectedModel = resolveGeminiModel(model, 'transcribe');
+    if (isGeminiAvailable()) {
+      try {
+        const ai = createGeminiClient();
+        const response = await ai.models.generateContent({
+          model: selectedModel,
+          contents: {
+            parts: [
+              { inlineData: { mimeType: effectiveMimeType, data: cleanBase64 } },
+              { text: 'Transcribe this voice message accurately into text verbatim.' },
+            ],
+          },
+        });
+        const text = response.text?.trim();
+        if (!text) {
+          return res.status(502).json({ error: `Gemini(${selectedModel}) 未返回有效语音识别文本` });
+        }
+        return res.json({ text, modelUsed: selectedModel });
+      } catch (e: any) {
+        handleGeminiApiError(`AudioTranscribe(${selectedModel})`, e);
+        return res.status(503).json({ error: `语音识别失败 (${selectedModel}): ${e?.message || String(e)}` });
       }
-      return res.json({ text, modelUsed: selectedModel });
-    } catch (e: any) {
-      handleGeminiApiError(`AudioTranscribe(${selectedModel})`, e);
-      return res.status(503).json({ error: `语音识别失败 (${selectedModel}): ${e?.message || String(e)}` });
     }
+
+    const isCloudEndpointMissing = cloudSttStatus === 404 || cloudSttStatus === 405 || cloudSttStatus === 501;
+    return res.status(isCloudEndpointMissing ? 501 : cloudSttStatus >= 400 ? cloudSttStatus : 400).json({
+      error: isCloudEndpointMissing
+        ? '当前云端网关暂未开通语音转文字 (STT) 端点；如需使用语音转文字，请前往「模型 → 接入自有模型网关」配置支持 Whisper 或 Gemini 音频的模型接口。'
+        : cloudSttErr
+        ? `云端语音转文字失败: ${cloudSttErr}`
+        : '未获取到会员授权令牌，请先登录会员账号后再使用云端语音转文字。',
+    });
   } catch (error: any) {
     res.status(500).json({ error: error.message });
   }
@@ -9252,6 +9341,22 @@ app.post('/api/audio/tts-clone', aiGenerationLimiter, requireTenantAuth, async (
       });
     }
 
+    const allowedVoices = ['Puck', 'Charon', 'Kore', 'Fenrir', 'Zephyr'];
+    const chosenVoice = allowedVoices.includes(voiceName) ? voiceName : 'Kore';
+    const selectedTtsModel =
+      typeof requestedModel === 'string' && requestedModel.trim()
+        ? requestedModel.trim()
+        : 'gemini-3.8-flash-tts';
+
+    const openAiVoiceMap: Record<string, string> = {
+      Kore: 'nova',
+      Zephyr: 'shimmer',
+      Fenrir: 'onyx',
+      Puck: 'echo',
+      Charon: 'fable',
+    };
+    const mappedOpenAiVoice = openAiVoiceMap[chosenVoice] || 'nova';
+
     const cleanBaseUrl = (
       (typeof customConfig?.baseUrl === 'string' && customConfig.baseUrl.trim()) ||
       (typeof savedCustomConfig?.baseUrl === 'string' && savedCustomConfig.baseUrl.trim()) ||
@@ -9262,6 +9367,129 @@ app.post('/api/audio/tts-clone', aiGenerationLimiter, requireTenantAuth, async (
       (typeof savedCustomConfig?.apiKey === 'string' && savedCustomConfig.apiKey.trim()) ||
       ''
     );
+
+    const isPriorityCustomTts = Boolean(
+      effectiveTtsConfig?.enabled && effectiveTtsConfig?.engineMode === 'custom'
+    );
+
+    // When in Cloud Priority Mode and no custom gateway is configured, try Cloud Brain TTS first
+    if (!isPriorityCustomTts && (!cleanBaseUrl || isBuiltInCloudGatewayUrl(cleanBaseUrl))) {
+      const bearerJwt = extractBearerToken(req) || lastActiveUserJwt || undefined;
+      const effectiveEngineKey =
+        (typeof effectiveTtsConfig?.engineLicenseKey === 'string' && effectiveTtsConfig.engineLicenseKey.trim()) ||
+        (typeof savedCustomConfig?.engineLicenseKey === 'string' && savedCustomConfig.engineLicenseKey.trim()) ||
+        (process.env.RAILWAY_BRAIN_KEY || '').trim() ||
+        undefined;
+
+      let cloudTtsStatus = 0;
+      let cloudTtsErr = '';
+      if (bearerJwt || effectiveEngineKey) {
+        try {
+          const cloudTtsRes = await safeSsrfFetch(
+            `${getRailwayBrainBaseUrl()}/v1/audio/speech`,
+            {
+              method: 'POST',
+              headers: buildRailwayAuthHeaders(undefined, bearerJwt, effectiveEngineKey),
+              body: JSON.stringify({
+                model: selectedTtsModel,
+                input: text,
+                voice: mappedOpenAiVoice,
+                gemini_voice: chosenVoice,
+                tone_style: toneStyle,
+                response_format: 'mp3',
+              }),
+              signal: AbortSignal.timeout(25000),
+            }
+          );
+          cloudTtsStatus = cloudTtsRes.status;
+          if (cloudTtsRes.ok) {
+            const contentType = (cloudTtsRes.headers.get('content-type') || '').toLowerCase();
+            if (contentType.includes('application/json')) {
+              const json = await cloudTtsRes.json().catch(() => null);
+              const rawB64 = json?.audio || json?.data?.[0]?.b64_json || json?.audioBase64;
+              if (typeof rawB64 === 'string' && rawB64.trim()) {
+                const audioUrl = rawB64.startsWith('data:') ? rawB64 : `data:audio/mp3;base64,${rawB64}`;
+                return res.json({
+                  audioUrl,
+                  format: 'mp3',
+                  voiceName: chosenVoice,
+                  toneStyle,
+                  modelUsed: json?.model || 'lingxi_cloud_brain_tts',
+                  routingReason: '通过 HumanSense 云端引擎合成语音',
+                });
+              }
+            } else {
+              const buf = Buffer.from(await cloudTtsRes.arrayBuffer());
+              if (buf.length > 0) {
+                const mimeType = contentType.includes('wav')
+                  ? 'audio/wav'
+                  : contentType.includes('ogg')
+                  ? 'audio/ogg'
+                  : 'audio/mpeg';
+                const format = mimeType === 'audio/wav' ? 'wav' : mimeType === 'audio/ogg' ? 'ogg' : 'mp3';
+                return res.json({
+                  audioUrl: `data:${mimeType};base64,${buf.toString('base64')}`,
+                  format,
+                  voiceName: chosenVoice,
+                  toneStyle,
+                  modelUsed: 'lingxi_cloud_brain_tts',
+                  routingReason: '通过 HumanSense 云端引擎合成语音',
+                });
+              }
+            }
+          } else {
+            const errTxt = await cloudTtsRes.text().catch(() => '');
+            cloudTtsErr = `HTTP ${cloudTtsRes.status}${errTxt ? `: ${errTxt.slice(0, 160)}` : ''}`;
+          }
+        } catch (err: any) {
+          cloudTtsStatus = 503;
+          cloudTtsErr = err?.message || String(err);
+        }
+      }
+
+      if (isGeminiAvailable()) {
+        try {
+          const ai = createGeminiClient();
+          const response = await ai.models.generateContent({
+            model: resolveGeminiModel(requestedModel, 'tts'),
+            contents: [{ role: 'user', parts: [{ text }] }],
+            config: {
+              responseModalities: ['AUDIO'],
+              speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: chosenVoice } } },
+              systemInstruction: toneStyle
+                ? `Please speak in an authentic, natural voice with tone and style: ${toneStyle}`
+                : undefined,
+            },
+          });
+          const audioPart = response.candidates?.[0]?.content?.parts?.[0]?.inlineData;
+          const base64Audio = audioPart?.data;
+          if (base64Audio && Buffer.from(base64Audio, 'base64').length > 0) {
+            const mimeType = audioPart?.mimeType || 'audio/wav';
+            return res.json({
+              audioUrl: `data:${mimeType};base64,${base64Audio}`,
+              format: mimeType.includes('ogg') ? 'ogg' : mimeType.includes('mp3') ? 'mp3' : 'wav',
+              voiceName: chosenVoice,
+              toneStyle,
+              modelUsed: resolveGeminiModel(requestedModel, 'tts'),
+              routingReason: '通过官方 Gemini 引擎合成语音',
+            });
+          }
+        } catch (e: any) {
+          handleGeminiApiError('CloudTtsClone', e);
+        }
+      }
+
+      const isMissingEndpoint = cloudTtsStatus === 404 || cloudTtsStatus === 405 || cloudTtsStatus === 501;
+      return res.status(isMissingEndpoint ? 400 : cloudTtsStatus || 400).json({
+        ok: false,
+        error: isMissingEndpoint ? '云端网关暂未开通音色合成端点，需配置自有网关' : '音色克隆需使用自有模型网关',
+        message: isMissingEndpoint
+          ? '云端引擎暂未开通音色合成端点；请前往「模型 → 接入自有模型网关」填写支持 OpenAI TTS / Gemini 音频的 Base URL 与 API 密钥后重试。'
+          : cloudTtsErr
+          ? `云端语音合成失败 (${cloudTtsErr})；您也可在「模型 → 接入自有模型网关」配置自有网关独立使用。`
+          : '音色克隆需登录会员或前往「模型 → 接入自有模型网关」填写 Base URL 与 API 密钥。',
+      });
+    }
 
     if (!cleanBaseUrl || isBuiltInCloudGatewayUrl(cleanBaseUrl)) {
       return res.status(400).json({
@@ -9290,22 +9518,6 @@ app.post('/api/audio/tts-clone', aiGenerationLimiter, requireTenantAuth, async (
         message: '请先在「模型 → 接入自有模型网关」填写 API 密钥。',
       });
     }
-
-    const allowedVoices = ['Puck', 'Charon', 'Kore', 'Fenrir', 'Zephyr'];
-    const chosenVoice = allowedVoices.includes(voiceName) ? voiceName : 'Kore';
-    const selectedTtsModel =
-      typeof requestedModel === 'string' && requestedModel.trim()
-        ? requestedModel.trim()
-        : 'gemini-3.8-flash-tts';
-
-    const openAiVoiceMap: Record<string, string> = {
-      Kore: 'nova',
-      Zephyr: 'shimmer',
-      Fenrir: 'onyx',
-      Puck: 'echo',
-      Charon: 'fable',
-    };
-    const mappedOpenAiVoice = openAiVoiceMap[chosenVoice] || 'nova';
 
     const isOfficialGeminiUrl = cleanBaseUrl.toLowerCase().includes('googleapis.com');
     const isGeminiStyleModel = selectedTtsModel.toLowerCase().includes('gemini');
@@ -9458,16 +9670,34 @@ app.post('/api/audio/tts-clone', aiGenerationLimiter, requireTenantAuth, async (
   }
 });
 
-async function getCnTranslationIfForeign(
+export async function getCnTranslationIfForeign(
   text: string,
   overrideCustomConfig?: any,
   userJwt?: string
 ): Promise<string> {
   if (!text || typeof text !== 'string') return '';
-  const hasForeign = /[a-zA-Z\u0400-\u04FF\u0600-\u06FF]/.test(text);
-  if (!hasForeign) return '';
+  const stripped = text
+    .trim()
+    .replace(/https?:\/\/\S+/gi, ' ')
+    .replace(/\bwww\.\S+/gi, ' ')
+    .replace(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi, ' ')
+    .replace(/@[a-zA-Z0-9_]+/g, ' ')
+    .trim();
+  if (!stripped || !/\p{L}/u.test(stripped)) return '';
   try {
     const transSettings = await getServerTranslationSettings();
+    const targetLang =
+      transSettings?.defaultTargetLang && transSettings.defaultTargetLang !== 'Auto'
+        ? transSettings.defaultTargetLang
+        : 'Chinese';
+
+    const detectedSourceCode = detectSourceLangCode(text);
+    const normSrc = detectedSourceCode.toLowerCase();
+    const normTarget = mapLanguageCode(targetLang).toLowerCase();
+    if (normSrc && normTarget && (normSrc === normTarget || (normSrc === 'zh-cn' && normTarget === 'zh'))) {
+      return '';
+    }
+
     const customConfig = overrideCustomConfig || (await getServerCustomLlmConfig());
     const isDualOff = Boolean(
       customConfig && (customConfig.enabled === false || customConfig.explicitlyDisabled)
@@ -9490,7 +9720,7 @@ async function getCnTranslationIfForeign(
     const result = await performStrictTranslation({
       text,
       sourceLang: 'Auto',
-      targetLang: transSettings?.defaultTargetLang && transSettings.defaultTargetLang !== 'Auto' ? transSettings.defaultTargetLang : 'Chinese',
+      targetLang,
       engine,
       googleApiKey: transSettings?.googleApiKey,
       geminiModel: transSettings?.geminiModel,
@@ -9500,7 +9730,11 @@ async function getCnTranslationIfForeign(
       userJwt: (typeof userJwt === 'string' && userJwt.trim()) || undefined,
       engineLicenseKey: customConfig?.engineLicenseKey,
     });
-    return result.translatedText || '';
+    const translated = (result.translatedText || '').trim();
+    if (!translated || translated.toLowerCase() === text.trim().toLowerCase()) {
+      return '';
+    }
+    return translated;
   } catch (err: any) {
     console.warn('[Background Translation Error]:', err?.message || err);
     return '';
@@ -9620,26 +9854,46 @@ function normalizeMessageTurn(raw: any, fallbackSeq: number): NormalizedChatTurn
   };
 }
 
+function buildScopedAccountFilterVariants(accountId?: string | null): string[] {
+  const raw = String(accountId || '').trim();
+  if (!raw) return [];
+  const variants = new Set<string>(getScopedAccountIdVariants(raw));
+  if (raw === 'acc_telegram_bot' || raw === 'acc_1') {
+    variants.add('acc_telegram_bot');
+    variants.add('acc_1');
+  }
+  return Array.from(variants);
+}
+
 export async function extractRecentTwoWayMessages(
   customerId: string,
   altCustomerId: string,
   clientMessages: any[] = [],
-  limit = 30
+  limit = 30,
+  accountId?: string
 ): Promise<NormalizedChatTurn[]> {
   const cappedLimit = Math.min(Math.max(1, Number(limit) || 30), 30);
   const dbTurns: NormalizedChatTurn[] = [];
+  const accVariants = buildScopedAccountFilterVariants(accountId);
+  const accSet = accVariants.length > 0 ? new Set(accVariants) : null;
 
   if (customerId) {
     try {
-      const rows = (await db
-        .prepare(
-          `SELECT id, sender, text, stt_text, image_caption, timestamp, created_at
+      const sql = accVariants.length > 0
+        ? `SELECT id, sender, text, stt_text, image_caption, timestamp, created_at
+           FROM messages
+           WHERE (chat_id = ? OR chat_id = ?) AND account_id IN (${accVariants.map(() => '?').join(', ')})
+           ORDER BY created_at DESC
+           LIMIT ?`
+        : `SELECT id, sender, text, stt_text, image_caption, timestamp, created_at
            FROM messages
            WHERE (chat_id = ? OR chat_id = ?)
            ORDER BY created_at DESC
-           LIMIT ?`
-        )
-        .all(customerId, altCustomerId || customerId, Math.max(cappedLimit * 2, 60))) as any[];
+           LIMIT ?`;
+      const params = accVariants.length > 0
+        ? [customerId, altCustomerId || customerId, ...accVariants, Math.max(cappedLimit * 2, 60)]
+        : [customerId, altCustomerId || customerId, Math.max(cappedLimit * 2, 60)];
+      const rows = (await db.prepare(sql).all(...params)) as any[];
 
       const orderedRows = [...rows].reverse();
       orderedRows.forEach((row, idx) => {
@@ -9655,6 +9909,13 @@ export async function extractRecentTwoWayMessages(
   if (Array.isArray(clientMessages)) {
     const baseSeq = Date.now() - clientMessages.length;
     clientMessages.forEach((msg, idx) => {
+      if (accSet && msg && typeof msg === 'object') {
+        const msgAccRaw = String(msg.accountId ?? msg.account_id ?? '').trim();
+        if (msgAccRaw) {
+          const msgAccVariants = buildScopedAccountFilterVariants(msgAccRaw);
+          if (!msgAccVariants.some((v) => accSet.has(v))) return;
+        }
+      }
       const turn = normalizeMessageTurn(msg, baseSeq + idx);
       if (turn) clientTurns.push(turn);
     });
@@ -9845,10 +10106,10 @@ app.post('/api/llm/chat', aiGenerationLimiter, requireTenantAuth, async (req: Re
       });
     }
 
-    // Step 2: Read & normalize current Customer ID + Account ID
+    // Step 2: Read & normalize current Customer ID + Account ID (prefer verified tenant account)
     const { customerId, altCustomerId, accountId } = resolveCanonicalChatIds(
       chatId,
-      reqAccountId || authContext?.effectiveAccountId
+      authContext?.effectiveAccountId || reqAccountId
     );
 
     // Step 3: Read real Persona & active evolution habits from DB
@@ -9963,8 +10224,8 @@ ${memoryGuideline}`;
       }
     }
 
-    // Step 5: Extract recent 30 two-way messages (DB + client buffer, deduplicated & ordered)
-    const recent30Messages = await extractRecentTwoWayMessages(customerId, altCustomerId, messages, 30);
+    // Step 5: Extract recent 30 two-way messages (DB + client buffer, deduplicated, ordered, strictly scoped by accountId)
+    const recent30Messages = await extractRecentTwoWayMessages(customerId, altCustomerId, messages, 30, accountId);
 
     // Step 6: Validate Data Integrity before constructing Cloud API / LLM request
     const validation = validateReplyPipelineData({
@@ -10304,8 +10565,14 @@ ${transcriptContext}${langRequirement}`;
             })),
           ];
 
+          const resolvedChatModel = isCloudBrainChat
+            ? (effectiveChatConfig.modelName && /^(gemini|gemma)/i.test(String(effectiveChatConfig.modelName).trim())
+                ? String(effectiveChatConfig.modelName).trim()
+                : 'gemini-4-hydrogen')
+            : (effectiveChatConfig.modelName || 'gpt-4o-mini');
+
           const requestBody: Record<string, any> = {
-            model: effectiveChatConfig.modelName || (isCloudBrainChat ? 'gemini-4-hydrogen' : 'gpt-4o-mini'),
+            model: resolvedChatModel,
             messages: formattedMessages,
             temperature: effectiveChatConfig.temperature ?? 0.7,
             max_tokens: 500,
@@ -10447,15 +10714,7 @@ ${transcriptContext}${langRequirement}`;
   }
 });
 
-// 11. Real-time Live Duplex Voice Conversation Info (Gemini 3.8 Live for Telegram Mini Apps)
-app.get('/api/live/info', (_req: Request, res: Response) => {
-  res.json({
-    liveModel: 'gemini-3.8-live',
-    description: 'Gemini 3.8 Live 实时全双工低延迟语音通话与多模态交互引擎',
-    supportedProtocols: ['WebSocket', 'WebRTC'],
-    features: ['全双工双向打断', '超低延迟实时音频流', '真人语调情绪实时反馈'],
-  });
-});
+// (/api/live/info stub removed: real-time duplex voice streaming is not bundled in desktop release)
 
 function isNonChatModelId(modelId: string): boolean {
   const lower = (modelId || '').toLowerCase();
@@ -10753,7 +11012,9 @@ app.post('/api/llm/ping', aiGenerationLimiter, requireTenantAuth, async (req: Re
     const hasExplicitModel = Boolean(modelName && typeof modelName === 'string' && modelName.trim());
     const effectiveModel = hasExplicitModel
       ? modelName.trim()
-      : (protocol === 'gemini' ? 'gemini-4-hydrogen' : 'gpt-4o-mini');
+      : isCloudPing || protocol === 'gemini'
+      ? 'gemini-4-hydrogen'
+      : 'gpt-4o-mini';
 
     let extraHeaders: Record<string, string> = {};
     if (customHeaders) {
@@ -11940,13 +12201,79 @@ export async function generateTtsAudio(
     throw new Error(`自有模型网关语音合成失败: ${lastErr}`);
   }
 
-  // Cloud Priority Mode: official Gemini TTS
-  if (!isGeminiAvailable()) {
-    const circuit = getGeminiCircuitStatus();
-    throw new Error(circuit.reason || 'TTS voice generation failed: Gemini API unavailable or unconfigured');
+  // Cloud Priority Mode: try Cloud Brain TTS gateway first, then local Gemini fallback
+  const ttsModel = resolveGeminiModel(undefined, 'tts');
+  const openAiVoiceMapCloud: Record<string, string> = {
+    Kore: 'nova',
+    Zephyr: 'shimmer',
+    Fenrir: 'onyx',
+    Puck: 'echo',
+    Charon: 'fable',
+  };
+  const effectiveEngineKey =
+    (typeof serverCustomConfig?.engineLicenseKey === 'string' && serverCustomConfig.engineLicenseKey.trim()) ||
+    (process.env.RAILWAY_BRAIN_KEY || '').trim() ||
+    undefined;
+  let cloudTtsFailureMsg = '';
+  if (lastActiveUserJwt || effectiveEngineKey) {
+    try {
+      const cloudTtsRes = await safeSsrfFetch(
+        `${getRailwayBrainBaseUrl()}/v1/audio/speech`,
+        {
+          method: 'POST',
+          headers: buildRailwayAuthHeaders(undefined, lastActiveUserJwt || undefined, effectiveEngineKey),
+          body: JSON.stringify({
+            model: ttsModel,
+            input: text,
+            voice: openAiVoiceMapCloud[chosenVoice] || 'nova',
+            gemini_voice: chosenVoice,
+            tone_style: toneStyle,
+            response_format: 'mp3',
+          }),
+          signal: AbortSignal.timeout(25000),
+        }
+      );
+      if (cloudTtsRes.ok) {
+        const contentType = (cloudTtsRes.headers.get('content-type') || '').toLowerCase();
+        if (contentType.includes('application/json')) {
+          const json = await cloudTtsRes.json().catch(() => null);
+          const rawB64 = json?.audio || json?.data?.[0]?.b64_json || json?.audioBase64;
+          if (typeof rawB64 === 'string' && rawB64.trim()) {
+            return {
+              audioUrl: rawB64.startsWith('data:') ? rawB64 : `data:audio/mp3;base64,${rawB64}`,
+              duration,
+            };
+          }
+        } else {
+          const buf = Buffer.from(await cloudTtsRes.arrayBuffer());
+          if (buf.length > 0) {
+            const mimeType = contentType.includes('wav')
+              ? 'audio/wav'
+              : contentType.includes('ogg')
+              ? 'audio/ogg'
+              : 'audio/mpeg';
+            return {
+              audioUrl: `data:${mimeType};base64,${buf.toString('base64')}`,
+              duration,
+            };
+          }
+        }
+      } else {
+        cloudTtsFailureMsg = `云端 TTS 网关返回 HTTP ${cloudTtsRes.status}`;
+      }
+    } catch (e: any) {
+      cloudTtsFailureMsg = e?.message || String(e);
+    }
   }
 
-  const ttsModel = resolveGeminiModel(undefined, 'tts');
+  if (!isGeminiAvailable()) {
+    const circuit = getGeminiCircuitStatus();
+    throw new Error(
+      cloudTtsFailureMsg ||
+        circuit.reason ||
+        'TTS voice generation unavailable: 云端语音合成端点未开通且未配置本地 Gemini 密钥'
+    );
+  }
   let lastError = '';
   try {
     const ai = createGeminiClient();
@@ -11980,7 +12307,255 @@ export async function generateTtsAudio(
   throw new Error(`TTS voice generation failed (${ttsModel}): ${lastError}`);
 }
 
-// Helper: Download voice file from Telegram and transcribe strictly obeying 3-state mutual exclusion
+// Shared Helper: Transcribe an audio buffer strictly obeying 3-state mutual exclusion
+export async function transcribeAudioBufferStrictly(
+  buffer: Buffer,
+  mimeType: string = 'audio/ogg',
+  overrideCustomConfig?: any,
+  modelOverride?: string
+): Promise<{ ok: boolean; text: string; error?: string }> {
+  if (!buffer || buffer.length === 0) {
+    return { ok: false, text: '', error: '语音音频数据为空' };
+  }
+
+  const serverCustomConfig = overrideCustomConfig || (await getServerCustomLlmConfig().catch(() => null));
+  const isDualOff = Boolean(
+    serverCustomConfig &&
+      (serverCustomConfig.enabled === false || serverCustomConfig.explicitlyDisabled)
+  );
+  if (isDualOff) {
+    return {
+      ok: false,
+      text: '',
+      error: '当前处于双关状态（官方大模型与自有密钥均已关闭），已跳过语音转文字大模型调用',
+    };
+  }
+
+  const isPriorityCustom = Boolean(
+    serverCustomConfig?.enabled && serverCustomConfig?.engineMode === 'custom'
+  );
+  const base64Audio = buffer.toString('base64');
+
+  if (isPriorityCustom) {
+    const cleanBaseUrl = (serverCustomConfig?.baseUrl || '').trim().replace(/\/+$/, '');
+    const cleanApiKey = sanitizeHttpHeaderValue(serverCustomConfig?.apiKey || '');
+    if (!cleanBaseUrl || isBuiltInCloudGatewayUrl(cleanBaseUrl)) {
+      return {
+        ok: false,
+        text: '',
+        error: '已开启「优先自有密钥回复」，语音转文字需配置自有模型网关 Base URL（严禁偷跑官方 Gemini）',
+      };
+    }
+    let isLocalhostUrl = false;
+    try {
+      const parsed = new URL(cleanBaseUrl);
+      isLocalhostUrl = isAllowedLocalhostEndpoint(parsed.hostname);
+    } catch {
+      return {
+        ok: false,
+        text: '',
+        error: '自有模型网关 Base URL 无效，无法执行语音转文字',
+      };
+    }
+    if (!cleanApiKey && !isLocalhostUrl) {
+      return {
+        ok: false,
+        text: '',
+        error: '已开启「优先自有密钥回复」，缺少自有模型网关 API 密钥（严禁偷跑官方 Gemini）',
+      };
+    }
+
+    const inferredProtocol =
+      serverCustomConfig?.protocol === 'gemini' || cleanBaseUrl.toLowerCase().includes('googleapis.com')
+        ? 'gemini'
+        : serverCustomConfig?.protocol === 'anthropic'
+        ? 'anthropic'
+        : 'openai';
+
+    if (inferredProtocol === 'anthropic') {
+      return {
+        ok: false,
+        text: '',
+        error: 'Anthropic 协议暂不支持音频转写，请在自有模型网关切换 OpenAI 或 Gemini 协议接口',
+      };
+    }
+
+    if (inferredProtocol === 'gemini') {
+      const customSttModel =
+        (modelOverride && modelOverride.trim()) ||
+        (serverCustomConfig?.modelName && serverCustomConfig.modelName.trim()) ||
+        resolveGeminiModel(undefined, 'transcribe');
+      try {
+        const sdkBaseUrl = cleanBaseUrl.replace(/\/v1beta.*$/i, '').replace(/\/v1$/i, '');
+        const ai = new GoogleGenAI({
+          apiKey: cleanApiKey || 'local-key',
+          httpOptions: {
+            baseUrl: sdkBaseUrl,
+            headers: { 'User-Agent': 'aistudio-build' },
+          },
+        });
+        const response = await ai.models.generateContent({
+          model: customSttModel,
+          contents: {
+            parts: [
+              { inlineData: { mimeType, data: base64Audio } },
+              {
+                text: 'Transcribe this voice message accurately into text verbatim. Output only the verbatim transcribed spoken words without markdown, explanation or quotes.',
+              },
+            ],
+          },
+        });
+        const text = response.text?.trim() || '';
+        if (!text) {
+          return {
+            ok: false,
+            text: '',
+            error: `自有网关 (${customSttModel}) 未识别出有效语音文字`,
+          };
+        }
+        return { ok: true, text };
+      } catch (err: any) {
+        return {
+          ok: false,
+          text: '',
+          error: `自有网关语音转写失败 (${customSttModel}): ${err?.message || String(err)}`,
+        };
+      }
+    }
+
+    // OpenAI-compatible Whisper transcription on user's custom gateway
+    const sttModel = (modelOverride && modelOverride.trim()) || 'whisper-1';
+    const ext = mimeType.includes('mp3') ? 'mp3' : mimeType.includes('wav') ? 'wav' : mimeType.includes('m4a') ? 'm4a' : 'ogg';
+    const candidateUrls = cleanBaseUrl.endsWith('/audio/transcriptions')
+      ? [cleanBaseUrl]
+      : cleanBaseUrl.endsWith('/v1')
+      ? [`${cleanBaseUrl}/audio/transcriptions`]
+      : [`${cleanBaseUrl}/v1/audio/transcriptions`, `${cleanBaseUrl}/audio/transcriptions`];
+
+    let lastErr = '自有网关未返回有效语音识别文本';
+    for (const targetUrl of candidateUrls) {
+      try {
+        const form = new FormData();
+        form.append('file', new Blob([new Uint8Array(buffer)], { type: mimeType }), `voice.${ext}`);
+        form.append('model', sttModel);
+        const encodedForm = new Response(form);
+        const formBuf = Buffer.from(await encodedForm.arrayBuffer());
+        const formContentType = encodedForm.headers.get('content-type') || 'multipart/form-data';
+
+        const sttRes = await safeSsrfFetch(targetUrl, {
+          method: 'POST',
+          headers: {
+            'Content-Type': formContentType,
+            ...(cleanApiKey ? { Authorization: `Bearer ${cleanApiKey}` } : {}),
+          },
+          body: formBuf,
+          signal: AbortSignal.timeout(30000),
+        });
+        if (!sttRes.ok) {
+          const errTxt = await sttRes.text().catch(() => '');
+          lastErr = `HTTP ${sttRes.status}${errTxt ? `: ${errTxt.slice(0, 180)}` : ''}`;
+          if (sttRes.status !== 404) break;
+          continue;
+        }
+        const json = await sttRes.json().catch(() => null);
+        const text = typeof json?.text === 'string' ? json.text.trim() : '';
+        if (text) {
+          return { ok: true, text };
+        }
+        lastErr = json?.error?.message || '自有网关未返回有效语音识别文本';
+        break;
+      } catch (err: any) {
+        lastErr = err?.message || String(err);
+      }
+    }
+    return {
+      ok: false,
+      text: '',
+      error: `自有网关语音转写失败 (${sttModel}): ${lastErr}`,
+    };
+  }
+
+  // Cloud Priority Mode: try Cloud Brain STT gateway first, then local Gemini fallback
+  const sttModel = resolveGeminiModel(modelOverride, 'transcribe');
+  const effectiveEngineKey =
+    (typeof serverCustomConfig?.engineLicenseKey === 'string' && serverCustomConfig.engineLicenseKey.trim()) ||
+    (process.env.RAILWAY_BRAIN_KEY || '').trim() ||
+    undefined;
+  let cloudSttErr = '';
+  if (lastActiveUserJwt || effectiveEngineKey) {
+    try {
+      const ext = mimeType.includes('mp3') ? 'mp3' : mimeType.includes('wav') ? 'wav' : mimeType.includes('m4a') ? 'm4a' : 'ogg';
+      const form = new FormData();
+      form.append('file', new Blob([new Uint8Array(buffer)], { type: mimeType }), `voice.${ext}`);
+      form.append('model', sttModel);
+      const encodedForm = new Response(form);
+      const formBuf = Buffer.from(await encodedForm.arrayBuffer());
+      const formContentType = encodedForm.headers.get('content-type') || 'multipart/form-data';
+      const cloudHeaders = buildRailwayAuthHeaders(undefined, lastActiveUserJwt || undefined, effectiveEngineKey);
+      delete cloudHeaders['Content-Type'];
+      cloudHeaders['Content-Type'] = formContentType;
+      const cloudRes = await safeSsrfFetch(
+        `${getRailwayBrainBaseUrl()}/v1/audio/transcriptions`,
+        { method: 'POST', headers: cloudHeaders, body: formBuf, signal: AbortSignal.timeout(25000) }
+      );
+      if (cloudRes.ok) {
+        const json = await cloudRes.json().catch(() => null);
+        const cloudText = typeof json?.text === 'string' ? json.text.trim() : '';
+        if (cloudText) {
+          return { ok: true, text: cloudText };
+        }
+      } else {
+        cloudSttErr = `HTTP ${cloudRes.status}`;
+      }
+    } catch (e: any) {
+      cloudSttErr = e?.message || String(e);
+    }
+  }
+
+  if (!isGeminiAvailable()) {
+    const circuit = getGeminiCircuitStatus();
+    return {
+      ok: false,
+      text: '',
+      error: cloudSttErr
+        ? `云端语音转文字网关暂不可用 (${cloudSttErr})`
+        : circuit.reason || '未获取到云端语音转文字授权且未配置本地密钥',
+    };
+  }
+  try {
+    const ai = createGeminiClient();
+    const response = await ai.models.generateContent({
+      model: sttModel,
+      contents: {
+        parts: [
+          { inlineData: { mimeType, data: base64Audio } },
+          {
+            text: 'Transcribe this voice message accurately into text verbatim. Output only the verbatim transcribed spoken words without markdown, explanation or quotes.',
+          },
+        ],
+      },
+    });
+
+    const transcribedText = response.text?.trim() || '';
+    if (!transcribedText) {
+      return {
+        ok: false,
+        text: '',
+        error: `Gemini STT (${sttModel}) 未识别出有效文字内容`,
+      };
+    }
+    return { ok: true, text: transcribedText };
+  } catch (geminiErr: any) {
+    handleGeminiApiError('TelegramVoiceSTT', geminiErr);
+    return {
+      ok: false,
+      text: '',
+      error: `语音转写失败 (${sttModel}): ${geminiErr?.message || String(geminiErr)}`,
+    };
+  }
+}
+
+// Helper: Download voice file from Telegram Bot API and transcribe strictly obeying 3-state mutual exclusion
 export async function downloadAndTranscribeTelegramVoice(
   fileId: string,
   overrideCustomConfig?: any
@@ -11996,7 +12571,6 @@ export async function downloadAndTranscribeTelegramVoice(
   }
 
   try {
-    // 1. Get file path from Telegram getFile API
     const fileInfoRes = await fetch(`https://api.telegram.org/bot${botToken}/getFile?file_id=${encodeURIComponent(fileId)}`);
     const fileInfo = await fileInfoRes.json();
     if (!fileInfo.ok || !fileInfo.result?.file_path) {
@@ -12011,8 +12585,6 @@ export async function downloadAndTranscribeTelegramVoice(
 
     const filePath = fileInfo.result.file_path;
     const downloadUrl = `https://api.telegram.org/file/bot${botToken}/${filePath}`;
-
-    // 2. Download the binary audio data
     const audioRes = await fetch(downloadUrl);
     if (!audioRes.ok) {
       console.warn(`[Telegram Voice] Failed to download audio from ${downloadUrl}, status: ${audioRes.status}`);
@@ -12038,215 +12610,13 @@ export async function downloadAndTranscribeTelegramVoice(
     const mimeType = filePath.endsWith('.mp3') ? 'audio/mp3' : filePath.endsWith('.wav') ? 'audio/wav' : 'audio/ogg';
     const audioDataUrl = `data:${mimeType};base64,${base64Audio}`;
 
-    // 3. Enforce 3-state mutual exclusion before invoking any STT LLM
-    const serverCustomConfig = overrideCustomConfig || (await getServerCustomLlmConfig().catch(() => null));
-    const isDualOff = Boolean(
-      serverCustomConfig &&
-      (serverCustomConfig.enabled === false || serverCustomConfig.explicitlyDisabled)
-    );
-    if (isDualOff) {
-      return {
-        ok: false,
-        text: '',
-        audioUrl: audioDataUrl,
-        error: '当前处于双关状态（官方大模型与自有密钥均已关闭），已跳过语音转文字大模型调用',
-      };
-    }
-
-    const isPriorityCustom = Boolean(
-      serverCustomConfig?.enabled && serverCustomConfig?.engineMode === 'custom'
-    );
-
-    if (isPriorityCustom) {
-      const cleanBaseUrl = (serverCustomConfig?.baseUrl || '').trim().replace(/\/+$/, '');
-      const cleanApiKey = sanitizeHttpHeaderValue(serverCustomConfig?.apiKey || '');
-      if (!cleanBaseUrl || isBuiltInCloudGatewayUrl(cleanBaseUrl)) {
-        return {
-          ok: false,
-          text: '',
-          audioUrl: audioDataUrl,
-          error: '已开启「优先自有密钥回复」，Webhook 语音转文字需配置自有模型网关 Base URL（严禁偷跑官方 Gemini）',
-        };
-      }
-      let isLocalhostUrl = false;
-      try {
-        const parsed = new URL(cleanBaseUrl);
-        isLocalhostUrl = isAllowedLocalhostEndpoint(parsed.hostname);
-      } catch {
-        return {
-          ok: false,
-          text: '',
-          audioUrl: audioDataUrl,
-          error: '自有模型网关 Base URL 无效，无法执行语音转文字',
-        };
-      }
-      if (!cleanApiKey && !isLocalhostUrl) {
-        return {
-          ok: false,
-          text: '',
-          audioUrl: audioDataUrl,
-          error: '已开启「优先自有密钥回复」，缺少自有模型网关 API 密钥（严禁偷跑官方 Gemini）',
-        };
-      }
-
-      const inferredProtocol =
-        serverCustomConfig?.protocol === 'gemini' || cleanBaseUrl.toLowerCase().includes('googleapis.com')
-          ? 'gemini'
-          : serverCustomConfig?.protocol === 'anthropic'
-          ? 'anthropic'
-          : 'openai';
-
-      if (inferredProtocol === 'anthropic') {
-        return {
-          ok: false,
-          text: '',
-          audioUrl: audioDataUrl,
-          error: 'Anthropic 协议暂不支持音频转写，请在自有模型网关切换 OpenAI 或 Gemini 协议接口',
-        };
-      }
-
-      if (inferredProtocol === 'gemini') {
-        const customSttModel =
-          (serverCustomConfig?.modelName && serverCustomConfig.modelName.trim()) ||
-          resolveGeminiModel(undefined, 'transcribe');
-        try {
-          const sdkBaseUrl = cleanBaseUrl.replace(/\/v1beta.*$/i, '').replace(/\/v1$/i, '');
-          const ai = new GoogleGenAI({
-            apiKey: cleanApiKey || 'local-key',
-            httpOptions: {
-              baseUrl: sdkBaseUrl,
-              headers: { 'User-Agent': 'aistudio-build' },
-            },
-          });
-          const response = await ai.models.generateContent({
-            model: customSttModel,
-            contents: {
-              parts: [
-                { inlineData: { mimeType, data: base64Audio } },
-                { text: 'Transcribe this voice message accurately into text verbatim. Output only the verbatim transcribed spoken words without markdown, explanation or quotes.' },
-              ],
-            },
-          });
-          const text = response.text?.trim() || '';
-          if (!text) {
-            return {
-              ok: false,
-              text: '',
-              audioUrl: audioDataUrl,
-              error: `自有网关 (${customSttModel}) 未识别出有效语音文字`,
-            };
-          }
-          return { ok: true, text, audioUrl: audioDataUrl };
-        } catch (err: any) {
-          return {
-            ok: false,
-            text: '',
-            audioUrl: audioDataUrl,
-            error: `自有网关语音转写失败 (${customSttModel}): ${err?.message || String(err)}`,
-          };
-        }
-      }
-
-      // OpenAI-compatible Whisper transcription on user's custom gateway
-      const sttModel = 'whisper-1';
-      const ext = mimeType.includes('mp3') ? 'mp3' : mimeType.includes('wav') ? 'wav' : 'ogg';
-      const candidateUrls = cleanBaseUrl.endsWith('/audio/transcriptions')
-        ? [cleanBaseUrl]
-        : cleanBaseUrl.endsWith('/v1')
-        ? [`${cleanBaseUrl}/audio/transcriptions`]
-        : [`${cleanBaseUrl}/v1/audio/transcriptions`, `${cleanBaseUrl}/audio/transcriptions`];
-
-      let lastErr = '自有网关未返回有效语音识别文本';
-      for (const targetUrl of candidateUrls) {
-        try {
-          const form = new FormData();
-          form.append('file', new Blob([new Uint8Array(buffer)], { type: mimeType }), `voice.${ext}`);
-          form.append('model', sttModel);
-          const encodedForm = new Response(form);
-          const formBuf = Buffer.from(await encodedForm.arrayBuffer());
-          const formContentType = encodedForm.headers.get('content-type') || 'multipart/form-data';
-
-          const sttRes = await safeSsrfFetch(targetUrl, {
-            method: 'POST',
-            headers: {
-              'Content-Type': formContentType,
-              ...(cleanApiKey ? { Authorization: `Bearer ${cleanApiKey}` } : {}),
-            },
-            body: formBuf,
-            signal: AbortSignal.timeout(30000),
-          });
-          if (!sttRes.ok) {
-            const errTxt = await sttRes.text().catch(() => '');
-            lastErr = `HTTP ${sttRes.status}${errTxt ? `: ${errTxt.slice(0, 180)}` : ''}`;
-            if (sttRes.status !== 404) break;
-            continue;
-          }
-          const json = await sttRes.json().catch(() => null);
-          const text = typeof json?.text === 'string' ? json.text.trim() : '';
-          if (text) {
-            return { ok: true, text, audioUrl: audioDataUrl };
-          }
-          lastErr = json?.error?.message || '自有网关未返回有效语音识别文本';
-          break;
-        } catch (err: any) {
-          lastErr = err?.message || String(err);
-        }
-      }
-      return {
-        ok: false,
-        text: '',
-        audioUrl: audioDataUrl,
-        error: `自有网关语音转写失败 (${sttModel}): ${lastErr}`,
-      };
-    }
-
-    // Cloud Priority Mode: official Gemini STT (strict error propagation, never fake text)
-    if (!isGeminiAvailable()) {
-      const circuit = getGeminiCircuitStatus();
-      return {
-        ok: false,
-        text: '',
-        audioUrl: audioDataUrl,
-        error: circuit.reason || '未配置 Gemini API 密钥，无法执行语音转写',
-      };
-    }
-
-    const sttModel = resolveGeminiModel(undefined, 'transcribe');
-    try {
-      const ai = createGeminiClient();
-      const response = await ai.models.generateContent({
-        model: sttModel,
-        contents: {
-          parts: [
-            { inlineData: { mimeType, data: base64Audio } },
-            { text: 'Transcribe this voice message accurately into text verbatim. Output only the verbatim transcribed spoken words without markdown, explanation or quotes.' },
-          ],
-        },
-      });
-
-      const transcribedText = response.text?.trim() || '';
-      if (!transcribedText) {
-        return {
-          ok: false,
-          text: '',
-          audioUrl: audioDataUrl,
-          error: `Gemini STT (${sttModel}) 未识别出有效文字内容`,
-        };
-      }
-      return {
-        ok: true,
-        text: transcribedText,
-        audioUrl: audioDataUrl,
-      };
-    } catch (geminiErr: any) {
-      handleGeminiApiError('TelegramVoiceSTT', geminiErr);
-      return {
-        ok: false,
-        text: '',
-        audioUrl: audioDataUrl,
-        error: `语音转写失败 (${sttModel}): ${geminiErr?.message || String(geminiErr)}`,
-      };
-    }
+    const sttRes = await transcribeAudioBufferStrictly(buffer, mimeType, overrideCustomConfig);
+    return {
+      ok: sttRes.ok,
+      text: sttRes.text,
+      audioUrl: audioDataUrl,
+      error: sttRes.error,
+    };
   } catch (err: any) {
     console.error(`[Telegram Voice] Failed to process voice file ${fileId}:`, err.message);
     return {
@@ -12456,18 +12826,19 @@ async function processTelegramMessageAsync(
       }
     }
 
-    // 1. Fetch the most recent 15 conversation messages for this chat in chronological order
+    // 1. Fetch the most recent 15 conversation messages for this chat in chronological order (strictly Bot / acc_1 scope)
+    const altBotChatId = chatId.startsWith('tg_') ? chatId.replace(/^tg_/, '') : `tg_${chatId}`;
     const recentMessages = (await db.prepare(`
       SELECT sender, sender_name, text, stt_text, created_at
       FROM (
         SELECT sender, sender_name, text, stt_text, created_at
         FROM messages
-        WHERE chat_id = ?
+        WHERE (chat_id = ? OR chat_id = ?) AND account_id IN ('acc_telegram_bot', 'acc_1')
         ORDER BY created_at DESC
         LIMIT 15
       ) sub
       ORDER BY created_at ASC
-    `).all(chatId)) as any[];
+    `).all(chatId, altBotChatId)) as any[];
 
     // 2. Fetch customer profile or create default profile if not exists (Bot scope)
     let profile = await getScopedCustomerProfile(chatId, 'acc_telegram_bot');
@@ -12737,7 +13108,7 @@ ${dialogueTranscript}
     // 6. Save AI reply to database (strictly obeying user's configured translation engine)
     let replyTranslatedToChinese = '';
     try {
-      if (replyText && !/[\u4e00-\u9fa5]/.test(replyText)) {
+      if (replyText) {
         replyTranslatedToChinese = await getCnTranslationIfForeign(replyText, undefined, lastActiveUserJwt || undefined);
       }
     } catch {
@@ -21005,6 +21376,86 @@ export function attachTelegramClientMessageListener(client: TelegramClient, phon
           console.log(`[HumanSense Autopilot] Auto-generating holographic memory reply for chat ${canonicalChatId}...`);
           setImmediate(async () => {
             try {
+              const rawServerCustomConfig = await getServerCustomLlmConfig().catch(() => null);
+              const isDualOff = Boolean(
+                rawServerCustomConfig &&
+                  (rawServerCustomConfig.enabled === false || rawServerCustomConfig.explicitlyDisabled)
+              );
+              if (isDualOff) {
+                console.warn(
+                  `[HumanSense Autopilot Dual-Off Guard] Chat ${canonicalChatId}: 当前处于双关状态（官方大模型与自有密钥均已关闭），跳过自动回复并保持静默。`
+                );
+                return;
+              }
+
+              const serverCustomConfig =
+                rawServerCustomConfig ||
+                (lastActiveUserJwt || (process.env.RAILWAY_BRAIN_KEY || '').trim()
+                  ? {
+                      enabled: true,
+                      explicitlyDisabled: false,
+                      engineMode: 'cloud',
+                      modelName: 'gemini-4-hydrogen',
+                      enableKnowledgeBaseRAG: true,
+                    }
+                  : null);
+              const isPriorityCustom = Boolean(
+                serverCustomConfig?.enabled && serverCustomConfig?.engineMode === 'custom'
+              );
+
+              // 0. If incoming message is a voice note without transcript text, download and transcribe via 3-state STT
+              let effectiveIncomingText = (text || '').trim();
+              const isVoicePlaceholder =
+                isAudio &&
+                (!effectiveIncomingText || /^(\[语音消息\]|Voice Message|🎤)/i.test(effectiveIncomingText));
+              if (isVoicePlaceholder) {
+                if (!message.media) {
+                  console.warn(`[HumanSense Autopilot Voice Guard] Chat ${canonicalChatId}: 语音消息缺少可下载媒体体，跳过自动回复。`);
+                  return;
+                }
+                try {
+                  const downloaded = await client.downloadMedia(message, {});
+                  const audioBuf = Buffer.isBuffer(downloaded)
+                    ? downloaded
+                    : downloaded
+                    ? Buffer.from(downloaded as any)
+                    : Buffer.alloc(0);
+                  const voiceMimeType =
+                    String((message.media as any)?.document?.mimeType || '').trim() || 'audio/ogg';
+                  const sttRes = await transcribeAudioBufferStrictly(
+                    audioBuf,
+                    voiceMimeType,
+                    serverCustomConfig
+                  );
+                  if (!sttRes.ok || !sttRes.text.trim()) {
+                    console.warn(
+                      `[HumanSense Autopilot Voice STT Failed] Chat ${canonicalChatId}: ${sttRes.error || '未能识别语音文字'}，严禁对占位符自动回复。`
+                    );
+                    return;
+                  }
+                  effectiveIncomingText = sttRes.text.trim();
+                  try {
+                    await db
+                      .prepare(`UPDATE messages SET stt_text = ? WHERE id = ?`)
+                      .run(effectiveIncomingText, messageId);
+                  } catch {}
+                  pushPendingLocalUpdate({
+                    ...realtimeUpdate,
+                    sttText: effectiveIncomingText,
+                  });
+                } catch (voiceErr: any) {
+                  console.warn(
+                    `[HumanSense Autopilot Voice Download/STT Error] Chat ${canonicalChatId}: ${voiceErr?.message || String(voiceErr)}`
+                  );
+                  return;
+                }
+              }
+
+              if (!effectiveIncomingText) {
+                console.warn(`[HumanSense Autopilot Guard] Chat ${canonicalChatId}: 入站消息无有效文本内容，跳过自动回复。`);
+                return;
+              }
+
               // 1. Get customer profile from database strictly scoped by accountId
               const p =
                 (await getScopedCustomerProfile(canonicalChatId, accountId)) ||
@@ -21014,7 +21465,7 @@ export function attachTelegramClientMessageListener(client: TelegramClient, phon
               const taboos = p ? safeJsonParse<string[]>(p.dislikes_taboos, []) : [];
               const memories = p ? safeJsonParse<any[]>(p.key_memories, []) : [];
 
-              // Retrieve active Global Persona & Evolution state using unified builder
+              // Retrieve active Global Persona, Evolution state, and Oral Transcript styles
               let autoPersonaContext = '';
               let autoHabitIds: string[] = [];
               let hasAutoConfiguredPersona = false;
@@ -21027,7 +21478,32 @@ export function attachTelegramClientMessageListener(client: TelegramClient, phon
                 hasAutoConfiguredPersona = autoCtx.hasConfiguredPersona;
               } catch {}
 
-              const serverCustomConfig = await getServerCustomLlmConfig();
+              let oralStyleContext = '';
+              try {
+                const activeTranscripts = (await db
+                  .prepare(`SELECT title, learned_style FROM chat_transcripts WHERE is_active = 1 ORDER BY updated_at DESC LIMIT 2`)
+                  .all()) as any[];
+                if (activeTranscripts.length > 0) {
+                  oralStyleContext =
+                    '\n【高匹配整文口语表达范式】:\n' +
+                    activeTranscripts.map((t) => `- ${t.title}: ${t.learned_style}`).join('\n');
+                }
+              } catch {}
+
+              // Retrieve recent 20 two-way conversation turns strictly scoped by accountId so replies never leak across accounts
+              let recentHistoryTurns: NormalizedChatTurn[] = [];
+              try {
+                recentHistoryTurns = await extractRecentTwoWayMessages(canonicalChatId, rawChatId, [], 20, accountId);
+                // Avoid duplicating the current incoming turn if upsertSyncedMessageToDb already saved it
+                recentHistoryTurns = recentHistoryTurns.filter((t) => t.id !== messageId);
+                if (
+                  recentHistoryTurns.length > 0 &&
+                  recentHistoryTurns[recentHistoryTurns.length - 1].sender === 'peer' &&
+                  recentHistoryTurns[recentHistoryTurns.length - 1].text.trim() === effectiveIncomingText
+                ) {
+                  recentHistoryTurns.pop();
+                }
+              } catch {}
 
               // Retrieve Cloud Brain Knowledge Base (if enabled) & local RAG context
               let kbContext = '';
@@ -21035,7 +21511,7 @@ export function attachTelegramClientMessageListener(client: TelegramClient, phon
                 let railwayRes: RemoteKbSearchResult;
                 try {
                   railwayRes = await searchRailwayKnowledgeBase(
-                    text,
+                    effectiveIncomingText,
                     serverCustomConfig?.knowledgeBaseApiUrl,
                     serverCustomConfig?.knowledgeBaseApiKey || serverCustomConfig?.apiKey,
                     7000,
@@ -21064,13 +21540,13 @@ export function attachTelegramClientMessageListener(client: TelegramClient, phon
                 }
               }
               try {
-                const localRag = await queryKnowledgeRAG(text, 2);
+                const localRag = await queryKnowledgeRAG(effectiveIncomingText, 2);
                 if (localRag.matchedCount > 0 && localRag.context) {
                   kbContext += `\n${localRag.context}\n`;
                 }
               } catch {}
 
-              let targetLangCode = detectSourceLangCode(text);
+              let targetLangCode = detectSourceLangCode(effectiveIncomingText);
               if ((!targetLangCode || targetLangCode === 'zh-CN') && p?.location_timezone) {
                 const tz = String(p.location_timezone).toLowerCase();
                 if (tz.includes('istanbul') || tz.includes('turkey') || tz.includes('土耳其')) targetLangCode = 'tr';
@@ -21094,7 +21570,7 @@ export function attachTelegramClientMessageListener(client: TelegramClient, phon
                 !hasAutoConfiguredPersona && autoPersonaContext
                   ? `\n\n${autoPersonaContext}`
                   : ''
-              }
+              }${oralStyleContext}
 
 【客户全息画像与长期记忆档案】：
 - 客户称谓: ${p?.client_name || '好友'}
@@ -21110,31 +21586,50 @@ ${kbContext}${langConstraint}
 2. 篇幅短小精炼（1~2句日常短句），像真人用手机 Telegram 私聊！
 3. ${autopilotFamiliarity}，绝不要说“作为AI”。`;
 
-              let replyText = "";
+              const contextMessages = [
+                ...recentHistoryTurns.map((t) => ({
+                  role: t.sender === 'me' ? 'assistant' : 'user',
+                  content: t.text,
+                })),
+                { role: 'user', content: effectiveIncomingText },
+              ];
+
+              let replyText = '';
               if (serverCustomConfig?.enabled) {
                 try {
                   const candidate = await callCustomLlm({
                     customConfig: serverCustomConfig,
                     systemInstruction: memoryPrompt,
-                    messages: [{ role: "user", content: `客户刚才发来消息：“${text}”\n请直接生成最新一句回复：` }],
+                    messages: contextMessages,
                     temperature: 0.7,
                     maxTokens: 200,
                     userJwt: lastActiveUserJwt || undefined,
+                    throwOnError: true,
                     skipSync: true,
                   });
                   if (candidate?.trim()) {
                     replyText = candidate.trim();
                   }
                 } catch (autoLlmErr: any) {
-                  console.warn("[HumanSense Autopilot Custom LLM Guard]: 自定义大模型/云端引擎未连通，严格保持静默（严禁切回 Gemini）:", autoLlmErr.message);
+                  console.warn(
+                    `[HumanSense Autopilot LLM Guard] Chat ${canonicalChatId}: ${
+                      isPriorityCustom ? '自定义大模型' : '云端引擎'
+                    }调用失败 (${autoLlmErr?.message || String(autoLlmErr)})，严格保持静默`
+                  );
                 }
-              } else if (!(serverCustomConfig && (serverCustomConfig.enabled === false || serverCustomConfig.explicitlyDisabled)) && isGeminiAvailable()) {
+              } else if (!isPriorityCustom && isGeminiAvailable()) {
                 const targetModel = resolveGeminiModel(serverCustomConfig?.geminiModel, 'chat');
                 try {
                   const ai = createGeminiClient();
+                  const historyTranscript = recentHistoryTurns
+                    .map((t) => `${t.sender === 'me' ? '我方' : '客户'}: ${t.text}`)
+                    .join('\n');
+                  const fullPrompt = historyTranscript
+                    ? `最近历史对话：\n${historyTranscript}\n\n客户刚才发来消息：“${effectiveIncomingText}”\n请直接生成最新一句回复：`
+                    : `客户刚才发来消息：“${effectiveIncomingText}”\n请直接生成最新一句回复：`;
                   const response = await ai.models.generateContent({
                     model: targetModel,
-                    contents: `客户刚才发来消息：“${text}”\n请直接生成最新一句回复：`,
+                    contents: fullPrompt,
                     config: { systemInstruction: memoryPrompt },
                   });
                   const candidate = response.text?.trim();
@@ -21144,49 +21639,50 @@ ${kbContext}${langConstraint}
                 } catch (modelErr: any) {
                   handleGeminiApiError(`Autopilot(${targetModel})`, modelErr);
                 }
+              } else {
+                console.warn(
+                  `[HumanSense Autopilot Guard] Chat ${canonicalChatId}: 未检测到可用的大模型会话或授权令牌，跳过自动回复`
+                );
               }
 
-                if (replyText) {
-                  const cleanPeer = rawChatId.replace(/^tg_/, '');
-                  const rawPeer: any = /^-?\d+$/.test(cleanPeer) ? Number(cleanPeer) : cleanPeer;
-                  markOutboundMessageSent(canonicalChatId, replyText, accountId);
-                  await client.sendMessage(rawPeer, { message: replyText });
-                  void incrementEvolutionHabitUsage(autoHabitIds);
-                  const replyMsgId = `msg_auto_${Date.now()}`;
-                  let replyZh = '';
-                  try {
-                    if (replyText && !/[\u4e00-\u9fa5]/.test(replyText)) {
-                      replyZh = await getCnTranslationIfForeign(replyText, serverCustomConfig, lastActiveUserJwt || undefined);
-                    }
-                  } catch {}
-                  const replyTime = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false });
+              if (replyText) {
+                const cleanPeer = rawChatId.replace(/^tg_/, '');
+                const rawPeer: any = /^-?\d+$/.test(cleanPeer) ? Number(cleanPeer) : cleanPeer;
+                markOutboundMessageSent(canonicalChatId, replyText, accountId);
+                await client.sendMessage(rawPeer, { message: replyText });
+                void incrementEvolutionHabitUsage(autoHabitIds);
+                const replyMsgId = `msg_auto_${Date.now()}`;
+                let replyZh = '';
+                try {
+                  replyZh = await getCnTranslationIfForeign(replyText, serverCustomConfig, lastActiveUserJwt || undefined);
+                } catch {}
+                const replyTime = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false });
 
-                  // Save to database
-                  try {
-                    await db.prepare(`
-                      INSERT INTO messages (
-                        id, chat_id, account_id, sender, sender_name, text, translated_text,
-                        timestamp, created_at, delivery_status
-                      ) VALUES (?, ?, ?, 'me', '我方 (AI托管)', ?, ?, ?, ?, 'delivered')
-                    `).run(replyMsgId, canonicalChatId, accountId, replyText, replyZh, replyTime, Date.now());
-                  } catch {}
+                try {
+                  await db.prepare(`
+                    INSERT INTO messages (
+                      id, chat_id, account_id, sender, sender_name, text, translated_text,
+                      timestamp, created_at, delivery_status
+                    ) VALUES (?, ?, ?, 'me', '我方 (AI托管)', ?, ?, ?, ?, 'delivered')
+                  `).run(replyMsgId, canonicalChatId, accountId, replyText, replyZh, replyTime, Date.now());
+                } catch {}
 
-                  pushPendingLocalUpdate({
-                    id: replyMsgId,
-                    chatId: canonicalChatId,
-                    rawChatId,
-                    accountId,
-                    sender: 'me',
-                    senderName: '我方 (AI托管)',
-                    text: replyText,
-                    translatedText: replyZh,
-                    timestamp: replyTime,
-                    createdAt: Date.now(),
-                  });
-                  console.log(`[HumanSense Autopilot] Sent auto-reply to ${canonicalChatId}: "${replyText}"`);
-                }
+                pushPendingLocalUpdate({
+                  id: replyMsgId,
+                  chatId: canonicalChatId,
+                  rawChatId,
+                  accountId,
+                  sender: 'me',
+                  senderName: '我方 (AI托管)',
+                  text: replyText,
+                  translatedText: replyZh,
+                  timestamp: replyTime,
+                  createdAt: Date.now(),
+                });
+                console.log(`[HumanSense Autopilot] Sent auto-reply to ${canonicalChatId}: "${replyText}"`);
+              }
             } catch (autoErr: any) {
-              console.warn('[HumanSense Autopilot Exception]:', autoErr.message);
+              console.warn('[HumanSense Autopilot Exception]:', autoErr?.message || String(autoErr));
             }
           });
         }

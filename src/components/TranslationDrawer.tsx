@@ -28,13 +28,12 @@ const CUSTOM_TRANSLATION_MODEL_PRESETS: Array<{ value: string; label: string }> 
   { value: 'gpt-4o-mini', label: 'gpt-4o-mini (OpenAI 轻量高速)' },
   { value: 'gpt-4o', label: 'gpt-4o (OpenAI 旗舰)' },
   { value: 'deepseek-chat', label: 'deepseek-chat (DeepSeek-V3)' },
-  { value: 'DeepSeek-V4.1-Flash', label: 'DeepSeek-V4.1-Flash' },
-  { value: 'DeepSeek-V4-Pro', label: 'DeepSeek-V4-Pro' },
-  { value: 'claude-3-5-sonnet-20241022', label: 'claude-3-5-sonnet-20241022' },
+  { value: 'deepseek-reasoner', label: 'deepseek-reasoner (DeepSeek-R1)' },
+  { value: 'claude-3-5-sonnet-20241022', label: 'claude-3-5-sonnet-20241022 (Claude 3.5)' },
+  { value: 'gemini-3-flash-preview', label: 'gemini-3-flash-preview (Google Gemini 最新高速)' },
+  { value: 'gemini-3.1-flash-lite', label: 'gemini-3.1-flash-lite (Google Gemini 最新轻量)' },
   { value: 'gemini-2.5-flash', label: 'gemini-2.5-flash (Google Gemini 高速)' },
   { value: 'gemini-2.5-pro', label: 'gemini-2.5-pro (Google Gemini 旗舰)' },
-  { value: 'gemini-3.1-flash-lite', label: 'gemini-3.1-flash-lite' },
-  { value: 'gemini-4-hydrogen', label: 'gemini-4-hydrogen' },
 ];
 
 export const TranslationDrawer: React.FC<TranslationDrawerProps> = ({

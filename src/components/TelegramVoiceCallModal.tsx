@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { PhoneOff, Mic, MicOff, Volume2, VolumeX, Shield, AlertCircle } from 'lucide-react';
+import { PhoneOff, Shield, AlertCircle, Info } from 'lucide-react';
 import { Chat } from '../types';
 import {
   startTelegramVoiceCallApi,
@@ -30,8 +30,6 @@ export const TelegramVoiceCallModal: React.FC<TelegramVoiceCallModalProps> = ({
 }) => {
   const [callStatus, setCallStatus] = useState<'calling' | 'ringing' | 'connected' | 'ended'>('calling');
   const [duration, setDuration] = useState(0);
-  const [isMuted, setIsMuted] = useState(false);
-  const [isSpeakerOn, setIsSpeakerOn] = useState(true);
   const [statusNotice, setStatusNotice] = useState('');
   const [errorMsg, setErrorMsg] = useState('');
   const timerRef = useRef<any>(null);
@@ -91,7 +89,7 @@ export const TelegramVoiceCallModal: React.FC<TelegramVoiceCallModalProps> = ({
             }
             return 'connected';
           });
-          setStatusNotice('Telegram 云端呼叫信令已接通（Web 端暂不支持直连音频流，请使用语音条）');
+          setStatusNotice('Telegram 云端呼叫信令已接通（桌面端暂不传输实时通话音频，请发送语音条或使用手机端 Telegram 通话）');
         } else if (st.status === 'discarded' || st.status === 'failed') {
           clearInterval(timerRef.current);
           clearInterval(pollRef.current);
@@ -157,13 +155,13 @@ export const TelegramVoiceCallModal: React.FC<TelegramVoiceCallModalProps> = ({
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/75 backdrop-blur-md animate-in fade-in duration-200 select-none">
       <div className="relative w-full max-w-sm rounded-3xl bg-gradient-to-b from-[#182533] to-[#0e1621] text-white p-6 shadow-2xl border border-white/10 flex flex-col items-center">
-        {/* Top Encryption Indicator */}
+        {/* Top Signaling Indicator */}
         <div className="flex items-center gap-1.5 text-[11px] text-white/70 font-medium mb-6">
           <Shield className="w-3.5 h-3.5 text-emerald-400" />
-          <span>Telegram 云端语音呼叫</span>
+          <span>Telegram 云端呼叫信令</span>
         </div>
 
-        {/* Contact Avatar with Animated Pulse Ring */}
+        {/* Contact Avatar */}
         <div className="relative my-4">
           <div
             className="w-28 h-28 rounded-full overflow-hidden flex items-center justify-center text-3xl font-bold shadow-2xl border-4 border-white/20 relative z-10"
@@ -175,9 +173,6 @@ export const TelegramVoiceCallModal: React.FC<TelegramVoiceCallModalProps> = ({
               <span>{displayAvatarInitial}</span>
             )}
           </div>
-          {callStatus === 'connected' && (
-            <div className="absolute inset-0 rounded-full border-4 border-[#2481cc]/40 animate-ping pointer-events-none" />
-          )}
           {(callStatus === 'calling' || callStatus === 'ringing') && (
             <div className="absolute -inset-2 rounded-full border-2 border-emerald-400/40 animate-pulse pointer-events-none" />
           )}
@@ -187,11 +182,11 @@ export const TelegramVoiceCallModal: React.FC<TelegramVoiceCallModalProps> = ({
         <h3 className="text-xl font-bold text-center mt-3 truncate max-w-[240px] text-white">
           {displayName}
         </h3>
-        <p className="text-sm font-medium mt-1 text-[#2ba0ff] tabular-nums">
-          {callStatus === 'calling' && '正在连接 Telegram 云端呼叫...'}
+        <p className="text-sm font-medium mt-1 text-[#2ba0ff] tabular-nums text-center">
+          {callStatus === 'calling' && '正在连接 Telegram 云端呼叫信令...'}
           {callStatus === 'ringing' && '对方客户端正在响铃（等待接听）...'}
-          {callStatus === 'connected' && `已接通 ${formatDuration(duration)}`}
-          {callStatus === 'ended' && (errorMsg ? '呼叫未能建立' : statusNotice || '通话已结束')}
+          {callStatus === 'connected' && `信令已接通 ${formatDuration(duration)}`}
+          {callStatus === 'ended' && (errorMsg ? '呼叫未能建立' : statusNotice || '通话信令已结束')}
         </p>
 
         {errorMsg && (
@@ -201,56 +196,23 @@ export const TelegramVoiceCallModal: React.FC<TelegramVoiceCallModalProps> = ({
           </div>
         )}
 
-        {!errorMsg && statusNotice && (
-          <p className="mt-2 text-[11px] text-amber-300/90 text-center leading-relaxed px-2">
-            {statusNotice}
-          </p>
-        )}
-
-        {/* Call Waveform Animation */}
-        {callStatus === 'connected' ? (
-          <div className="flex items-center gap-1 my-6 h-6">
-            <span className="w-1 bg-[#2ba0ff] rounded-full animate-pulse h-4" />
-            <span className="w-1 bg-[#2ba0ff] rounded-full animate-pulse h-6 [animation-delay:150ms]" />
-            <span className="w-1 bg-[#2ba0ff] rounded-full animate-pulse h-3 [animation-delay:300ms]" />
-            <span className="w-1 bg-[#2ba0ff] rounded-full animate-pulse h-5 [animation-delay:450ms]" />
-            <span className="w-1 bg-[#2ba0ff] rounded-full animate-pulse h-4 [animation-delay:200ms]" />
+        {!errorMsg && (
+          <div className="mt-3 px-3 py-2 rounded-xl bg-amber-500/10 border border-amber-400/25 text-amber-200/90 text-[11px] flex items-start gap-2 text-left w-full leading-relaxed">
+            <Info className="w-3.5 h-3.5 shrink-0 mt-0.5 text-amber-300" />
+            <span>
+              {statusNotice || '桌面端仅支持发起与挂断 Telegram 呼叫信令，暂不支持实时通话音频传输；如需语音沟通，请发送语音条或使用手机端 Telegram。'}
+            </span>
           </div>
-        ) : (
-          <div className="h-6 my-6" />
         )}
 
-        {/* Action Controls */}
-        <div className="flex items-center gap-6 mt-4">
-          {/* Mute Button */}
-          <button
-            onClick={() => setIsMuted(!isMuted)}
-            className={`w-14 h-14 rounded-full flex items-center justify-center transition-colors cursor-pointer ${
-              isMuted ? 'bg-red-500/80 text-white' : 'bg-white/10 hover:bg-white/20 text-white'
-            }`}
-            title={isMuted ? '取消静音' : '静音'}
-          >
-            {isMuted ? <MicOff className="w-6 h-6" /> : <Mic className="w-6 h-6" />}
-          </button>
-
-          {/* End Call Button */}
+        {/* Action Controls (Real Hang-up only — no fake mute/speaker controls) */}
+        <div className="flex items-center justify-center mt-6">
           <button
             onClick={handleEndCall}
             className="w-16 h-16 rounded-full bg-red-500 hover:bg-red-600 text-white flex items-center justify-center shadow-lg transition-transform hover:scale-105 cursor-pointer"
-            title="挂断电话"
+            title="挂断呼叫"
           >
             <PhoneOff className="w-7 h-7" />
-          </button>
-
-          {/* Speaker Button */}
-          <button
-            onClick={() => setIsSpeakerOn(!isSpeakerOn)}
-            className={`w-14 h-14 rounded-full flex items-center justify-center transition-colors cursor-pointer ${
-              isSpeakerOn ? 'bg-[#2481cc] text-white' : 'bg-white/10 hover:bg-white/20 text-white'
-            }`}
-            title={isSpeakerOn ? '扬声器开' : '听筒模式'}
-          >
-            {isSpeakerOn ? <Volume2 className="w-6 h-6" /> : <VolumeX className="w-6 h-6" />}
           </button>
         </div>
       </div>

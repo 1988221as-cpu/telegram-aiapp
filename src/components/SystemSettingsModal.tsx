@@ -152,7 +152,7 @@ export const SystemSettingsModal: React.FC<SystemSettingsModalProps> = ({
                 <div className="text-[10px] text-[#7f93a5]">会话安全存储</div>
                 <div className="text-emerald-400 font-medium mt-0.5 flex items-center gap-1">
                   <Lock className="w-3 h-3" />
-                  <span>AES-256-GCM 硬件加密</span>
+                  <span>本地加密保护（凭据 AES-256-GCM）</span>
                 </div>
               </div>
               <div className="p-2.5 rounded-lg bg-[#0c131c] border border-[#1e2f42]/60">
