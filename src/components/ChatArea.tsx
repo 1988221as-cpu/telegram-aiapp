@@ -62,6 +62,7 @@ import {
   saveLocalMessage,
   updateMessageSttInDb,
 } from '../services/apiService';
+import { sanitizeSafeResourceUrl } from '../services/urlSafety';
 
 function getTranslationErrorLabel(channel?: Message['translationErrorChannel']): string {
   switch (channel) {
@@ -905,8 +906,9 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
 
   const resolveDisplayUrl = useCallback(
     (rawUrl?: string) => {
-      if (!rawUrl) return rawUrl;
-      return refreshedUrlsMap[rawUrl] || rawUrl;
+      if (!rawUrl) return undefined;
+      const safeUrl = sanitizeSafeResourceUrl(refreshedUrlsMap[rawUrl] || rawUrl);
+      return safeUrl || undefined;
     },
     [refreshedUrlsMap]
   );
@@ -919,7 +921,8 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
         return null;
       }
       if (!force && !isSignedResourceUrlExpiringSoon(currentResolved)) {
-        return currentResolved;
+        const safeCurrent = sanitizeSafeResourceUrl(currentResolved);
+        return safeCurrent || null;
       }
       attemptedRefreshUrlsRef.current.add(rawUrl);
       attemptedRefreshUrlsRef.current.add(currentResolved);
@@ -934,14 +937,15 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
             nextUrl = refreshed;
           }
         }
-        if (nextUrl && nextUrl !== currentResolved) {
-          attemptedRefreshUrlsRef.current.add(nextUrl);
+        const safeNextUrl = sanitizeSafeResourceUrl(nextUrl);
+        if (safeNextUrl && safeNextUrl !== currentResolved) {
+          attemptedRefreshUrlsRef.current.add(safeNextUrl);
           setRefreshedUrlsMap((prev) => ({
             ...prev,
-            [rawUrl]: nextUrl,
-            [currentResolved]: nextUrl,
+            [rawUrl]: safeNextUrl,
+            [currentResolved]: safeNextUrl,
           }));
-          return nextUrl;
+          return safeNextUrl;
         }
       } catch {}
       return null;
@@ -1917,7 +1921,8 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
 
   const copyImageToClipboard = async (imageUrl: string, id: string) => {
     if (!imageUrl) return;
-    let effectiveImageUrl = resolveDisplayUrl(imageUrl) || imageUrl;
+    let effectiveImageUrl = resolveDisplayUrl(imageUrl) || '';
+    if (!effectiveImageUrl) return;
     if (isSignedResourceUrlExpiringSoon(effectiveImageUrl)) {
       const refreshed = await triggerSilentUrlRefresh(effectiveImageUrl, true);
       if (refreshed) effectiveImageUrl = refreshed;
@@ -2183,7 +2188,8 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
     const originAccountId = matchedMsg?.accountId || currentAccountId || '';
 
     if (audioUrl) {
-      let effectiveUrl = resolveDisplayUrl(audioUrl) || audioUrl;
+      let effectiveUrl = resolveDisplayUrl(audioUrl) || '';
+      if (!effectiveUrl) return;
       if (isSignedResourceUrlExpiringSoon(effectiveUrl)) {
         const fresh = await triggerSilentUrlRefresh(effectiveUrl, true);
         if (audioPlaySeqRef.current !== playSeq) return;
@@ -3169,143 +3175,172 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                   )}
 
                 {/* Image / Sticker Attachment with Copy and Download Overlay */}
-                {msg.isImage && msg.imageUrl && (
-                  <div className="mb-1.5 rounded-xl overflow-hidden max-w-[280px] shadow-xs relative group/img">
-                    <img
-                      src={resolveDisplayUrl(msg.imageUrl)}
-                      alt={msg.imageCaption || 'image'}
-                      className="w-full h-auto object-cover max-h-72 cursor-pointer hover:opacity-95 transition-opacity rounded-xl"
-                      onLoad={(e) => {
-                        e.currentTarget.style.display = '';
-                      }}
-                      onError={() => {
-                        void triggerSilentUrlRefresh(msg.imageUrl, true);
-                      }}
-                    />
-                    {/* Hover actions for image: Copy Image and Download Image */}
-                    <div className="absolute top-2 right-2 flex items-center gap-1 opacity-0 group-hover/img:opacity-100 transition-opacity bg-black/65 backdrop-blur-xs rounded-lg p-1 text-white shadow-md">
-                      <button
-                        type="button"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          copyImageToClipboard(resolveDisplayUrl(msg.imageUrl) || msg.imageUrl!, msg.id);
+                {msg.isImage && msg.imageUrl && (() => {
+                  const safeImageHref = resolveDisplayUrl(msg.imageUrl);
+                  if (!safeImageHref) return null;
+                  return (
+                    <div className="mb-1.5 rounded-xl overflow-hidden max-w-[280px] shadow-xs relative group/img">
+                      <img
+                        src={safeImageHref}
+                        alt={msg.imageCaption || 'image'}
+                        className="w-full h-auto object-cover max-h-72 cursor-pointer hover:opacity-95 transition-opacity rounded-xl"
+                        onLoad={(e) => {
+                          e.currentTarget.style.display = '';
                         }}
-                        title="复制照片到剪贴板"
-                        className="p-1 hover:bg-white/20 rounded-md cursor-pointer transition-colors"
-                      >
-                        {copiedId === msg.id ? (
-                          <Check className="w-3.5 h-3.5 text-emerald-400" />
-                        ) : (
-                          <Copy className="w-3.5 h-3.5" />
-                        )}
-                      </button>
-                      <a
-                        href={resolveDisplayUrl(msg.imageUrl)}
-                        download={msg.imageCaption || `tg_photo_${Date.now()}.png`}
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          const resolved = resolveDisplayUrl(msg.imageUrl);
-                          if (msg.imageUrl && isSignedResourceUrlExpiringSoon(resolved)) {
-                            e.preventDefault();
-                            void triggerSilentUrlRefresh(msg.imageUrl, true).then((nextUrl) => {
-                              const a = document.createElement('a');
-                              a.href = nextUrl || resolved || msg.imageUrl!;
-                              a.download = msg.imageCaption || `tg_photo_${Date.now()}.png`;
-                              document.body.appendChild(a);
-                              a.click();
-                              document.body.removeChild(a);
-                            });
-                          }
+                        onError={() => {
+                          void triggerSilentUrlRefresh(msg.imageUrl, true);
                         }}
-                        title="下载保存照片"
-                        className="p-1 hover:bg-white/20 rounded-md cursor-pointer transition-colors"
-                      >
-                        <Download className="w-3.5 h-3.5" />
-                      </a>
-                    </div>
-                  </div>
-                )}
-
-                {/* Video Attachment with Inline Player, Duration Badge, and Download */}
-                {msg.isVideo && msg.videoUrl && (
-                  <div className="mb-1.5 rounded-xl overflow-hidden max-w-[320px] shadow-sm relative group/vid bg-black/10 dark:bg-black/40">
-                    <video
-                      src={resolveDisplayUrl(msg.videoUrl)}
-                      controls
-                      preload="metadata"
-                      className="w-full h-auto max-h-80 object-contain rounded-xl bg-black"
-                      onError={() => {
-                        void triggerSilentUrlRefresh(msg.videoUrl, true);
-                      }}
-                    />
-                    <div className="absolute top-2 right-2 flex items-center gap-1 opacity-0 group-hover/vid:opacity-100 transition-opacity bg-black/65 backdrop-blur-xs rounded-lg p-1 text-white shadow-md z-10">
-                      <a
-                        href={resolveDisplayUrl(msg.videoUrl)}
-                        download={`tg_video_${Date.now()}.mp4`}
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          const resolved = resolveDisplayUrl(msg.videoUrl);
-                          if (msg.videoUrl && isSignedResourceUrlExpiringSoon(resolved)) {
-                            e.preventDefault();
-                            void triggerSilentUrlRefresh(msg.videoUrl, true).then((nextUrl) => {
-                              const a = document.createElement('a');
-                              a.href = nextUrl || resolved || msg.videoUrl!;
-                              a.download = `tg_video_${Date.now()}.mp4`;
-                              document.body.appendChild(a);
-                              a.click();
-                              document.body.removeChild(a);
-                            });
-                          }
-                        }}
-                        title="下载保存视频"
-                        className="p-1 hover:bg-white/20 rounded-md cursor-pointer transition-colors"
-                      >
-                        <Download className="w-3.5 h-3.5" />
-                      </a>
-                    </div>
-                  </div>
-                )}
-
-                {/* File Attachment */}
-                {msg.isFile && (
-                  <div className={`p-2.5 rounded-xl flex items-center justify-between gap-3 text-xs mb-1.5 ${isMe ? 'bg-white/12' : 'bg-black/5 dark:bg-white/10 aurora:bg-[#15252e]'}`}>
-                    <div className="flex items-center gap-2 min-w-0">
-                      <FileText className={`w-6 h-6 shrink-0 ${isMe ? 'text-white/90' : 'text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#5eead4]'}`} />
-                      <div className="min-w-0">
-                        <div className="font-semibold truncate">{msg.fileName || '文档附件'}</div>
-                        <div className="text-[10px] opacity-70">{msg.fileSize || '128 KB'}</div>
+                      />
+                      {/* Hover actions for image: Copy Image and Download Image */}
+                      <div className="absolute top-2 right-2 flex items-center gap-1 opacity-0 group-hover/img:opacity-100 transition-opacity bg-black/65 backdrop-blur-xs rounded-lg p-1 text-white shadow-md">
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            copyImageToClipboard(safeImageHref, msg.id);
+                          }}
+                          title="复制照片到剪贴板"
+                          className="p-1 hover:bg-white/20 rounded-md cursor-pointer transition-colors"
+                        >
+                          {copiedId === msg.id ? (
+                            <Check className="w-3.5 h-3.5 text-emerald-400" />
+                          ) : (
+                            <Copy className="w-3.5 h-3.5" />
+                          )}
+                        </button>
+                        <a
+                          href={safeImageHref}
+                          download={msg.imageCaption || `tg_photo_${Date.now()}.png`}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            const resolved = resolveDisplayUrl(msg.imageUrl);
+                            if (!resolved) {
+                              e.preventDefault();
+                              return;
+                            }
+                            if (msg.imageUrl && isSignedResourceUrlExpiringSoon(resolved)) {
+                              e.preventDefault();
+                              void triggerSilentUrlRefresh(msg.imageUrl, true).then((nextUrl) => {
+                                const safeDownloadHref = sanitizeSafeResourceUrl(nextUrl) || resolved;
+                                if (!safeDownloadHref) return;
+                                const a = document.createElement('a');
+                                a.href = safeDownloadHref;
+                                a.download = msg.imageCaption || `tg_photo_${Date.now()}.png`;
+                                document.body.appendChild(a);
+                                a.click();
+                                document.body.removeChild(a);
+                              });
+                            }
+                          }}
+                          title="下载保存照片"
+                          className="p-1 hover:bg-white/20 rounded-md cursor-pointer transition-colors"
+                        >
+                          <Download className="w-3.5 h-3.5" />
+                        </a>
                       </div>
                     </div>
-                    {msg.fileUrl ? (
-                      <a
-                        href={resolveDisplayUrl(msg.fileUrl) || '#'}
-                        download={msg.fileName || 'file'}
-                        onClick={(e) => {
-                          const resolved = resolveDisplayUrl(msg.fileUrl);
-                          if (msg.fileUrl && isSignedResourceUrlExpiringSoon(resolved)) {
-                            e.preventDefault();
-                            void triggerSilentUrlRefresh(msg.fileUrl, true).then((nextUrl) => {
-                              const a = document.createElement('a');
-                              a.href = nextUrl || resolved || msg.fileUrl!;
-                              a.download = msg.fileName || 'file';
-                              document.body.appendChild(a);
-                              a.click();
-                              document.body.removeChild(a);
-                            });
-                          }
+                  );
+                })()}
+
+                {/* Video Attachment with Inline Player, Duration Badge, and Download */}
+                {msg.isVideo && msg.videoUrl && (() => {
+                  const safeVideoHref = resolveDisplayUrl(msg.videoUrl);
+                  if (!safeVideoHref) return null;
+                  return (
+                    <div className="mb-1.5 rounded-xl overflow-hidden max-w-[320px] shadow-sm relative group/vid bg-black/10 dark:bg-black/40">
+                      <video
+                        src={safeVideoHref}
+                        controls
+                        preload="metadata"
+                        className="w-full h-auto max-h-80 object-contain rounded-xl bg-black"
+                        onError={() => {
+                          void triggerSilentUrlRefresh(msg.videoUrl, true);
                         }}
-                        className={`p-1.5 rounded-lg cursor-pointer ${isMe ? 'text-white hover:bg-white/15' : 'text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#5eead4] hover:bg-[#2481cc]/10 aurora:hover:bg-[#14b8a6]/15'}`}
-                        title="下载附件"
-                      >
-                        <Download className="w-4 h-4" />
-                      </a>
-                    ) : (
-                      <span className="text-[10px] opacity-60 px-1.5 py-0.5 rounded bg-black/5 dark:bg-white/10">
-                        未缓存
-                      </span>
-                    )}
-                  </div>
-                )}
+                      />
+                      <div className="absolute top-2 right-2 flex items-center gap-1 opacity-0 group-hover/vid:opacity-100 transition-opacity bg-black/65 backdrop-blur-xs rounded-lg p-1 text-white shadow-md z-10">
+                        <a
+                          href={safeVideoHref}
+                          download={`tg_video_${Date.now()}.mp4`}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            const resolved = resolveDisplayUrl(msg.videoUrl);
+                            if (!resolved) {
+                              e.preventDefault();
+                              return;
+                            }
+                            if (msg.videoUrl && isSignedResourceUrlExpiringSoon(resolved)) {
+                              e.preventDefault();
+                              void triggerSilentUrlRefresh(msg.videoUrl, true).then((nextUrl) => {
+                                const safeDownloadHref = sanitizeSafeResourceUrl(nextUrl) || resolved;
+                                if (!safeDownloadHref) return;
+                                const a = document.createElement('a');
+                                a.href = safeDownloadHref;
+                                a.download = `tg_video_${Date.now()}.mp4`;
+                                document.body.appendChild(a);
+                                a.click();
+                                document.body.removeChild(a);
+                              });
+                            }
+                          }}
+                          title="下载保存视频"
+                          className="p-1 hover:bg-white/20 rounded-md cursor-pointer transition-colors"
+                        >
+                          <Download className="w-3.5 h-3.5" />
+                        </a>
+                      </div>
+                    </div>
+                  );
+                })()}
+
+                {/* File Attachment */}
+                {msg.isFile && (() => {
+                  const safeFileHref = resolveDisplayUrl(msg.fileUrl);
+                  return (
+                    <div className={`p-2.5 rounded-xl flex items-center justify-between gap-3 text-xs mb-1.5 ${isMe ? 'bg-white/12' : 'bg-black/5 dark:bg-white/10 aurora:bg-[#15252e]'}`}>
+                      <div className="flex items-center gap-2 min-w-0">
+                        <FileText className={`w-6 h-6 shrink-0 ${isMe ? 'text-white/90' : 'text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#5eead4]'}`} />
+                        <div className="min-w-0">
+                          <div className="font-semibold truncate">{msg.fileName || '文档附件'}</div>
+                          <div className="text-[10px] opacity-70">{msg.fileSize || '128 KB'}</div>
+                        </div>
+                      </div>
+                      {safeFileHref ? (
+                        <a
+                          href={safeFileHref}
+                          download={msg.fileName || 'file'}
+                          onClick={(e) => {
+                            const resolved = resolveDisplayUrl(msg.fileUrl);
+                            if (!resolved) {
+                              e.preventDefault();
+                              return;
+                            }
+                            if (msg.fileUrl && isSignedResourceUrlExpiringSoon(resolved)) {
+                              e.preventDefault();
+                              void triggerSilentUrlRefresh(msg.fileUrl, true).then((nextUrl) => {
+                                const safeDownloadHref = sanitizeSafeResourceUrl(nextUrl) || resolved;
+                                if (!safeDownloadHref) return;
+                                const a = document.createElement('a');
+                                a.href = safeDownloadHref;
+                                a.download = msg.fileName || 'file';
+                                document.body.appendChild(a);
+                                a.click();
+                                document.body.removeChild(a);
+                              });
+                            }
+                          }}
+                          className={`p-1.5 rounded-lg cursor-pointer ${isMe ? 'text-white hover:bg-white/15' : 'text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#5eead4] hover:bg-[#2481cc]/10 aurora:hover:bg-[#14b8a6]/15'}`}
+                          title="下载附件"
+                        >
+                          <Download className="w-4 h-4" />
+                        </a>
+                      ) : (
+                        <span className="text-[10px] opacity-60 px-1.5 py-0.5 rounded bg-black/5 dark:bg-white/10">
+                          未缓存
+                        </span>
+                      )}
+                    </div>
+                  );
+                })()}
 
                 {/* Audio voice note message */}
                 {msg.isAudio ? (

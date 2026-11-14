@@ -67,6 +67,16 @@ import {
   getEvolutionStateFromDb,
   saveEvolutionStateToDb,
   resetGlobalPersonaInDb,
+  SnapshotValidationError,
+  BACKUP_MIN_PASSPHRASE_LENGTH,
+  sealDiskSnapshot,
+  unsealDiskSnapshot,
+  encryptBackupEnvelope,
+  decryptBackupEnvelope,
+  isEncryptedBackupEnvelope,
+  isDiskSnapshotEnvelope,
+  getSqliteRuntimePragmas,
+  checkpointSqliteWal,
 } from './server/db.ts';
 import { EMBEDDED_JWT_PUBLIC_KEY } from './server/authConfig.ts';
 import {
@@ -105,24 +115,67 @@ const HOST = getArg('--host') || process.env.HOST || '0.0.0.0';
 export const app = express();
 app.set('trust proxy', isRailway ? 1 : 'loopback');
 
+export function buildCspDirectives(options?: {
+  isProduction?: boolean;
+  isElectron?: boolean;
+}) {
+  const strictDesktopCsp = Boolean(
+    options?.isElectron ?? isElectronMainProcess
+  ) || Boolean(options?.isProduction ?? isProduction);
+
+  return {
+    defaultSrc: ["'self'"],
+    // Production & Electron desktop bundles contain zero inline scripts or eval; Vite dev only uses inline React Refresh preamble.
+    scriptSrc: strictDesktopCsp ? ["'self'"] : ["'self'", "'unsafe-inline'"],
+    scriptSrcAttr: ["'none'"],
+    styleSrc: ["'self'", "'unsafe-inline'", 'https://fonts.googleapis.com'],
+    fontSrc: ["'self'", 'https://fonts.gstatic.com', 'data:'],
+    imgSrc: [
+      "'self'",
+      'data:',
+      'blob:',
+      'https://images.unsplash.com',
+      'https://*.telegram.org',
+      'https://api.telegram.org',
+      'https://*.telesco.pe',
+    ],
+    connectSrc: ["'self'", 'https:', 'wss:', 'ws:'],
+    mediaSrc: [
+      "'self'",
+      'data:',
+      'blob:',
+      'https://*.telegram.org',
+      'https://api.telegram.org',
+      'https://*.telesco.pe',
+    ],
+    frameAncestors: strictDesktopCsp
+      ? ["'self'"]
+      : [
+          "'self'",
+          'https://aistudio.google.com',
+          'https://*.aistudio.google.com',
+          'https://*.ai.studio',
+          'https://*.usercontent.google.com',
+        ],
+    baseUri: ["'self'"],
+    formAction: ["'self'"],
+    workerSrc: ["'self'", 'blob:'],
+    objectSrc: ["'none'"],
+    upgradeInsecureRequests: null,
+  };
+}
+
+const isStrictDesktopCsp = isProduction || isElectronMainProcess;
+
 // Security Headers & Content Security Policy via Helmet
 app.use(
   helmet({
-    frameguard: false,
+    frameguard: isStrictDesktopCsp ? { action: 'sameorigin' } : false,
     contentSecurityPolicy: {
-      directives: {
-        defaultSrc: ["'self'"],
-        scriptSrc: ["'self'", "'unsafe-inline'", "'unsafe-eval'"],
-        styleSrc: ["'self'", "'unsafe-inline'", 'https://fonts.googleapis.com'],
-        fontSrc: ["'self'", 'https://fonts.gstatic.com', 'data:'],
-        imgSrc: ["'self'", 'data:', 'blob:', 'https://images.unsplash.com', 'https://*.telegram.org', 'https://api.telegram.org', 'https://*.telesco.pe'],
-        connectSrc: ["'self'", 'https:', 'wss:', 'ws:'],
-        mediaSrc: ["'self'", 'data:', 'blob:', 'https://*.telegram.org', 'https://api.telegram.org', 'https://*.telesco.pe'],
-        frameAncestors: ["'self'", '*'],
-        workerSrc: ["'self'", 'blob:'],
-        objectSrc: ["'none'"],
-        upgradeInsecureRequests: null,
-      },
+      directives: buildCspDirectives({
+        isProduction,
+        isElectron: isElectronMainProcess,
+      }),
     },
     crossOriginEmbedderPolicy: false,
     crossOriginResourcePolicy: false,
@@ -1855,6 +1908,7 @@ export interface ConnectedTelegramUser {
   apiHash: string;
   connectedAt: number;
   dialogsFetchedAt?: number;
+  dialogsInFlight?: Promise<any[]>;
   dialogs: Array<{
     id: string;
     rawId: string;
@@ -1874,7 +1928,7 @@ export interface ConnectedTelegramUser {
 export const connectedUserClients = new Map<string, ConnectedTelegramUser>();
 
 // ==================== TELEGRAM ACCOUNT-LEVEL FLOOD_WAIT CIRCUIT BREAKER ====================
-export const TELEGRAM_DIALOGS_CACHE_TTL_MS = 25_000;
+export const TELEGRAM_DIALOGS_CACHE_TTL_MS = 30_000;
 
 export interface TelegramFloodCooldownEntry {
   accountKey: string;
@@ -2232,6 +2286,68 @@ export async function fetchTelegramUserDialogs(client: TelegramClient, limit = 1
   }
 }
 
+export async function getOrFetchConnectedAccountDialogs(
+  connected: ConnectedTelegramUser,
+  opts?: { force?: boolean; limit?: number }
+): Promise<{ dialogs: any[]; cached: boolean }> {
+  const force = Boolean(opts?.force);
+  const nowMs = Date.now();
+  if (
+    !force &&
+    Array.isArray(connected.dialogs) &&
+    typeof connected.dialogsFetchedAt === 'number' &&
+    connected.dialogsFetchedAt > 0 &&
+    nowMs - connected.dialogsFetchedAt < TELEGRAM_DIALOGS_CACHE_TTL_MS
+  ) {
+    return { dialogs: connected.dialogs, cached: true };
+  }
+
+  if (!force && connected.dialogsInFlight) {
+    const dialogs = await connected.dialogsInFlight;
+    return { dialogs, cached: true };
+  }
+
+  const limit = opts?.limit ?? 150;
+  const fetchPromise = fetchTelegramUserDialogs(connected.client, limit, connected.userId)
+    .then((dialogs) => {
+      connected.dialogs = dialogs;
+      connected.dialogsFetchedAt = Date.now();
+      return dialogs;
+    })
+    .finally(() => {
+      if (connected.dialogsInFlight === fetchPromise) {
+        connected.dialogsInFlight = undefined;
+      }
+    });
+
+  connected.dialogsInFlight = fetchPromise;
+  const dialogs = await fetchPromise;
+  return { dialogs, cached: false };
+}
+
+async function refreshDialogEntityCacheSafely(client: TelegramClient, limit = 60): Promise<void> {
+  const uid = (client as any)?._selfId ? String((client as any)._selfId) : undefined;
+  const floodCtx = uid ? { userId: uid, accountId: `acc_tg_${uid}` } : undefined;
+  if (floodCtx && getTelegramFloodCooldown(floodCtx)) {
+    return;
+  }
+  const connected = uid ? connectedUserClients.get(uid) : undefined;
+  if (connected?.dialogsInFlight) {
+    try {
+      await connected.dialogsInFlight;
+    } catch {}
+    return;
+  }
+  try {
+    await client.getDialogs({ limit });
+  } catch (err: any) {
+    if (floodCtx) {
+      recordTelegramFloodWait(floodCtx, err, 'messages.GetDialogs');
+    }
+    throw err;
+  }
+}
+
 // ==================== SECURITY HARDENING & ENCRYPTION INFRASTRUCTURE ====================
 
 // Helper to perform constant-time, fixed-length comparison of tokens preventing byte and length timing side-channel attacks
@@ -2242,15 +2358,30 @@ export function verifySecretToken(received: string | undefined, expected: string
   return crypto.timingSafeEqual(receivedDigest, expectedDigest);
 }
 
+function normalizeLoopbackHostname(hostname: string): string {
+  const lower = hostname.trim().toLowerCase();
+  if (lower === 'localhost' || lower === '127.0.0.1' || lower === '::1' || lower === '[::1]') {
+    return 'loopback';
+  }
+  return lower;
+}
+
 // Strict Origin & Referer validator for Windows Electron & Dev Preview (Defends against Localhost CSRF)
 export function isAllowedClientOrigin(req: Request): boolean {
-  const origin = (req.headers.origin as string) || (req.headers.referer as string);
-  // Direct desktop requests (Electron direct IPC/HTTP without origin, or native fetch)
-  if (!origin) return true;
+  const rawOriginHeader = req.headers.origin;
+  const rawRefererHeader = req.headers.referer;
+  const hasOriginHeader = rawOriginHeader !== undefined;
+  const originStr = Array.isArray(rawOriginHeader) ? rawOriginHeader[0] : rawOriginHeader;
+  const refererStr = Array.isArray(rawRefererHeader) ? rawRefererHeader[0] : rawRefererHeader;
+  const origin = hasOriginHeader ? String(originStr ?? '').trim() : String(refererStr ?? '').trim();
+
+  // Direct desktop requests (Electron direct IPC/HTTP without Origin/Referer, or native fetch)
+  if (!hasOriginHeader && !origin) return true;
+  // Explicit empty Origin or sandboxed "null" Origin must always be rejected
+  if (!origin || origin.toLowerCase() === 'null') return false;
 
   try {
     const parsed = new URL(origin);
-    const hostname = parsed.hostname;
     const protocol = parsed.protocol;
 
     // Electron local packaging protocols
@@ -2258,19 +2389,60 @@ export function isAllowedClientOrigin(req: Request): boolean {
       return true;
     }
 
-    // Localhost / Loopback workstation addresses
-    if (hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '::1' || hostname === '[::1]') {
+    if (protocol !== 'http:' && protocol !== 'https:') {
+      return false;
+    }
+    if (!parsed.hostname || parsed.username || parsed.password) {
+      return false;
+    }
+
+    // Optional explicit exact-origin allowlist via ALLOWED_ORIGINS (never wildcards)
+    const configuredOrigins = String(process.env.ALLOWED_ORIGINS || '')
+      .split(',')
+      .map((item) => item.trim())
+      .filter(Boolean);
+    for (const entry of configuredOrigins) {
+      try {
+        const allowedUrl = new URL(entry);
+        if (
+          (allowedUrl.protocol === 'http:' || allowedUrl.protocol === 'https:') &&
+          allowedUrl.origin.toLowerCase() === parsed.origin.toLowerCase()
+        ) {
+          return true;
+        }
+      } catch {}
+    }
+
+    // Strictly match against the server's current Host header (hostname + normalized port)
+    const rawHost = String(req.get?.('host') || req.headers?.host || '').trim();
+    if (!rawHost || rawHost.includes('/') || rawHost.includes('@') || /\s/.test(rawHost)) {
+      return false;
+    }
+
+    const hostUrl = new URL(`${protocol}//${rawHost}`);
+    if (hostUrl.username || hostUrl.password || hostUrl.pathname !== '/') {
+      return false;
+    }
+
+    const originPort = parsed.port || (protocol === 'https:' ? '443' : '80');
+    const hostPort = hostUrl.port || (protocol === 'https:' ? '443' : '80');
+    if (originPort !== hostPort) {
+      return false;
+    }
+
+    const originHostLower = parsed.hostname.toLowerCase();
+    const hostLower = hostUrl.hostname.toLowerCase();
+
+    // Exact hostname match (covers same-origin preview URLs such as a specific *.run.app instance without wildcarding others)
+    if (originHostLower === hostLower) {
       return true;
     }
 
-    // Match the current Host header of this server instance (must compare Origin hostname against Host, never allow arbitrary Origin just because server runs on loopback)
-    const currentHost = (req.get('host') || '').split(':')[0].toLowerCase();
-    if (currentHost && hostname.toLowerCase() === currentHost) {
-      return true;
-    }
-
-    // Google Cloud / AI Studio preview environments
-    if (hostname.endsWith('.run.app') || hostname.endsWith('.google.com') || hostname.endsWith('.googleusercontent.com')) {
+    // Loopback-to-loopback (e.g. localhost:3000 <-> 127.0.0.1:3000) ONLY when port strictly matches above
+    if (
+      normalizeLoopbackHostname(originHostLower) === 'loopback' &&
+      normalizeLoopbackHostname(hostLower) === 'loopback'
+    ) {
       return true;
     }
 
@@ -3300,7 +3472,28 @@ export function extractBearerToken(req: Request): string | undefined {
 }
 
 // In-memory JWT revocation blacklist populated on explicit logout
-const revokedJwtTokens = new Map<string, number>();
+export const MAX_REVOKED_JWT_TOKENS = 5000;
+export const revokedJwtTokens = new Map<string, number>();
+
+export function pruneRevokedJwtTokens(now = Date.now()): number {
+  let removed = 0;
+  for (const [k, exp] of revokedJwtTokens.entries()) {
+    if (exp <= now) {
+      revokedJwtTokens.delete(k);
+      removed++;
+    }
+  }
+  while (revokedJwtTokens.size > MAX_REVOKED_JWT_TOKENS) {
+    const oldestKey = revokedJwtTokens.keys().next().value;
+    if (oldestKey === undefined) break;
+    revokedJwtTokens.delete(oldestKey);
+    removed++;
+  }
+  if (removed > 0) {
+    void db.prepare('DELETE FROM revoked_jwt_tokens WHERE expires_at <= ?').run(now).catch(() => {});
+  }
+  return removed;
+}
 
 function hashJwtForRevocation(token: string): string {
   return crypto.createHash('sha256').update(token, 'utf8').digest('hex');
@@ -3310,27 +3503,31 @@ export async function loadRevokedJwtTokensFromDb(): Promise<void> {
   try {
     const now = Date.now();
     await db.prepare('DELETE FROM revoked_jwt_tokens WHERE expires_at <= ?').run(now);
-    const rows = (await db.prepare('SELECT token_hash, expires_at FROM revoked_jwt_tokens WHERE expires_at > ?').all(now)) as any[];
+    const rows = (await db
+      .prepare('SELECT token_hash, expires_at FROM revoked_jwt_tokens WHERE expires_at > ? ORDER BY expires_at DESC LIMIT ?')
+      .all(now, MAX_REVOKED_JWT_TOKENS)) as any[];
     for (const row of rows) {
       if (row?.token_hash && typeof row?.expires_at === 'number') {
         revokedJwtTokens.set(String(row.token_hash), Number(row.expires_at));
       }
     }
+    pruneRevokedJwtTokens(now);
   } catch {}
 }
 
 export function revokeJwtToken(token: string, expMs?: number): void {
   if (!token || typeof token !== 'string') return;
   const now = Date.now();
-  for (const [k, exp] of revokedJwtTokens.entries()) {
-    if (exp <= now) revokedJwtTokens.delete(k);
-  }
   const effectiveExp =
     typeof expMs === 'number' && Number.isFinite(expMs) && expMs > now
       ? expMs
       : now + SESSION_MAX_AGE_MS;
   const digest = hashJwtForRevocation(token);
+  if (revokedJwtTokens.has(digest)) {
+    revokedJwtTokens.delete(digest);
+  }
   revokedJwtTokens.set(digest, effectiveExp);
+  pruneRevokedJwtTokens(now);
   void db
     .prepare('INSERT OR REPLACE INTO revoked_jwt_tokens (token_hash, expires_at) VALUES (?, ?)')
     .run(digest, effectiveExp)
@@ -3387,12 +3584,12 @@ export async function requireTenantAuth(req: Request, res: Response, next: NextF
     let session: SessionContext | null = null;
     let authFailure: JwtVerificationResult | null = null;
 
-    // 1. Authenticate via Telegram Webhook Secret Token (Server-to-Server)
+    // 1. Authenticate via Telegram Webhook Secret Token (Server-to-Server, strictly locked to acc_telegram_bot)
     if (verifySecretToken(webhookSecretHeader, TELEGRAM_WEBHOOK_SECRET)) {
       session = {
         token: webhookSecretHeader!,
         accountId: 'acc_telegram_bot',
-        authorizedAccounts: getAuthorizedAccountsList(),
+        authorizedAccounts: ['acc_telegram_bot'],
         isMaster: false,
         isBot: true,
         createdAt: Date.now(),
@@ -3469,11 +3666,52 @@ export async function requireTenantAuth(req: Request, res: Response, next: NextF
       });
     }
 
+    // 3.1 Reject non-master / Bot attempts to override accountId via header, query, or body
+    const trimmedClaimedAccountId = typeof claimedAccountId === 'string' ? claimedAccountId.trim() : '';
+    if (!session.isMaster && trimmedClaimedAccountId && trimmedClaimedAccountId !== session.accountId) {
+      return res.status(403).json({
+        ok: false,
+        code: session.isBot ? 'BOT_CROSS_ACCOUNT_FORBIDDEN' : 'ACCOUNT_SCOPE_FORBIDDEN',
+        error: `权限不足：当前会话已锁定账号 (${session.accountId})，禁止越权访问其他账号 (${trimmedClaimedAccountId})`,
+      });
+    }
+
+    // 3.2 Block Bot Webhook credentials from personal MTProto, admin, database, system, and control endpoints
+    const fullRequestPath = `${req.baseUrl || ''}${req.path || ''}`.replace(/\/+$/, '') || '/';
+    if (session.isBot) {
+      const botForbiddenPrefixes = [
+        '/api/telegram/user',
+        '/api/telegram/autopilot',
+        '/api/telegram/credentials',
+        '/api/telegram/webhook/',
+        '/api/telegram/resource',
+        '/api/admin',
+        '/api/database',
+        '/api/system',
+        '/api/llm/config',
+        '/api/translate/settings',
+        '/api/llm/usage-stats',
+      ];
+      if (
+        botForbiddenPrefixes.some((prefix) =>
+          prefix.endsWith('/')
+            ? fullRequestPath.startsWith(prefix)
+            : fullRequestPath === prefix || fullRequestPath.startsWith(`${prefix}/`)
+        )
+      ) {
+        return res.status(403).json({
+          ok: false,
+          code: 'BOT_FORBIDDEN',
+          error: '权限不足：Bot Webhook 凭证无权访问个人账号、成员管理或系统控制接口',
+        });
+      }
+    }
+
     // Determine effective account ID strictly
     let effectiveAccountId = session.accountId || 'acc_1';
     if (session.isMaster) {
-      if (claimedAccountId && (session.authorizedAccounts.includes(claimedAccountId) || claimedAccountId.startsWith('acc_tg_'))) {
-        effectiveAccountId = claimedAccountId;
+      if (trimmedClaimedAccountId && (session.authorizedAccounts.includes(trimmedClaimedAccountId) || trimmedClaimedAccountId.startsWith('acc_tg_'))) {
+        effectiveAccountId = trimmedClaimedAccountId;
       }
     } else {
       effectiveAccountId = session.accountId;
@@ -3817,6 +4055,13 @@ app.get('/api/health', (_req: Request, res: Response) => {
 
 // 0. Member & JWT Auth Status Check
 app.get('/api/auth/status', async (req: Request, res: Response) => {
+  if (!isAllowedClientOrigin(req)) {
+    return res.status(403).json({
+      ok: false,
+      code: 'CSRF_ORIGIN_REJECTED',
+      error: 'Forbidden: Invalid request origin',
+    });
+  }
   const bearerToken = extractBearerToken(req);
   const jwtConfig = getActiveJwtVerificationConfig();
   const jwtConfigured = Boolean(jwtConfig.publicKeyPem || jwtConfig.hs256Secret);
@@ -3862,6 +4107,14 @@ app.get('/api/auth/status', async (req: Request, res: Response) => {
 
 // 0.2 Logout Endpoint (Protected: Origin + Valid Authenticated Member Session Required)
 app.post('/api/auth/logout', requireTenantAuth, async (req: Request, res: Response) => {
+  if (!isAllowedClientOrigin(req)) {
+    return res.status(403).json({
+      ok: false,
+      error: 'Forbidden: Untrusted Origin',
+      code: 'CSRF_ORIGIN_REJECTED',
+      message: '拒绝访问：请求来源未通过安全白名单校验 (防止本地 CSRF 劫持)',
+    });
+  }
   const authContext = (req as any).auth;
   const session = authContext?.session;
   if (!session || session.isBot || authContext?.isBot) {
@@ -3910,11 +4163,15 @@ app.post('/api/auth/logout', requireTenantAuth, async (req: Request, res: Respon
   for (const qr of activeQrSessions.values()) {
     qr.isStopped = true;
     if (qr.pollTimer) clearTimeout(qr.pollTimer);
+    if (qr.passwordTimeoutTimer) clearTimeout(qr.passwordTimeoutTimer);
     if (!qr.clientTransferred) {
       await destroyTelegramClientSafely(qr.client);
     }
   }
   activeQrSessions.clear();
+  pendingChangePhoneSessions.clear();
+  activeTelegramCalls.clear();
+  telegramStickerThumbCache.clear();
   pendingLocalUpdates.length = 0;
 
   if (revokeTelegramSessions) {
@@ -3927,9 +4184,18 @@ app.post('/api/auth/logout', requireTenantAuth, async (req: Request, res: Respon
   res.json({ ok: true, message: '已安全退出登录并断开活跃会话连接' });
 });
 
-// 0.3 Member Stats for Dashboard / Admin
-app.get('/api/admin/users/stats', requireTenantAuth, async (_req: Request, res: Response) => {
+// 0.3 Member Stats for Dashboard / Admin (Authenticated Desktop Member Only, Blocks Bot Webhook)
+app.get('/api/admin/users/stats', requireTenantAuth, async (req: Request, res: Response) => {
   try {
+    const authContext = (req as any).auth;
+    const session = authContext?.session;
+    if (!session || session.isBot || authContext?.isBot || !session.isMaster) {
+      return res.status(403).json({
+        ok: false,
+        code: 'AUTH_MEMBER_REQUIRED',
+        error: '权限不足：仅已登录桌面端会员有权读取成员统计信息',
+      });
+    }
     const totalRow = (await db.prepare('SELECT count(*) as cnt FROM app_users').get()) as any;
     const users = (await db.prepare('SELECT id, username, role, created_at, last_login_at FROM app_users ORDER BY created_at DESC LIMIT 50').all()) as any[];
     res.json({
@@ -3963,6 +4229,8 @@ app.get('/api/database/status', requireTenantAuth, async (req: Request, res: Res
       }
     }
 
+    const sqlitePragmas = await getSqliteRuntimePragmas();
+
     res.json({
       status: 'connected',
       verified: true,
@@ -3978,7 +4246,9 @@ app.get('/api/database/status', requireTenantAuth, async (req: Request, res: Res
       totalMessages: Number(msgCount),
       totalProfiles: Number(profileCount),
       sizeBytes,
-      walEnabled: true,
+      walEnabled: sqlitePragmas.walEnabled,
+      journalMode: sqlitePragmas.journalMode,
+      busyTimeoutMs: sqlitePragmas.busyTimeoutMs,
       railwayGuide: !isTurso && !isPersistentVolume
         ? '当前环境使用临时容器文件系统。若在 Railway 部署，请在服务控制台点击「Add Volume」，设置挂载路径为「/data」或「/app/data」即可确保重新部署数据永不丢失！或在环境变量配置 TURSO_DATABASE_URL 接入高可用云端数据库。'
         : null,
@@ -3988,7 +4258,7 @@ app.get('/api/database/status', requireTenantAuth, async (req: Request, res: Res
   }
 });
 
-// 1.1 Export Database Full Snapshot (Protected: Authenticated Desktop Member Only, Blocks Bot Webhook)
+// 1.1 Export Database Snapshot (Protected: Authenticated Desktop Member Only, Blocks Bot Webhook, Never leaks plaintext on direct download)
 app.get('/api/database/backup', requireTenantAuth, async (req: Request, res: Response) => {
   try {
     const authContext = (req as any).auth;
@@ -3996,16 +4266,65 @@ app.get('/api/database/backup', requireTenantAuth, async (req: Request, res: Res
     if (!session || session.isBot || authContext?.isBot) {
       return res.status(403).json({ error: '权限不足：仅客户端已登录会员有权导出数据库备份' });
     }
+    const headerPassphrase = typeof req.headers['x-backup-passphrase'] === 'string'
+      ? req.headers['x-backup-passphrase']
+      : '';
+    const bundleMode = String(req.headers['x-backup-bundle-mode'] || '').trim().toLowerCase();
+
+    if (headerPassphrase && headerPassphrase.length < BACKUP_MIN_PASSPHRASE_LENGTH) {
+      return res.status(400).json({
+        error: `备份加密口令至少需要 ${BACKUP_MIN_PASSPHRASE_LENGTH} 个字符`,
+        code: 'BACKUP_PASSPHRASE_TOO_SHORT',
+      });
+    }
+
     const snapshot = await exportDatabaseSnapshot();
-    res.setHeader('Content-Disposition', `attachment; filename="telegram_pro_backup_${Date.now()}.json"`);
+    const responsePayload = headerPassphrase
+      ? encryptBackupEnvelope(snapshot, headerPassphrase)
+      : bundleMode === 'client-encrypt'
+        ? snapshot
+        : sealDiskSnapshot(snapshot);
+
+    res.setHeader('Content-Disposition', `attachment; filename="humansense_backup_${Date.now()}.json"`);
     res.setHeader('Content-Type', 'application/json');
-    res.send(JSON.stringify(snapshot, null, 2));
+    res.send(JSON.stringify(responsePayload, null, 2));
   } catch (err: any) {
+    if (err instanceof SnapshotValidationError) {
+      return res.status(400).json({ error: err.message, code: err.code });
+    }
     res.status(500).json({ error: err.message });
   }
 });
 
-// 1.2 Restore Database from Full Snapshot (Protected: Authenticated Desktop Member Only with Two-Factor confirmation)
+// 1.1b Passphrase-Encrypted Database Backup Export (Recommended POST endpoint)
+app.post('/api/database/backup', requireTenantAuth, async (req: Request, res: Response) => {
+  try {
+    const authContext = (req as any).auth;
+    const session = authContext?.session;
+    if (!session || session.isBot || authContext?.isBot) {
+      return res.status(403).json({ error: '权限不足：仅客户端已登录会员有权导出数据库备份' });
+    }
+    const passphrase = typeof req.body?.passphrase === 'string' ? req.body.passphrase : '';
+    if (passphrase.length < BACKUP_MIN_PASSPHRASE_LENGTH) {
+      return res.status(400).json({
+        error: `导出必须设置至少 ${BACKUP_MIN_PASSPHRASE_LENGTH} 位备份加密口令`,
+        code: 'BACKUP_PASSPHRASE_REQUIRED',
+      });
+    }
+    const snapshot = await exportDatabaseSnapshot();
+    const encryptedEnvelope = encryptBackupEnvelope(snapshot, passphrase);
+    res.setHeader('Content-Disposition', `attachment; filename="humansense_encrypted_backup_${Date.now()}.json"`);
+    res.setHeader('Content-Type', 'application/json');
+    res.json(encryptedEnvelope);
+  } catch (err: any) {
+    if (err instanceof SnapshotValidationError) {
+      return res.status(400).json({ error: err.message, code: err.code });
+    }
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 1.2 Restore Database from Snapshot (Protected: Member Only + Two-Step Confirmation + Atomic Transaction + Strict Schema Validation)
 app.post('/api/database/restore', requireTenantAuth, async (req: Request, res: Response) => {
   try {
     const authContext = (req as any).auth;
@@ -4022,19 +4341,55 @@ app.post('/api/database/restore', requireTenantAuth, async (req: Request, res: R
       });
     }
 
-    const snapshot = req.body?.snapshot || req.body;
-    if (!snapshot || !snapshot.tables) {
-      return res.status(400).json({ error: '无效的数据快照格式，必须包含 tables 结构' });
+    const rawConfirmPhrase = String(req.body?.confirmPhrase ?? req.body?.confirmationText ?? '').trim();
+    if (rawConfirmPhrase.toUpperCase() !== 'RESTORE' && rawConfirmPhrase !== '确认恢复') {
+      return res.status(400).json({
+        error: '鉴权二次输入验证失败：请输入确认口令 "RESTORE"（或 "确认恢复"）后再执行恢复',
+        code: 'RESTORE_CONFIRMATION_PHRASE_REQUIRED',
+        requiresConfirmation: true,
+        requiresSecondaryInput: true,
+      });
     }
-    const result = await restoreDatabaseSnapshot(snapshot);
+
+    let candidatePayload = req.body?.snapshot || req.body?.backup || req.body;
+    if (isEncryptedBackupEnvelope(candidatePayload)) {
+      const passphrase = typeof req.body?.passphrase === 'string' ? req.body.passphrase : '';
+      if (!passphrase) {
+        return res.status(400).json({
+          error: '检测到加密备份文件，请提供备份解密口令',
+          code: 'BACKUP_PASSPHRASE_REQUIRED',
+        });
+      }
+      const decrypted = decryptBackupEnvelope<any>(candidatePayload, passphrase);
+      candidatePayload = decrypted?.sqliteSnapshot?.tables ? decrypted.sqliteSnapshot : decrypted;
+    } else if (isDiskSnapshotEnvelope(candidatePayload)) {
+      candidatePayload = unsealDiskSnapshot(candidatePayload);
+    } else if (candidatePayload?.sqliteSnapshot?.tables) {
+      candidatePayload = candidatePayload.sqliteSnapshot;
+    }
+
+    if (!candidatePayload || !candidatePayload.tables) {
+      return res.status(400).json({
+        error: '无效的数据快照格式，必须包含 tables 结构',
+        code: 'INVALID_SNAPSHOT_SCHEMA',
+      });
+    }
+
+    const result = await restoreDatabaseSnapshot(candidatePayload);
     activeServerTranslationSettings = null;
     await loadSystemProxyConfigFromDb().catch(() => null);
     res.json({
       success: true,
-      message: '数据快照恢复成功！',
+      message: '数据快照已通过原子事务校验并恢复成功！',
       restoredCounts: result.restoredCounts,
     });
   } catch (err: any) {
+    if (err instanceof SnapshotValidationError) {
+      return res.status(400).json({
+        error: err.message,
+        code: err.code,
+      });
+    }
     res.status(500).json({ error: err.message });
   }
 });
@@ -4256,6 +4611,77 @@ export function getScopedAccountIdVariants(accountId?: string): string[] {
     set.add(`acc_tg_${clean}`);
   }
   return Array.from(set);
+}
+
+export function resolveScopedAccountFromRequest(
+  req: Request,
+  options?: { allowBot?: boolean; allowMasterOverride?: boolean }
+): { ok: true; accountId: string; isExplicit: boolean } | { ok: false; status: number; code: string; error: string } {
+  const authContext = (req as any).auth;
+  const session = authContext?.session;
+  if (!session) {
+    return { ok: false, status: 401, code: 'AUTH_SESSION_REQUIRED', error: '未授权访问：缺少有效会话' };
+  }
+
+  const allowBot = options?.allowBot ?? false;
+  if (!allowBot && (session.isBot || authContext?.isBot)) {
+    return {
+      ok: false,
+      status: 403,
+      code: 'BOT_FORBIDDEN',
+      error: '权限不足：Bot Webhook 凭证无权访问个人账号或系统控制接口',
+    };
+  }
+
+  const rawRequested =
+    (typeof req.body?.accountId === 'string' && req.body.accountId.trim()) ||
+    (typeof req.query?.accountId === 'string' && req.query.accountId.trim()) ||
+    (typeof req.headers['x-account-id'] === 'string' && req.headers['x-account-id'].trim()) ||
+    '';
+  const effective = String(authContext?.effectiveAccountId || session.accountId || 'acc_1').trim() || 'acc_1';
+
+  if (session.isBot || authContext?.isBot) {
+    if (rawRequested && rawRequested !== 'acc_telegram_bot') {
+      return {
+        ok: false,
+        status: 403,
+        code: 'BOT_CROSS_ACCOUNT_FORBIDDEN',
+        error: 'Bot 会话已锁定为 acc_telegram_bot，禁止越权指定或访问其他账号',
+      };
+    }
+    return { ok: true, accountId: 'acc_telegram_bot', isExplicit: Boolean(rawRequested) };
+  }
+
+  if (!session.isMaster) {
+    if (rawRequested && rawRequested !== effective) {
+      return {
+        ok: false,
+        status: 403,
+        code: 'ACCOUNT_SCOPE_FORBIDDEN',
+        error: `无权跨账号操作目标账号 (${rawRequested})`,
+      };
+    }
+    return { ok: true, accountId: effective, isExplicit: Boolean(rawRequested) };
+  }
+
+  if (options?.allowMasterOverride !== false && rawRequested) {
+    const authorized: string[] = Array.isArray(session.authorizedAccounts) ? session.authorizedAccounts : [];
+    if (
+      rawRequested === effective ||
+      rawRequested.startsWith('acc_tg_') ||
+      authorized.includes(rawRequested)
+    ) {
+      return { ok: true, accountId: rawRequested, isExplicit: true };
+    }
+    return {
+      ok: false,
+      status: 403,
+      code: 'ACCOUNT_SCOPE_FORBIDDEN',
+      error: `无权访问未授权账号 (${rawRequested})`,
+    };
+  }
+
+  return { ok: true, accountId: effective, isExplicit: Boolean(rawRequested) };
 }
 
 export function resolveScopedAiAccountId(
@@ -4929,23 +5355,36 @@ export async function resolveUnifiedEvolutionCorpus(params: {
     const connected = resolveConnectedTelegramUser(cleanAccountId);
     if (connected?.client) {
       try {
-        const dialogs = await Promise.race([
-          connected.client.getDialogs({ limit: 8 }),
-          new Promise<any[]>((resolve) => setTimeout(() => resolve([]), 5000)),
-        ]);
-        const targetDialogs = (Array.isArray(dialogs) ? dialogs : [])
-          .filter((d: any) => {
-            const idStr = String(d?.id || '');
-            return idStr && idStr !== '777000' && idStr !== '42777' && idStr !== String(connected.userId);
-          })
+        let dialogIds: string[] = Array.isArray(connected.dialogs)
+          ? connected.dialogs.map((d: any) => String(d?.rawId || String(d?.id || '').replace(/^tg_/, ''))).filter(Boolean)
+          : [];
+        if (
+          dialogIds.length === 0 &&
+          !getTelegramFloodCooldown({ accountId: cleanAccountId, userId: connected.userId, phone: connected.phone })
+        ) {
+          const fetched = await Promise.race([
+            getOrFetchConnectedAccountDialogs(connected, { limit: 12 }).then((r) => r.dialogs),
+            new Promise<any[]>((resolve) => setTimeout(() => resolve([]), 5000)),
+          ]);
+          dialogIds = (Array.isArray(fetched) ? fetched : [])
+            .map((d: any) => String(d?.rawId || String(d?.id || '').replace(/^tg_/, '')))
+            .filter(Boolean);
+        }
+        const targetDialogIds = dialogIds
+          .filter((idStr) => idStr && idStr !== '777000' && idStr !== '42777' && idStr !== String(connected.userId))
           .slice(0, 4);
-        for (const dlg of targetDialogs) {
-          const synced = await syncTelegramUserChatMessages(connected.client, `tg_${dlg.id}`, 12, connected.userId);
+        for (const idStr of targetDialogIds) {
+          const synced = await syncTelegramUserChatMessages(connected.client, `tg_${idStr}`, 12, connected.userId);
           if (synced.length > 0) {
             cloudMsgs.push(...synced);
           }
         }
       } catch (err: any) {
+        recordTelegramFloodWait(
+          { accountId: cleanAccountId, userId: connected.userId, phone: connected.phone },
+          err,
+          'messages.GetDialogs'
+        );
         console.warn('[Unified Evolution Corpus] Cloud dialog fetch non-fatal:', err?.message || err);
       }
     }
@@ -5102,9 +5541,11 @@ app.get('/api/chats', requireTenantAuth, async (req: Request, res: Response) => 
 app.post('/api/chats/:chatId/language', requireTenantAuth, async (req: Request, res: Response) => {
   try {
     const { chatId } = req.params;
-    const authContext = (req as any).auth;
-    const bodyAccId = typeof req.body?.accountId === 'string' ? req.body.accountId.trim() : '';
-    const effectiveAccountId = bodyAccId || authContext?.effectiveAccountId || 'acc_1';
+    const scope = resolveScopedAccountFromRequest(req, { allowBot: true });
+    if (!scope.ok) {
+      return res.status(scope.status).json({ ok: false, code: scope.code, error: scope.error });
+    }
+    const effectiveAccountId = scope.accountId;
     const sourceLang = typeof req.body?.sourceLang === 'string' && req.body.sourceLang.trim()
       ? req.body.sourceLang.trim()
       : 'Auto';
@@ -6240,8 +6681,8 @@ async function resolveTelegramInputPeer(
     const inputPeer = await client.getInputEntity(rawPeer);
     return { inputPeer, rawPeer };
   } catch {
-    // Refresh dialog entity cache once before failing
-    await client.getDialogs({ limit: 60 });
+    // Refresh dialog entity cache once before failing (protected by FLOOD_WAIT breaker & in-flight dedup)
+    await refreshDialogEntityCacheSafely(client, 60);
     const inputPeer = await client.getInputEntity(rawPeer);
     return { inputPeer, rawPeer };
   }
@@ -6397,17 +6838,14 @@ app.patch('/api/messages/:id/translation', requireTenantAuth, async (req: Reques
     if (!hasTranslatedText && !hasSttText) {
       return res.status(400).json({ ok: false, error: 'translatedText 或 sttText 至少需提供一项字符串' });
     }
+    const scope = resolveScopedAccountFromRequest(req, { allowBot: true });
+    if (!scope.ok) {
+      return res.status(scope.status).json({ ok: false, code: scope.code, error: scope.error });
+    }
     const authContext = (req as any).auth;
-    const claimedAccountId =
-      (typeof rawAccountId === 'string' && rawAccountId.trim()) ||
-      (typeof req.headers['x-account-id'] === 'string' && req.headers['x-account-id'].trim()) ||
-      '';
-    const effectiveAccountId =
-      claimedAccountId ||
-      authContext?.effectiveAccountId ||
-      'acc_1';
+    const effectiveAccountId = scope.accountId;
     const isMaster = Boolean(authContext?.session?.isMaster);
-    const enforceAccountScope = !isMaster || Boolean(claimedAccountId);
+    const enforceAccountScope = !isMaster || scope.isExplicit;
     const accVariants = getScopedAccountIdVariants(effectiveAccountId);
     if ((effectiveAccountId === 'acc_telegram_bot' || effectiveAccountId === 'acc_1') && !accVariants.includes('acc_telegram_bot')) {
       accVariants.push('acc_telegram_bot');
@@ -15212,53 +15650,195 @@ async function processIncomingBotUpdate(
 }
 
 let isBotPollingStarted = false;
-async function startTelegramBotLongPolling() {
-  const botToken = process.env.TELEGRAM_BOT_TOKEN;
+let botPollingAbortController: AbortController | null = null;
+let botPollingSleepTimer: NodeJS.Timeout | null = null;
+let botPollingLoopPromise: Promise<void> | null = null;
+
+export function computeBotPollingBackoffMs(
+  consecutiveErrors: number,
+  retryAfterSec?: number,
+  baseDelayMs = 4000
+): number {
+  if (typeof retryAfterSec === 'number' && Number.isFinite(retryAfterSec) && retryAfterSec > 0) {
+    return Math.min(Math.max(Math.round(retryAfterSec * 1000), baseDelayMs), 120_000);
+  }
+  const expShift = Math.min(4, Math.max(0, consecutiveErrors - 1));
+  return Math.min(baseDelayMs * Math.pow(2, expShift), 60_000);
+}
+
+export function getBotPollingState() {
+  return {
+    isBotPollingStarted,
+    hasAbortController: Boolean(botPollingAbortController),
+    hasActiveLoop: Boolean(botPollingLoopPromise),
+  };
+}
+
+export async function stopTelegramBotLongPolling(): Promise<void> {
+  isBotPollingStarted = false;
+  if (botPollingSleepTimer) {
+    clearTimeout(botPollingSleepTimer);
+    botPollingSleepTimer = null;
+  }
+  const controller = botPollingAbortController;
+  botPollingAbortController = null;
+  if (controller && !controller.signal.aborted) {
+    try {
+      controller.abort();
+    } catch {}
+  }
+  const loopPromise = botPollingLoopPromise;
+  if (loopPromise) {
+    await Promise.race([
+      loopPromise.catch(() => {}),
+      new Promise<void>((resolve) => {
+        const t = setTimeout(resolve, 500);
+        t.unref?.();
+      }),
+    ]);
+    botPollingLoopPromise = null;
+  }
+}
+
+export async function startTelegramBotLongPolling(options?: {
+  fetcher?: typeof fetch;
+  botToken?: string;
+  baseDelayMs?: number;
+}): Promise<void> {
+  const botToken = options?.botToken ?? process.env.TELEGRAM_BOT_TOKEN;
   if (!botToken || isBotPollingStarted) return;
   if (process.env.TELEGRAM_AUTO_REGISTER_WEBHOOK === 'true' || process.env.AUTO_REGISTER_WEBHOOK === 'true') {
     return;
   }
+
+  const fetcher = options?.fetcher ?? fetch;
+  const baseDelayMs = typeof options?.baseDelayMs === 'number' && options.baseDelayMs >= 0 ? options.baseDelayMs : 4000;
+  const controller = new AbortController();
+  botPollingAbortController = controller;
   isBotPollingStarted = true;
+
+  const sleepWithAbort = (ms: number): Promise<void> => {
+    if (ms <= 0 || !isBotPollingStarted || controller.signal.aborted) return Promise.resolve();
+    return new Promise<void>((resolve) => {
+      const onAbort = () => {
+        if (botPollingSleepTimer) {
+          clearTimeout(botPollingSleepTimer);
+          botPollingSleepTimer = null;
+        }
+        resolve();
+      };
+      controller.signal.addEventListener('abort', onAbort, { once: true });
+      botPollingSleepTimer = setTimeout(() => {
+        botPollingSleepTimer = null;
+        controller.signal.removeEventListener('abort', onAbort);
+        resolve();
+      }, ms);
+      botPollingSleepTimer.unref?.();
+    });
+  };
+
   try {
-    const infoRes = await fetch(`https://api.telegram.org/bot${botToken}/getWebhookInfo`);
+    const infoRes = await fetcher(`https://api.telegram.org/bot${botToken}/getWebhookInfo`, {
+      signal: controller.signal,
+    });
     const infoJson: any = await infoRes.json().catch(() => null);
     if (infoJson?.ok && infoJson?.result?.url) {
       console.log(`[Telegram Bot Polling] Skipped because active webhook is set: ${infoJson.result.url}`);
+      isBotPollingStarted = false;
+      if (botPollingAbortController === controller) {
+        botPollingAbortController = null;
+      }
       return;
     }
   } catch {
+    if (!isBotPollingStarted || controller.signal.aborted) {
+      isBotPollingStarted = false;
+      if (botPollingAbortController === controller) {
+        botPollingAbortController = null;
+      }
+      return;
+    }
     // Proceed to poll only if no webhook configured
+  }
+
+  if (!isBotPollingStarted || controller.signal.aborted) {
+    isBotPollingStarted = false;
+    if (botPollingAbortController === controller) {
+      botPollingAbortController = null;
+    }
+    return;
   }
 
   console.log('[Telegram Bot Polling] Started desktop getUpdates long-polling loop.');
   let offset = 0;
+  let consecutiveErrors = 0;
+
   const pollLoop = async () => {
-    while (isBotPollingStarted) {
-      try {
-        const res = await fetch(
-          `https://api.telegram.org/bot${botToken}/getUpdates?offset=${offset}&timeout=20&allowed_updates=${encodeURIComponent(JSON.stringify(['message', 'edited_message', 'channel_post']))}`
-        );
-        if (res.status === 409 || res.status === 401) {
-          console.warn(`[Telegram Bot Polling] Stopped due to Telegram API HTTP ${res.status} (webhook active or invalid token).`);
-          isBotPollingStarted = false;
-          return;
-        }
-        const data: any = await res.json().catch(() => null);
-        if (data?.ok && Array.isArray(data.result)) {
-          for (const upd of data.result) {
-            if (typeof upd.update_id === 'number' && upd.update_id >= offset) {
-              offset = upd.update_id + 1;
-            }
-            await processIncomingBotUpdate(upd);
+    try {
+      while (isBotPollingStarted && !controller.signal.aborted) {
+        try {
+          const res = await fetcher(
+            `https://api.telegram.org/bot${botToken}/getUpdates?offset=${offset}&timeout=20&allowed_updates=${encodeURIComponent(JSON.stringify(['message', 'edited_message', 'channel_post']))}`,
+            { signal: controller.signal }
+          );
+          if (!isBotPollingStarted || controller.signal.aborted) {
+            break;
           }
+          if (res.status === 409 || res.status === 401) {
+            console.warn(`[Telegram Bot Polling] Stopped due to Telegram API HTTP ${res.status} (webhook active or invalid token).`);
+            isBotPollingStarted = false;
+            return;
+          }
+          const data: any = await res.json().catch(() => null);
+          if (res.status === 429 || res.status >= 500 || !res.ok || data?.ok === false) {
+            consecutiveErrors += 1;
+            const retryAfterHeader = Number(res.headers?.get?.('retry-after') || 0);
+            const retryAfterParam = Number(data?.parameters?.retry_after || 0);
+            const retryAfterSec = retryAfterParam > 0 ? retryAfterParam : retryAfterHeader > 0 ? retryAfterHeader : undefined;
+            const backoffMs = computeBotPollingBackoffMs(consecutiveErrors, retryAfterSec, baseDelayMs);
+            console.warn(
+              `[Telegram Bot Polling] HTTP ${res.status} (${data?.description || 'upstream error'}), backing off ${backoffMs}ms (attempt=${consecutiveErrors}).`
+            );
+            await sleepWithAbort(backoffMs);
+            continue;
+          }
+          consecutiveErrors = 0;
+          if (data?.ok && Array.isArray(data.result)) {
+            for (const upd of data.result) {
+              if (!isBotPollingStarted || controller.signal.aborted) break;
+              if (typeof upd.update_id === 'number' && upd.update_id >= offset) {
+                offset = upd.update_id + 1;
+              }
+              await processIncomingBotUpdate(upd);
+            }
+          }
+        } catch (err: any) {
+          if (!isBotPollingStarted || controller.signal.aborted || err?.name === 'AbortError') {
+            break;
+          }
+          consecutiveErrors += 1;
+          const backoffMs = computeBotPollingBackoffMs(consecutiveErrors, undefined, baseDelayMs);
+          console.warn('[Telegram Bot Polling Warning]:', err?.message || err);
+          await sleepWithAbort(backoffMs);
         }
-      } catch (err: any) {
-        console.warn('[Telegram Bot Polling Warning]:', err?.message || err);
-        await new Promise((r) => setTimeout(r, 4000));
+      }
+    } finally {
+      isBotPollingStarted = false;
+      if (botPollingSleepTimer) {
+        clearTimeout(botPollingSleepTimer);
+        botPollingSleepTimer = null;
+      }
+      if (botPollingAbortController === controller) {
+        botPollingAbortController = null;
       }
     }
   };
-  void pollLoop();
+
+  botPollingLoopPromise = pollLoop().finally(() => {
+    if (botPollingLoopPromise) {
+      botPollingLoopPromise = null;
+    }
+  });
 }
 
 // 12. Telegram Webhook Endpoint
@@ -15521,8 +16101,35 @@ interface InMemoryCloudTelegramCredentials {
 }
 const CLOUD_CREDS_RAM_TTL_MS = 12 * 60 * 60 * 1000;
 const OFFLINE_GRACE_CREDS_MAX_TTL_MS = 24 * 60 * 60 * 1000;
-const inMemoryCloudTelegramCreds = new Map<string, InMemoryCloudTelegramCredentials>();
+export const MAX_IN_MEMORY_CLOUD_TG_CREDS = 64;
+export const inMemoryCloudTelegramCreds = new Map<string, InMemoryCloudTelegramCredentials>();
 let lastCloudCredsError: { code?: string; error: string; isAuthRejection?: boolean; at: number } | null = null;
+
+export function pruneInMemoryCloudTelegramCreds(now = Date.now()): number {
+  let removed = 0;
+  for (const [k, entry] of inMemoryCloudTelegramCreds.entries()) {
+    if (!entry || now - entry.fetchedAt > CLOUD_CREDS_RAM_TTL_MS) {
+      inMemoryCloudTelegramCreds.delete(k);
+      removed++;
+    }
+  }
+  while (inMemoryCloudTelegramCreds.size > MAX_IN_MEMORY_CLOUD_TG_CREDS) {
+    let evictKey: string | undefined;
+    for (const k of inMemoryCloudTelegramCreds.keys()) {
+      if (k !== '__default__') {
+        evictKey = k;
+        break;
+      }
+    }
+    if (!evictKey) {
+      evictKey = inMemoryCloudTelegramCreds.keys().next().value;
+    }
+    if (!evictKey) break;
+    inMemoryCloudTelegramCreds.delete(evictKey);
+    removed++;
+  }
+  return removed;
+}
 
 function getOfflineGraceCredsFilePath(): string {
   return path.join(dbDir, '.tg_creds_grace.enc');
@@ -16063,6 +16670,7 @@ export async function fetchCloudAuthorizedTelegramCredentials(
     };
     inMemoryCloudTelegramCreds.set(getCloudCredsCacheKey(bearerToken), record);
     inMemoryCloudTelegramCreds.set('__default__', record);
+    pruneInMemoryCloudTelegramCreds();
     writeOfflineGraceTelegramCredentials({
       bearerToken,
       apiId,
@@ -16137,6 +16745,7 @@ export async function resolveTelegramApiCredentials(options: {
         };
         inMemoryCloudTelegramCreds.set(getCloudCredsCacheKey(options.bearerToken), record);
         inMemoryCloudTelegramCreds.set('__default__', record);
+        pruneInMemoryCloudTelegramCreds();
         return {
           ok: true,
           apiId: grace.apiId,
@@ -16901,16 +17510,101 @@ interface QrSessionContext {
   authorizedAt?: number;
   isScanned?: boolean;
   needsPassword?: boolean;
+  needsPasswordAt?: number;
   passwordHint?: string;
   user?: any;
   error?: string;
   createdAt: number;
   pollTimer?: NodeJS.Timeout;
+  passwordTimeoutTimer?: NodeJS.Timeout;
   isStopped?: boolean;
   pollErrorCount?: number;
 }
 
-const activeQrSessions = new Map<string, QrSessionContext>();
+export const QR_SESSION_UNSCANNED_STALE_MS = 45 * 1000;
+export const QR_SESSION_MAX_WAIT_MS = 2 * 60 * 1000;
+export const QR_SESSION_2FA_TIMEOUT_MS = 5 * 60 * 1000;
+export const MAX_ACTIVE_QR_SESSIONS = 16;
+export const activeQrSessions = new Map<string, QrSessionContext>();
+
+export function armQrPasswordTimeout(
+  sessionObj: QrSessionContext,
+  timeoutMs: number = QR_SESSION_2FA_TIMEOUT_MS
+): void {
+  sessionObj.needsPassword = true;
+  sessionObj.isScanned = true;
+  sessionObj.needsPasswordAt = Date.now();
+  if (sessionObj.pollTimer) {
+    clearTimeout(sessionObj.pollTimer);
+    sessionObj.pollTimer = undefined;
+  }
+  if (sessionObj.passwordTimeoutTimer) {
+    clearTimeout(sessionObj.passwordTimeoutTimer);
+  }
+  sessionObj.passwordTimeoutTimer = setTimeout(() => {
+    sessionObj.passwordTimeoutTimer = undefined;
+    if (sessionObj.isAuthorized || sessionObj.clientTransferred) {
+      activeQrSessions.delete(sessionObj.sessionId);
+      return;
+    }
+    console.log(`[Telegram QR Auth] Session ${sessionObj.sessionId} 2FA password timed out, releasing socket...`);
+    sessionObj.isStopped = true;
+    sessionObj.error = '两步验证等待超时，请刷新二维码重新登录';
+    void destroyTelegramClientSafely(sessionObj.client);
+    activeQrSessions.delete(sessionObj.sessionId);
+  }, timeoutMs);
+  sessionObj.passwordTimeoutTimer.unref?.();
+}
+
+export function pruneExpiredQrSessions(now = Date.now()): number {
+  let removed = 0;
+  for (const [oldId, oldSession] of activeQrSessions.entries()) {
+    if (oldSession.isAuthorized || oldSession.clientTransferred) {
+      if (now - (oldSession.authorizedAt || oldSession.createdAt) > 15000) {
+        if (oldSession.pollTimer) clearTimeout(oldSession.pollTimer);
+        if (oldSession.passwordTimeoutTimer) clearTimeout(oldSession.passwordTimeoutTimer);
+        activeQrSessions.delete(oldId);
+        removed++;
+      }
+      continue;
+    }
+    if (oldSession.needsPassword) {
+      const waitAnchor = oldSession.needsPasswordAt || oldSession.createdAt;
+      if (now - waitAnchor >= QR_SESSION_2FA_TIMEOUT_MS || oldSession.isStopped) {
+        if (oldSession.pollTimer) clearTimeout(oldSession.pollTimer);
+        if (oldSession.passwordTimeoutTimer) clearTimeout(oldSession.passwordTimeoutTimer);
+        oldSession.isStopped = true;
+        void destroyTelegramClientSafely(oldSession.client);
+        activeQrSessions.delete(oldId);
+        removed++;
+      }
+      continue;
+    }
+    const isStaleUnscanned = now - oldSession.createdAt > QR_SESSION_UNSCANNED_STALE_MS && !oldSession.isScanned;
+    if (isStaleUnscanned || now - oldSession.createdAt > QR_SESSION_MAX_WAIT_MS || oldSession.isStopped) {
+      if (oldSession.pollTimer) clearTimeout(oldSession.pollTimer);
+      if (oldSession.passwordTimeoutTimer) clearTimeout(oldSession.passwordTimeoutTimer);
+      oldSession.isStopped = true;
+      void destroyTelegramClientSafely(oldSession.client);
+      activeQrSessions.delete(oldId);
+      removed++;
+    }
+  }
+  while (activeQrSessions.size > MAX_ACTIVE_QR_SESSIONS) {
+    const oldestId = activeQrSessions.keys().next().value;
+    if (!oldestId) break;
+    const oldest = activeQrSessions.get(oldestId)!;
+    if (oldest.pollTimer) clearTimeout(oldest.pollTimer);
+    if (oldest.passwordTimeoutTimer) clearTimeout(oldest.passwordTimeoutTimer);
+    oldest.isStopped = true;
+    if (!oldest.isAuthorized && !oldest.clientTransferred) {
+      void destroyTelegramClientSafely(oldest.client);
+    }
+    activeQrSessions.delete(oldestId);
+    removed++;
+  }
+  return removed;
+}
 
 async function finishQrLogin(sessionObj: QrSessionContext, user: any) {
   console.log(`[Telegram QR Auth] User confirmed scan and authorized: ${user.firstName} (@${user.username || user.id})`);
@@ -16957,6 +17651,14 @@ async function finishQrLogin(sessionObj: QrSessionContext, user: any) {
     now
   );
 
+  if (sessionObj.pollTimer) {
+    clearTimeout(sessionObj.pollTimer);
+    sessionObj.pollTimer = undefined;
+  }
+  if (sessionObj.passwordTimeoutTimer) {
+    clearTimeout(sessionObj.passwordTimeoutTimer);
+    sessionObj.passwordTimeoutTimer = undefined;
+  }
   sessionObj.clientTransferred = true;
   sessionObj.authorizedAt = now;
   sessionObj.isAuthorized = true;
@@ -16998,11 +17700,9 @@ async function finishQrLogin(sessionObj: QrSessionContext, user: any) {
   });
   attachTelegramClientMessageListener(sessionObj.client, cleanPhone, String(user.id));
 
-  // Asynchronously sync real dialogs into local memory
-  fetchTelegramUserDialogs(sessionObj.client, 150, String(user.id))
-    .then((dialogs) => {
-      userConnectedObj.dialogs = dialogs;
-      userConnectedObj.dialogsFetchedAt = Date.now();
+  // Asynchronously sync real dialogs into local memory via single-flight helper
+  getOrFetchConnectedAccountDialogs(userConnectedObj, { limit: 150 })
+    .then(({ dialogs }) => {
       console.log(`[Telegram QR Auth] Synced ${dialogs.length} real dialogs into memory for user ${user.id}`);
     })
     .catch((err) => {
@@ -17035,23 +17735,7 @@ app.post('/api/telegram/user/qr-token', requireTenantAuth, async (req: Request, 
     const sessionId = 'qr_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8);
 
     // Clean up stale QR sessions safely: NEVER destroy a client already transferred to connectedUserClients!
-    const now = Date.now();
-    for (const [oldId, oldSession] of activeQrSessions.entries()) {
-      if (oldSession.isAuthorized || oldSession.clientTransferred) {
-        if (now - (oldSession.authorizedAt || oldSession.createdAt) > 15000) {
-          if (oldSession.pollTimer) clearTimeout(oldSession.pollTimer);
-          activeQrSessions.delete(oldId);
-        }
-        continue;
-      }
-      const isStaleUnscanned = now - oldSession.createdAt > 45 * 1000 && !oldSession.isScanned;
-      if (isStaleUnscanned || now - oldSession.createdAt > 2 * 60 * 1000 || oldSession.isStopped) {
-        if (oldSession.pollTimer) clearTimeout(oldSession.pollTimer);
-        oldSession.isStopped = true;
-        void destroyTelegramClientSafely(oldSession.client);
-        activeQrSessions.delete(oldId);
-      }
-    }
+    pruneExpiredQrSessions(Date.now());
 
     const stringSession = new StringSession('');
     const telegramProxy = getConfiguredTelegramProxy();
@@ -17148,8 +17832,7 @@ app.post('/api/telegram/user/qr-token', requireTenantAuth, async (req: Request, 
           } catch (importErr: any) {
             if (importErr.errorMessage === 'SESSION_PASSWORD_NEEDED') {
               console.log(`[Telegram QR Auth] Session ${sessionId}: 2FA Password needed after DC migration`);
-              sessionObj.needsPassword = true;
-              sessionObj.isScanned = true;
+              armQrPasswordTimeout(sessionObj);
               try {
                 const pwdInfo = await client.invoke(new Api.account.GetPassword());
                 sessionObj.passwordHint = (pwdInfo as any).hint || '';
@@ -17167,8 +17850,7 @@ app.post('/api/telegram/user/qr-token', requireTenantAuth, async (req: Request, 
       } catch (err: any) {
         if (err.errorMessage === 'SESSION_PASSWORD_NEEDED') {
           console.log(`[Telegram QR Auth] Session ${sessionId}: 2FA Password needed`);
-          sessionObj.needsPassword = true;
-          sessionObj.isScanned = true;
+          armQrPasswordTimeout(sessionObj);
           try {
             const pwdInfo = await client.invoke(new Api.account.GetPassword());
             sessionObj.passwordHint = (pwdInfo as any).hint || '';
@@ -17183,9 +17865,11 @@ app.post('/api/telegram/user/qr-token', requireTenantAuth, async (req: Request, 
             sessionObj.error = '与 Telegram 服务器通信持续异常，请检查网络或代理后刷新二维码';
             sessionObj.isStopped = true;
             if (sessionObj.pollTimer) clearTimeout(sessionObj.pollTimer);
+            if (sessionObj.passwordTimeoutTimer) clearTimeout(sessionObj.passwordTimeoutTimer);
             if (!sessionObj.isAuthorized && !sessionObj.clientTransferred) {
               void destroyTelegramClientSafely(sessionObj.client);
             }
+            activeQrSessions.delete(sessionId);
             return;
           }
         }
@@ -17194,10 +17878,11 @@ app.post('/api/telegram/user/qr-token', requireTenantAuth, async (req: Request, 
       // Schedule next check if still active
       if (!sessionObj.isStopped && !sessionObj.isAuthorized && !sessionObj.clientTransferred && !sessionObj.needsPassword) {
         // Enforce 2 minutes maximum session wait time
-        if (Date.now() - sessionObj.createdAt > 2 * 60 * 1000) {
+        if (Date.now() - sessionObj.createdAt > QR_SESSION_MAX_WAIT_MS) {
           sessionObj.error = '二维码已超时（2分钟未扫码），已自动断开连接。请刷新重新获取。';
           sessionObj.isStopped = true;
           if (sessionObj.pollTimer) clearTimeout(sessionObj.pollTimer);
+          if (sessionObj.passwordTimeoutTimer) clearTimeout(sessionObj.passwordTimeoutTimer);
           if (!sessionObj.isAuthorized && !sessionObj.clientTransferred) {
             void destroyTelegramClientSafely(sessionObj.client);
             activeQrSessions.delete(sessionId);
@@ -17236,6 +17921,11 @@ app.post('/api/telegram/user/cancel-qr', requireTenantAuth, async (req: Request,
       sessionObj.isStopped = true;
       if (sessionObj.pollTimer) {
         clearTimeout(sessionObj.pollTimer);
+        sessionObj.pollTimer = undefined;
+      }
+      if (sessionObj.passwordTimeoutTimer) {
+        clearTimeout(sessionObj.passwordTimeoutTimer);
+        sessionObj.passwordTimeoutTimer = undefined;
       }
       if (!sessionObj.isAuthorized && !sessionObj.clientTransferred) {
         await destroyTelegramClientSafely(sessionObj.client);
@@ -17309,6 +17999,16 @@ app.post('/api/telegram/user/qr-password', requireTenantAuth, authAttemptLimiter
     const session = activeQrSessions.get(sessionId)!;
     if (!session.needsPassword) {
       return res.status(400).json({ ok: false, error: '当前会话无需输入两步验证密码' });
+    }
+    if (Date.now() - (session.needsPasswordAt || session.createdAt) >= QR_SESSION_2FA_TIMEOUT_MS) {
+      if (session.pollTimer) clearTimeout(session.pollTimer);
+      if (session.passwordTimeoutTimer) clearTimeout(session.passwordTimeoutTimer);
+      session.isStopped = true;
+      if (!session.isAuthorized && !session.clientTransferred) {
+        void destroyTelegramClientSafely(session.client);
+      }
+      activeQrSessions.delete(sessionId);
+      return res.status(400).json({ ok: false, error: '两步验证会话已过期，请重新扫码' });
     }
 
     const cleanPwd = String(password || '').trim();
@@ -17501,10 +18201,8 @@ app.post('/api/telegram/user/verify-code', requireTenantAuth, authAttemptLimiter
     });
     attachTelegramClientMessageListener(client, cleanPhone, String(me.id));
 
-    fetchTelegramUserDialogs(client, 150, String(me.id))
-      .then((dialogs) => {
-        userConnectedObj.dialogs = dialogs;
-        userConnectedObj.dialogsFetchedAt = Date.now();
+    getOrFetchConnectedAccountDialogs(userConnectedObj, { limit: 150 })
+      .then(({ dialogs }) => {
         console.log(`[Telegram User Auth] Synced ${dialogs.length} real dialogs into memory for user ${me.id}`);
       })
       .catch((err) => {
@@ -17802,34 +18500,10 @@ app.get('/api/telegram/user/dialogs', requireTenantAuth, async (req: Request, re
       return prefs;
     };
 
-    const nowMs = Date.now();
-    if (
-      !forceRefresh &&
-      Array.isArray(connected.dialogs) &&
-      connected.dialogs.length > 0 &&
-      connected.dialogsFetchedAt &&
-      nowMs - connected.dialogsFetchedAt < TELEGRAM_DIALOGS_CACHE_TTL_MS
-    ) {
-      const dialogLangPrefs = await loadDialogLangPrefs();
-      const cachedDialogs = connected.dialogs.map((d: any) => {
-        const pref = dialogLangPrefs.get(d.id);
-        return pref
-          ? { ...d, sourceLang: pref.sourceLang, targetLang: pref.targetLang }
-          : d;
-      });
-      return res.json({
-        ok: true,
-        dialogs: cachedDialogs,
-        userId: connected.userId,
-        phone: connected.phone,
-        isConnected: Boolean(connected.client.connected),
-        totalCount: cachedDialogs.length,
-        cached: true,
-      });
-    }
-
-    // Refresh dialogs directly from Telegram MTProto
-    const rawDialogs = await fetchTelegramUserDialogs(connected.client, 150, connected.userId);
+    const { dialogs: rawDialogs, cached } = await getOrFetchConnectedAccountDialogs(connected, {
+      force: forceRefresh,
+      limit: 150,
+    });
     const dialogLangPrefs = await loadDialogLangPrefs();
 
     const dialogs = rawDialogs.map((d: any) => {
@@ -17838,8 +18512,10 @@ app.get('/api/telegram/user/dialogs', requireTenantAuth, async (req: Request, re
         ? { ...d, sourceLang: pref.sourceLang, targetLang: pref.targetLang }
         : d;
     });
-    connected.dialogs = dialogs;
-    connected.dialogsFetchedAt = Date.now();
+    if (!cached) {
+      connected.dialogs = dialogs;
+      connected.dialogsFetchedAt = Date.now();
+    }
 
     res.json({
       ok: true,
@@ -17848,6 +18524,7 @@ app.get('/api/telegram/user/dialogs', requireTenantAuth, async (req: Request, re
       phone: connected.phone,
       isConnected: Boolean(connected.client.connected),
       totalCount: dialogs.length,
+      ...(cached ? { cached: true } : {}),
     });
   } catch (err: any) {
     const floodEntry = recordTelegramFloodWait(
@@ -18034,14 +18711,36 @@ export const telegramMediaCache = new BoundedByteLruCache<{
   maxItemBytes: TELEGRAM_MEDIA_STREAM_THRESHOLD_BYTES,
 });
 
+export function pruneServerRuntimeCaches(now = Date.now()) {
+  const avatarRemoved = telegramAvatarCache.pruneExpired(now);
+  const mediaRemoved = telegramMediaCache.pruneExpired(now);
+  const stickerRemoved = telegramStickerThumbCache.pruneExpired(now);
+  const floodRemoved = pruneExpiredTelegramFloodCooldowns(now);
+  const qrRemoved = pruneExpiredQrSessions(now);
+  const changePhoneRemoved = prunePendingChangePhoneSessions(now);
+  const callsRemoved = pruneActiveTelegramCalls(now);
+  const jwtRemoved = pruneRevokedJwtTokens(now);
+  const dedupRemoved = pruneOutboundAndMtprotoDedupCaches(now);
+  const credsRemoved = pruneInMemoryCloudTelegramCreds(now);
+  return {
+    avatarRemoved,
+    mediaRemoved,
+    stickerRemoved,
+    floodRemoved,
+    qrRemoved,
+    changePhoneRemoved,
+    callsRemoved,
+    jwtRemoved,
+    ...dedupRemoved,
+    credsRemoved,
+  };
+}
+
 let telegramCacheCleanupInterval: NodeJS.Timeout | null = null;
 function startTelegramCacheCleanupTimer(): void {
   if (telegramCacheCleanupInterval) return;
   telegramCacheCleanupInterval = setInterval(() => {
-    const now = Date.now();
-    telegramAvatarCache.pruneExpired(now);
-    telegramMediaCache.pruneExpired(now);
-    pruneExpiredTelegramFloodCooldowns(now);
+    pruneServerRuntimeCaches(Date.now());
   }, 5 * 60 * 1000);
   telegramCacheCleanupInterval.unref?.();
 }
@@ -19032,12 +19731,31 @@ app.post('/api/telegram/user/upload-avatar', requireTenantAuth, async (req: Requ
 });
 
 // 20.3.1b Official Change Phone Number (account.SendChangePhoneCode / account.ChangePhone)
-const pendingChangePhoneSessions = new Map<string, {
+export const CHANGE_PHONE_SESSION_TTL_MS = 10 * 60 * 1000;
+export const MAX_PENDING_CHANGE_PHONE_SESSIONS = 100;
+export const pendingChangePhoneSessions = new Map<string, {
   userId: string;
   newPhone: string;
   phoneCodeHash: string;
   createdAt: number;
 }>();
+
+export function prunePendingChangePhoneSessions(now = Date.now()): number {
+  let removed = 0;
+  for (const [uid, entry] of pendingChangePhoneSessions.entries()) {
+    if (!entry || now - entry.createdAt >= CHANGE_PHONE_SESSION_TTL_MS) {
+      pendingChangePhoneSessions.delete(uid);
+      removed++;
+    }
+  }
+  while (pendingChangePhoneSessions.size > MAX_PENDING_CHANGE_PHONE_SESSIONS) {
+    const oldestUid = pendingChangePhoneSessions.keys().next().value;
+    if (oldestUid === undefined) break;
+    pendingChangePhoneSessions.delete(oldestUid);
+    removed++;
+  }
+  return removed;
+}
 
 app.post('/api/telegram/user/change-phone/send-code', requireTenantAuth, async (req: Request, res: Response) => {
   try {
@@ -19063,12 +19781,15 @@ app.post('/api/telegram/user/change-phone/send-code', requireTenantAuth, async (
       })
     );
 
+    const now = Date.now();
+    prunePendingChangePhoneSessions(now);
     pendingChangePhoneSessions.set(connected.userId, {
       userId: connected.userId,
       newPhone: cleanNewPhone,
       phoneCodeHash: sent.phoneCodeHash,
-      createdAt: Date.now(),
+      createdAt: now,
     });
+    prunePendingChangePhoneSessions(now);
 
     return res.json({
       ok: true,
@@ -19102,6 +19823,7 @@ app.post('/api/telegram/user/change-phone/confirm', requireTenantAuth, authAttem
       return res.status(400).json({ ok: false, error: '当前账号未在线连接 Telegram MTProto，无法完成手机号换绑。' });
     }
 
+    prunePendingChangePhoneSessions();
     const pending = pendingChangePhoneSessions.get(connected.userId);
     const cleanNewPhone = normalizePhoneNumber(rawNewPhone || pending?.newPhone || '');
     const phoneCodeHash = String(req.body?.phoneCodeHash || pending?.phoneCodeHash || '').trim();
@@ -20668,12 +21390,12 @@ app.post('/api/telegram/user/dialogs/read', requireTenantAuth, async (req: Reque
 // 20.3.1s3 Batch Delete Messages in Telegram Cloud & DB (supports revoke: boolean + local failed items)
 app.post('/api/telegram/user/messages/batch-delete', requireTenantAuth, async (req: Request, res: Response) => {
   try {
+    const scope = resolveScopedAccountFromRequest(req, { allowBot: false });
+    if (!scope.ok) {
+      return res.status(scope.status).json({ ok: false, code: scope.code, error: scope.error });
+    }
     const authContext = (req as any).auth;
-    const accountId =
-      (req.body?.accountId as string) ||
-      (req.headers['x-account-id'] as string) ||
-      authContext?.effectiveAccountId ||
-      '';
+    const accountId = scope.accountId;
     const isMaster = Boolean(authContext?.session?.isMaster);
     const { chatId, items, revoke = true } = req.body || {};
 
@@ -20792,7 +21514,11 @@ app.post('/api/telegram/user/messages/batch-delete', requireTenantAuth, async (r
 // 20.3.1s4 Forward Messages in Telegram Cloud (client.forwardMessages)
 app.post('/api/telegram/user/messages/forward', requireTenantAuth, async (req: Request, res: Response) => {
   try {
-    const accountId = (req.body?.accountId as string) || (req.headers['x-account-id'] as string) || '';
+    const scope = resolveScopedAccountFromRequest(req, { allowBot: false });
+    if (!scope.ok) {
+      return res.status(scope.status).json({ ok: false, code: scope.code, error: scope.error });
+    }
+    const accountId = scope.accountId;
     const { fromChatId, toChatId, messageIds, telegramMessageIds, dropAuthor = false } = req.body || {};
 
     if (!fromChatId || !toChatId) {
@@ -21178,7 +21904,18 @@ app.get('/api/telegram/user/chat-info/:chatId', requireTenantAuth, async (req: R
 });
 
 // 20.3.1v Fetch Official Installed Telegram Stickers (messages.GetAllStickers + messages.GetStickerSet)
-const telegramStickerThumbCache = new Map<string, { buffer: Buffer; mime: string; expiresAt: number }>();
+export const TELEGRAM_STICKER_CACHE_MAX_BYTES = 32 * 1024 * 1024;
+export const TELEGRAM_STICKER_CACHE_MAX_ENTRIES = 200;
+export const TELEGRAM_STICKER_CACHE_ITEM_MAX_BYTES = 4 * 1024 * 1024;
+export const telegramStickerThumbCache = new BoundedByteLruCache<{
+  buffer: Buffer;
+  mime: string;
+  expiresAt: number;
+}>({
+  maxBytes: TELEGRAM_STICKER_CACHE_MAX_BYTES,
+  maxEntries: TELEGRAM_STICKER_CACHE_MAX_ENTRIES,
+  maxItemBytes: TELEGRAM_STICKER_CACHE_ITEM_MAX_BYTES,
+});
 
 app.get('/api/telegram/user/stickers', requireTenantAuth, async (req: Request, res: Response) => {
   try {
@@ -21318,8 +22055,8 @@ app.get('/api/telegram/user/sticker/:setId/:docId', async (req: Request, res: Re
     const cacheKey = `${cacheAccountScope}:${setId}:${docId}`;
     const now = Date.now();
 
-    const cached = telegramStickerThumbCache.get(cacheKey);
-    if (cached && cached.expiresAt > now) {
+    const cached = telegramStickerThumbCache.get(cacheKey, now);
+    if (cached) {
       res.setHeader('Content-Type', cached.mime);
       res.setHeader('Cache-Control', 'private, max-age=3600');
       return res.send(cached.buffer);
@@ -21359,15 +22096,15 @@ app.get('/api/telegram/user/sticker/:setId/:docId', async (req: Request, res: Re
         }
 
         if (buffer && Buffer.isBuffer(buffer) && buffer.length > 0) {
-          telegramStickerThumbCache.set(cacheKey, {
-            buffer,
-            mime: outMime,
-            expiresAt: now + 3600 * 1000,
-          });
-          if (telegramStickerThumbCache.size > 200) {
-            const oldestKey = telegramStickerThumbCache.keys().next().value;
-            if (oldestKey) telegramStickerThumbCache.delete(oldestKey);
-          }
+          telegramStickerThumbCache.set(
+            cacheKey,
+            {
+              buffer,
+              mime: outMime,
+              expiresAt: now + 3600 * 1000,
+            },
+            now
+          );
           res.setHeader('Content-Type', outMime);
           res.setHeader('Cache-Control', 'private, max-age=3600');
           return res.send(buffer);
@@ -21673,9 +22410,9 @@ async function resolveTelegramInputUser(client: TelegramClient, peerRef: string)
     } catch {}
   }
 
-  // Fallback 4: refresh recent dialogs entity cache
+  // Fallback 4: refresh recent dialogs entity cache (protected by FLOOD_WAIT breaker & in-flight dedup)
   try {
-    await client.getDialogs({ limit: 80 });
+    await refreshDialogEntityCacheSafely(client, 80);
   } catch {}
   return await tryResolve();
 }
@@ -22330,12 +23067,70 @@ interface ActiveTelegramCallSession {
   tgCallId: any;
   accessHash: any;
   client: TelegramClient;
+  accountId: string;
+  userId?: string;
+  ownerUserId?: string;
   status: 'ringing' | 'accepted' | 'discarded' | 'failed';
   startedAt: number;
   acceptedAt?: number;
+  discardedAt?: number;
   endedReason?: string;
 }
-const activeTelegramCalls = new Map<string, ActiveTelegramCallSession>();
+export const CALL_DISCARDED_TTL_MS = 30 * 1000;
+export const CALL_RINGING_MAX_TTL_MS = 5 * 60 * 1000;
+export const CALL_ACCEPTED_MAX_TTL_MS = 4 * 60 * 60 * 1000;
+export const MAX_ACTIVE_TELEGRAM_CALLS = 100;
+export const activeTelegramCalls = new Map<string, ActiveTelegramCallSession>();
+
+export function pruneActiveTelegramCalls(now = Date.now()): number {
+  let removed = 0;
+  for (const [id, session] of activeTelegramCalls.entries()) {
+    if (!session) {
+      activeTelegramCalls.delete(id);
+      removed++;
+      continue;
+    }
+    const isExpiredDiscarded =
+      (session.status === 'discarded' || session.status === 'failed') &&
+      now - (session.discardedAt || session.startedAt) >= CALL_DISCARDED_TTL_MS;
+    const isStaleRinging =
+      session.status === 'ringing' && now - session.startedAt >= CALL_RINGING_MAX_TTL_MS;
+    const isStaleAccepted = now - session.startedAt >= CALL_ACCEPTED_MAX_TTL_MS;
+    if (isExpiredDiscarded || isStaleRinging || isStaleAccepted) {
+      activeTelegramCalls.delete(id);
+      removed++;
+    }
+  }
+  while (activeTelegramCalls.size > MAX_ACTIVE_TELEGRAM_CALLS) {
+    const oldestId = activeTelegramCalls.keys().next().value;
+    if (oldestId === undefined) break;
+    activeTelegramCalls.delete(oldestId);
+    removed++;
+  }
+  return removed;
+}
+
+function isCallSessionOwnedByCaller(
+  callSession: ActiveTelegramCallSession,
+  req: Request,
+  callerAccountId: string
+): boolean {
+  const authContext = (req as any).auth;
+  const authSession = authContext?.session;
+  if (!authSession || authSession.isBot || authContext?.isBot) return false;
+  if (!authSession.isMaster && callSession.ownerUserId && authSession.userId && callSession.ownerUserId !== authSession.userId) {
+    return false;
+  }
+  const callerVariants = getScopedAccountIdVariants(callerAccountId);
+  const callVariants = getScopedAccountIdVariants(callSession.accountId);
+  if (callSession.userId) {
+    const uid = String(callSession.userId).trim();
+    if (uid) {
+      callVariants.push(uid, `acc_tg_${uid}`);
+    }
+  }
+  return callerVariants.some((v) => callVariants.includes(v));
+}
 
 function bufferToBigInt(buf: Buffer): bigint {
   if (!buf || buf.length === 0) return 0n;
@@ -22382,6 +23177,7 @@ function ensurePhoneCallListener(client: TelegramClient) {
             if (!session.acceptedAt) session.acceptedAt = Date.now();
           } else if (phoneCall.className === 'PhoneCallDiscarded') {
             session.status = 'discarded';
+            session.discardedAt = Date.now();
             const reasonClass = phoneCall.reason?.className || '';
             session.endedReason =
               reasonClass === 'PhoneCallDiscardReasonBusy'
@@ -22389,6 +23185,12 @@ function ensurePhoneCallListener(client: TelegramClient) {
                 : reasonClass === 'PhoneCallDiscardReasonMissed'
                   ? '对方未接听'
                   : '通话已挂断';
+            const cleanupTimer = setTimeout(() => {
+              if (activeTelegramCalls.get(session.callId) === session) {
+                activeTelegramCalls.delete(session.callId);
+              }
+            }, CALL_DISCARDED_TTL_MS);
+            cleanupTimer.unref?.();
           } else if (phoneCall.className === 'PhoneCallWaiting') {
             session.status = 'ringing';
           }
@@ -22400,7 +23202,12 @@ function ensurePhoneCallListener(client: TelegramClient) {
 
 app.post('/api/telegram/user/call/start', requireTenantAuth, async (req: Request, res: Response) => {
   try {
-    const accountId = (req.body?.accountId as string) || (req.headers['x-account-id'] as string) || '';
+    const scope = resolveScopedAccountFromRequest(req, { allowBot: false });
+    if (!scope.ok) {
+      return res.status(scope.status).json({ ok: false, code: scope.code, error: scope.error });
+    }
+    const accountId = scope.accountId;
+    const authContext = (req as any).auth;
     const { chatId, username, phone } = req.body || {};
 
     const connected = resolveConnectedTelegramUser(accountId);
@@ -22457,14 +23264,20 @@ app.post('/api/telegram/user/call/start', requireTenantAuth, async (req: Request
       throw new Error('Telegram 云端未返回通话信令句柄');
     }
 
-    const callId = `call_${String(phoneCallObj.id)}_${Date.now()}`;
+    const nowCall = Date.now();
+    pruneActiveTelegramCalls(nowCall);
+    const callId = `call_${String(phoneCallObj.id)}_${nowCall}`;
+    const canonicalCallAccount = connected.userId ? `acc_tg_${connected.userId}` : accountId;
     activeTelegramCalls.set(callId, {
       callId,
       tgCallId: phoneCallObj.id,
       accessHash: phoneCallObj.accessHash,
       client: connected.client,
+      accountId: canonicalCallAccount,
+      userId: connected.userId,
+      ownerUserId: authContext?.session?.userId,
       status: 'ringing',
-      startedAt: Date.now(),
+      startedAt: nowCall,
     });
 
     return res.json({
@@ -22488,9 +23301,20 @@ app.post('/api/telegram/user/call/start', requireTenantAuth, async (req: Request
 });
 
 app.get('/api/telegram/user/call/status/:callId', requireTenantAuth, (req: Request, res: Response) => {
+  const scope = resolveScopedAccountFromRequest(req, { allowBot: false });
+  if (!scope.ok) {
+    return res.status(scope.status).json({ ok: false, code: scope.code, error: scope.error });
+  }
   const session = activeTelegramCalls.get(req.params.callId);
   if (!session) {
     return res.json({ ok: true, status: 'discarded', endedReason: '通话会话已结束', elapsedSeconds: 0 });
+  }
+  if (!isCallSessionOwnedByCaller(session, req, scope.accountId)) {
+    return res.status(403).json({
+      ok: false,
+      code: 'CALL_OWNERSHIP_FORBIDDEN',
+      error: '权限不足：无权查看不属于当前账号的语音通话状态',
+    });
   }
   const elapsedSeconds = session.acceptedAt ? Math.max(0, Math.floor((Date.now() - session.acceptedAt) / 1000)) : 0;
   return res.json({
@@ -22503,11 +23327,22 @@ app.get('/api/telegram/user/call/status/:callId', requireTenantAuth, (req: Reque
 
 app.post('/api/telegram/user/call/end', requireTenantAuth, async (req: Request, res: Response) => {
   try {
+    const scope = resolveScopedAccountFromRequest(req, { allowBot: false });
+    if (!scope.ok) {
+      return res.status(scope.status).json({ ok: false, code: scope.code, error: scope.error });
+    }
     const callId = String(req.body?.callId || '');
     const duration = Number(req.body?.duration || 0);
     const session = activeTelegramCalls.get(callId);
     if (!session) {
       return res.json({ ok: true, cloudSynced: false });
+    }
+    if (!isCallSessionOwnedByCaller(session, req, scope.accountId)) {
+      return res.status(403).json({
+        ok: false,
+        code: 'CALL_OWNERSHIP_FORBIDDEN',
+        error: '权限不足：无权挂断不属于当前账号的语音通话',
+      });
     }
     if (session.status !== 'discarded') {
       try {
@@ -22524,9 +23359,11 @@ app.post('/api/telegram/user/call/end', requireTenantAuth, async (req: Request, 
         );
       } catch {}
       session.status = 'discarded';
+      session.discardedAt = Date.now();
       session.endedReason = '已挂断';
     }
-    setTimeout(() => activeTelegramCalls.delete(callId), 30000);
+    const callCleanupTimer = setTimeout(() => activeTelegramCalls.delete(callId), CALL_DISCARDED_TTL_MS);
+    callCleanupTimer.unref?.();
     return res.json({ ok: true, cloudSynced: true });
   } catch (err: any) {
     return res.status(500).json({ ok: false, error: err?.message || '挂断失败' });
@@ -22942,11 +23779,11 @@ export async function querySqlitePaginatedMessagesFallback(
 // 20.4 Fetch real cloud messages from Telegram for a specific conversation (supports offsetId pagination, search, readOutboxMaxId & SQLite fallback)
 app.get('/api/telegram/user/messages/:chatId', requireTenantAuth, async (req: Request, res: Response) => {
   const { chatId } = req.params;
-  const accountId =
-    (req.query.accountId as string) ||
-    (req.headers['x-account-id'] as string) ||
-    (req as any).auth?.effectiveAccountId ||
-    '';
+  const scope = resolveScopedAccountFromRequest(req, { allowBot: false });
+  if (!scope.ok) {
+    return res.status(scope.status).json({ ok: false, code: scope.code, error: scope.error });
+  }
+  const accountId = scope.accountId;
   let connected: ConnectedTelegramUser | undefined;
   const limit = Math.min(Math.max(Number(req.query.limit) || 30, 1), 100);
   const rawOffsetId = req.query.offsetId ? Number(req.query.offsetId) : undefined;
@@ -23146,14 +23983,14 @@ export function setAutopilotEnabledForChat(accountId: string | undefined, chatId
   return isAutopilotEnabledForChat(accountId, chatId);
 }
 
-// 20.5 Autopilot Status & Toggle Endpoints (strictly scoped per accountId)
+// 20.5 Autopilot Status & Toggle Endpoints (strictly scoped per accountId, blocks Bot Webhook)
 app.get('/api/telegram/autopilot/status', requireTenantAuth, (req: Request, res: Response) => {
+  const scope = resolveScopedAccountFromRequest(req, { allowBot: false });
+  if (!scope.ok) {
+    return res.status(scope.status).json({ ok: false, code: scope.code, error: scope.error });
+  }
   const chatId = String(req.query.chatId || '').trim();
-  const accountId =
-    (req.query.accountId as string) ||
-    (req as any).auth?.effectiveAccountId ||
-    (req.headers['x-account-id'] as string) ||
-    undefined;
+  const accountId = scope.accountId;
   const scopePrefix = `${normalizeAutopilotAccountScope(accountId)}::`;
   const scopedActiveChats = Array.from(activeAutonomousChats)
     .filter((k) => k.startsWith(scopePrefix))
@@ -23168,13 +24005,13 @@ app.get('/api/telegram/autopilot/status', requireTenantAuth, (req: Request, res:
 });
 
 app.post('/api/telegram/autopilot/toggle', requireTenantAuth, (req: Request, res: Response) => {
-  const { chatId, enabled, accountId: bodyAccountId } = req.body || {};
+  const scope = resolveScopedAccountFromRequest(req, { allowBot: false });
+  if (!scope.ok) {
+    return res.status(scope.status).json({ ok: false, code: scope.code, error: scope.error });
+  }
+  const { chatId, enabled } = req.body || {};
   if (!chatId) return res.status(400).json({ ok: false, error: 'chatId is required' });
-  const accountId =
-    bodyAccountId ||
-    (req as any).auth?.effectiveAccountId ||
-    (req.headers['x-account-id'] as string) ||
-    undefined;
+  const accountId = scope.accountId;
 
   const currentEnabled = setAutopilotEnabledForChat(accountId, String(chatId), Boolean(enabled));
   const scopePrefix = `${normalizeAutopilotAccountScope(accountId)}::`;
@@ -23264,39 +24101,190 @@ export function pushPendingLocalUpdate(upd: LocalIncomingUpdate, maxPerAccount =
   }
 }
 
+function doesUpdateBelongToAccount(updateAccountId: string | undefined, targetAccountId: string): boolean {
+  const updAcc = String(updateAccountId || '').trim();
+  const target = String(targetAccountId || '').trim();
+  if (!updAcc || !target) return false;
+  const targetVariants = getScopedAccountIdVariants(target);
+  return targetVariants.includes(updAcc) || updAcc === `acc_tg_${target}` || target === `acc_tg_${updAcc}`;
+}
+
 // Endpoint for local desktop app to poll new incoming Telegram messages non-destructively (ACK required to dequeue)
-app.get('/api/telegram/user/poll-updates', (req: Request, res: Response) => {
-  const targetAccount = (req.query.accountId as string) || (req.headers['x-account-id'] as string);
-  if (targetAccount) {
-    const matched = pendingLocalUpdates.filter(
-      (upd) =>
-        upd.accountId === targetAccount ||
-        upd.accountId === `acc_tg_${targetAccount}` ||
-        targetAccount === `acc_tg_${upd.accountId}`
-    );
+app.get('/api/telegram/user/poll-updates', requireTenantAuth, (req: Request, res: Response) => {
+  const authContext = (req as any).auth;
+  const session = authContext?.session;
+  if (!session || session.isBot || authContext?.isBot) {
+    return res.status(403).json({
+      ok: false,
+      code: 'BOT_FORBIDDEN',
+      error: '权限不足：Bot Webhook 凭证无权拉取个人账号实时更新队列',
+    });
+  }
+
+  const rawRequested =
+    (typeof req.query.accountId === 'string' && req.query.accountId.trim()) ||
+    (typeof req.headers['x-account-id'] === 'string' && req.headers['x-account-id'].trim()) ||
+    '';
+
+  if (!session.isMaster) {
+    const lockedAccount = String(authContext.effectiveAccountId || session.accountId || '').trim();
+    if (rawRequested && !doesUpdateBelongToAccount(rawRequested, lockedAccount)) {
+      return res.status(403).json({
+        ok: false,
+        code: 'ACCOUNT_SCOPE_FORBIDDEN',
+        error: `权限不足：禁止跨账号读取 (${rawRequested}) 的实时更新队列`,
+      });
+    }
+    const matched = pendingLocalUpdates.filter((upd) => doesUpdateBelongToAccount(upd.accountId, lockedAccount));
     return res.json({ ok: true, updates: matched });
   }
-  res.json({ ok: true, updates: [...pendingLocalUpdates] });
+
+  if (rawRequested) {
+    const authorized: string[] = Array.isArray(session.authorizedAccounts) ? session.authorizedAccounts : [];
+    const isAllowed =
+      rawRequested === authContext.effectiveAccountId ||
+      rawRequested.startsWith('acc_tg_') ||
+      authorized.includes(rawRequested);
+    if (!isAllowed) {
+      return res.status(403).json({
+        ok: false,
+        code: 'ACCOUNT_SCOPE_FORBIDDEN',
+        error: `权限不足：无权读取未授权账号 (${rawRequested}) 的实时更新队列`,
+      });
+    }
+    const matched = pendingLocalUpdates.filter((upd) => doesUpdateBelongToAccount(upd.accountId, rawRequested));
+    return res.json({ ok: true, updates: matched });
+  }
+
+  const authorized: string[] = Array.isArray(session.authorizedAccounts) ? session.authorizedAccounts : [];
+  const matched = pendingLocalUpdates.filter((upd) => {
+    const acc = String(upd.accountId || '').trim();
+    return acc.startsWith('acc_tg_') || authorized.includes(acc);
+  });
+  res.json({ ok: true, updates: matched });
 });
 
-// Explicit client acknowledgement endpoint: removes delivered update IDs only after client persists them
-app.post('/api/telegram/user/ack-updates', (req: Request, res: Response) => {
+// Explicit client acknowledgement endpoint: removes delivered update IDs only for authorized/scoped account
+app.post('/api/telegram/user/ack-updates', requireTenantAuth, (req: Request, res: Response) => {
+  const authContext = (req as any).auth;
+  const session = authContext?.session;
+  if (!session || session.isBot || authContext?.isBot) {
+    return res.status(403).json({
+      ok: false,
+      code: 'BOT_FORBIDDEN',
+      error: '权限不足：Bot Webhook 凭证无权清理个人账号实时更新队列',
+    });
+  }
+
   const ids = Array.isArray(req.body?.ids) ? req.body.ids.map(String) : [];
   if (ids.length === 0) {
     return res.json({ ok: true, ackedCount: 0 });
   }
+
+  const rawRequested =
+    (typeof req.body?.accountId === 'string' && req.body.accountId.trim()) ||
+    (typeof req.headers['x-account-id'] === 'string' && req.headers['x-account-id'].trim()) ||
+    '';
+
+  let scopedAccountFilter = '';
+  if (!session.isMaster) {
+    const lockedAccount = String(authContext.effectiveAccountId || session.accountId || '').trim();
+    if (rawRequested && !doesUpdateBelongToAccount(rawRequested, lockedAccount)) {
+      return res.status(403).json({
+        ok: false,
+        code: 'ACCOUNT_SCOPE_FORBIDDEN',
+        error: `权限不足：禁止跨账号清理 (${rawRequested}) 的实时更新队列`,
+      });
+    }
+    scopedAccountFilter = lockedAccount;
+  } else if (rawRequested) {
+    const authorized: string[] = Array.isArray(session.authorizedAccounts) ? session.authorizedAccounts : [];
+    const isAllowed =
+      rawRequested === authContext.effectiveAccountId ||
+      rawRequested.startsWith('acc_tg_') ||
+      authorized.includes(rawRequested);
+    if (!isAllowed) {
+      return res.status(403).json({
+        ok: false,
+        code: 'ACCOUNT_SCOPE_FORBIDDEN',
+        error: `权限不足：无权清理未授权账号 (${rawRequested}) 的实时更新队列`,
+      });
+    }
+    scopedAccountFilter = rawRequested;
+  }
+
   const ackSet = new Set<string>(ids);
   const beforeLen = pendingLocalUpdates.length;
-  const remaining = pendingLocalUpdates.filter((upd) => !ackSet.has(String(upd.id)));
+  const remaining = pendingLocalUpdates.filter((upd) => {
+    if (!ackSet.has(String(upd.id))) return true;
+    if (scopedAccountFilter && !doesUpdateBelongToAccount(upd.accountId, scopedAccountFilter)) {
+      return true;
+    }
+    return false;
+  });
   pendingLocalUpdates.length = 0;
   pendingLocalUpdates.push(...remaining);
   res.json({ ok: true, ackedCount: beforeLen - remaining.length });
 });
 
 // In-memory cache of recently sent outbound messages and processed MTProto message IDs to prevent echo duplicates
-const recentlySentOutboundCache = new Map<string, { count: number; expiresAt: number }>();
-const recentlySentOutboundIds = new Map<string, number>();
-const processedMtprotoMsgIds = new Map<string, number>();
+export const MAX_RECENT_OUTBOUND_IDS = 1000;
+export const MAX_RECENT_OUTBOUND_CACHE = 1000;
+export const MAX_PROCESSED_MTPROTO_MSG_IDS = 2000;
+export const MTPROTO_DEDUP_TTL_MS = 60 * 1000;
+export const recentlySentOutboundCache = new Map<string, { count: number; expiresAt: number }>();
+export const recentlySentOutboundIds = new Map<string, number>();
+export const processedMtprotoMsgIds = new Map<string, number>();
+
+export function pruneOutboundAndMtprotoDedupCaches(now = Date.now()): {
+  outboundIdsRemoved: number;
+  outboundCacheRemoved: number;
+  mtprotoIdsRemoved: number;
+} {
+  let outboundIdsRemoved = 0;
+  for (const [k, exp] of recentlySentOutboundIds.entries()) {
+    if (now >= exp) {
+      recentlySentOutboundIds.delete(k);
+      outboundIdsRemoved++;
+    }
+  }
+  while (recentlySentOutboundIds.size > MAX_RECENT_OUTBOUND_IDS) {
+    const oldest = recentlySentOutboundIds.keys().next().value;
+    if (oldest === undefined) break;
+    recentlySentOutboundIds.delete(oldest);
+    outboundIdsRemoved++;
+  }
+
+  let outboundCacheRemoved = 0;
+  for (const [k, item] of recentlySentOutboundCache.entries()) {
+    if (!item || now >= item.expiresAt) {
+      recentlySentOutboundCache.delete(k);
+      outboundCacheRemoved++;
+    }
+  }
+  while (recentlySentOutboundCache.size > MAX_RECENT_OUTBOUND_CACHE) {
+    const oldest = recentlySentOutboundCache.keys().next().value;
+    if (oldest === undefined) break;
+    recentlySentOutboundCache.delete(oldest);
+    outboundCacheRemoved++;
+  }
+
+  let mtprotoIdsRemoved = 0;
+  for (const [k, ts] of processedMtprotoMsgIds.entries()) {
+    if (now - ts >= MTPROTO_DEDUP_TTL_MS) {
+      processedMtprotoMsgIds.delete(k);
+      mtprotoIdsRemoved++;
+    }
+  }
+  while (processedMtprotoMsgIds.size > MAX_PROCESSED_MTPROTO_MSG_IDS) {
+    const oldest = processedMtprotoMsgIds.keys().next().value;
+    if (oldest === undefined) break;
+    processedMtprotoMsgIds.delete(oldest);
+    mtprotoIdsRemoved++;
+  }
+
+  return { outboundIdsRemoved, outboundCacheRemoved, mtprotoIdsRemoved };
+}
 
 function buildOutboundEchoKey(chatId: string, text: string, accountId?: string): string {
   const scope = accountId ? normalizeAutopilotAccountScope(accountId) : 'shared';
@@ -23311,10 +24299,19 @@ function buildOutboundEchoIdKey(chatId: string, telegramMessageId: number, accou
 export function markOutboundTelegramMessageIdSent(chatId: string, telegramMessageId?: number, accountId?: string) {
   if (!telegramMessageId || !Number.isInteger(telegramMessageId) || telegramMessageId <= 0) return;
   const now = Date.now();
-  recentlySentOutboundIds.set(buildOutboundEchoIdKey(chatId, telegramMessageId, accountId), now + 30000);
+  const key = buildOutboundEchoIdKey(chatId, telegramMessageId, accountId);
+  if (recentlySentOutboundIds.has(key)) {
+    recentlySentOutboundIds.delete(key);
+  }
+  recentlySentOutboundIds.set(key, now + 30000);
   if (recentlySentOutboundIds.size > 300) {
     for (const [k, exp] of recentlySentOutboundIds.entries()) {
       if (now >= exp) recentlySentOutboundIds.delete(k);
+    }
+    while (recentlySentOutboundIds.size > MAX_RECENT_OUTBOUND_IDS) {
+      const oldest = recentlySentOutboundIds.keys().next().value;
+      if (oldest === undefined) break;
+      recentlySentOutboundIds.delete(oldest);
     }
   }
 }
@@ -23325,10 +24322,18 @@ export function markOutboundMessageSent(chatId: string, text: string, accountId?
   const now = Date.now();
   const prev = recentlySentOutboundCache.get(key);
   const nextCount = prev && now < prev.expiresAt ? prev.count + 1 : 1;
+  if (recentlySentOutboundCache.has(key)) {
+    recentlySentOutboundCache.delete(key);
+  }
   recentlySentOutboundCache.set(key, { count: nextCount, expiresAt: now + 25000 });
   if (recentlySentOutboundCache.size > 300) {
     for (const [k, item] of recentlySentOutboundCache.entries()) {
       if (now >= item.expiresAt) recentlySentOutboundCache.delete(k);
+    }
+    while (recentlySentOutboundCache.size > MAX_RECENT_OUTBOUND_CACHE) {
+      const oldest = recentlySentOutboundCache.keys().next().value;
+      if (oldest === undefined) break;
+      recentlySentOutboundCache.delete(oldest);
     }
   }
 }
@@ -23385,11 +24390,16 @@ export function attachTelegramClientMessageListener(client: TelegramClient, phon
         if (processedMtprotoMsgIds.has(mtprotoMsgKey)) {
           return;
         }
-        processedMtprotoMsgIds.set(mtprotoMsgKey, Date.now());
+        const nowDedup = Date.now();
+        processedMtprotoMsgIds.set(mtprotoMsgKey, nowDedup);
         if (processedMtprotoMsgIds.size > 500) {
-          const now = Date.now();
           for (const [k, ts] of processedMtprotoMsgIds.entries()) {
-            if (now - ts > 60000) processedMtprotoMsgIds.delete(k);
+            if (nowDedup - ts >= MTPROTO_DEDUP_TTL_MS) processedMtprotoMsgIds.delete(k);
+          }
+          while (processedMtprotoMsgIds.size > MAX_PROCESSED_MTPROTO_MSG_IDS) {
+            const oldest = processedMtprotoMsgIds.keys().next().value;
+            if (oldest === undefined) break;
+            processedMtprotoMsgIds.delete(oldest);
           }
         }
         // Always enforce canonical tg_ prefix matching the desktop dialog list
@@ -24277,12 +25287,7 @@ export async function restoreTelegramUserSessionsOnStartup(
 
             attachTelegramClientMessageListener(client, cleanPhone, uidStr);
 
-            fetchTelegramUserDialogs(client, 150, uidStr)
-              .then((dialogs) => {
-                userObj.dialogs = dialogs;
-                userObj.dialogsFetchedAt = Date.now();
-              })
-              .catch(() => {});
+            getOrFetchConnectedAccountDialogs(userObj, { limit: 150 }).catch(() => {});
 
             restoredCount++;
           } else {
@@ -24420,12 +25425,14 @@ let activeHttpServer: http.Server | null = null;
 
 export async function gracefulShutdownServer(reason = 'shutdown'): Promise<void> {
   console.log(`[Server Shutdown] Initiating graceful cleanup (${reason})...`);
+  await stopTelegramBotLongPolling();
   stopTelegramConnectionWatchdog();
   stopTelegramCacheCleanupTimer();
   try {
     for (const qrSession of activeQrSessions.values()) {
       try {
         if (qrSession.pollTimer) clearTimeout(qrSession.pollTimer);
+        if (qrSession.passwordTimeoutTimer) clearTimeout(qrSession.passwordTimeoutTimer);
         qrSession.isStopped = true;
         await destroyTelegramClientSafely(qrSession.client);
       } catch {}
@@ -24434,10 +25441,16 @@ export async function gracefulShutdownServer(reason = 'shutdown'): Promise<void>
 
     for (const pending of activeUserClients.values()) {
       try {
+        if (pending.timeoutTimer) clearTimeout(pending.timeoutTimer);
         await destroyTelegramClientSafely(pending.client);
       } catch {}
     }
     activeUserClients.clear();
+
+    pendingChangePhoneSessions.clear();
+    activeTelegramCalls.clear();
+    telegramStickerThumbCache.clear();
+    inMemoryCloudTelegramCreds.clear();
 
     const uniqueClients = new Set<TelegramClient>();
     for (const conn of connectedUserClients.values()) {
@@ -24446,6 +25459,8 @@ export async function gracefulShutdownServer(reason = 'shutdown'): Promise<void>
     await Promise.allSettled(Array.from(uniqueClients).map((c) => destroyTelegramClientSafely(c)));
     connectedUserClients.clear();
   } catch {}
+
+  await checkpointSqliteWal();
 
   if (activeHttpServer) {
     const srv = activeHttpServer;

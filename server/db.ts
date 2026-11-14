@@ -1,4 +1,6 @@
-import { createClient, type Client } from '@libsql/client';
+import { createClient, type Client, type Transaction } from '@libsql/client';
+import { AsyncLocalStorage } from 'async_hooks';
+import crypto from 'crypto';
 import path from 'path';
 import fs from 'fs';
 import os from 'os';
@@ -153,15 +155,20 @@ export const dbType = isTurso
   ? `Turso LibSQL Client (Persistent Volume: ${dbDir})`
   : 'Turso LibSQL Client (Local File)';
 
+export const SQLITE_BUSY_TIMEOUT_MS = 5000;
+
 const resolvedLibsqlUrl = process.env.TURSO_DATABASE_URL || formatLibsqlFileUrl(dbPath);
 
 // 1. Initialize Turso / LibSQL client
 export const turso: Client = createClient({
   url: resolvedLibsqlUrl,
   authToken: process.env.TURSO_AUTH_TOKEN,
+  ...(isTurso ? {} : { timeout: SQLITE_BUSY_TIMEOUT_MS }),
 });
 
-// 2. High-performance asynchronous query wrapper matching Turso capabilities
+const activeTxStorage = new AsyncLocalStorage<Transaction>();
+
+// 2. High-performance asynchronous query wrapper matching Turso capabilities with real atomic transactions
 export const db = {
   client: turso,
   isTurso,
@@ -169,7 +176,8 @@ export const db = {
   tursoUrl: resolvedLibsqlUrl,
 
   async execute(stmt: string | { sql: string; args?: any[] | Record<string, any> }) {
-    return await turso.execute(typeof stmt === 'string' ? { sql: stmt, args: [] } : stmt);
+    const executor = activeTxStorage.getStore() || turso;
+    return await executor.execute(typeof stmt === 'string' ? { sql: stmt, args: [] } : stmt);
   },
 
   async ping() {
@@ -180,21 +188,25 @@ export const db = {
   },
 
   async exec(sql: string) {
-    return await turso.executeMultiple(sql);
+    const executor = activeTxStorage.getStore() || turso;
+    return await executor.executeMultiple(sql);
   },
 
   prepare(sql: string) {
     return {
       async all(...params: any[]) {
-        const res = await turso.execute({ sql, args: params });
+        const executor = activeTxStorage.getStore() || turso;
+        const res = await executor.execute({ sql, args: params });
         return res.rows as any[];
       },
       async get(...params: any[]) {
-        const res = await turso.execute({ sql, args: params });
+        const executor = activeTxStorage.getStore() || turso;
+        const res = await executor.execute({ sql, args: params });
         return (res.rows[0] as any) || undefined;
       },
       async run(...params: any[]) {
-        const res = await turso.execute({ sql, args: params });
+        const executor = activeTxStorage.getStore() || turso;
+        const res = await executor.execute({ sql, args: params });
         return {
           changes: res.rowsAffected,
           lastInsertRowid: res.lastInsertRowid,
@@ -203,21 +215,169 @@ export const db = {
     };
   },
 
-  transaction(fn: (...args: any[]) => Promise<any> | any) {
-    return async (...args: any[]) => {
-      return await fn(...args);
+  transaction<T extends (...args: any[]) => Promise<any>>(fn: T) {
+    return async (...args: Parameters<T>): Promise<Awaited<ReturnType<T>>> => {
+      const parentTx = activeTxStorage.getStore();
+      if (parentTx) {
+        const savepointName = `sp_${Date.now()}_${Math.floor(Math.random() * 1_000_000)}`;
+        await parentTx.execute(`SAVEPOINT ${savepointName}`);
+        try {
+          const result = await fn(...args);
+          await parentTx.execute(`RELEASE SAVEPOINT ${savepointName}`);
+          return result;
+        } catch (err) {
+          try {
+            await parentTx.execute(`ROLLBACK TO SAVEPOINT ${savepointName}`);
+          } catch {}
+          try {
+            await parentTx.execute(`RELEASE SAVEPOINT ${savepointName}`);
+          } catch {}
+          throw err;
+        }
+      }
+
+      const tx = await turso.transaction('write');
+      try {
+        const result = await activeTxStorage.run(tx, () => fn(...args));
+        await tx.commit();
+        return result;
+      } catch (err) {
+        try {
+          if (!tx.closed) await tx.rollback();
+        } catch {}
+        try {
+          if (!tx.closed) tx.close();
+        } catch {}
+        throw err;
+      }
     };
   },
 };
+
+
+function extractFirstPragmaValue(result: any): unknown {
+  const row = result?.rows?.[0];
+  if (!row || typeof row !== 'object') return undefined;
+  const values = Object.values(row);
+  return values.length > 0 ? values[0] : undefined;
+}
+
+export async function getSqliteRuntimePragmas(): Promise<{
+  journalMode: string;
+  busyTimeoutMs: number;
+  walEnabled: boolean;
+}> {
+  if (isTurso) {
+    return {
+      journalMode: 'turso_mvcc',
+      busyTimeoutMs: SQLITE_BUSY_TIMEOUT_MS,
+      walEnabled: true,
+    };
+  }
+  let journalMode = 'unknown';
+  let busyTimeoutMs = 0;
+  try {
+    const jmRes = await db.execute('PRAGMA journal_mode');
+    const rawJm = extractFirstPragmaValue(jmRes);
+    if (rawJm !== undefined && rawJm !== null) {
+      journalMode = String(rawJm).trim().toLowerCase();
+    }
+  } catch (err: any) {
+    console.warn('[Database] Failed to query PRAGMA journal_mode:', err?.message || err);
+  }
+  try {
+    const btRes = await db.execute('PRAGMA busy_timeout');
+    const rawBt = extractFirstPragmaValue(btRes);
+    const parsedBt = Number(rawBt);
+    if (Number.isFinite(parsedBt) && parsedBt >= 0) {
+      busyTimeoutMs = parsedBt;
+    }
+  } catch (err: any) {
+    console.warn('[Database] Failed to query PRAGMA busy_timeout:', err?.message || err);
+  }
+  return {
+    journalMode,
+    busyTimeoutMs,
+    walEnabled: journalMode === 'wal',
+  };
+}
+
+export async function configureLocalSqlitePragmas(): Promise<{
+  journalMode: string;
+  busyTimeoutMs: number;
+  synchronousMode: string;
+  walEnabled: boolean;
+}> {
+  if (isTurso) {
+    return {
+      journalMode: 'turso_mvcc',
+      busyTimeoutMs: SQLITE_BUSY_TIMEOUT_MS,
+      synchronousMode: 'normal',
+      walEnabled: true,
+    };
+  }
+
+  let journalMode = 'unknown';
+  let busyTimeoutMs = 0;
+  let synchronousMode = 'unknown';
+
+  try {
+    await db.execute(`PRAGMA busy_timeout = ${SQLITE_BUSY_TIMEOUT_MS}`);
+  } catch (err: any) {
+    console.warn('[Database] Failed to set PRAGMA busy_timeout:', err?.message || err);
+  }
+  try {
+    const jmRes = await db.execute('PRAGMA journal_mode = WAL');
+    const rawJm = extractFirstPragmaValue(jmRes);
+    if (rawJm !== undefined && rawJm !== null) {
+      journalMode = String(rawJm).trim().toLowerCase();
+    }
+  } catch (err: any) {
+    console.warn('[Database] Failed to enable PRAGMA journal_mode = WAL:', err?.message || err);
+  }
+  try {
+    await db.execute('PRAGMA synchronous = NORMAL');
+    const syncRes = await db.execute('PRAGMA synchronous');
+    const rawSync = extractFirstPragmaValue(syncRes);
+    if (rawSync !== undefined && rawSync !== null) {
+      synchronousMode = String(rawSync).trim().toLowerCase();
+    }
+  } catch (err: any) {
+    console.warn('[Database] Failed to set PRAGMA synchronous = NORMAL:', err?.message || err);
+  }
+  try {
+    await db.execute('PRAGMA secure_delete = ON');
+  } catch (err: any) {
+    console.warn('[Database] Failed to set PRAGMA secure_delete = ON:', err?.message || err);
+  }
+
+  const verified = await getSqliteRuntimePragmas();
+  return {
+    journalMode: verified.journalMode !== 'unknown' ? verified.journalMode : journalMode,
+    busyTimeoutMs: verified.busyTimeoutMs || busyTimeoutMs,
+    synchronousMode,
+    walEnabled: verified.walEnabled,
+  };
+}
+
+export async function checkpointSqliteWal(): Promise<void> {
+  if (isTurso) return;
+  try {
+    await db.execute('PRAGMA wal_checkpoint(TRUNCATE)');
+  } catch {}
+}
 
 // 3. Database initialization & seedings
 export async function initDatabase() {
   console.log(`[Database] Initializing ${dbType}...`);
 
   if (!isTurso) {
-    try {
-      await db.execute('PRAGMA secure_delete = ON');
-    } catch {}
+    const pragmaState = await configureLocalSqlitePragmas();
+    if (!pragmaState.walEnabled || pragmaState.busyTimeoutMs < SQLITE_BUSY_TIMEOUT_MS) {
+      console.warn(
+        `[Database] SQLite pragma warning: journal_mode=${pragmaState.journalMode}, busy_timeout=${pragmaState.busyTimeoutMs}ms`
+      );
+    }
   }
 
   // Initialize Tables
@@ -693,6 +853,536 @@ export async function saveEvolutionStateToDb(state: any, accountId?: string): Pr
 
 export const snapshotFilePath = path.join(dbDir, 'telegram_pro_snapshot.json');
 
+export const ENCRYPTED_BACKUP_FORMAT = 'humansense_encrypted_backup_v1' as const;
+export const ENCRYPTED_BACKUP_VERSION = 'humansense_enc_v4' as const;
+export const ENCRYPTED_BACKUP_TYPE = 'HumanSense_Encrypted_Desktop_Backup' as const;
+export const ENCRYPTED_BACKUP_AAD = 'HumanSense_Encrypted_Desktop_Backup:v4' as const;
+export const DISK_SNAPSHOT_FORMAT = 'humansense_disk_snapshot_v1' as const;
+export const DISK_SNAPSHOT_AAD = 'HumanSense_Disk_Snapshot:v1' as const;
+export const BACKUP_KDF_ITERATIONS = 210_000;
+export const BACKUP_MIN_PASSPHRASE_LENGTH = 8;
+export const BACKUP_MAX_ROWS_PER_TABLE = 100_000;
+export const BACKUP_MAX_TOTAL_ROWS = 250_000;
+export const BACKUP_MAX_TEXT_LENGTH = 2_000_000;
+
+export class SnapshotValidationError extends Error {
+  code = 'INVALID_SNAPSHOT_SCHEMA';
+  constructor(message: string) {
+    super(message);
+    this.name = 'SnapshotValidationError';
+  }
+}
+
+export interface EncryptedBackupEnvelope {
+  format: typeof ENCRYPTED_BACKUP_FORMAT;
+  type: typeof ENCRYPTED_BACKUP_TYPE;
+  version: typeof ENCRYPTED_BACKUP_VERSION;
+  exportedAt: string;
+  kdf: {
+    name: 'PBKDF2';
+    hash: 'SHA-256';
+    iterations: number;
+    salt: string;
+  };
+  cipher: {
+    name: 'AES-GCM';
+    iv: string;
+    aad: typeof ENCRYPTED_BACKUP_AAD;
+  };
+  ciphertext: string;
+  hmac: string;
+}
+
+export interface SealedDiskSnapshotEnvelope {
+  format: typeof DISK_SNAPSHOT_FORMAT;
+  version: string;
+  exportedAt: string;
+  cipher: {
+    name: 'AES-GCM';
+    iv: string;
+    aad: typeof DISK_SNAPSHOT_AAD;
+  };
+  ciphertext: string;
+  hmac: string;
+}
+
+function getOrCreateLocalDeviceSecretForSnapshot(): string {
+  const secretPath = path.join(dbDir, '.device_secret');
+  try {
+    if (fs.existsSync(secretPath)) {
+      const existing = fs.readFileSync(secretPath, 'utf8').trim();
+      if (existing.length >= 32) return existing;
+    }
+    const created = crypto.randomBytes(32).toString('hex');
+    fs.writeFileSync(secretPath, created, { encoding: 'utf8', mode: 0o600 });
+    try {
+      fs.chmodSync(secretPath, 0o600);
+    } catch {}
+    return created;
+  } catch {
+    return crypto.createHash('sha256').update(dbPath).digest('hex');
+  }
+}
+
+function getDiskSnapshotKeys(): { aesKey: Buffer; hmacKey: Buffer } {
+  const secret = getOrCreateLocalDeviceSecretForSnapshot();
+  const aesKey = crypto.createHmac('sha256', secret).update('humansense-disk-snapshot-aes-v1').digest();
+  const hmacKey = crypto.createHmac('sha256', secret).update('humansense-disk-snapshot-hmac-v1').digest();
+  return { aesKey, hmacKey };
+}
+
+function buildBackupCanonicalHmacInput(envelope: Omit<EncryptedBackupEnvelope, 'hmac'>): string {
+  return [
+    envelope.format,
+    envelope.version,
+    envelope.exportedAt,
+    envelope.kdf.name,
+    envelope.kdf.hash,
+    String(envelope.kdf.iterations),
+    envelope.kdf.salt,
+    envelope.cipher.name,
+    envelope.cipher.iv,
+    envelope.cipher.aad,
+    envelope.ciphertext,
+  ].join('|');
+}
+
+function buildDiskCanonicalHmacInput(envelope: Omit<SealedDiskSnapshotEnvelope, 'hmac'>): string {
+  return [
+    envelope.format,
+    envelope.version,
+    envelope.exportedAt,
+    envelope.cipher.name,
+    envelope.cipher.iv,
+    envelope.cipher.aad,
+    envelope.ciphertext,
+  ].join('|');
+}
+
+export function isEncryptedBackupEnvelope(obj: any): obj is EncryptedBackupEnvelope {
+  return Boolean(
+    obj &&
+      typeof obj === 'object' &&
+      obj.format === ENCRYPTED_BACKUP_FORMAT &&
+      obj.kdf &&
+      typeof obj.kdf === 'object' &&
+      obj.cipher &&
+      typeof obj.cipher === 'object' &&
+      typeof obj.ciphertext === 'string' &&
+      typeof obj.hmac === 'string'
+  );
+}
+
+export function isDiskSnapshotEnvelope(obj: any): obj is SealedDiskSnapshotEnvelope {
+  return Boolean(
+    obj &&
+      typeof obj === 'object' &&
+      obj.format === DISK_SNAPSHOT_FORMAT &&
+      obj.cipher &&
+      typeof obj.cipher === 'object' &&
+      typeof obj.ciphertext === 'string' &&
+      typeof obj.hmac === 'string'
+  );
+}
+
+export function encryptBackupEnvelope(payload: unknown, passphrase: string): EncryptedBackupEnvelope {
+  if (typeof passphrase !== 'string' || passphrase.length < BACKUP_MIN_PASSPHRASE_LENGTH) {
+    throw new SnapshotValidationError(`备份加密口令至少需要 ${BACKUP_MIN_PASSPHRASE_LENGTH} 个字符`);
+  }
+  const salt = crypto.randomBytes(16);
+  const iv = crypto.randomBytes(12);
+  const exportedAt = new Date().toISOString();
+  const derived = crypto.pbkdf2Sync(
+    Buffer.from(passphrase, 'utf8'),
+    salt,
+    BACKUP_KDF_ITERATIONS,
+    64,
+    'sha256'
+  );
+  const aesKey = derived.subarray(0, 32);
+  const hmacKey = derived.subarray(32, 64);
+
+  const cipher = crypto.createCipheriv('aes-256-gcm', aesKey, iv);
+  cipher.setAAD(Buffer.from(ENCRYPTED_BACKUP_AAD, 'utf8'));
+  const plaintext = Buffer.from(JSON.stringify(payload), 'utf8');
+  const encrypted = Buffer.concat([cipher.update(plaintext), cipher.final(), cipher.getAuthTag()]);
+
+  const unsignedEnvelope: Omit<EncryptedBackupEnvelope, 'hmac'> = {
+    format: ENCRYPTED_BACKUP_FORMAT,
+    type: ENCRYPTED_BACKUP_TYPE,
+    version: ENCRYPTED_BACKUP_VERSION,
+    exportedAt,
+    kdf: {
+      name: 'PBKDF2',
+      hash: 'SHA-256',
+      iterations: BACKUP_KDF_ITERATIONS,
+      salt: salt.toString('base64'),
+    },
+    cipher: {
+      name: 'AES-GCM',
+      iv: iv.toString('base64'),
+      aad: ENCRYPTED_BACKUP_AAD,
+    },
+    ciphertext: encrypted.toString('base64'),
+  };
+
+  const hmac = crypto
+    .createHmac('sha256', hmacKey)
+    .update(buildBackupCanonicalHmacInput(unsignedEnvelope), 'utf8')
+    .digest('base64');
+
+  return { ...unsignedEnvelope, hmac };
+}
+
+export function decryptBackupEnvelope<T = any>(envelope: unknown, passphrase: string): T {
+  if (!isEncryptedBackupEnvelope(envelope)) {
+    throw new SnapshotValidationError('无效的加密备份文件格式');
+  }
+  if (typeof passphrase !== 'string' || passphrase.length === 0) {
+    throw new SnapshotValidationError('请输入备份解密口令');
+  }
+  if (
+    envelope.kdf.name !== 'PBKDF2' ||
+    envelope.kdf.hash !== 'SHA-256' ||
+    !Number.isInteger(envelope.kdf.iterations) ||
+    envelope.kdf.iterations < 100_000 ||
+    envelope.kdf.iterations > 2_000_000 ||
+    envelope.cipher.name !== 'AES-GCM' ||
+    envelope.cipher.aad !== ENCRYPTED_BACKUP_AAD
+  ) {
+    throw new SnapshotValidationError('不支持或已被篡改的备份加密参数');
+  }
+
+  const salt = Buffer.from(envelope.kdf.salt, 'base64');
+  const iv = Buffer.from(envelope.cipher.iv, 'base64');
+  const ciphertext = Buffer.from(envelope.ciphertext, 'base64');
+  const providedHmac = Buffer.from(envelope.hmac, 'base64');
+
+  if (salt.length < 16 || iv.length !== 12 || ciphertext.length <= 16 || providedHmac.length !== 32) {
+    throw new SnapshotValidationError('加密备份字段长度非法');
+  }
+
+  const derived = crypto.pbkdf2Sync(
+    Buffer.from(passphrase, 'utf8'),
+    salt,
+    envelope.kdf.iterations,
+    64,
+    'sha256'
+  );
+  const aesKey = derived.subarray(0, 32);
+  const hmacKey = derived.subarray(32, 64);
+
+  const expectedHmac = crypto
+    .createHmac('sha256', hmacKey)
+    .update(buildBackupCanonicalHmacInput(envelope), 'utf8')
+    .digest();
+
+  if (providedHmac.length !== expectedHmac.length || !crypto.timingSafeEqual(providedHmac, expectedHmac)) {
+    throw new SnapshotValidationError('备份完整性校验失败：口令错误或备份文件已被篡改');
+  }
+
+  try {
+    const authTag = ciphertext.subarray(ciphertext.length - 16);
+    const encData = ciphertext.subarray(0, ciphertext.length - 16);
+    const decipher = crypto.createDecipheriv('aes-256-gcm', aesKey, iv);
+    decipher.setAAD(Buffer.from(envelope.cipher.aad, 'utf8'));
+    decipher.setAuthTag(authTag);
+    const decrypted = Buffer.concat([decipher.update(encData), decipher.final()]).toString('utf8');
+    return JSON.parse(decrypted) as T;
+  } catch {
+    throw new SnapshotValidationError('备份解密失败：口令错误或密文已损坏');
+  }
+}
+
+export function sealDiskSnapshot(snapshot: any): SealedDiskSnapshotEnvelope {
+  const { aesKey, hmacKey } = getDiskSnapshotKeys();
+  const iv = crypto.randomBytes(12);
+  const exportedAt = String(snapshot?.exportedAt || new Date().toISOString());
+  const version = String(snapshot?.version || '1.3');
+  const cipher = crypto.createCipheriv('aes-256-gcm', aesKey, iv);
+  cipher.setAAD(Buffer.from(DISK_SNAPSHOT_AAD, 'utf8'));
+  const plaintext = Buffer.from(JSON.stringify(snapshot), 'utf8');
+  const encrypted = Buffer.concat([cipher.update(plaintext), cipher.final(), cipher.getAuthTag()]);
+
+  const unsignedEnvelope: Omit<SealedDiskSnapshotEnvelope, 'hmac'> = {
+    format: DISK_SNAPSHOT_FORMAT,
+    version,
+    exportedAt,
+    cipher: {
+      name: 'AES-GCM',
+      iv: iv.toString('base64'),
+      aad: DISK_SNAPSHOT_AAD,
+    },
+    ciphertext: encrypted.toString('base64'),
+  };
+
+  const hmac = crypto
+    .createHmac('sha256', hmacKey)
+    .update(buildDiskCanonicalHmacInput(unsignedEnvelope), 'utf8')
+    .digest('base64');
+
+  return { ...unsignedEnvelope, hmac };
+}
+
+export function unsealDiskSnapshot(envelope: unknown): any {
+  if (!isDiskSnapshotEnvelope(envelope)) {
+    throw new SnapshotValidationError('无效的磁盘加密快照格式');
+  }
+  if (envelope.cipher.name !== 'AES-GCM' || envelope.cipher.aad !== DISK_SNAPSHOT_AAD) {
+    throw new SnapshotValidationError('不支持或已被篡改的磁盘快照加密参数');
+  }
+
+  const iv = Buffer.from(envelope.cipher.iv, 'base64');
+  const ciphertext = Buffer.from(envelope.ciphertext, 'base64');
+  const providedHmac = Buffer.from(envelope.hmac, 'base64');
+  if (iv.length !== 12 || ciphertext.length <= 16 || providedHmac.length !== 32) {
+    throw new SnapshotValidationError('磁盘加密快照字段长度非法');
+  }
+
+  const { aesKey, hmacKey } = getDiskSnapshotKeys();
+  const expectedHmac = crypto
+    .createHmac('sha256', hmacKey)
+    .update(buildDiskCanonicalHmacInput(envelope), 'utf8')
+    .digest();
+
+  if (providedHmac.length !== expectedHmac.length || !crypto.timingSafeEqual(providedHmac, expectedHmac)) {
+    throw new SnapshotValidationError('磁盘快照完整性校验失败：文件已被篡改或密钥不匹配');
+  }
+
+  try {
+    const authTag = ciphertext.subarray(ciphertext.length - 16);
+    const encData = ciphertext.subarray(0, ciphertext.length - 16);
+    const decipher = crypto.createDecipheriv('aes-256-gcm', aesKey, iv);
+    decipher.setAAD(Buffer.from(envelope.cipher.aad, 'utf8'));
+    decipher.setAuthTag(authTag);
+    const decrypted = Buffer.concat([decipher.update(encData), decipher.final()]).toString('utf8');
+    return JSON.parse(decrypted);
+  } catch {
+    throw new SnapshotValidationError('磁盘快照解密失败：密文损坏或设备密钥不匹配');
+  }
+}
+
+function writeSealedDiskSnapshotFile(snapshot: any): void {
+  const sealed = sealDiskSnapshot(snapshot);
+  fs.writeFileSync(snapshotFilePath, JSON.stringify(sealed, null, 2), {
+    encoding: 'utf-8',
+    mode: 0o600,
+  });
+  try {
+    fs.chmodSync(snapshotFilePath, 0o600);
+  } catch {}
+}
+
+const ALLOWED_SNAPSHOT_TABLES = new Set([
+  'messages',
+  'customer_profiles',
+  'account_customer_profiles',
+  'knowledge_base',
+  'chat_transcripts',
+  'system_config',
+  'chat_language_prefs',
+  'media_materials',
+  'persona_schedule_vault',
+  'training_logs',
+  'telegram_user_sessions',
+]);
+
+function isPlainObject(val: unknown): val is Record<string, any> {
+  return Boolean(val && typeof val === 'object' && !Array.isArray(val));
+}
+
+function assertRequiredNonEmptyString(
+  val: unknown,
+  fieldLabel: string,
+  maxLen = 512
+): string {
+  if (typeof val !== 'string' || val.trim().length === 0) {
+    throw new SnapshotValidationError(`快照校验失败：字段 ${fieldLabel} 必须是非空字符串`);
+  }
+  if (val.length > maxLen) {
+    throw new SnapshotValidationError(`快照校验失败：字段 ${fieldLabel} 长度超过上限 (${maxLen})`);
+  }
+  return val;
+}
+
+function assertStringField(
+  val: unknown,
+  fieldLabel: string,
+  defaultVal = '',
+  maxLen = BACKUP_MAX_TEXT_LENGTH
+): string {
+  if (val === undefined || val === null) return defaultVal;
+  if (typeof val !== 'string') {
+    throw new SnapshotValidationError(`快照校验失败：字段 ${fieldLabel} 必须是字符串`);
+  }
+  if (val.length > maxLen) {
+    throw new SnapshotValidationError(`快照校验失败：字段 ${fieldLabel} 长度超过上限 (${maxLen})`);
+  }
+  return val;
+}
+
+function assertNonNegFiniteNumber(
+  val: unknown,
+  fieldLabel: string,
+  required = false,
+  defaultVal = 0
+): number {
+  if (val === undefined || val === null) {
+    if (required) {
+      throw new SnapshotValidationError(`快照校验失败：字段 ${fieldLabel} 缺失或非有效数字`);
+    }
+    return defaultVal;
+  }
+  const num = typeof val === 'number' ? val : Number(val);
+  if (!Number.isFinite(num) || num < 0) {
+    throw new SnapshotValidationError(`快照校验失败：字段 ${fieldLabel} 必须是非负有限数字`);
+  }
+  return num;
+}
+
+function assertFlagInt(val: unknown, fieldLabel: string, defaultVal = 0): number {
+  if (val === undefined || val === null) return defaultVal;
+  if (typeof val === 'boolean') return val ? 1 : 0;
+  const num = Number(val);
+  if (!Number.isInteger(num) || (num !== 0 && num !== 1)) {
+    throw new SnapshotValidationError(`快照校验失败：字段 ${fieldLabel} 必须是 0 或 1`);
+  }
+  return num;
+}
+
+export function validateDatabaseSnapshot(snapshot: any): { skippedUserSessions: number; totalRows: number } {
+  if (!isPlainObject(snapshot) || !isPlainObject(snapshot.tables)) {
+    throw new SnapshotValidationError('无效的数据快照格式：缺少合法的 tables 对象');
+  }
+
+  const tables = snapshot.tables;
+  let totalRows = 0;
+  let skippedUserSessions = 0;
+
+  for (const [tableName, rows] of Object.entries(tables)) {
+    if (!ALLOWED_SNAPSHOT_TABLES.has(tableName)) {
+      throw new SnapshotValidationError(`快照校验失败：包含未授权或不支持的数据表 "${tableName}"`);
+    }
+    if (!Array.isArray(rows)) {
+      throw new SnapshotValidationError(`快照校验失败：表 "${tableName}" 必须是数组`);
+    }
+    if (rows.length > BACKUP_MAX_ROWS_PER_TABLE) {
+      throw new SnapshotValidationError(
+        `快照校验失败：表 "${tableName}" 行数 (${rows.length}) 超过单表上限 (${BACKUP_MAX_ROWS_PER_TABLE})`
+      );
+    }
+    totalRows += rows.length;
+    if (totalRows > BACKUP_MAX_TOTAL_ROWS) {
+      throw new SnapshotValidationError(
+        `快照校验失败：总行数 (${totalRows}) 超过恢复上限 (${BACKUP_MAX_TOTAL_ROWS})`
+      );
+    }
+
+    for (let i = 0; i < rows.length; i++) {
+      const row = rows[i];
+      if (!isPlainObject(row)) {
+        throw new SnapshotValidationError(`快照校验失败：${tableName}[${i}] 必须是 JSON 对象`);
+      }
+
+      if (tableName === 'messages') {
+        assertRequiredNonEmptyString(row.id, `messages[${i}].id`, 256);
+        assertRequiredNonEmptyString(row.chat_id, `messages[${i}].chat_id`, 256);
+        assertRequiredNonEmptyString(row.account_id, `messages[${i}].account_id`, 256);
+        const sender = assertRequiredNonEmptyString(row.sender, `messages[${i}].sender`, 32);
+        if (sender !== 'me' && sender !== 'peer' && sender !== 'system') {
+          throw new SnapshotValidationError(`快照校验失败：messages[${i}].sender 仅允许 me/peer/system`);
+        }
+        assertStringField(row.text, `messages[${i}].text`);
+        assertStringField(row.sender_name, `messages[${i}].sender_name`, '', 512);
+        assertStringField(row.translated_text, `messages[${i}].translated_text`);
+        assertFlagInt(row.is_audio, `messages[${i}].is_audio`, 0);
+        assertNonNegFiniteNumber(row.audio_duration, `messages[${i}].audio_duration`, false, 0);
+        assertStringField(row.audio_url, `messages[${i}].audio_url`);
+        assertStringField(row.stt_text, `messages[${i}].stt_text`);
+        assertStringField(row.voice_tone, `messages[${i}].voice_tone`, '', 256);
+        assertFlagInt(row.is_image, `messages[${i}].is_image`, 0);
+        assertStringField(row.image_url, `messages[${i}].image_url`);
+        assertStringField(row.image_caption, `messages[${i}].image_caption`);
+        assertFlagInt(row.is_video, `messages[${i}].is_video`, 0);
+        assertStringField(row.video_url, `messages[${i}].video_url`);
+        assertNonNegFiniteNumber(row.video_duration, `messages[${i}].video_duration`, false, 0);
+        assertFlagInt(row.is_file, `messages[${i}].is_file`, 0);
+        assertStringField(row.file_name, `messages[${i}].file_name`, '', 1024);
+        assertStringField(row.file_size, `messages[${i}].file_size`, '', 128);
+        assertStringField(row.file_url, `messages[${i}].file_url`);
+        assertRequiredNonEmptyString(row.timestamp, `messages[${i}].timestamp`, 128);
+        assertNonNegFiniteNumber(row.created_at, `messages[${i}].created_at`, true);
+        assertFlagInt(row.is_edited, `messages[${i}].is_edited`, 0);
+        assertFlagInt(row.is_pinned, `messages[${i}].is_pinned`, 0);
+      } else if (tableName === 'customer_profiles') {
+        assertRequiredNonEmptyString(row.chat_id, `customer_profiles[${i}].chat_id`, 256);
+        assertStringField(row.account_id, `customer_profiles[${i}].account_id`, 'acc_1', 256);
+        assertStringField(row.client_name, `customer_profiles[${i}].client_name`, '', 512);
+        assertNonNegFiniteNumber(row.total_messages_count, `customer_profiles[${i}].total_messages_count`, false, 0);
+        assertNonNegFiniteNumber(row.last_analyzed_at, `customer_profiles[${i}].last_analyzed_at`, false, 0);
+        assertNonNegFiniteNumber(row.updated_at, `customer_profiles[${i}].updated_at`, false, 0);
+      } else if (tableName === 'account_customer_profiles') {
+        assertRequiredNonEmptyString(row.account_id, `account_customer_profiles[${i}].account_id`, 256);
+        assertRequiredNonEmptyString(row.chat_id, `account_customer_profiles[${i}].chat_id`, 256);
+        assertStringField(row.client_name, `account_customer_profiles[${i}].client_name`, '', 512);
+        assertNonNegFiniteNumber(row.total_messages_count, `account_customer_profiles[${i}].total_messages_count`, false, 0);
+        assertNonNegFiniteNumber(row.last_analyzed_at, `account_customer_profiles[${i}].last_analyzed_at`, false, 0);
+        assertNonNegFiniteNumber(row.updated_at, `account_customer_profiles[${i}].updated_at`, false, 0);
+      } else if (tableName === 'knowledge_base') {
+        assertRequiredNonEmptyString(row.id, `knowledge_base[${i}].id`, 256);
+        assertRequiredNonEmptyString(row.category, `knowledge_base[${i}].category`, 256);
+        assertRequiredNonEmptyString(row.title, `knowledge_base[${i}].title`, 1024);
+        assertStringField(row.content, `knowledge_base[${i}].content`);
+        assertRequiredNonEmptyString(row.source_type, `knowledge_base[${i}].source_type`, 128);
+        assertFlagInt(row.is_active, `knowledge_base[${i}].is_active`, 1);
+        assertNonNegFiniteNumber(row.hit_count, `knowledge_base[${i}].hit_count`, false, 0);
+        assertNonNegFiniteNumber(row.created_at, `knowledge_base[${i}].created_at`, false, 0);
+        assertNonNegFiniteNumber(row.updated_at, `knowledge_base[${i}].updated_at`, false, 0);
+      } else if (tableName === 'chat_transcripts') {
+        assertRequiredNonEmptyString(row.id, `chat_transcripts[${i}].id`, 256);
+        assertRequiredNonEmptyString(row.title, `chat_transcripts[${i}].title`, 1024);
+        assertStringField(row.dialogue_text, `chat_transcripts[${i}].dialogue_text`);
+        assertFlagInt(row.is_active, `chat_transcripts[${i}].is_active`, 1);
+        assertNonNegFiniteNumber(row.round_count, `chat_transcripts[${i}].round_count`, false, 0);
+        assertNonNegFiniteNumber(row.character_count, `chat_transcripts[${i}].character_count`, false, 0);
+        assertNonNegFiniteNumber(row.created_at, `chat_transcripts[${i}].created_at`, false, 0);
+        assertNonNegFiniteNumber(row.updated_at, `chat_transcripts[${i}].updated_at`, false, 0);
+      } else if (tableName === 'system_config') {
+        assertRequiredNonEmptyString(row.key, `system_config[${i}].key`, 256);
+        if (typeof row.value !== 'string' || row.value.length > BACKUP_MAX_TEXT_LENGTH) {
+          throw new SnapshotValidationError(`快照校验失败：system_config[${i}].value 必须是合法长度的字符串`);
+        }
+        assertNonNegFiniteNumber(row.updated_at, `system_config[${i}].updated_at`, false, 0);
+      } else if (tableName === 'chat_language_prefs') {
+        assertRequiredNonEmptyString(row.chat_id, `chat_language_prefs[${i}].chat_id`, 256);
+        assertStringField(row.account_id, `chat_language_prefs[${i}].account_id`, 'acc_1', 256);
+        assertStringField(row.source_lang, `chat_language_prefs[${i}].source_lang`, 'Auto', 64);
+        assertStringField(row.target_lang, `chat_language_prefs[${i}].target_lang`, 'Auto', 64);
+        assertNonNegFiniteNumber(row.updated_at, `chat_language_prefs[${i}].updated_at`, false, 0);
+      } else if (tableName === 'media_materials') {
+        assertRequiredNonEmptyString(row.id, `media_materials[${i}].id`, 256);
+        assertRequiredNonEmptyString(row.category, `media_materials[${i}].category`, 256);
+        assertRequiredNonEmptyString(row.title, `media_materials[${i}].title`, 512);
+        assertRequiredNonEmptyString(row.image_url, `media_materials[${i}].image_url`, 4096);
+      } else if (tableName === 'persona_schedule_vault') {
+        assertRequiredNonEmptyString(row.id, `persona_schedule_vault[${i}].id`, 256);
+        assertRequiredNonEmptyString(row.account_id, `persona_schedule_vault[${i}].account_id`, 256);
+        assertRequiredNonEmptyString(row.persona_name, `persona_schedule_vault[${i}].persona_name`, 512);
+      } else if (tableName === 'training_logs') {
+        assertRequiredNonEmptyString(row.id, `training_logs[${i}].id`, 256);
+        assertStringField(row.log_type, `training_logs[${i}].log_type`, 'manual', 128);
+        assertStringField(row.details, `training_logs[${i}].details`, '');
+        assertNonNegFiniteNumber(row.items_learned, `training_logs[${i}].items_learned`, false, 0);
+        assertNonNegFiniteNumber(row.created_at, `training_logs[${i}].created_at`, false, 0);
+      } else if (tableName === 'telegram_user_sessions') {
+        skippedUserSessions++;
+      }
+    }
+  }
+
+  return { skippedUserSessions, totalRows };
+}
+
 // Export entire database contents into a portable JSON snapshot (Excludes sensitive telegram_user_sessions)
 export async function exportDatabaseSnapshot() {
   const [
@@ -779,153 +1469,152 @@ export async function exportDatabaseSnapshot() {
     },
   };
 
-  // Persist to snapshot file in data directory
+  // Persist sealed (AES-256-GCM + HMAC-SHA256 + 0o600) snapshot file to data directory (never plaintext on disk)
   try {
-    fs.writeFileSync(snapshotFilePath, JSON.stringify(snapshot, null, 2), 'utf-8');
+    writeSealedDiskSnapshotFile(snapshot);
   } catch (err: any) {
-    console.warn('[Database Snapshot] Failed to write snapshot file to disk:', err.message);
+    console.warn('[Database Snapshot] Failed to write sealed snapshot file to disk:', err.message);
   }
 
   return snapshot;
 }
 
-// Restore entire database from a portable JSON snapshot
+// Restore entire database from a validated JSON snapshot inside a single atomic SQLite transaction
 export async function restoreDatabaseSnapshot(snapshot: any): Promise<{ success: boolean; restoredCounts: any }> {
-  if (!snapshot || !snapshot.tables) {
-    throw new Error('Invalid snapshot payload format: missing tables property');
-  }
-
+  const { skippedUserSessions } = validateDatabaseSnapshot(snapshot);
   const { tables } = snapshot;
 
-  if (Array.isArray(tables.messages)) {
-    for (const m of tables.messages) {
-      await db.prepare(`
-        INSERT OR REPLACE INTO messages (
-          id, chat_id, account_id, sender, sender_name, text, translated_text,
-          is_audio, audio_duration, audio_url, stt_text, voice_tone,
-          is_image, image_url, image_caption, is_video, video_url, video_duration,
-          is_file, file_name, file_size, file_url,
-          timestamp, created_at, delivery_status, telegram_message_id,
-          reply_to_json, is_edited, is_pinned, forward_from, reactions_json
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `).run(
-        m.id, m.chat_id, m.account_id, m.sender, m.sender_name, m.text, m.translated_text,
-        m.is_audio, m.audio_duration, m.audio_url, m.stt_text, m.voice_tone,
-        m.is_image, m.image_url, m.image_caption, m.is_video ?? 0, m.video_url || '', m.video_duration ?? 0,
-        m.is_file ?? 0, m.file_name || '', m.file_size || '', m.file_url || '',
-        m.timestamp, m.created_at,
-        m.delivery_status || 'delivered',
-        m.telegram_message_id ?? null,
-        m.reply_to_json ?? null,
-        m.is_edited ?? 0,
-        m.is_pinned ?? 0,
-        m.forward_from ?? null,
-        m.reactions_json ?? null
-      );
-    }
-  }
+  return await db.transaction(async () => {
+    const tableExists = async (name: string): Promise<boolean> => {
+      const row = (await db.prepare(`SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?`).get(name)) as any;
+      return Boolean(row?.name);
+    };
 
-  if (Array.isArray(tables.customer_profiles)) {
-    for (const p of tables.customer_profiles) {
-      await db.prepare(`
-        INSERT OR REPLACE INTO customer_profiles (
-          chat_id, account_id, client_name, relationship_stage, age_estimate, occupation,
-          location_timezone, tone_style, likes_interests, dislikes_taboos, emotional_needs,
-          key_memories, total_messages_count, last_analyzed_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `).run(
-        p.chat_id ?? '',
-        p.account_id ?? 'acc_1',
-        p.client_name ?? '',
-        p.relationship_stage ?? '初次接触',
-        p.age_estimate ?? '-',
-        p.occupation ?? '',
-        p.location_timezone ?? 'UTC+8',
-        p.tone_style ?? '',
-        p.likes_interests ?? '[]',
-        p.dislikes_taboos ?? '[]',
-        p.emotional_needs ?? '',
-        p.key_memories ?? '[]',
-        p.total_messages_count ?? 0,
-        p.last_analyzed_at ?? 0,
-        p.updated_at ?? Date.now()
-      );
+    if (Array.isArray(tables.messages)) {
+      for (const m of tables.messages) {
+        await db.prepare(`
+          INSERT OR REPLACE INTO messages (
+            id, chat_id, account_id, sender, sender_name, text, translated_text,
+            is_audio, audio_duration, audio_url, stt_text, voice_tone,
+            is_image, image_url, image_caption, is_video, video_url, video_duration,
+            is_file, file_name, file_size, file_url,
+            timestamp, created_at, delivery_status, telegram_message_id,
+            reply_to_json, is_edited, is_pinned, forward_from, reactions_json
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `).run(
+          m.id, m.chat_id, m.account_id, m.sender, m.sender_name ?? '', m.text ?? '', m.translated_text ?? '',
+          m.is_audio ?? 0, m.audio_duration ?? 0, m.audio_url ?? '', m.stt_text ?? '', m.voice_tone ?? '',
+          m.is_image ?? 0, m.image_url ?? '', m.image_caption ?? '', m.is_video ?? 0, m.video_url || '', m.video_duration ?? 0,
+          m.is_file ?? 0, m.file_name || '', m.file_size || '', m.file_url || '',
+          m.timestamp, Number(m.created_at),
+          m.delivery_status || 'delivered',
+          m.telegram_message_id ?? null,
+          m.reply_to_json ?? null,
+          m.is_edited ?? 0,
+          m.is_pinned ?? 0,
+          m.forward_from ?? null,
+          m.reactions_json ?? null
+        );
+      }
     }
-  }
 
-  if (Array.isArray(tables.account_customer_profiles)) {
-    for (const p of tables.account_customer_profiles) {
-      await db.prepare(`
-        INSERT OR REPLACE INTO account_customer_profiles (
-          account_id, chat_id, client_name, relationship_stage, age_estimate, occupation,
-          location_timezone, tone_style, likes_interests, dislikes_taboos, emotional_needs,
-          key_memories, total_messages_count, last_analyzed_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `).run(
-        p.account_id ?? 'acc_1',
-        p.chat_id ?? '',
-        p.client_name ?? '',
-        p.relationship_stage ?? '初次接触',
-        p.age_estimate ?? '-',
-        p.occupation ?? '',
-        p.location_timezone ?? 'UTC+8',
-        p.tone_style ?? '',
-        p.likes_interests ?? '[]',
-        p.dislikes_taboos ?? '[]',
-        p.emotional_needs ?? '',
-        p.key_memories ?? '[]',
-        p.total_messages_count ?? 0,
-        p.last_analyzed_at ?? 0,
-        p.updated_at ?? Date.now()
-      );
+    if (Array.isArray(tables.customer_profiles)) {
+      for (const p of tables.customer_profiles) {
+        await db.prepare(`
+          INSERT OR REPLACE INTO customer_profiles (
+            chat_id, account_id, client_name, relationship_stage, age_estimate, occupation,
+            location_timezone, tone_style, likes_interests, dislikes_taboos, emotional_needs,
+            key_memories, total_messages_count, last_analyzed_at, updated_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `).run(
+          p.chat_id,
+          p.account_id || 'acc_1',
+          p.client_name ?? '',
+          p.relationship_stage ?? '初次接触',
+          p.age_estimate ?? '-',
+          p.occupation ?? '',
+          p.location_timezone ?? 'UTC+8',
+          p.tone_style ?? '',
+          p.likes_interests ?? '[]',
+          p.dislikes_taboos ?? '[]',
+          p.emotional_needs ?? '',
+          p.key_memories ?? '[]',
+          Number(p.total_messages_count) || 0,
+          Number(p.last_analyzed_at) || 0,
+          Number(p.updated_at) || Date.now()
+        );
+      }
     }
-  }
 
-  if (Array.isArray(tables.knowledge_base)) {
-    for (const k of tables.knowledge_base) {
-      await db.prepare(`
-        INSERT OR REPLACE INTO knowledge_base (
-          id, account_id, category, title, content, keywords, source_type, source_file, is_active, hit_count, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `).run(
-        k.id, k.account_id || 'global', k.category, k.title, k.content, k.keywords, k.source_type, k.source_file,
-        k.is_active, k.hit_count, k.created_at, k.updated_at
-      );
+    if (Array.isArray(tables.account_customer_profiles)) {
+      for (const p of tables.account_customer_profiles) {
+        await db.prepare(`
+          INSERT OR REPLACE INTO account_customer_profiles (
+            account_id, chat_id, client_name, relationship_stage, age_estimate, occupation,
+            location_timezone, tone_style, likes_interests, dislikes_taboos, emotional_needs,
+            key_memories, total_messages_count, last_analyzed_at, updated_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `).run(
+          p.account_id,
+          p.chat_id,
+          p.client_name ?? '',
+          p.relationship_stage ?? '初次接触',
+          p.age_estimate ?? '-',
+          p.occupation ?? '',
+          p.location_timezone ?? 'UTC+8',
+          p.tone_style ?? '',
+          p.likes_interests ?? '[]',
+          p.dislikes_taboos ?? '[]',
+          p.emotional_needs ?? '',
+          p.key_memories ?? '[]',
+          Number(p.total_messages_count) || 0,
+          Number(p.last_analyzed_at) || 0,
+          Number(p.updated_at) || Date.now()
+        );
+      }
     }
-  }
 
-  if (Array.isArray(tables.chat_transcripts)) {
-    for (const t of tables.chat_transcripts) {
-      await db.prepare(`
-        INSERT OR REPLACE INTO chat_transcripts (
-          id, account_id, title, description, dialogue_text, learned_style, round_count, character_count, is_active, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `).run(
-        t.id, t.account_id || 'global', t.title, t.description, t.dialogue_text, t.learned_style, t.round_count,
-        t.character_count, t.is_active, t.created_at, t.updated_at
-      );
+    if (Array.isArray(tables.knowledge_base)) {
+      for (const k of tables.knowledge_base) {
+        await db.prepare(`
+          INSERT OR REPLACE INTO knowledge_base (
+            id, account_id, category, title, content, keywords, source_type, source_file, is_active, hit_count, created_at, updated_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `).run(
+          k.id, k.account_id || 'global', k.category, k.title, k.content ?? '', k.keywords ?? '', k.source_type, k.source_file ?? '',
+          k.is_active ?? 1, Number(k.hit_count) || 0, Number(k.created_at) || Date.now(), Number(k.updated_at) || Date.now()
+        );
+      }
     }
-  }
 
-  if (Array.isArray(tables.media_materials) && tables.media_materials.length > 0) {
-    try {
+    if (Array.isArray(tables.chat_transcripts)) {
+      for (const t of tables.chat_transcripts) {
+        await db.prepare(`
+          INSERT OR REPLACE INTO chat_transcripts (
+            id, account_id, title, description, dialogue_text, learned_style, round_count, character_count, is_active, created_at, updated_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `).run(
+          t.id, t.account_id || 'global', t.title, t.description ?? '', t.dialogue_text ?? '', t.learned_style ?? '',
+          Number(t.round_count) || 0, Number(t.character_count) || 0, t.is_active ?? 1,
+          Number(t.created_at) || Date.now(), Number(t.updated_at) || Date.now()
+        );
+      }
+    }
+
+    if (Array.isArray(tables.media_materials) && tables.media_materials.length > 0 && (await tableExists('media_materials'))) {
       for (const m of tables.media_materials) {
         await db.prepare(`
           INSERT OR REPLACE INTO media_materials (
             id, category, title, description, tags, image_url, usage_count, last_used_at, created_at
           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         `).run(
-          m.id, m.category, m.title, m.description, m.tags, m.image_url,
-          m.usage_count, m.last_used_at, m.created_at
+          m.id, m.category, m.title, m.description ?? '', m.tags ?? '', m.image_url,
+          Number(m.usage_count) || 0, Number(m.last_used_at) || 0, Number(m.created_at) || Date.now()
         );
       }
-    } catch (e: any) {
-      console.warn('[Snapshot Restore] Skipping optional media_materials restore:', e?.message || e);
     }
-  }
 
-  if (Array.isArray(tables.persona_schedule_vault) && tables.persona_schedule_vault.length > 0) {
-    try {
+    if (Array.isArray(tables.persona_schedule_vault) && tables.persona_schedule_vault.length > 0 && (await tableExists('persona_schedule_vault'))) {
       for (const p of tables.persona_schedule_vault) {
         await db.prepare(`
           INSERT OR REPLACE INTO persona_schedule_vault (
@@ -934,166 +1623,145 @@ export async function restoreDatabaseSnapshot(snapshot: any): Promise<{ success:
             reply_rhythm_rules, is_active, updated_at
           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         `).run(
-          p.id, p.account_id, p.persona_name, p.occupation, p.city, p.timezone, p.weather_condition,
-          p.temperature, p.current_status, p.weekly_schedule, p.daily_timeline, p.tone_style,
-          p.reply_rhythm_rules, p.is_active, p.updated_at
+          p.id, p.account_id, p.persona_name, p.occupation ?? '', p.city ?? '', p.timezone ?? '', p.weather_condition ?? '',
+          p.temperature ?? '', p.current_status ?? '', p.weekly_schedule ?? '', p.daily_timeline ?? '', p.tone_style ?? '',
+          p.reply_rhythm_rules ?? '', p.is_active ?? 1, Number(p.updated_at) || Date.now()
         );
       }
-    } catch (e: any) {
-      console.warn('[Snapshot Restore] Skipping optional persona_schedule_vault restore:', e?.message || e);
     }
-  }
 
-  if (Array.isArray(tables.training_logs) && tables.training_logs.length > 0) {
-    try {
+    if (Array.isArray(tables.training_logs) && tables.training_logs.length > 0) {
       for (const tl of tables.training_logs) {
         await db.prepare(`
           INSERT OR REPLACE INTO training_logs (
             id, account_id, log_type, details, items_learned, created_at
           ) VALUES (?, ?, ?, ?, ?, ?)
         `).run(
-          tl.id, tl.account_id || 'global', tl.log_type ?? 'manual', tl.details ?? '', Number(tl.items_learned) || 0, Number(tl.created_at) || Date.now()
+          tl.id, tl.account_id || 'global', tl.log_type || 'manual', tl.details ?? '', Number(tl.items_learned) || 0, Number(tl.created_at) || Date.now()
         );
       }
-    } catch (e: any) {
-      console.warn('[Snapshot Restore] Skipping training_logs restore:', e?.message || e);
     }
-  }
 
-  if (Array.isArray(tables.telegram_user_sessions)) {
-    try {
-      await db.execute(`
-        CREATE TABLE IF NOT EXISTS telegram_user_sessions (
-          phone TEXT PRIMARY KEY,
-          session_string TEXT NOT NULL,
-          user_id TEXT,
-          username TEXT,
-          first_name TEXT,
-          is_active INTEGER DEFAULT 1,
-          created_at INTEGER NOT NULL,
-          updated_at INTEGER NOT NULL
-        )
-      `);
-      for (const s of tables.telegram_user_sessions) {
-        const rawSess = typeof s?.session_string === 'string' ? s.session_string : '';
-        if (!rawSess || !rawSess.startsWith('enc:gcm:')) {
+    // Security & cross-machine isolation: NEVER import telegram_user_sessions from backup snapshots.
+    // Each machine binds session ciphertexts to its unique .device_secret; users must sign in on the target machine.
+    if (skippedUserSessions > 0) {
+      console.warn(
+        `[Snapshot Restore] Skipped ${skippedUserSessions} telegram_user_sessions row(s) to prevent cross-machine .device_secret decryption conflicts.`
+      );
+    }
+
+    let restoredConfigCount = 0;
+    if (Array.isArray(tables.system_config)) {
+      for (const c of tables.system_config) {
+        const cfgKey = String(c?.key || '').trim();
+        if (!cfgKey || cfgKey === 'telegram_api_credentials' || cfgKey === 'custom_llm_config') {
           continue;
         }
-        await db.prepare(`
-          INSERT OR REPLACE INTO telegram_user_sessions (
-            phone, session_string, user_id, username, first_name, is_active, created_at, updated_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        `).run(
-          s.phone,
-          rawSess,
-          s.user_id ?? null,
-          s.username ?? '',
-          s.first_name ?? '',
-          s.is_active ?? 1,
-          s.created_at ?? Date.now(),
-          s.updated_at ?? Date.now()
-        );
-      }
-    } catch (e: any) {
-      console.warn('[Snapshot Restore] Failed to restore telegram_user_sessions:', e.message);
-    }
-  }
-
-  let restoredConfigCount = 0;
-  if (Array.isArray(tables.system_config)) {
-    for (const c of tables.system_config) {
-      const cfgKey = String(c?.key || '').trim();
-      if (!cfgKey || cfgKey === 'telegram_api_credentials' || cfgKey === 'custom_llm_config') {
-        continue;
-      }
-      if (typeof c?.value !== 'string') continue;
-      let valueToSave = c.value;
-      if (cfgKey === 'translation_settings' || cfgKey === 'network_proxy') {
-        try {
-          const incomingObj = JSON.parse(c.value);
-          if (incomingObj && typeof incomingObj === 'object') {
-            const existingRow = (await db
-              .prepare('SELECT value FROM system_config WHERE key = ?')
-              .get(cfgKey)) as any;
-            const existingObj =
-              existingRow && typeof existingRow.value === 'string'
-                ? JSON.parse(existingRow.value)
-                : null;
-            if (existingObj && typeof existingObj === 'object') {
-              if (cfgKey === 'translation_settings') {
-                const merged = { ...incomingObj };
-                if (merged.geminiApiKey === undefined && existingObj.geminiApiKey) {
-                  merged.geminiApiKey = existingObj.geminiApiKey;
+        if (typeof c?.value !== 'string') continue;
+        let valueToSave = c.value;
+        if (cfgKey === 'translation_settings' || cfgKey === 'network_proxy') {
+          try {
+            const incomingObj = JSON.parse(c.value);
+            if (incomingObj && typeof incomingObj === 'object') {
+              const existingRow = (await db
+                .prepare('SELECT value FROM system_config WHERE key = ?')
+                .get(cfgKey)) as any;
+              const existingObj =
+                existingRow && typeof existingRow.value === 'string'
+                  ? JSON.parse(existingRow.value)
+                  : null;
+              if (existingObj && typeof existingObj === 'object') {
+                if (cfgKey === 'translation_settings') {
+                  const merged = { ...incomingObj };
+                  if (merged.geminiApiKey === undefined && existingObj.geminiApiKey) {
+                    merged.geminiApiKey = existingObj.geminiApiKey;
+                  }
+                  if (merged.googleApiKey === undefined && existingObj.googleApiKey) {
+                    merged.googleApiKey = existingObj.googleApiKey;
+                  }
+                  valueToSave = JSON.stringify(merged);
+                } else if (cfgKey === 'network_proxy') {
+                  const merged = { ...incomingObj };
+                  if (merged.password === undefined && existingObj.password) {
+                    merged.password = existingObj.password;
+                  }
+                  valueToSave = JSON.stringify(merged);
                 }
-                if (merged.googleApiKey === undefined && existingObj.googleApiKey) {
-                  merged.googleApiKey = existingObj.googleApiKey;
-                }
-                valueToSave = JSON.stringify(merged);
-              } else if (cfgKey === 'network_proxy') {
-                const merged = { ...incomingObj };
-                if (merged.password === undefined && existingObj.password) {
-                  merged.password = existingObj.password;
-                }
-                valueToSave = JSON.stringify(merged);
               }
             }
-          }
-        } catch {}
+          } catch {}
+        }
+        await db.prepare(`
+          INSERT OR REPLACE INTO system_config (key, value, updated_at)
+          VALUES (?, ?, ?)
+        `).run(cfgKey, valueToSave, Number(c.updated_at) || Date.now());
+        restoredConfigCount++;
       }
-      await db.prepare(`
-        INSERT OR REPLACE INTO system_config (key, value, updated_at)
-        VALUES (?, ?, ?)
-      `).run(cfgKey, valueToSave, Number(c.updated_at) || Date.now());
-      restoredConfigCount++;
     }
-  }
 
-  let restoredLangPrefCount = 0;
-  if (Array.isArray(tables.chat_language_prefs)) {
-    for (const lp of tables.chat_language_prefs) {
-      if (!lp?.chat_id) continue;
-      await db.prepare(`
-        INSERT OR REPLACE INTO chat_language_prefs (account_id, chat_id, source_lang, target_lang, updated_at)
-        VALUES (?, ?, ?, ?, ?)
-      `).run(
-        String(lp.account_id || 'acc_1'),
-        String(lp.chat_id),
-        String(lp.source_lang || 'Auto'),
-        String(lp.target_lang || 'Auto'),
-        Number(lp.updated_at) || Date.now()
-      );
-      restoredLangPrefCount++;
+    let restoredLangPrefCount = 0;
+    if (Array.isArray(tables.chat_language_prefs)) {
+      for (const lp of tables.chat_language_prefs) {
+        if (!lp?.chat_id) continue;
+        await db.prepare(`
+          INSERT OR REPLACE INTO chat_language_prefs (account_id, chat_id, source_lang, target_lang, updated_at)
+          VALUES (?, ?, ?, ?, ?)
+        `).run(
+          String(lp.account_id || 'acc_1'),
+          String(lp.chat_id),
+          String(lp.source_lang || 'Auto'),
+          String(lp.target_lang || 'Auto'),
+          Number(lp.updated_at) || Date.now()
+        );
+        restoredLangPrefCount++;
+      }
     }
-  }
 
-  return {
-    success: true,
-    restoredCounts: {
-      messages: tables.messages?.length || 0,
-      profiles: tables.customer_profiles?.length || 0,
-      accountProfiles: tables.account_customer_profiles?.length || 0,
-      knowledge: tables.knowledge_base?.length || 0,
-      transcripts: tables.chat_transcripts?.length || 0,
-      materials: tables.media_materials?.length || 0,
-      personas: tables.persona_schedule_vault?.length || 0,
-      trainingLogs: tables.training_logs?.length || 0,
-      systemConfig: restoredConfigCount,
-      chatLanguagePrefs: restoredLangPrefCount,
-      userSessions: tables.telegram_user_sessions?.length || 0,
-    },
-  };
+    return {
+      success: true,
+      restoredCounts: {
+        messages: tables.messages?.length || 0,
+        profiles: tables.customer_profiles?.length || 0,
+        accountProfiles: tables.account_customer_profiles?.length || 0,
+        knowledge: tables.knowledge_base?.length || 0,
+        transcripts: tables.chat_transcripts?.length || 0,
+        materials: tables.media_materials?.length || 0,
+        personas: tables.persona_schedule_vault?.length || 0,
+        trainingLogs: tables.training_logs?.length || 0,
+        systemConfig: restoredConfigCount,
+        chatLanguagePrefs: restoredLangPrefCount,
+        userSessions: 0,
+        skippedUserSessions,
+      },
+    };
+  })();
 }
 
-// Automatically restore data from disk snapshot if SQLite file was wiped/empty
+// Automatically restore data from encrypted (or legacy) disk snapshot if SQLite file was wiped/empty
 export async function autoRestoreSnapshotIfAvailable(): Promise<boolean> {
   try {
     if (fs.existsSync(snapshotFilePath)) {
       const raw = fs.readFileSync(snapshotFilePath, 'utf-8');
-      const data = JSON.parse(raw);
-      if (data && data.tables) {
+      const parsed = JSON.parse(raw);
+      let snapshotData: any = null;
+      let isLegacyPlaintext = false;
+
+      if (isDiskSnapshotEnvelope(parsed)) {
+        snapshotData = unsealDiskSnapshot(parsed);
+      } else if (parsed && parsed.tables) {
+        snapshotData = parsed;
+        isLegacyPlaintext = true;
+      }
+
+      if (snapshotData && snapshotData.tables) {
         console.log(`[Database Auto-Recovery] Detected snapshot at ${snapshotFilePath}, auto-restoring records...`);
-        await restoreDatabaseSnapshot(data);
-        console.log(`[Database Auto-Recovery] Successfully restored ${data.counts?.messages || 0} messages and ${data.counts?.profiles || 0} customer profiles!`);
+        await restoreDatabaseSnapshot(snapshotData);
+        if (isLegacyPlaintext) {
+          try {
+            writeSealedDiskSnapshotFile(snapshotData);
+          } catch {}
+        }
+        console.log(`[Database Auto-Recovery] Successfully restored ${snapshotData.counts?.messages || 0} messages and ${snapshotData.counts?.profiles || 0} customer profiles!`);
         return true;
       }
     }

@@ -34,6 +34,7 @@ import {
   refreshSignedResourceUrlsApi,
   ensureFreshSignedResourceUrl,
 } from '../services/apiService';
+import { sanitizeSafeResourceUrl } from '../services/urlSafety';
 
 interface TelegramChatInfoDrawerProps {
   isOpen: boolean;
@@ -89,8 +90,9 @@ export const TelegramChatInfoDrawer: React.FC<TelegramChatInfoDrawerProps> = ({
 
   const resolveDisplayUrl = useCallback(
     (rawUrl?: string) => {
-      if (!rawUrl) return rawUrl;
-      return refreshedUrlsMap[rawUrl] || rawUrl;
+      if (!rawUrl) return undefined;
+      const safeUrl = sanitizeSafeResourceUrl(refreshedUrlsMap[rawUrl] || rawUrl);
+      return safeUrl || undefined;
     },
     [refreshedUrlsMap]
   );
@@ -103,7 +105,8 @@ export const TelegramChatInfoDrawer: React.FC<TelegramChatInfoDrawerProps> = ({
         return null;
       }
       if (!force && !isSignedResourceUrlExpiringSoon(currentResolved)) {
-        return currentResolved;
+        const safeCurrent = sanitizeSafeResourceUrl(currentResolved);
+        return safeCurrent || null;
       }
       attemptedRefreshUrlsRef.current.add(rawUrl);
       attemptedRefreshUrlsRef.current.add(currentResolved);
@@ -118,14 +121,15 @@ export const TelegramChatInfoDrawer: React.FC<TelegramChatInfoDrawerProps> = ({
             nextUrl = refreshed;
           }
         }
-        if (nextUrl && nextUrl !== currentResolved) {
-          attemptedRefreshUrlsRef.current.add(nextUrl);
+        const safeNextUrl = sanitizeSafeResourceUrl(nextUrl);
+        if (safeNextUrl && safeNextUrl !== currentResolved) {
+          attemptedRefreshUrlsRef.current.add(safeNextUrl);
           setRefreshedUrlsMap((prev) => ({
             ...prev,
-            [rawUrl]: nextUrl,
-            [currentResolved]: nextUrl,
+            [rawUrl]: safeNextUrl,
+            [currentResolved]: safeNextUrl,
           }));
-          return nextUrl;
+          return safeNextUrl;
         }
       } catch {}
       return null;
@@ -847,8 +851,8 @@ export const TelegramChatInfoDrawer: React.FC<TelegramChatInfoDrawerProps> = ({
                   </div>
                 ) : (
                   fileMessages.map((m) => {
-                    const hasFileUrl = Boolean(m.fileUrl && m.fileUrl.trim() && m.fileUrl.trim() !== '#');
-                    const resolvedFileHref = hasFileUrl ? resolveDisplayUrl(m.fileUrl) || '' : '';
+                    const resolvedFileHref = m.fileUrl ? resolveDisplayUrl(m.fileUrl) || '' : '';
+                    const hasFileUrl = Boolean(resolvedFileHref);
                     return (
                       <div key={m.id} className="p-2.5 rounded-xl bg-[#f8fafc] dark:bg-[#0e1726]/85 aurora:bg-[#101c23]/90 border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] flex items-center justify-between gap-2 text-xs">
                         <div className="flex items-center gap-2 min-w-0">
@@ -866,11 +870,17 @@ export const TelegramChatInfoDrawer: React.FC<TelegramChatInfoDrawerProps> = ({
                             href={resolvedFileHref}
                             download={m.fileName || true}
                             onClick={(e) => {
+                              if (!resolvedFileHref) {
+                                e.preventDefault();
+                                return;
+                              }
                               if (m.fileUrl && isSignedResourceUrlExpiringSoon(resolvedFileHref)) {
                                 e.preventDefault();
                                 void triggerSilentUrlRefresh(m.fileUrl, true).then((nextUrl) => {
+                                  const safeDownloadHref = sanitizeSafeResourceUrl(nextUrl) || resolvedFileHref;
+                                  if (!safeDownloadHref) return;
                                   const a = document.createElement('a');
-                                  a.href = nextUrl || resolvedFileHref;
+                                  a.href = safeDownloadHref;
                                   if (m.fileName) a.download = m.fileName;
                                   document.body.appendChild(a);
                                   a.click();

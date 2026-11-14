@@ -2201,28 +2201,53 @@ export async function fetchDatabaseStatus(): Promise<any> {
 
 const telegramDialogsCooldownMap = new Map<string, number>();
 
-export function getClientTelegramFloodCooldown(accountKey?: string): {
+function resolveClientFloodKeys(accountKey?: string, extraKey?: string): string[] {
+  const keys = new Set<string>();
+  for (const raw of [accountKey, extraKey]) {
+    const k = String(raw || '').trim();
+    if (!k) continue;
+    keys.add(k);
+    if (k.startsWith('acc_tg_')) {
+      const bare = k.slice('acc_tg_'.length);
+      if (bare) keys.add(bare);
+    } else if (/^\d+$/.test(k)) {
+      keys.add(`acc_tg_${k}`);
+    }
+  }
+  if (keys.size === 0) keys.add('__default__');
+  return Array.from(keys);
+}
+
+export function getClientTelegramFloodCooldown(accountKey?: string, extraKey?: string): {
   retryAfterSeconds: number;
   floodWaitUntil: number;
 } | null {
-  const key = String(accountKey || '__default__');
-  const until = telegramDialogsCooldownMap.get(key) || 0;
-  if (!until || until <= Date.now()) {
-    if (until) telegramDialogsCooldownMap.delete(key);
-    return null;
+  const keys = resolveClientFloodKeys(accountKey, extraKey);
+  const now = Date.now();
+  let maxUntil = 0;
+  for (const key of keys) {
+    const until = telegramDialogsCooldownMap.get(key) || 0;
+    if (!until) continue;
+    if (until <= now) {
+      telegramDialogsCooldownMap.delete(key);
+      continue;
+    }
+    if (until > maxUntil) maxUntil = until;
   }
+  if (!maxUntil || maxUntil <= now) return null;
   return {
-    retryAfterSeconds: Math.max(1, Math.ceil((until - Date.now()) / 1000)),
-    floodWaitUntil: until,
+    retryAfterSeconds: Math.max(1, Math.ceil((maxUntil - now) / 1000)),
+    floodWaitUntil: maxUntil,
   };
 }
 
 export function recordClientTelegramFloodCooldown(
   accountKey: string | undefined,
   floodWaitUntil?: number,
-  retryAfterSeconds?: number
+  retryAfterSeconds?: number,
+  extraKey?: string
 ): void {
-  const key = String(accountKey || '__default__');
+  const keys = resolveClientFloodKeys(accountKey, extraKey);
   const now = Date.now();
   const resolvedUntil =
     typeof floodWaitUntil === 'number' && floodWaitUntil > now
@@ -2231,9 +2256,11 @@ export function recordClientTelegramFloodCooldown(
         ? now + retryAfterSeconds * 1000
         : 0;
   if (resolvedUntil > now) {
-    const prev = telegramDialogsCooldownMap.get(key) || 0;
-    if (resolvedUntil > prev) {
-      telegramDialogsCooldownMap.set(key, resolvedUntil);
+    for (const key of keys) {
+      const prev = telegramDialogsCooldownMap.get(key) || 0;
+      if (resolvedUntil > prev) {
+        telegramDialogsCooldownMap.set(key, resolvedUntil);
+      }
     }
   }
 }
@@ -2253,7 +2280,7 @@ export async function fetchTelegramUserDialogsDetailedApi(
   cached?: boolean;
 }> {
   const cooldownKey = accountId || phone;
-  const activeCooldown = getClientTelegramFloodCooldown(cooldownKey);
+  const activeCooldown = getClientTelegramFloodCooldown(accountId, phone);
   if (activeCooldown) {
     return {
       ok: false,
@@ -2286,7 +2313,7 @@ export async function fetchTelegramUserDialogsDetailedApi(
       };
     }
     if (res.status === 429 || data?.code === 'TELEGRAM_FLOOD_WAIT') {
-      recordClientTelegramFloodCooldown(cooldownKey, data?.floodWaitUntil, data?.retryAfterSeconds);
+      recordClientTelegramFloodCooldown(accountId || phone, data?.floodWaitUntil, data?.retryAfterSeconds, phone);
     }
     return {
       ok: false,
@@ -2492,12 +2519,15 @@ export async function saveSystemProxyApi(payload: SystemProxyConfig & { preserve
   }
 }
 
-export async function downloadDatabaseBackup(): Promise<any> {
+export async function downloadDatabaseBackup(bundleMode: 'client-encrypt' | 'sealed' = 'client-encrypt'): Promise<any> {
   try {
     const res = await fetchWithTimeout(
       '/api/database/backup',
       {
-        headers: getAuthHeaders(),
+        headers: {
+          ...getAuthHeaders(),
+          ...(bundleMode === 'client-encrypt' ? { 'X-Backup-Bundle-Mode': 'client-encrypt' } : {}),
+        },
         credentials: 'include',
       },
       30000
@@ -2513,7 +2543,11 @@ export async function downloadDatabaseBackup(): Promise<any> {
   }
 }
 
-export async function uploadDatabaseRestore(snapshot: any): Promise<{ success: boolean; message: string; restoredCounts?: any }> {
+export async function uploadDatabaseRestore(
+  snapshot: any,
+  confirmPhrase: string,
+  passphrase?: string
+): Promise<{ success: boolean; message: string; restoredCounts?: any }> {
   try {
     const res = await fetchWithTimeout(
       '/api/database/restore?confirm=true',
@@ -2521,7 +2555,12 @@ export async function uploadDatabaseRestore(snapshot: any): Promise<{ success: b
         method: 'POST',
         headers: getAuthHeaders(),
         credentials: 'include',
-        body: JSON.stringify({ snapshot, confirm: true }),
+        body: JSON.stringify({
+          snapshot,
+          confirm: true,
+          confirmPhrase,
+          ...(passphrase ? { passphrase } : {}),
+        }),
       },
       30000
     );

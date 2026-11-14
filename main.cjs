@@ -352,11 +352,23 @@ function waitForHealth200(url, maxRetries = 120, interval = 250) {
 }
 
 // 6. Inline HTML templates for splash screen and visual error reporting
+function escapeHtml(value) {
+  return String(value == null ? '' : value)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;')
+    .replace(/\//g, '&#x2F;')
+    .replace(/`/g, '&#x60;');
+}
+
 const SPLASH_HTML = `data:text/html;charset=utf-8,` + encodeURIComponent(`
 <!DOCTYPE html>
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline';">
   <title>HumanSense</title>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -416,11 +428,18 @@ const SPLASH_HTML = `data:text/html;charset=utf-8,` + encodeURIComponent(`
 `);
 
 function renderErrorHtml(title, errorMsg, stack = '') {
+  const safeTitle = escapeHtml(title);
+  const safeErrorMsg = escapeHtml(errorMsg);
+  const safeStack = escapeHtml(stack);
+  const safeLogPath = escapeHtml(getLogFilePath());
+  const retryPort = Number.isInteger(currentPort) && currentPort > 0 && currentPort <= 65535 ? currentPort : FIXED_APP_PORT;
+
   return `data:text/html;charset=utf-8,` + encodeURIComponent(`
 <!DOCTYPE html>
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline';">
   <title>启动异常 - HumanSense</title>
   <style>
     body {
@@ -448,24 +467,26 @@ function renderErrorHtml(title, errorMsg, stack = '') {
       font-size: 12px;
       color: #7f93a5;
     }
-    button {
+    .btn {
+      display: inline-block;
       margin-top: 16px;
       background: #2481cc;
       color: white;
-      border: none;
+      text-decoration: none;
       padding: 10px 20px;
       border-radius: 6px;
       cursor: pointer;
       font-weight: 600;
+      font-size: 13px;
     }
-    button:hover { background: #1a6fb0; }
+    .btn:hover { background: #1a6fb0; }
   </style>
 </head>
 <body>
-  <h2>⚠️ ${title}</h2>
-  <div class="box">${errorMsg}\n\n${stack}</div>
-  <p class="hint">详细日志已保存至: ${getLogFilePath()}</p>
-  <button onclick="location.reload()">重新载入</button>
+  <h2>⚠️ ${safeTitle}</h2>
+  <div class="box">${safeErrorMsg}${safeStack ? `\n\n${safeStack}` : ''}</div>
+  <p class="hint">详细日志已保存至: ${safeLogPath}</p>
+  <a class="btn" href="http://127.0.0.1:${retryPort}/">重新载入</a>
 </body>
 </html>
 `);

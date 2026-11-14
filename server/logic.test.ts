@@ -2268,7 +2268,7 @@ test('Telegram account isolation, encrypted session hardening, and expiry detect
 
   const testPhoneValid = `+1999${Date.now().toString().slice(-7)}`;
   const testPhonePlain = `+1888${Date.now().toString().slice(-7)}`;
-  await restoreDatabaseSnapshot({
+  const sessionRestoreRes = await restoreDatabaseSnapshot({
     tables: {
       telegram_user_sessions: [
         {
@@ -2295,8 +2295,9 @@ test('Telegram account isolation, encrypted session hardening, and expiry detect
   const plainRow = await db.prepare('SELECT * FROM telegram_user_sessions WHERE phone = ?').get(testPhonePlain);
   const validRow = await db.prepare('SELECT * FROM telegram_user_sessions WHERE phone = ?').get(testPhoneValid) as any;
   assert.equal(plainRow, undefined);
-  assert.equal(validRow?.user_id, 'u_enc');
-  await db.prepare('DELETE FROM telegram_user_sessions WHERE phone = ?').run(testPhoneValid);
+  assert.equal(validRow, undefined, 'restoreDatabaseSnapshot must never import telegram_user_sessions across machines');
+  assert.equal(sessionRestoreRes.restoredCounts.userSessions, 0);
+  assert.equal(sessionRestoreRes.restoredCounts.skippedUserSessions, 2);
 
   // 5. Runtime Telegram session expiry error classifier
   assert.equal(isTelegramSessionExpiredError({ errorMessage: 'AUTH_KEY_UNREGISTERED' }), true);
@@ -2891,17 +2892,41 @@ test('Commercialization Audit P0/P1 Fixes: socks dependency, proxy-forwarded pre
   assert.equal(dbModalSrc.includes("key.startsWith('tg_deleted_message_ids')"), true);
 });
 
-test('isAllowedClientOrigin blocks cross-site evil Origin even when Host is 127.0.0.1/localhost', () => {
-  const makeReq = (origin: string | undefined, host = '127.0.0.1:3000') =>
+test('isAllowedClientOrigin blocks cross-site evil Origin, wildcard run.app/google domains, and mismatched loopback ports', () => {
+  const makeReq = (origin: string | undefined, host = '127.0.0.1:3000', referer?: string) =>
     ({
-      headers: origin ? { origin } : {},
+      headers: {
+        ...(origin !== undefined ? { origin } : {}),
+        ...(referer !== undefined ? { referer } : {}),
+      },
       get: (name: string) => (name.toLowerCase() === 'host' ? host : undefined),
     }) as any;
 
+  // Untrusted external & previously-wildcarded domains must be rejected
   assert.equal(isAllowedClientOrigin(makeReq('https://evil.example', '127.0.0.1:3000')), false);
   assert.equal(isAllowedClientOrigin(makeReq('https://evil.example', 'localhost:3000')), false);
+  assert.equal(isAllowedClientOrigin(makeReq('https://evil.run.app', '127.0.0.1:3000')), false);
+  assert.equal(isAllowedClientOrigin(makeReq('https://evil.google.com', '127.0.0.1:3000')), false);
+  assert.equal(isAllowedClientOrigin(makeReq('https://evil.googleusercontent.com', '127.0.0.1:3000')), false);
+  assert.equal(isAllowedClientOrigin(makeReq('https://attacker.run.app', 'ais-dev-demo.us-west1.run.app')), false);
+  assert.equal(isAllowedClientOrigin(makeReq('https://ais-dev-demo.us-west1.run.app', 'ais-dev-demo.us-west1.run.app')), true);
+
+  // Null / empty Origin must be rejected even if Referer looks local
+  assert.equal(isAllowedClientOrigin(makeReq('null', '127.0.0.1:3000', 'http://127.0.0.1:3000/')), false);
+  assert.equal(isAllowedClientOrigin(makeReq('', '127.0.0.1:3000', 'http://127.0.0.1:3000/')), false);
+
+  // Mismatched loopback ports must be rejected
+  assert.equal(isAllowedClientOrigin(makeReq('http://localhost:9999', '127.0.0.1:3000')), false);
+  assert.equal(isAllowedClientOrigin(makeReq('http://127.0.0.1:8080', '127.0.0.1:38271')), false);
+  assert.equal(isAllowedClientOrigin(makeReq('http://[::1]:5173', '127.0.0.1:3000')), false);
+  assert.equal(isAllowedClientOrigin(makeReq('http://localhost', '127.0.0.1:3000')), false);
+  assert.equal(isAllowedClientOrigin(makeReq('http://localhost.evil.com:3000', '127.0.0.1:3000')), false);
+
+  // Matching loopback port & Electron schemes remain allowed
   assert.equal(isAllowedClientOrigin(makeReq('http://127.0.0.1:3000', '127.0.0.1:3000')), true);
   assert.equal(isAllowedClientOrigin(makeReq('http://localhost:3000', '127.0.0.1:3000')), true);
+  assert.equal(isAllowedClientOrigin(makeReq('http://[::1]:3000', '127.0.0.1:3000')), true);
+  assert.equal(isAllowedClientOrigin(makeReq('http://127.0.0.1:38271', 'localhost:38271')), true);
   assert.equal(isAllowedClientOrigin(makeReq('file://', '127.0.0.1:3000')), true);
   assert.equal(isAllowedClientOrigin(makeReq(undefined, '127.0.0.1:3000')), true);
 });
@@ -8315,14 +8340,1206 @@ test('P0 #2: Account-level FLOOD_WAIT circuit breaker, dialogs TTL cache, and el
   assert.match(apiServiceSrc, /recordClientTelegramFloodCooldown/);
 });
 
+test('P1: isBot webhook secret cannot access personal MTProto/admin/control endpoints or override accountId, ack-updates is account-scoped, and call endpoints verify ownership', async () => {
+  const http = await import('node:http');
+  const { createHmac } = await import('node:crypto');
+  const { db } = await import('../server/db.ts');
+  const {
+    app,
+    TELEGRAM_WEBHOOK_SECRET,
+    pendingLocalUpdates,
+    pushPendingLocalUpdate,
+    activeTelegramCalls,
+    activeAutonomousChats,
+  } = await import('../server.ts');
 
+  const prevJwtSecret = process.env.JWT_SECRET;
+  process.env.JWT_SECRET = 'p1_isbot_isolation_test_secret_12345';
 
+  const makeJwt = (sub: string) => {
+    const h = Buffer.from(JSON.stringify({ alg: 'HS256', typ: 'JWT' })).toString('base64url');
+    const p = Buffer.from(
+      JSON.stringify({ sub, username: sub, role: 'member', exp: Math.floor(Date.now() / 1000) + 3600 })
+    ).toString('base64url');
+    const s = createHmac('sha256', process.env.JWT_SECRET!).update(`${h}.${p}`).digest('base64url');
+    return `${h}.${p}.${s}`;
+  };
 
+  const memberJwt = makeJwt('member_p1_security');
+  const server = http.createServer(app);
+  await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
+  const port = (server.address() as any).port;
+  const baseUrl = `http://127.0.0.1:${port}`;
 
+  const updAcc1 = `upd_p1_acc1_${Date.now()}`;
+  const updAcc2 = `upd_p1_acc2_${Date.now()}`;
+  const callId1 = `call_p1_1001_${Date.now()}`;
+  let discardInvoked = false;
 
+  pushPendingLocalUpdate({
+    id: updAcc1,
+    chatId: 'tg_5001',
+    accountId: 'acc_tg_1001',
+    sender: 'peer',
+    senderName: 'Alice',
+    text: 'secret msg 1001',
+    timestamp: '10:00',
+    createdAt: Date.now(),
+  });
+  pushPendingLocalUpdate({
+    id: updAcc2,
+    chatId: 'tg_5002',
+    accountId: 'acc_tg_2002',
+    sender: 'peer',
+    senderName: 'Bob',
+    text: 'secret msg 2002',
+    timestamp: '10:01',
+    createdAt: Date.now(),
+  });
 
+  activeTelegramCalls.set(callId1, {
+    callId: callId1,
+    tgCallId: 987654321n,
+    accessHash: 123456789n,
+    accountId: 'acc_tg_1001',
+    userId: '1001',
+    ownerUserId: 'member_p1_security',
+    status: 'ringing',
+    startedAt: Date.now(),
+    client: {
+      invoke: async () => {
+        discardInvoked = true;
+        return {};
+      },
+    } as any,
+  });
 
+  const botHeaders = {
+    'Content-Type': 'application/json',
+    'X-Telegram-Bot-Api-Secret-Token': TELEGRAM_WEBHOOK_SECRET,
+  };
 
+  try {
+    // 1. isBot MUST be denied (403) on /api/admin/users/stats
+    const statsRes = await fetch(`${baseUrl}/api/admin/users/stats`, { headers: botHeaders });
+    assert.equal(statsRes.status, 403);
 
+    // 2. isBot MUST be denied (403) on poll-updates & ack-updates (with or without accountId)
+    const botPollAllRes = await fetch(`${baseUrl}/api/telegram/user/poll-updates`, { headers: botHeaders });
+    assert.equal(botPollAllRes.status, 403);
+    const botPollScopedRes = await fetch(`${baseUrl}/api/telegram/user/poll-updates?accountId=acc_tg_1001`, {
+      headers: botHeaders,
+    });
+    assert.equal(botPollScopedRes.status, 403);
 
+    const botAckRes = await fetch(`${baseUrl}/api/telegram/user/ack-updates`, {
+      method: 'POST',
+      headers: botHeaders,
+      body: JSON.stringify({ ids: [updAcc1, updAcc2] }),
+    });
+    assert.equal(botAckRes.status, 403);
+    assert.equal(pendingLocalUpdates.some((u) => u.id === updAcc1), true);
+    assert.equal(pendingLocalUpdates.some((u) => u.id === updAcc2), true);
+
+    // 3. isBot MUST be denied (403) on autopilot, batch-delete, forward, dialogs, and call endpoints even when claiming accountId
+    const botAutoGetRes = await fetch(`${baseUrl}/api/telegram/autopilot/status?accountId=acc_tg_1001&chatId=tg_5001`, {
+      headers: botHeaders,
+    });
+    assert.equal(botAutoGetRes.status, 403);
+
+    const botAutoToggleRes = await fetch(`${baseUrl}/api/telegram/autopilot/toggle`, {
+      method: 'POST',
+      headers: botHeaders,
+      body: JSON.stringify({ accountId: 'acc_tg_1001', chatId: 'tg_5001', enabled: true }),
+    });
+    assert.equal(botAutoToggleRes.status, 403);
+    assert.equal(activeAutonomousChats.has('acc_tg_1001::tg_5001'), false);
+
+    const botBatchDelRes = await fetch(`${baseUrl}/api/telegram/user/messages/batch-delete`, {
+      method: 'POST',
+      headers: botHeaders,
+      body: JSON.stringify({ accountId: 'acc_tg_1001', chatId: 'tg_5001', items: [{ id: 'x', localOnly: true }] }),
+    });
+    assert.equal(botBatchDelRes.status, 403);
+
+    const botForwardRes = await fetch(`${baseUrl}/api/telegram/user/messages/forward`, {
+      method: 'POST',
+      headers: botHeaders,
+      body: JSON.stringify({ accountId: 'acc_tg_1001', fromChatId: 'tg_5001', toChatId: 'tg_5002', telegramMessageIds: [1] }),
+    });
+    assert.equal(botForwardRes.status, 403);
+
+    const botDialogsRes = await fetch(`${baseUrl}/api/telegram/user/dialogs`, { headers: botHeaders });
+    assert.equal(botDialogsRes.status, 403);
+
+    const botCallStatusRes = await fetch(`${baseUrl}/api/telegram/user/call/status/${callId1}`, { headers: botHeaders });
+    assert.equal(botCallStatusRes.status, 403);
+
+    const botCallEndRes = await fetch(`${baseUrl}/api/telegram/user/call/end`, {
+      method: 'POST',
+      headers: botHeaders,
+      body: JSON.stringify({ callId: callId1, duration: 10 }),
+    });
+    assert.equal(botCallEndRes.status, 403);
+    assert.equal(discardInvoked, false);
+
+    // 4. isBot cannot override accountId on POST /api/chats/:chatId/language (body or header)
+    const botLangBodyBypassRes = await fetch(`${baseUrl}/api/chats/tg_5001/language`, {
+      method: 'POST',
+      headers: botHeaders,
+      body: JSON.stringify({ accountId: 'acc_tg_1001', sourceLang: 'en', targetLang: 'ja' }),
+    });
+    assert.equal(botLangBodyBypassRes.status, 403);
+
+    const botLangHeaderBypassRes = await fetch(`${baseUrl}/api/chats/tg_5001/language`, {
+      method: 'POST',
+      headers: { ...botHeaders, 'X-Account-Id': 'acc_tg_1001' },
+      body: JSON.stringify({ sourceLang: 'en', targetLang: 'ja' }),
+    });
+    assert.equal(botLangHeaderBypassRes.status, 403);
+
+    const leakedPref = await db
+      .prepare('SELECT * FROM chat_language_prefs WHERE account_id = ? AND chat_id = ?')
+      .get('acc_tg_1001', 'tg_5001');
+    assert.equal(leakedPref, undefined);
+
+    // 5. ack-updates under account 1 MUST NOT delete updates belonging to account 2
+    const crossAckRes = await fetch(`${baseUrl}/api/telegram/user/ack-updates`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${memberJwt}`,
+        'X-Account-Id': 'acc_tg_1001',
+      },
+      body: JSON.stringify({ ids: [updAcc1, updAcc2], accountId: 'acc_tg_1001' }),
+    });
+    assert.equal(crossAckRes.status, 200);
+    const crossAckJson = (await crossAckRes.json()) as any;
+    assert.equal(crossAckJson.ackedCount, 1);
+    assert.equal(pendingLocalUpdates.some((u) => u.id === updAcc1), false);
+    assert.equal(pendingLocalUpdates.some((u) => u.id === updAcc2), true);
+
+    // 6. Call status/end MUST enforce callId ownership by accountId
+    const wrongCallStatusRes = await fetch(`${baseUrl}/api/telegram/user/call/status/${callId1}`, {
+      headers: {
+        Authorization: `Bearer ${memberJwt}`,
+        'X-Account-Id': 'acc_tg_2002',
+      },
+    });
+    assert.equal(wrongCallStatusRes.status, 403);
+
+    const wrongCallEndRes = await fetch(`${baseUrl}/api/telegram/user/call/end`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${memberJwt}`,
+        'X-Account-Id': 'acc_tg_2002',
+      },
+      body: JSON.stringify({ callId: callId1, duration: 5 }),
+    });
+    assert.equal(wrongCallEndRes.status, 403);
+    assert.equal(discardInvoked, false);
+
+    // Owner account CAN view & end its own call
+    const ownerCallStatusRes = await fetch(`${baseUrl}/api/telegram/user/call/status/${callId1}`, {
+      headers: {
+        Authorization: `Bearer ${memberJwt}`,
+        'X-Account-Id': 'acc_tg_1001',
+      },
+    });
+    assert.equal(ownerCallStatusRes.status, 200);
+    const ownerCallStatusJson = (await ownerCallStatusRes.json()) as any;
+    assert.equal(ownerCallStatusJson.status, 'ringing');
+
+    const ownerCallEndRes = await fetch(`${baseUrl}/api/telegram/user/call/end`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${memberJwt}`,
+        'X-Account-Id': 'acc_tg_1001',
+      },
+      body: JSON.stringify({ callId: callId1, duration: 12 }),
+    });
+    assert.equal(ownerCallEndRes.status, 200);
+    assert.equal(discardInvoked, true);
+  } finally {
+    activeTelegramCalls.delete(callId1);
+    for (let i = pendingLocalUpdates.length - 1; i >= 0; i--) {
+      if (pendingLocalUpdates[i].id === updAcc1 || pendingLocalUpdates[i].id === updAcc2) {
+        pendingLocalUpdates.splice(i, 1);
+      }
+    }
+    await new Promise<void>((r) => server.close(() => r()));
+    if (prevJwtSecret === undefined) delete process.env.JWT_SECRET;
+    else process.env.JWT_SECRET = prevJwtSecret;
+  }
+});
+
+test('P1 #4: CSRF Origin enforcement blocks *.run.app/*.google.com/*.googleusercontent.com & wrong loopback ports on /api/auth/status and /api/auth/logout', async () => {
+  const http = await import('node:http');
+  const { createHmac } = await import('node:crypto');
+  const { app } = await import('../server.ts');
+
+  const prevJwtSecret = process.env.JWT_SECRET;
+  process.env.JWT_SECRET = 'p1_csrf_origin_test_secret_12345';
+
+  const makeJwt = (sub: string) => {
+    const h = Buffer.from(JSON.stringify({ alg: 'HS256', typ: 'JWT' })).toString('base64url');
+    const p = Buffer.from(
+      JSON.stringify({ sub, username: sub, role: 'member', exp: Math.floor(Date.now() / 1000) + 3600 })
+    ).toString('base64url');
+    const s = createHmac('sha256', process.env.JWT_SECRET!).update(`${h}.${p}`).digest('base64url');
+    return `${h}.${p}.${s}`;
+  };
+
+  const memberJwt = makeJwt('member_p1_csrf');
+  const server = http.createServer(app);
+  await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
+  const port = (server.address() as any).port;
+  const baseUrl = `http://127.0.0.1:${port}`;
+  const wrongPort = port === 9999 ? 9998 : 9999;
+
+  try {
+    // 1. GET /api/auth/status MUST reject evil *.run.app, *.google.com, *.googleusercontent.com, null, and mismatched loopback ports
+    const blockedStatusOrigins = [
+      { Origin: 'https://evil-app.run.app' },
+      { Origin: 'https://evil.google.com' },
+      { Origin: 'https://evil.googleusercontent.com' },
+      { Origin: `http://localhost:${wrongPort}` },
+      { Origin: `http://127.0.0.1:${wrongPort}` },
+      { Origin: 'null' },
+      { Referer: 'https://evil.googleusercontent.com/attack.html' },
+    ];
+    for (const hdrs of blockedStatusOrigins) {
+      const res = await fetch(`${baseUrl}/api/auth/status`, { headers: hdrs as any });
+      assert.equal(res.status, 403, `Expected 403 on /api/auth/status for ${JSON.stringify(hdrs)}`);
+      const body = (await res.json()) as any;
+      assert.equal(body.code, 'CSRF_ORIGIN_REJECTED');
+    }
+
+    // 2. GET /api/auth/status allows same-port loopback Origin and direct desktop requests without Origin
+    for (const hdrs of [
+      {},
+      { Origin: `http://127.0.0.1:${port}` },
+      { Origin: `http://localhost:${port}` },
+      { Referer: `http://127.0.0.1:${port}/` },
+    ]) {
+      const res = await fetch(`${baseUrl}/api/auth/status`, { headers: hdrs as any });
+      assert.equal(res.status, 200, `Expected 200 on /api/auth/status for ${JSON.stringify(hdrs)}`);
+    }
+
+    // 3. POST /api/auth/logout MUST reject evil *.run.app, *.googleusercontent.com, and mismatched loopback ports even with valid JWT
+    for (const badOrigin of [
+      'https://evil-app.run.app',
+      'https://evil.google.com',
+      'https://evil.googleusercontent.com',
+      `http://localhost:${wrongPort}`,
+      `http://127.0.0.1:${wrongPort}`,
+    ]) {
+      const res = await fetch(`${baseUrl}/api/auth/logout`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Origin: badOrigin,
+          Authorization: `Bearer ${memberJwt}`,
+        },
+        body: JSON.stringify({ revokeTelegramSessions: false }),
+      });
+      assert.equal(res.status, 403, `Expected 403 on /api/auth/logout for Origin ${badOrigin}`);
+      const body = (await res.json()) as any;
+      assert.equal(body.code, 'CSRF_ORIGIN_REJECTED');
+    }
+
+    // 4. POST /api/auth/logout succeeds with matching loopback port Origin
+    const okLogoutRes = await fetch(`${baseUrl}/api/auth/logout`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Origin: `http://localhost:${port}`,
+        Authorization: `Bearer ${memberJwt}`,
+      },
+      body: JSON.stringify({ revokeTelegramSessions: false }),
+    });
+    assert.equal(okLogoutRes.status, 200);
+    const okLogoutJson = (await okLogoutRes.json()) as any;
+    assert.equal(okLogoutJson.ok, true);
+  } finally {
+    await new Promise<void>((r) => server.close(() => r()));
+    if (prevJwtSecret === undefined) delete process.env.JWT_SECRET;
+    else process.env.JWT_SECRET = prevJwtSecret;
+  }
+});
+
+test('P1 #5: Backup PBKDF2+AES-GCM+HMAC encryption, 0o600 sealed disk snapshot, atomic db.transaction rollback, strict schema/row validation, and secondary RESTORE auth', async () => {
+  const http = await import('node:http');
+  const fs = await import('node:fs');
+  const { resolve } = await import('node:path');
+  const { createHmac } = await import('node:crypto');
+  const {
+    db,
+    exportDatabaseSnapshot,
+    restoreDatabaseSnapshot,
+    autoRestoreSnapshotIfAvailable,
+    snapshotFilePath,
+    SnapshotValidationError,
+    BACKUP_MAX_ROWS_PER_TABLE,
+    encryptBackupEnvelope,
+    decryptBackupEnvelope,
+    isEncryptedBackupEnvelope,
+    isDiskSnapshotEnvelope,
+  } = await import('../server/db.ts');
+  const { encryptBackupWithPassphrase, decryptBackupWithPassphrase } = await import(
+    '../src/services/backupCrypto.ts'
+  );
+  const { app } = await import('../server.ts');
+
+  const prevJwtSecret = process.env.JWT_SECRET;
+  process.env.JWT_SECRET = 'p1_backup_hardening_test_secret_12345';
+
+  const h = Buffer.from(JSON.stringify({ alg: 'HS256', typ: 'JWT' })).toString('base64url');
+  const p = Buffer.from(
+    JSON.stringify({ sub: 'member_p1_backup', username: 'member_p1_backup', role: 'member', exp: Math.floor(Date.now() / 1000) + 3600 })
+  ).toString('base64url');
+  const s = createHmac('sha256', process.env.JWT_SECRET).update(`${h}.${p}`).digest('base64url');
+  const memberJwt = `${h}.${p}.${s}`;
+
+  const server = http.createServer(app);
+  await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
+  const port = (server.address() as any).port;
+  const baseUrl = `http://127.0.0.1:${port}`;
+
+  const sentinelMsgId = `msg_p1_tx_sentinel_${Date.now()}`;
+  const sentinelChatId = `tg_p1_tx_${Date.now()}`;
+  const secretPhrase = 'ConfidentialSecretPhrase_987654';
+  const now = Date.now();
+
+  try {
+    // 1. Real db.transaction rollback: error mid-transaction MUST roll back prior inserts
+    await assert.rejects(
+      () =>
+        db.transaction(async () => {
+          await db.prepare(
+            `INSERT INTO messages (id, chat_id, account_id, sender, text, timestamp, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`
+          ).run(sentinelMsgId, sentinelChatId, 'acc_tx', 'peer', 'MustRollBackText', '12:00', now);
+          throw new Error('SIMULATED_MID_RESTORE_FAILURE');
+        })(),
+      /SIMULATED_MID_RESTORE_FAILURE/
+    );
+    const rolledBackRow = await db.prepare('SELECT * FROM messages WHERE id = ?').get(sentinelMsgId);
+    assert.equal(rolledBackRow, undefined, 'db.transaction must roll back earlier writes on failure');
+
+    // 2. exportDatabaseSnapshot writes encrypted 0o600 disk snapshot (no plaintext message leak on disk)
+    await db.prepare(
+      `INSERT INTO messages (id, chat_id, account_id, sender, text, timestamp, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`
+    ).run(sentinelMsgId, sentinelChatId, 'acc_tx', 'peer', secretPhrase, '12:01', now);
+
+    const exported = await exportDatabaseSnapshot();
+    assert.ok(fs.existsSync(snapshotFilePath));
+    const diskRaw = fs.readFileSync(snapshotFilePath, 'utf8');
+    assert.equal(diskRaw.includes(secretPhrase), false, 'telegram_pro_snapshot.json on disk must NOT contain plaintext');
+    const diskParsed = JSON.parse(diskRaw);
+    assert.equal(isDiskSnapshotEnvelope(diskParsed), true);
+    if (process.platform !== 'win32') {
+      const mode = fs.statSync(snapshotFilePath).mode & 0o777;
+      assert.equal(mode, 0o600, 'telegram_pro_snapshot.json must enforce 0o600 permissions');
+    }
+
+    // Tampered disk snapshot must fail integrity check and NOT restore
+    await db.prepare('DELETE FROM messages WHERE id = ?').run(sentinelMsgId);
+    const tamperedDisk = { ...diskParsed, ciphertext: diskParsed.ciphertext.slice(0, -4) + 'AAAA' };
+    fs.writeFileSync(snapshotFilePath, JSON.stringify(tamperedDisk), { mode: 0o600 });
+    const tamperedRecovered = await autoRestoreSnapshotIfAvailable();
+    assert.equal(tamperedRecovered, false);
+    assert.equal(await db.prepare('SELECT * FROM messages WHERE id = ?').get(sentinelMsgId), undefined);
+
+    // Valid sealed disk snapshot restores cleanly
+    fs.writeFileSync(snapshotFilePath, diskRaw, { mode: 0o600 });
+    const okRecovered = await autoRestoreSnapshotIfAvailable();
+    assert.equal(okRecovered, true);
+    const recoveredRow = (await db.prepare('SELECT text FROM messages WHERE id = ?').get(sentinelMsgId)) as any;
+    assert.equal(recoveredRow?.text, secretPhrase);
+
+    // 3. Cross-compatibility between Node crypto (server/db.ts) & Web Crypto (src/services/backupCrypto.ts)
+    const samplePayload = {
+      sqliteSnapshot: exported,
+      decryptedPayload: { tg_master_voiceprint: { id: 'vp_1', sampleRate: 16000 } },
+    };
+    const webEncrypted = await encryptBackupWithPassphrase(samplePayload, 'StrongPass!2026');
+    assert.equal(isEncryptedBackupEnvelope(webEncrypted), true);
+    assert.equal(JSON.stringify(webEncrypted).includes(secretPhrase), false);
+    assert.equal(JSON.stringify(webEncrypted).includes('tg_master_voiceprint'), false);
+
+    // Node decrypts Web Crypto envelope & Web Crypto decrypts Node envelope
+    const nodeDecrypted = decryptBackupEnvelope<any>(webEncrypted, 'StrongPass!2026');
+    assert.equal(nodeDecrypted.decryptedPayload.tg_master_voiceprint.id, 'vp_1');
+
+    const nodeEncrypted = encryptBackupEnvelope(samplePayload, 'StrongPass!2026');
+    const webDecrypted = await decryptBackupWithPassphrase<any>(nodeEncrypted, 'StrongPass!2026');
+    assert.equal(webDecrypted.decryptedPayload.tg_master_voiceprint.id, 'vp_1');
+
+    // Wrong passphrase or tampered HMAC/ciphertext rejected
+    assert.throws(() => decryptBackupEnvelope(webEncrypted, 'WrongPass!2026'), /口令错误|完整性校验失败/);
+    await assert.rejects(() => decryptBackupWithPassphrase(nodeEncrypted, 'WrongPass!2026'), /口令错误|完整性校验失败/);
+    const tamperedEnvelope = { ...nodeEncrypted, version: 'tampered_v9' as any };
+    assert.throws(() => decryptBackupEnvelope(tamperedEnvelope, 'StrongPass!2026'), /篡改|参数/);
+
+    // 4. Strict field & row-count validation rejects malformed snapshots
+    await assert.rejects(
+      () => restoreDatabaseSnapshot({ tables: { app_users: [{ id: 'x' }] } }),
+      (err: any) => err instanceof SnapshotValidationError
+    );
+    await assert.rejects(
+      () =>
+        restoreDatabaseSnapshot({
+          tables: {
+            messages: [{ id: '', chat_id: 'c', account_id: 'a', sender: 'me', timestamp: '10:00', created_at: now }],
+          },
+        }),
+      (err: any) => err instanceof SnapshotValidationError
+    );
+    await assert.rejects(
+      () =>
+        restoreDatabaseSnapshot({
+          tables: {
+            messages: [{ id: 'm1', chat_id: 'c', account_id: 'a', sender: 'hacker', text: 'hi', timestamp: '10:00', created_at: now }],
+          },
+        }),
+      (err: any) => err instanceof SnapshotValidationError
+    );
+    const oversizedRows = new Array(BACKUP_MAX_ROWS_PER_TABLE + 1).fill({ id: 'x' });
+    await assert.rejects(
+      () => restoreDatabaseSnapshot({ tables: { messages: oversizedRows } }),
+      (err: any) => err instanceof SnapshotValidationError && /上限/.test(err.message)
+    );
+
+    // 5. HTTP endpoints: /api/database/backup & /api/database/restore
+    // 5a. Direct GET /api/database/backup returns sealed envelope (no plaintext chat leakage)
+    const directBackupRes = await fetch(`${baseUrl}/api/database/backup`, {
+      headers: { Authorization: `Bearer ${memberJwt}` },
+    });
+    assert.equal(directBackupRes.status, 200);
+    const directBackupText = await directBackupRes.text();
+    assert.equal(directBackupText.includes(secretPhrase), false);
+    assert.equal(isDiskSnapshotEnvelope(JSON.parse(directBackupText)), true);
+
+    // 5b. POST /api/database/backup requires >=8 char passphrase and returns encrypted envelope
+    const shortPassRes = await fetch(`${baseUrl}/api/database/backup`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${memberJwt}` },
+      body: JSON.stringify({ passphrase: '123' }),
+    });
+    assert.equal(shortPassRes.status, 400);
+
+    const encExportRes = await fetch(`${baseUrl}/api/database/backup`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${memberJwt}` },
+      body: JSON.stringify({ passphrase: 'BackupKey_2026!' }),
+    });
+    assert.equal(encExportRes.status, 200);
+    const encExportJson = (await encExportRes.json()) as any;
+    assert.equal(isEncryptedBackupEnvelope(encExportJson), true);
+
+    // 5c. POST /api/database/restore requires confirmPhrase ('RESTORE') secondary confirmation
+    const missingPhraseRes = await fetch(`${baseUrl}/api/database/restore?confirm=true`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${memberJwt}` },
+      body: JSON.stringify({ snapshot: exported, confirm: true }),
+    });
+    assert.equal(missingPhraseRes.status, 400);
+    const missingPhraseJson = (await missingPhraseRes.json()) as any;
+    assert.equal(missingPhraseJson.code, 'RESTORE_CONFIRMATION_PHRASE_REQUIRED');
+    assert.equal(missingPhraseJson.requiresSecondaryInput, true);
+
+    // 5d. POST /api/database/restore returns 400 INVALID_SNAPSHOT_SCHEMA on invalid table/fields
+    const badSchemaRes = await fetch(`${baseUrl}/api/database/restore?confirm=true`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${memberJwt}` },
+      body: JSON.stringify({
+        snapshot: { tables: { app_users: [{ id: 'evil' }] } },
+        confirm: true,
+        confirmPhrase: 'RESTORE',
+      }),
+    });
+    assert.equal(badSchemaRes.status, 400);
+    const badSchemaJson = (await badSchemaRes.json()) as any;
+    assert.equal(badSchemaJson.code, 'INVALID_SNAPSHOT_SCHEMA');
+
+    // 5e. POST /api/database/restore decrypts & restores encrypted backup atomically with confirmPhrase='RESTORE'
+    await db.prepare('DELETE FROM messages WHERE id = ?').run(sentinelMsgId);
+    const restoreOkRes = await fetch(`${baseUrl}/api/database/restore?confirm=true`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${memberJwt}` },
+      body: JSON.stringify({
+        backup: encExportJson,
+        passphrase: 'BackupKey_2026!',
+        confirm: true,
+        confirmPhrase: 'RESTORE',
+      }),
+    });
+    assert.equal(restoreOkRes.status, 200);
+    const restoreOkJson = (await restoreOkRes.json()) as any;
+    assert.equal(restoreOkJson.success, true);
+    const finalRestoredRow = (await db.prepare('SELECT text FROM messages WHERE id = ?').get(sentinelMsgId)) as any;
+    assert.equal(finalRestoredRow?.text, secretPhrase);
+
+    // 6. DatabaseModal.tsx contract checks
+    const modalSrc = fs.readFileSync(resolve(process.cwd(), 'src/components/DatabaseModal.tsx'), 'utf8');
+    assert.equal(modalSrc.includes('encryptBackupWithPassphrase'), true);
+    assert.equal(modalSrc.includes('decryptBackupWithPassphrase'), true);
+    assert.equal(modalSrc.includes('RESTORE'), true);
+    assert.equal(/\b(alert|prompt)\s*\(/.test(modalSrc), false);
+  } finally {
+    await db.prepare('DELETE FROM messages WHERE id = ?').run(sentinelMsgId).catch(() => {});
+    await new Promise<void>((r) => server.close(() => r()));
+    if (prevJwtSecret === undefined) delete process.env.JWT_SECRET;
+    else process.env.JWT_SECRET = prevJwtSecret;
+  }
+});
+
+test('P2 #6: Electron error page HTML escaping, strict Helmet CSP, and frontend file/media URL protocol allowlist', async () => {
+  const fs = await import('node:fs');
+  const http = await import('node:http');
+  const vm = await import('node:vm');
+  const { resolve } = await import('node:path');
+  const { app, buildCspDirectives } = await import('../server.ts');
+  const { sanitizeSafeResourceUrl, isSafeResourceUrl } = await import('../src/services/urlSafety.ts');
+
+  // 1. Electron main.cjs renderErrorHtml XSS escaping & script-none CSP meta tag
+  const mainCjsSrc = fs.readFileSync(resolve(process.cwd(), 'main.cjs'), 'utf8');
+  const fnSliceMatch = mainCjsSrc.match(
+    /function escapeHtml\(value\)[\s\S]*?function renderErrorHtml\(title, errorMsg, stack = ''\)[\s\S]*?\n\}/
+  );
+  assert.ok(fnSliceMatch, 'Expected escapeHtml and renderErrorHtml definitions in main.cjs');
+
+  const sandbox: Record<string, any> = {
+    currentPort: 38271,
+    FIXED_APP_PORT: 38271,
+    getLogFilePath: () => 'C:\\Users\\<svg onload=alert(9)>\\startup.log',
+    encodeURIComponent,
+    Number,
+    String,
+  };
+  vm.runInNewContext(`${fnSliceMatch[0]}\nthis.__renderErrorHtml = renderErrorHtml;`, sandbox);
+
+  const errorDataUrl = sandbox.__renderErrorHtml(
+    `<script>alert(1)</script> & "oops"`,
+    `<img src=x onerror="fetch('https://evil.test')">`,
+    `Error at 'C:\\Users\\<b>test</b>\\app.js'`
+  );
+  assert.equal(errorDataUrl.startsWith('data:text/html;charset=utf-8,'), true);
+  const decodedErrorHtml = decodeURIComponent(errorDataUrl.slice('data:text/html;charset=utf-8,'.length));
+  assert.equal(
+    decodedErrorHtml.includes('<meta http-equiv="Content-Security-Policy" content="default-src \'none\'; style-src \'unsafe-inline\';">'),
+    true
+  );
+  assert.equal(/\bonclick\s*=/i.test(decodedErrorHtml), false);
+  assert.equal(/<script\b/i.test(decodedErrorHtml), false);
+  assert.equal(/<img\b/i.test(decodedErrorHtml), false);
+  assert.equal(/<svg\b/i.test(decodedErrorHtml), false);
+  assert.equal(decodedErrorHtml.includes('&lt;script&gt;alert(1)&lt;&#x2F;script&gt;'), true);
+  assert.equal(decodedErrorHtml.includes('&lt;img src=x onerror=&quot;'), true);
+  assert.equal(decodedErrorHtml.includes('&lt;svg onload=alert(9)&gt;'), true);
+
+  // 2. Helmet CSP tightening in server.ts
+  for (const strictOpts of [
+    { isProduction: true, isElectron: false },
+    { isProduction: false, isElectron: true },
+    { isProduction: true, isElectron: true },
+  ]) {
+    const strictDirectives = buildCspDirectives(strictOpts);
+    assert.deepEqual(strictDirectives.scriptSrc, ["'self'"]);
+    assert.deepEqual(strictDirectives.scriptSrcAttr, ["'none'"]);
+    assert.deepEqual(strictDirectives.frameAncestors, ["'self'"]);
+    assert.deepEqual(strictDirectives.baseUri, ["'self'"]);
+    assert.deepEqual(strictDirectives.formAction, ["'self'"]);
+    assert.deepEqual(strictDirectives.objectSrc, ["'none'"]);
+  }
+
+  const devDirectives = buildCspDirectives({ isProduction: false, isElectron: false });
+  assert.equal(devDirectives.scriptSrc.includes("'unsafe-eval'"), false);
+  assert.equal(devDirectives.frameAncestors.includes('*'), false);
+
+  const server = http.createServer(app);
+  await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
+  const port = (server.address() as any).port;
+  try {
+    const res = await fetch(`http://127.0.0.1:${port}/api/health`);
+    const cspHeader = res.headers.get('content-security-policy') || '';
+    assert.ok(cspHeader.includes("object-src 'none'"));
+    assert.ok(cspHeader.includes("script-src-attr 'none'"));
+    assert.equal(cspHeader.includes("'unsafe-eval'"), false);
+    assert.equal(cspHeader.includes('frame-ancestors \'self\' *'), false);
+  } finally {
+    await new Promise<void>((r) => server.close(() => r()));
+  }
+
+  // 3. Frontend URL protocol allowlist (sanitizeSafeResourceUrl)
+  const dangerousUrls = [
+    'javascript:alert(1)',
+    '  JaVaScRiPt:alert(document.cookie)',
+    'java\tscript:alert(1)',
+    '\njavascript:alert(1)',
+    'vbscript:msgbox(1)',
+    'file:///C:/Windows/System32/calc.exe',
+    'data:text/html,<script>alert(1)</script>',
+    'data:image/svg+xml,<svg onload=alert(1)>',
+    'data:image/svg+xml;base64,PHN2Zy8+',
+    'blob:javascript:alert(1)',
+    '//evil.example/payload.js',
+    '/\\evil.example/payload.js',
+    '#',
+    '',
+    '/other/path',
+  ];
+  for (const badUrl of dangerousUrls) {
+    assert.equal(sanitizeSafeResourceUrl(badUrl), '', `Expected dangerous URL to be blocked: ${JSON.stringify(badUrl)}`);
+    assert.equal(isSafeResourceUrl(badUrl), false);
+  }
+
+  const safeUrls = [
+    '/api/telegram/user/media/tg_123/45?accountId=acc_1&exp=9999999999&sig=abc',
+    'https://cdn.telegram.org/file/123.pdf',
+    'http://127.0.0.1:38271/api/telegram/user/avatar/123',
+    'blob:https://127.0.0.1:38271/550e8400-e29b-41d4-a716-446655440000',
+    'data:image/png;base64,iVBORw0KGgo=',
+    'data:audio/mpeg;base64,SUQzAw==',
+    'data:video/mp4;base64,AAAAIGZ0eXA=',
+  ];
+  for (const okUrl of safeUrls) {
+    assert.equal(sanitizeSafeResourceUrl(okUrl), okUrl, `Expected safe URL to be allowed: ${okUrl}`);
+    assert.equal(isSafeResourceUrl(okUrl), true);
+  }
+
+  // 4. ChatArea & TelegramChatInfoDrawer source contracts
+  const chatAreaSrc = fs.readFileSync(resolve(process.cwd(), 'src/components/ChatArea.tsx'), 'utf8');
+  const infoDrawerSrc = fs.readFileSync(resolve(process.cwd(), 'src/components/TelegramChatInfoDrawer.tsx'), 'utf8');
+  assert.equal(chatAreaSrc.includes('sanitizeSafeResourceUrl'), true);
+  assert.equal(infoDrawerSrc.includes('sanitizeSafeResourceUrl'), true);
+  assert.equal(chatAreaSrc.includes("resolveDisplayUrl(msg.fileUrl) || '#'"), false);
+  assert.equal(chatAreaSrc.includes('msg.fileUrl!'), false);
+});
+
+test('P1: Runtime Map bounds, QR 2FA/8-error socket cleanup, change-phone/call TTLs, sticker byte LRU, and periodic pruning', async () => {
+  const fs = await import('node:fs');
+  const { resolve } = await import('node:path');
+  const {
+    activeQrSessions,
+    armQrPasswordTimeout,
+    pruneExpiredQrSessions,
+    MAX_ACTIVE_QR_SESSIONS,
+    QR_SESSION_2FA_TIMEOUT_MS,
+    pendingChangePhoneSessions,
+    CHANGE_PHONE_SESSION_TTL_MS,
+    MAX_PENDING_CHANGE_PHONE_SESSIONS,
+    activeTelegramCalls,
+    CALL_DISCARDED_TTL_MS,
+    CALL_RINGING_MAX_TTL_MS,
+    MAX_ACTIVE_TELEGRAM_CALLS,
+    telegramStickerThumbCache,
+    TELEGRAM_STICKER_CACHE_MAX_BYTES,
+    TELEGRAM_STICKER_CACHE_MAX_ENTRIES,
+    revokedJwtTokens,
+    MAX_REVOKED_JWT_TOKENS,
+    recentlySentOutboundCache,
+    recentlySentOutboundIds,
+    processedMtprotoMsgIds,
+    MAX_RECENT_OUTBOUND_IDS,
+    MAX_RECENT_OUTBOUND_CACHE,
+    MAX_PROCESSED_MTPROTO_MSG_IDS,
+    MTPROTO_DEDUP_TTL_MS,
+    inMemoryCloudTelegramCreds,
+    MAX_IN_MEMORY_CLOUD_TG_CREDS,
+    pruneServerRuntimeCaches,
+  } = await import('../server.ts');
+
+  const baseNow = Date.now();
+  try {
+    // 1. activeQrSessions: 2FA timeout destroys socket & deletes session; 8-error path deletes session
+    let destroyedCount = 0;
+    const mockClient = {
+      disconnect: async () => {
+        destroyedCount++;
+      },
+      destroy: async () => {
+        destroyedCount++;
+      },
+    } as any;
+
+    const qr2faSession: any = {
+      client: mockClient,
+      sessionId: 'qr_2fa_timeout_test',
+      apiId: 123,
+      apiHash: 'abc',
+      token: Buffer.from('t'),
+      expires: Math.floor(baseNow / 1000) + 60,
+      qrUrl: 'tg://login?token=t',
+      isAuthorized: false,
+      createdAt: baseNow,
+    };
+    activeQrSessions.set(qr2faSession.sessionId, qr2faSession);
+    armQrPasswordTimeout(qr2faSession, 40);
+    assert.equal(qr2faSession.needsPassword, true);
+    await new Promise((r) => setTimeout(r, 90));
+    assert.equal(activeQrSessions.has(qr2faSession.sessionId), false);
+    assert.equal(qr2faSession.isStopped, true);
+    assert.ok(destroyedCount >= 1, 'Expected 2FA timeout to destroy GramJS client');
+
+    // Prune expired 2FA session & enforce MAX_ACTIVE_QR_SESSIONS
+    activeQrSessions.set('qr_stale_2fa', {
+      client: mockClient,
+      sessionId: 'qr_stale_2fa',
+      apiId: 1,
+      apiHash: 'h',
+      token: Buffer.from('x'),
+      expires: 0,
+      qrUrl: 'tg://login?token=x',
+      isAuthorized: false,
+      needsPassword: true,
+      needsPasswordAt: baseNow - QR_SESSION_2FA_TIMEOUT_MS - 1000,
+      createdAt: baseNow - QR_SESSION_2FA_TIMEOUT_MS - 2000,
+    });
+    for (let i = 0; i < MAX_ACTIVE_QR_SESSIONS + 4; i++) {
+      activeQrSessions.set(`qr_cap_${i}`, {
+        client: mockClient,
+        sessionId: `qr_cap_${i}`,
+        apiId: 1,
+        apiHash: 'h',
+        token: Buffer.from('x'),
+        expires: 0,
+        qrUrl: 'tg://login?token=x',
+        isAuthorized: false,
+        isScanned: true,
+        createdAt: baseNow,
+      });
+    }
+    pruneExpiredQrSessions(baseNow);
+    assert.equal(activeQrSessions.has('qr_stale_2fa'), false);
+    assert.ok(activeQrSessions.size <= MAX_ACTIVE_QR_SESSIONS);
+    activeQrSessions.clear();
+
+    // Verify server.ts pollErrorCount >= 8 calls activeQrSessions.delete(sessionId)
+    const serverSrc = fs.readFileSync(resolve(process.cwd(), 'server.ts'), 'utf8');
+    assert.match(
+      serverSrc,
+      /if\s*\(sessionObj\.pollErrorCount\s*>=\s*8\)[\s\S]*?destroyTelegramClientSafely\(sessionObj\.client\)[\s\S]*?activeQrSessions\.delete\(sessionId\)/
+    );
+
+    // 2. pendingChangePhoneSessions TTL + cap
+    pendingChangePhoneSessions.set('u_expired', {
+      userId: 'u_expired',
+      newPhone: '+8613800000001',
+      phoneCodeHash: 'h1',
+      createdAt: baseNow - CHANGE_PHONE_SESSION_TTL_MS - 1000,
+    });
+    for (let i = 0; i < MAX_PENDING_CHANGE_PHONE_SESSIONS + 5; i++) {
+      pendingChangePhoneSessions.set(`u_live_${i}`, {
+        userId: `u_live_${i}`,
+        newPhone: '+8613800000002',
+        phoneCodeHash: `h_${i}`,
+        createdAt: baseNow,
+      });
+    }
+
+    // 3. activeTelegramCalls TTL (discarded 30s, ringing 5m) + cap
+    activeTelegramCalls.set('call_disc_expired', {
+      callId: 'call_disc_expired',
+      tgCallId: 1,
+      accessHash: 1,
+      client: mockClient,
+      accountId: 'acc_tg_1',
+      status: 'discarded',
+      startedAt: baseNow - 60_000,
+      discardedAt: baseNow - CALL_DISCARDED_TTL_MS - 1000,
+    });
+    activeTelegramCalls.set('call_ring_expired', {
+      callId: 'call_ring_expired',
+      tgCallId: 2,
+      accessHash: 2,
+      client: mockClient,
+      accountId: 'acc_tg_1',
+      status: 'ringing',
+      startedAt: baseNow - CALL_RINGING_MAX_TTL_MS - 1000,
+    });
+    for (let i = 0; i < MAX_ACTIVE_TELEGRAM_CALLS + 6; i++) {
+      activeTelegramCalls.set(`call_live_${i}`, {
+        callId: `call_live_${i}`,
+        tgCallId: 100 + i,
+        accessHash: 1,
+        client: mockClient,
+        accountId: 'acc_tg_1',
+        status: 'accepted',
+        startedAt: baseNow,
+      });
+    }
+
+    // 4. telegramStickerThumbCache uses BoundedByteLruCache with byte + entry limits
+    const stickerStats = telegramStickerThumbCache.stats();
+    assert.equal(stickerStats.maxBytes, TELEGRAM_STICKER_CACHE_MAX_BYTES);
+    assert.equal(stickerStats.maxEntries, TELEGRAM_STICKER_CACHE_MAX_ENTRIES);
+    telegramStickerThumbCache.set(
+      'sticker_expired',
+      { buffer: Buffer.alloc(1024, 1), mime: 'image/webp', expiresAt: baseNow - 1000 },
+      baseNow - 2000
+    );
+    assert.equal(telegramStickerThumbCache.get('sticker_expired', baseNow), undefined);
+
+    // 5. revokedJwtTokens, dedup caches, and inMemoryCloudTelegramCreds TTL + hard caps
+    revokedJwtTokens.set('expired_hash', baseNow - 1000);
+    for (let i = 0; i < MAX_REVOKED_JWT_TOKENS + 10; i++) {
+      revokedJwtTokens.set(`live_hash_${i}`, baseNow + 60_000);
+    }
+
+    recentlySentOutboundIds.set('old_out_id', baseNow - 1000);
+    for (let i = 0; i < MAX_RECENT_OUTBOUND_IDS + 15; i++) {
+      recentlySentOutboundIds.set(`live_out_id_${i}`, baseNow + 30_000);
+    }
+
+    recentlySentOutboundCache.set('old_out_msg', { count: 1, expiresAt: baseNow - 1000 });
+    for (let i = 0; i < MAX_RECENT_OUTBOUND_CACHE + 15; i++) {
+      recentlySentOutboundCache.set(`live_out_msg_${i}`, { count: 1, expiresAt: baseNow + 30_000 });
+    }
+
+    processedMtprotoMsgIds.set('old_mtproto_id', baseNow - MTPROTO_DEDUP_TTL_MS - 1000);
+    for (let i = 0; i < MAX_PROCESSED_MTPROTO_MSG_IDS + 15; i++) {
+      processedMtprotoMsgIds.set(`live_mtproto_${i}`, baseNow);
+    }
+
+    inMemoryCloudTelegramCreds.set('expired_cred', {
+      apiId: 1,
+      apiHash: 'old',
+      source: 'cloud_authorized',
+      fetchedAt: baseNow - 13 * 60 * 60 * 1000,
+    });
+    for (let i = 0; i < MAX_IN_MEMORY_CLOUD_TG_CREDS + 8; i++) {
+      inMemoryCloudTelegramCreds.set(`live_cred_${i}`, {
+        apiId: 1,
+        apiHash: 'ok',
+        source: 'cloud_authorized',
+        fetchedAt: baseNow,
+      });
+    }
+
+    const pruned = pruneServerRuntimeCaches(baseNow);
+    assert.ok(pruned.changePhoneRemoved >= 6);
+    assert.equal(pendingChangePhoneSessions.has('u_expired'), false);
+    assert.ok(pendingChangePhoneSessions.size <= MAX_PENDING_CHANGE_PHONE_SESSIONS);
+
+    assert.ok(pruned.callsRemoved >= 8);
+    assert.equal(activeTelegramCalls.has('call_disc_expired'), false);
+    assert.equal(activeTelegramCalls.has('call_ring_expired'), false);
+    assert.ok(activeTelegramCalls.size <= MAX_ACTIVE_TELEGRAM_CALLS);
+
+    assert.ok(pruned.jwtRemoved >= 11);
+    assert.equal(revokedJwtTokens.has('expired_hash'), false);
+    assert.ok(revokedJwtTokens.size <= MAX_REVOKED_JWT_TOKENS);
+
+    assert.ok(pruned.outboundIdsRemoved >= 16);
+    assert.equal(recentlySentOutboundIds.has('old_out_id'), false);
+    assert.ok(recentlySentOutboundIds.size <= MAX_RECENT_OUTBOUND_IDS);
+
+    assert.ok(pruned.outboundCacheRemoved >= 16);
+    assert.equal(recentlySentOutboundCache.has('old_out_msg'), false);
+    assert.ok(recentlySentOutboundCache.size <= MAX_RECENT_OUTBOUND_CACHE);
+
+    assert.ok(pruned.mtprotoIdsRemoved >= 16);
+    assert.equal(processedMtprotoMsgIds.has('old_mtproto_id'), false);
+    assert.ok(processedMtprotoMsgIds.size <= MAX_PROCESSED_MTPROTO_MSG_IDS);
+
+    assert.ok(pruned.credsRemoved >= 9);
+    assert.equal(inMemoryCloudTelegramCreds.has('expired_cred'), false);
+    assert.ok(inMemoryCloudTelegramCreds.size <= MAX_IN_MEMORY_CLOUD_TG_CREDS);
+  } finally {
+    activeQrSessions.clear();
+    pendingChangePhoneSessions.clear();
+    activeTelegramCalls.clear();
+    telegramStickerThumbCache.clear();
+    revokedJwtTokens.clear();
+    recentlySentOutboundIds.clear();
+    recentlySentOutboundCache.clear();
+    processedMtprotoMsgIds.clear();
+    inMemoryCloudTelegramCreds.clear();
+  }
+});
+
+test('P1: Telegram Bot long-polling aborts immediately on gracefulShutdownServer and backs off on HTTP 429/502', async () => {
+  const {
+    startTelegramBotLongPolling,
+    stopTelegramBotLongPolling,
+    getBotPollingState,
+    computeBotPollingBackoffMs,
+    gracefulShutdownServer,
+  } = await import('../server.ts');
+
+  // 1. Backoff computation honors Retry-After and exponential progression
+  assert.equal(computeBotPollingBackoffMs(1, undefined, 4000), 4000);
+  assert.equal(computeBotPollingBackoffMs(2, undefined, 4000), 8000);
+  assert.equal(computeBotPollingBackoffMs(3, undefined, 4000), 16000);
+  assert.equal(computeBotPollingBackoffMs(1, 12, 4000), 12000);
+  assert.equal(computeBotPollingBackoffMs(10, undefined, 4000), 60000);
+
+  // 2. Simulate getWebhookInfo -> empty, then 429, 502, then hanging 20s getUpdates aborted by gracefulShutdownServer
+  const pollCallTimes: number[] = [];
+  let inFlightAborted = false;
+  let getUpdatesCallIdx = 0;
+
+  const mockFetcher: typeof fetch = (async (input: any, init?: any) => {
+    const url = String(input);
+    const signal: AbortSignal | undefined = init?.signal;
+    if (url.includes('/getWebhookInfo')) {
+      return new Response(JSON.stringify({ ok: true, result: { url: '' } }), { status: 200 });
+    }
+    if (url.includes('/getUpdates')) {
+      getUpdatesCallIdx++;
+      pollCallTimes.push(Date.now());
+      if (getUpdatesCallIdx === 1) {
+        return new Response(
+          JSON.stringify({ ok: false, error_code: 429, description: 'Too Many Requests', parameters: { retry_after: 0.08 } }),
+          { status: 429 }
+        );
+      }
+      if (getUpdatesCallIdx === 2) {
+        return new Response('Bad Gateway', { status: 502 });
+      }
+      // 3rd call simulates 20s long poll waiting for AbortController cancellation
+      return await new Promise<Response>((_resolve, reject) => {
+        const timer = setTimeout(() => {
+          _resolve(new Response(JSON.stringify({ ok: true, result: [] }), { status: 200 }));
+        }, 20_000);
+        timer.unref?.();
+        const onAbort = () => {
+          clearTimeout(timer);
+          inFlightAborted = true;
+          const err = new Error('The operation was aborted');
+          (err as any).name = 'AbortError';
+          reject(err);
+        };
+        if (signal?.aborted) {
+          onAbort();
+        } else {
+          signal?.addEventListener('abort', onAbort, { once: true });
+        }
+      });
+    }
+    return new Response('{}', { status: 200 });
+  }) as any;
+
+  const prevAutoReg = process.env.TELEGRAM_AUTO_REGISTER_WEBHOOK;
+  delete process.env.TELEGRAM_AUTO_REGISTER_WEBHOOK;
+  try {
+    await startTelegramBotLongPolling({
+      fetcher: mockFetcher,
+      botToken: '123456:mock_bot_token',
+      baseDelayMs: 60,
+    });
+    assert.equal(getBotPollingState().isBotPollingStarted, true);
+
+    // Wait enough for 429 backoff (60ms) + 502 backoff (120ms) to enter 3rd hanging poll
+    const deadline = Date.now() + 2000;
+    while (getUpdatesCallIdx < 3 && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    assert.equal(getUpdatesCallIdx, 3);
+    // Verify 429 & 502 did NOT tight-loop immediately (elapsed gap >= 45ms each)
+    assert.ok(pollCallTimes[1] - pollCallTimes[0] >= 45, `Expected 429 backoff delay, got ${pollCallTimes[1] - pollCallTimes[0]}ms`);
+    assert.ok(pollCallTimes[2] - pollCallTimes[1] >= 85, `Expected 502 backoff delay, got ${pollCallTimes[2] - pollCallTimes[1]}ms`);
+
+    // Trigger gracefulShutdownServer and verify immediate AbortController cancellation (< 400ms, not 20s!)
+    const shutdownStart = Date.now();
+    await gracefulShutdownServer('p1-test-shutdown');
+    const shutdownElapsed = Date.now() - shutdownStart;
+
+    assert.equal(inFlightAborted, true, 'Expected hanging 20s getUpdates request to be aborted via AbortController');
+    assert.equal(getBotPollingState().isBotPollingStarted, false);
+    assert.equal(getBotPollingState().hasAbortController, false);
+    assert.ok(shutdownElapsed < 400, `Expected shutdown to abort immediately, took ${shutdownElapsed}ms`);
+  } finally {
+    await stopTelegramBotLongPolling();
+    if (prevAutoReg !== undefined) process.env.TELEGRAM_AUTO_REGISTER_WEBHOOK = prevAutoReg;
+  }
+});
+
+test('P2: Local SQLite enables WAL journal_mode and 5000ms busy_timeout, survives concurrent writes, and reports real PRAGMAs via /api/database/status', async () => {
+  const http = await import('node:http');
+  const { createHmac } = await import('node:crypto');
+  const {
+    db,
+    initDatabase,
+    configureLocalSqlitePragmas,
+    getSqliteRuntimePragmas,
+    checkpointSqliteWal,
+    SQLITE_BUSY_TIMEOUT_MS,
+  } = await import('../server/db.ts');
+  const { app } = await import('../server.ts');
+
+  await initDatabase();
+  const configured = await configureLocalSqlitePragmas();
+  assert.equal(configured.journalMode, 'wal');
+  assert.equal(configured.walEnabled, true);
+  assert.equal(configured.busyTimeoutMs, SQLITE_BUSY_TIMEOUT_MS);
+  assert.equal(SQLITE_BUSY_TIMEOUT_MS, 5000);
+
+  const live = await getSqliteRuntimePragmas();
+  assert.equal(live.journalMode, 'wal');
+  assert.equal(live.walEnabled, true);
+  assert.equal(live.busyTimeoutMs, 5000);
+
+  // Concurrent writes under WAL + busy_timeout complete cleanly with zero SQLITE_BUSY drops
+  const chatId = `tg_wal_concurrent_${Date.now()}`;
+  const now = Date.now();
+  try {
+    await Promise.all(
+      Array.from({ length: 20 }, (_, i) =>
+        db.prepare(
+          'INSERT INTO messages (id, chat_id, account_id, sender, text, timestamp, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)'
+        ).run(`msg_wal_${now}_${i}`, chatId, 'acc_wal', 'peer', `concurrent_${i}`, '12:00', now + i)
+      )
+    );
+    const cntRow = (await db.prepare('SELECT count(*) as cnt FROM messages WHERE chat_id = ?').get(chatId)) as any;
+    assert.equal(Number(cntRow?.cnt), 20);
+    await checkpointSqliteWal();
+    const afterConcurrent = await getSqliteRuntimePragmas();
+    assert.equal(afterConcurrent.walEnabled, true);
+    assert.equal(afterConcurrent.journalMode, 'wal');
+    assert.equal(afterConcurrent.busyTimeoutMs, 5000);
+    const poolChecks = await Promise.all(Array.from({ length: 10 }, () => db.execute('PRAGMA busy_timeout')));
+    for (const r of poolChecks) {
+      assert.equal(Number(Object.values(r.rows[0] as any)[0]), 5000);
+    }
+  } finally {
+    await db.prepare('DELETE FROM messages WHERE chat_id = ?').run(chatId).catch(() => {});
+  }
+
+  // /api/database/status returns live PRAGMA journalMode / busyTimeoutMs / walEnabled
+  const prevJwtSecret = process.env.JWT_SECRET;
+  process.env.JWT_SECRET = 'p2_sqlite_wal_status_test_secret_123';
+  const h = Buffer.from(JSON.stringify({ alg: 'HS256', typ: 'JWT' })).toString('base64url');
+  const p = Buffer.from(
+    JSON.stringify({ sub: 'member_wal', username: 'member_wal', role: 'member', exp: Math.floor(Date.now() / 1000) + 3600 })
+  ).toString('base64url');
+  const s = createHmac('sha256', process.env.JWT_SECRET).update(`${h}.${p}`).digest('base64url');
+  const memberJwt = `${h}.${p}.${s}`;
+
+  const server = http.createServer(app);
+  await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
+  const port = (server.address() as any).port;
+  try {
+    const res = await fetch(`http://127.0.0.1:${port}/api/database/status`, {
+      headers: { Authorization: `Bearer ${memberJwt}` },
+    });
+    assert.equal(res.status, 200);
+    const statusJson = (await res.json()) as any;
+    assert.equal(statusJson.walEnabled, true);
+    assert.equal(statusJson.journalMode, 'wal');
+    assert.equal(statusJson.busyTimeoutMs, 5000);
+  } finally {
+    await new Promise<void>((r) => server.close(() => r()));
+    if (prevJwtSecret === undefined) delete process.env.JWT_SECRET;
+    else process.env.JWT_SECRET = prevJwtSecret;
+  }
+});
+
+test('P0 #2 hardening: single-flight GetDialogs deduplication, protected fallbacks, normalized flood keys, and visibility/switch guards', async () => {
+  const http = await import('node:http');
+  const { createHmac } = await import('node:crypto');
+  const { readFileSync } = await import('node:fs');
+  const { resolve } = await import('node:path');
+  const {
+    app,
+    connectedUserClients,
+    getOrFetchConnectedAccountDialogs,
+    clearTelegramFloodCooldown,
+    telegramAccountFloodCooldowns,
+  } = await import('../server.ts');
+
+  const prevJwtSecret = process.env.JWT_SECRET;
+  process.env.JWT_SECRET = 'p0_singleflight_dialogs_secret_456';
+  const server = http.createServer(app);
+  await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
+  const port = (server.address() as any).port;
+
+  const h = Buffer.from(JSON.stringify({ alg: 'HS256', typ: 'JWT' })).toString('base64url');
+  const p = Buffer.from(
+    JSON.stringify({ sub: 'member_singleflight', username: 'member_sf', role: 'member', exp: Math.floor(Date.now() / 1000) + 3600 })
+  ).toString('base64url');
+  const s = createHmac('sha256', process.env.JWT_SECRET).update(`${h}.${p}`).digest('base64url');
+  const memberJwt = `${h}.${p}.${s}`;
+
+  let slowGetDialogsCalls = 0;
+  const uid = '99112233';
+  const accId = `acc_tg_${uid}`;
+  const mockConn: any = {
+    client: {
+      connected: true,
+      _selfId: uid,
+      getDialogs: async ({ folder }: { limit: number; folder?: number }) => {
+        slowGetDialogsCalls++;
+        await new Promise((r) => setTimeout(r, 40));
+        if (folder === 1) return [];
+        return [
+          {
+            id: 445566,
+            title: 'SingleFlight Partner',
+            date: Math.floor(Date.now() / 1000),
+            unreadCount: 0,
+            pinned: false,
+            entity: { className: 'User', id: 445566, firstName: 'Partner' },
+            message: { message: 'Ping' },
+            dialog: {},
+          },
+        ];
+      },
+      destroy: async () => {},
+      disconnect: async () => {},
+    },
+    phone: '+8613800009911',
+    userId: uid,
+    username: '@sf_tester',
+    firstName: 'SF',
+    avatarInitial: 'SF',
+    avatarBg: '#2481cc',
+    apiId: 12345,
+    apiHash: 'hash',
+    connectedAt: Date.now(),
+    dialogs: [],
+  };
+
+  connectedUserClients.set(accId, mockConn);
+  connectedUserClients.set(uid, mockConn);
+  clearTelegramFloodCooldown({ accountId: accId, userId: uid, phone: mockConn.phone });
+
+  try {
+    // Fire background login prefetch + 5 concurrent HTTP /dialogs requests simultaneously
+    const [prefetchRes, ...httpResponses] = await Promise.all([
+      getOrFetchConnectedAccountDialogs(mockConn, { limit: 150 }),
+      ...Array.from({ length: 5 }, () =>
+        fetch(`http://127.0.0.1:${port}/api/telegram/user/dialogs?accountId=${accId}`, {
+          headers: { Authorization: `Bearer ${memberJwt}` },
+        }).then((r) => r.json())
+      ),
+    ]);
+
+    assert.equal(prefetchRes.dialogs.length, 1);
+    assert.equal(slowGetDialogsCalls, 2, 'Expected 1 main + 1 archive GetDialogs RPC total across 6 concurrent callers');
+    for (const body of httpResponses as any[]) {
+      assert.equal(body.ok, true);
+      assert.equal(body.dialogs.length, 1);
+      assert.equal(body.dialogs[0].title, 'SingleFlight Partner');
+    }
+  } finally {
+    clearTelegramFloodCooldown({ accountId: accId, userId: uid, phone: mockConn.phone });
+    telegramAccountFloodCooldowns.clear();
+    connectedUserClients.delete(accId);
+    connectedUserClients.delete(uid);
+    await new Promise<void>((r) => server.close(() => r()));
+    if (prevJwtSecret === undefined) delete process.env.JWT_SECRET;
+    else process.env.JWT_SECRET = prevJwtSecret;
+  }
+
+  const appSrc = readFileSync(resolve(process.cwd(), 'src', 'App.tsx'), 'utf8');
+  assert.match(appSrc, /const statusPollTimer = setInterval\(\(\) => \{\s*if \(typeof document !== 'undefined' && document\.visibilityState === 'hidden'\) return;/);
+  assert.match(appSrc, /hasExistingAccountChats && Date\.now\(\) - lastSyncAt < DIALOG_MIN_REFRESH_GAP_MS/);
+
+  const apiServiceSrc = readFileSync(resolve(process.cwd(), 'src', 'services', 'apiService.ts'), 'utf8');
+  assert.match(apiServiceSrc, /function resolveClientFloodKeys/);
+});
 

@@ -1323,6 +1323,7 @@ export default function App() {
       void runSync();
     }, 2500);
     const statusPollTimer = setInterval(() => {
+      if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
       void runSync();
     }, 15000);
 
@@ -1378,6 +1379,13 @@ export default function App() {
 
     const syncDialogsFromCloud = async (opts?: { force?: boolean }) => {
       if (!targetAccId.startsWith('acc_tg_')) return;
+      const hasExistingAccountChats = chatsRef.current.some(
+        (c) => c.accountId === targetAccId && c.id.startsWith('tg_')
+      );
+      const lastSyncAt = lastDialogsSyncAtRef.current[targetAccId] || 0;
+      if (!opts?.force && hasExistingAccountChats && Date.now() - lastSyncAt < DIALOG_MIN_REFRESH_GAP_MS) {
+        return;
+      }
       const seq = selectAccountSeqRef.current;
       try {
         const res = await fetchTelegramUserDialogsDetailedApi(targetAccId, undefined, opts);
