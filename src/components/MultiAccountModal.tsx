@@ -111,21 +111,31 @@ export const MultiAccountModal: React.FC<MultiAccountModalProps> = ({
     return `+${dialDigits}${localDigits}`;
   };
 
+  const prefillPhoneNumber = (rawPhone?: string) => {
+    if (!rawPhone) return;
+    const sanitized = sanitizePhoneInput(rawPhone);
+    if (sanitized.trim().startsWith('+')) {
+      const matched = detectCountryFromPhone(sanitized);
+      if (matched) {
+        setSelectedCountryIso(matched.iso);
+        setDialCode(matched.code);
+        setLocalPhone(sanitized.trim().slice(matched.code.length).trimStart());
+        return;
+      }
+    }
+    setLocalPhone(sanitized);
+  };
+
   useEffect(() => {
     if (!isOpen) {
       resetState();
-    } else if (reloginAccount?.phone) {
-      const sanitized = sanitizePhoneInput(reloginAccount.phone);
-      if (sanitized.trim().startsWith('+')) {
-        const matched = detectCountryFromPhone(sanitized);
-        if (matched) {
-          setSelectedCountryIso(matched.iso);
-          setDialCode(matched.code);
-          setLocalPhone(sanitized.trim().slice(matched.code.length).trimStart());
-          return;
-        }
+    } else if (reloginAccount) {
+      if (reloginAccount.phone && /\d/.test(reloginAccount.phone)) {
+        prefillPhoneNumber(reloginAccount.phone);
+        setLoginMethod('phone');
+      } else {
+        setLoginMethod('qr');
       }
-      setLocalPhone(sanitized);
     }
   }, [isOpen, reloginAccount]);
 
@@ -142,6 +152,21 @@ export const MultiAccountModal: React.FC<MultiAccountModalProps> = ({
   const [qrIsScanned, setQrIsScanned] = useState(false);
   const [isSubmittingQrPassword, setIsSubmittingQrPassword] = useState(false);
   const qrPollFailCountRef = useRef(0);
+  const qrIsScannedRef = useRef(false);
+  const qrNeeds2FARef = useRef(false);
+  useEffect(() => {
+    qrIsScannedRef.current = qrIsScanned;
+  }, [qrIsScanned]);
+  useEffect(() => {
+    qrNeeds2FARef.current = qrNeeds2FA;
+  }, [qrNeeds2FA]);
+
+  const extractApiError = (res: Response, data: any, fallback: string): string => {
+    if (res.status === 429 || data?.error === 'Too Many Attempts' || data?.error === 'Too Many Requests') {
+      return data?.message || '操作尝试过于频繁，请 1 分钟后再试';
+    }
+    return data?.error || data?.message || (res.ok ? fallback : `${fallback} (HTTP ${res.status})`);
+  };
   const [confirmingDeleteId, setConfirmingDeleteId] = useState<string | null>(null);
   const [disconnectingId, setDisconnectingId] = useState<string | null>(null);
   const [disconnectError, setDisconnectError] = useState<{
@@ -194,6 +219,9 @@ export const MultiAccountModal: React.FC<MultiAccountModalProps> = ({
 
   // Request QR Code Login Token from server with silent background refresh support
   const fetchQrToken = async (silent = false) => {
+    if (silent && (qrIsScannedRef.current || qrNeeds2FARef.current)) {
+      return;
+    }
     const previousSessionId = qrSessionId;
     if (previousSessionId) {
       fetch('/api/telegram/user/cancel-qr', {
@@ -235,9 +263,9 @@ export const MultiAccountModal: React.FC<MultiAccountModalProps> = ({
         },
         20000
       );
-      const data = await res.json();
-      if (!data.ok) {
-        if (!silent) setQrError(data.error || '生成二维码失败');
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data?.ok) {
+        if (!silent) setQrError(extractApiError(res, data, '生成二维码失败'));
       } else {
         setQrError(null);
         setQrSessionId(data.sessionId);
@@ -274,8 +302,8 @@ export const MultiAccountModal: React.FC<MultiAccountModalProps> = ({
         },
         20000
       );
-      const data = await res.json();
-      if (data.ok && data.isAuthorized && data.user) {
+      const data = await res.json().catch(() => ({}));
+      if (res.ok && data?.ok && data?.isAuthorized && data?.user) {
         const userData = data.user;
         setAuthSuccess(`登录成功！欢迎回来，${userData.firstName || 'Telegram 用户'}`);
         onAddAccount({
@@ -295,7 +323,7 @@ export const MultiAccountModal: React.FC<MultiAccountModalProps> = ({
           resetState();
         }, 1000);
       } else {
-        setQrError(data.error || '两步验证密码验证失败');
+        setQrError(extractApiError(res, data, '两步验证密码验证失败'));
       }
     } catch (e: any) {
       setQrError(e.message || '网络连接异常');
@@ -400,7 +428,7 @@ export const MultiAccountModal: React.FC<MultiAccountModalProps> = ({
     }, 2500);
 
     return () => clearInterval(interval);
-  }, [loginMethod, qrSessionId, isOpen, qrUrl, qrIsScanned, qrNeeds2FA]);
+  }, [loginMethod, qrSessionId, isOpen]);
 
   // Handle pasted/typed local phone input (auto-extract international dial code if prefixed with + or 00)
   const handleLocalPhoneChange = (raw: string) => {
@@ -451,9 +479,9 @@ export const MultiAccountModal: React.FC<MultiAccountModalProps> = ({
         },
         20000
       );
-      const data = await res.json();
-      if (!data.ok) {
-        const errorMsg = data.error || '验证码发送失败';
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data?.ok) {
+        const errorMsg = extractApiError(res, data, '验证码发送失败');
         setAuthError(errorMsg);
         const floodMatch = errorMsg.match(/(\d+)\s*秒/);
         if (floodMatch) {
@@ -497,10 +525,10 @@ export const MultiAccountModal: React.FC<MultiAccountModalProps> = ({
         },
         20000
       );
-      const data = await res.json();
-      if (!data.ok) {
-        const errorMsg = data.error || '重发验证码失败';
-        if (data.code === 'TELEGRAM_AUTH_SESSION_EXPIRED') {
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data?.ok) {
+        const errorMsg = extractApiError(res, data, '重发验证码失败');
+        if (data?.code === 'TELEGRAM_AUTH_SESSION_EXPIRED') {
           setCodeSent(false);
           setNeeds2FA(false);
         }
@@ -555,17 +583,17 @@ export const MultiAccountModal: React.FC<MultiAccountModalProps> = ({
         },
         20000
       );
-      const data = await res.json();
-      if (data.needsPassword) {
+      const data = await res.json().catch(() => ({}));
+      if (data?.needsPassword) {
         setNeeds2FA(true);
         setAuthError(data.error || '您的账号设置了两步验证密码，请输入密码完成登录');
-      } else if (!data.ok) {
-        if (data.code === 'TELEGRAM_AUTH_SESSION_EXPIRED') {
+      } else if (!res.ok || !data?.ok) {
+        if (data?.code === 'TELEGRAM_AUTH_SESSION_EXPIRED') {
           setCodeSent(false);
           setNeeds2FA(false);
           setVerificationCode('');
         }
-        setAuthError(data.error || '验证失败');
+        setAuthError(extractApiError(res, data, '验证失败'));
       } else {
         setAuthSuccess('真实 Telegram 账号授权登录成功！');
         const userData = data.user || {};
@@ -821,17 +849,37 @@ export const MultiAccountModal: React.FC<MultiAccountModalProps> = ({
                         </button>
                       </div>
                     ) : (
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setConfirmingDeleteId(acc.id);
-                          setDisconnectError(null);
-                        }}
-                        className="p-1.5 rounded-lg text-[#7f93a5] hover:text-red-400 hover:bg-red-500/10 transition-colors cursor-pointer ml-2"
-                        title="断开并退出该账号"
-                      >
-                        <LogOut className="w-3.5 h-3.5" />
-                      </button>
+                      <div className="flex items-center gap-1.5 shrink-0 ml-2">
+                        {acc.status === 'expired' && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setShowAccountsPanel(false);
+                              if (acc.phone && /\d/.test(acc.phone)) {
+                                prefillPhoneNumber(acc.phone);
+                                handleSwitchLoginMethod('phone');
+                              } else {
+                                handleSwitchLoginMethod('qr');
+                                void fetchQrToken();
+                              }
+                            }}
+                            className="px-2 py-1 rounded bg-rose-500/20 hover:bg-rose-500/30 text-rose-300 text-[11px] font-medium cursor-pointer"
+                          >
+                            重新登录
+                          </button>
+                        )}
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setConfirmingDeleteId(acc.id);
+                            setDisconnectError(null);
+                          }}
+                          className="p-1.5 rounded-lg text-[#7f93a5] hover:text-red-400 hover:bg-red-500/10 transition-colors cursor-pointer"
+                          title="断开并退出该账号"
+                        >
+                          <LogOut className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
                     )}
                   </div>
 
@@ -1145,8 +1193,20 @@ export const MultiAccountModal: React.FC<MultiAccountModalProps> = ({
                   <button
                     type="button"
                     onClick={() => {
+                      const fullPhone = getCombinedPhone();
+                      if (fullPhone) {
+                        fetch('/api/telegram/user/cancel-auth', {
+                          method: 'POST',
+                          headers: {
+                            'Content-Type': 'application/json',
+                            ...getAuthHeaders(),
+                          },
+                          body: JSON.stringify({ phone: fullPhone }),
+                        }).catch(() => {});
+                      }
                       setCodeSent(false);
                       setNeeds2FA(false);
+                      setVerificationCode('');
                       setAuthError(null);
                     }}
                     className="text-xs text-[#40a7e3] hover:underline cursor-pointer"

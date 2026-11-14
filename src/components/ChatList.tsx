@@ -17,7 +17,8 @@ import {
   Trash2,
   ExternalLink,
   ChevronLeft,
-  Bot
+  Bot,
+  AlertTriangle
 } from 'lucide-react';
 import { Chat } from '../types';
 
@@ -34,6 +35,8 @@ interface ChatListProps {
   onToggleMarkUnread?: (chatId: string) => void;
   onDeleteChat?: (chatId: string) => void;
   onNewChatClick?: () => void;
+  currentAccountStatus?: string;
+  onReloginCurrentAccount?: () => void;
 }
 
 interface ContextMenuState {
@@ -55,6 +58,8 @@ export const ChatList: React.FC<ChatListProps> = ({
   onToggleMarkUnread,
   onDeleteChat,
   onNewChatClick,
+  currentAccountStatus,
+  onReloginCurrentAccount,
 }) => {
   // 1. Resizable Width State with Persistence
   const [width, setWidth] = useState<number>(() => {
@@ -232,6 +237,27 @@ export const ChatList: React.FC<ChatListProps> = ({
           </button>
         )}
       </div>
+
+      {/* Persistent Session Expired Banner */}
+      {currentAccountStatus === 'expired' && (
+        <div className="mx-2 mt-2 px-3 py-2 rounded-xl bg-rose-500/10 border border-rose-500/30 flex items-center justify-between gap-2 shrink-0">
+          <div className="flex items-center gap-2 min-w-0">
+            <AlertTriangle className="w-4 h-4 text-rose-500 shrink-0" />
+            <span className="text-[11.5px] font-medium text-rose-600 dark:text-rose-300 truncate">
+              当前账号会话已失效
+            </span>
+          </div>
+          {onReloginCurrentAccount && (
+            <button
+              type="button"
+              onClick={onReloginCurrentAccount}
+              className="px-2.5 py-1 rounded-lg bg-rose-500 hover:bg-rose-600 text-white text-[11px] font-semibold shrink-0 cursor-pointer transition-colors"
+            >
+              重新登录
+            </button>
+          )}
+        </div>
+      )}
 
       {/* 2. Chat Folder Tabs */}
       <div className="flex items-center px-2 py-1.5 gap-1 border-b border-[#e2e8f0] dark:border-[#162436] overflow-x-auto no-scrollbar text-[11.5px] font-medium shrink-0">

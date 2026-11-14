@@ -1010,18 +1010,19 @@ export async function fetchCustomerProfile(chatId: string, accountId?: string): 
 }
 
 export async function saveCustomerProfile(chatId: string, profile: Partial<CustomerProfile>, accountId?: string): Promise<boolean> {
+  const effectiveAccountId = accountId || profile.accountId || currentActiveAccountId;
   try {
     try {
-      const existing = getLocalCustomerProfile(chatId) || ({} as any);
+      const existing = getLocalCustomerProfile(chatId, effectiveAccountId) || ({} as any);
       const cleanProfile = Object.fromEntries(Object.entries(profile).filter(([_, v]) => v !== undefined));
-      saveLocalCustomerProfile(chatId, { ...existing, ...cleanProfile, chatId } as CustomerProfile);
+      saveLocalCustomerProfile(chatId, { ...existing, ...cleanProfile, chatId, accountId: effectiveAccountId } as CustomerProfile, effectiveAccountId);
     } catch {}
     const res = await fetch(`/api/customer/profile/${chatId}`, {
       method: 'POST',
-      headers: getAuthHeaders(accountId || profile.accountId),
+      headers: getAuthHeaders(effectiveAccountId),
       body: JSON.stringify({
         ...profile,
-        accountId: accountId || profile.accountId || currentActiveAccountId,
+        accountId: effectiveAccountId,
       }),
     });
     return res.ok;
@@ -1211,7 +1212,8 @@ import {
   secureSetItemSync,
   secureRemoveItem,
   secureGetItemAsync,
-  decryptDataAsync
+  decryptDataAsync,
+  purgeCryptoSeed
 } from './cryptoStorage';
 
 // ==================== ZERO-DB ENCRYPTED LOCAL STORAGE REPOSITORY ====================
@@ -1461,11 +1463,19 @@ export function purgeAllLocalChatData(): void {
     const keysToRemove: string[] = [];
     for (let i = 0; i < localStorage.length; i++) {
       const key = localStorage.key(i) || '';
-      if (key.startsWith('tg_desktop_msgs_') || key.startsWith('tg_desktop_profile_') || key.startsWith('tg_pro_')) {
+      if (
+        key.startsWith('tg_desktop_msgs_') ||
+        key.startsWith('tg_desktop_profile_') ||
+        key.startsWith('tg_local_msgs_') ||
+        key.startsWith('tg_pro_') ||
+        key === 'tg_deleted_message_ids' ||
+        key === 'tg_master_voiceprint'
+      ) {
         keysToRemove.push(key);
       }
     }
     keysToRemove.forEach((k) => secureRemoveItem(k));
+    purgeCryptoSeed();
   } catch (e) {
     console.error('Failed to purge local encrypted data', e);
   }
@@ -1478,8 +1488,8 @@ export async function syncTelegramCloudMessages(chatId: string, accountId?: stri
     const res = await fetch(`/api/telegram/user/messages/${chatId}?limit=40`, {
       headers: getAuthHeaders(accountId),
     });
-    const data = await res.json();
-    if (data.ok && Array.isArray(data.messages)) {
+    const data = await res.json().catch(() => ({}));
+    if (res.ok && data?.ok && Array.isArray(data.messages)) {
       return data.messages;
     }
   } catch (err) {

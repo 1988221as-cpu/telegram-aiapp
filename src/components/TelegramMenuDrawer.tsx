@@ -77,6 +77,7 @@ export const TelegramMenuDrawer: React.FC<TelegramMenuDrawerProps> = ({
   const [showAccountList, setShowAccountList] = useState(false);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
   const [confirmingDeleteId, setConfirmingDeleteId] = useState<string | null>(null);
+  const [confirmingMemberLogout, setConfirmingMemberLogout] = useState(false);
   const [disconnectingId, setDisconnectingId] = useState<string | null>(null);
   const [disconnectError, setDisconnectError] = useState<{
     accountId: string;
@@ -440,18 +441,44 @@ export const TelegramMenuDrawer: React.FC<TelegramMenuDrawerProps> = ({
 
           {/* 退出登录 */}
           {onMemberLogout && (
-            <button
-              onClick={() => {
-                onMemberLogout();
-                onClose();
-              }}
-              className="flex items-center gap-4 px-3 py-2.5 rounded-xl text-rose-500 hover:bg-rose-500/10 transition-colors cursor-pointer w-full text-left"
-            >
-              <LogOut className="w-5 h-5 shrink-0" />
-              <span className="truncate">
-                退出登录{currentMember ? ` (${currentMember.username})` : ''}
-              </span>
-            </button>
+            confirmingMemberLogout ? (
+              <div className="p-2.5 rounded-xl bg-rose-500/10 border border-rose-500/30 space-y-2">
+                <p className="text-[11px] text-rose-500 dark:text-rose-300 leading-relaxed">
+                  确认退出登录？将同时注销已连接的 Telegram 云端会话并清空本机缓存。
+                </p>
+                <div className="flex items-center justify-end gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setConfirmingMemberLogout(false)}
+                    className="px-2.5 py-1 rounded-lg bg-black/5 dark:bg-white/10 text-[11px] text-[#546778] dark:text-[#cfdbe5] cursor-pointer"
+                  >
+                    取消
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setConfirmingMemberLogout(false);
+                      onMemberLogout();
+                      onClose();
+                    }}
+                    className="px-2.5 py-1 rounded-lg bg-rose-500 hover:bg-rose-600 text-white text-[11px] font-medium cursor-pointer"
+                  >
+                    确认退出并注销
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <button
+                type="button"
+                onClick={() => setConfirmingMemberLogout(true)}
+                className="flex items-center gap-4 px-3 py-2.5 rounded-xl text-rose-500 hover:bg-rose-500/10 transition-colors cursor-pointer w-full text-left"
+              >
+                <LogOut className="w-5 h-5 shrink-0" />
+                <span className="truncate">
+                  退出登录{currentMember ? ` (${currentMember.username})` : ''}
+                </span>
+              </button>
+            )
           )}
 
           <div className="h-px bg-[#e0e4e8] dark:bg-[#202e3d] my-2 mx-1" />

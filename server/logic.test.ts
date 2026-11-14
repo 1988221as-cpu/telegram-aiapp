@@ -2400,6 +2400,107 @@ test('Round 2 P0/P1 regression: JWT revocation on logout, signed resource URLs, 
   await db.prepare('DELETE FROM account_customer_profiles WHERE account_id = ? AND chat_id = ?').run('acc_tg_snap1', testChat);
 });
 
+test('Round 3 audit fixes: persistent JWT revocation, snapshot key scrubbing, persistent expiry, fair update eviction, and frontend contracts', async () => {
+  const { readFileSync } = await import('node:fs');
+  const { resolve } = await import('node:path');
+  const { db, initDatabase, exportDatabaseSnapshot } = await import('./db.ts');
+  const {
+    revokeJwtToken,
+    isJwtTokenRevoked,
+    loadRevokedJwtTokensFromDb,
+    markTelegramSessionExpired,
+    pushPendingLocalUpdate,
+    pendingLocalUpdates,
+  } = await import('../server.ts');
+
+  await initDatabase();
+
+  // 1. Revoked JWT persists in revoked_jwt_tokens table and survives reload
+  const persistentToken = `eyJhbGciOiJIUzI1NiJ9.persist_${Date.now()}.sig`;
+  revokeJwtToken(persistentToken, Date.now() + 120_000);
+  await new Promise((r) => setTimeout(r, 80));
+  await loadRevokedJwtTokensFromDb();
+  assert.equal(isJwtTokenRevoked(persistentToken), true);
+
+  // 2. Database snapshot strips geminiApiKey/googleApiKey from translation_settings
+  const prevTrans = (await db.prepare("SELECT value FROM system_config WHERE key = 'translation_settings'").get()) as any;
+  await db.prepare('INSERT OR REPLACE INTO system_config (key, value, updated_at) VALUES (?, ?, ?)').run(
+    'translation_settings',
+    JSON.stringify({ preferredEngine: 'gemini', geminiApiKey: 'secret-gem-key', googleApiKey: 'secret-goog-key', defaultTargetLang: 'Chinese' }),
+    Date.now()
+  );
+  try {
+    const snap = await exportDatabaseSnapshot();
+    const transRow = ((snap.tables as any).system_config || []).find((r: any) => r.key === 'translation_settings');
+    assert.ok(transRow);
+    const parsedTrans = JSON.parse(transRow.value);
+    assert.equal(parsedTrans.preferredEngine, 'gemini');
+    assert.equal(parsedTrans.geminiApiKey, undefined);
+    assert.equal(parsedTrans.googleApiKey, undefined);
+  } finally {
+    if (prevTrans?.value) {
+      await db.prepare('INSERT OR REPLACE INTO system_config (key, value, updated_at) VALUES (?, ?, ?)').run('translation_settings', prevTrans.value, Date.now());
+    } else {
+      await db.prepare("DELETE FROM system_config WHERE key = 'translation_settings'").run();
+    }
+  }
+
+  // 3. markTelegramSessionExpired persists expired_reason in DB
+  const expPhone = `+1777${Date.now().toString().slice(-7)}`;
+  const expUid = `u_exp_${Date.now()}`;
+  await db.prepare(`
+    INSERT OR REPLACE INTO telegram_user_sessions (phone, session_string, user_id, username, first_name, is_active, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, 1, ?, ?)
+  `).run(expPhone, 'enc:gcm:00:00:00', expUid, 'expuser', 'Exp', Date.now(), Date.now());
+  await markTelegramSessionExpired({ accountId: `acc_tg_${expUid}`, userId: expUid, phone: expPhone, reason: 'AUTH_KEY_UNREGISTERED' });
+  const expRow = (await db.prepare('SELECT is_active, expired_reason FROM telegram_user_sessions WHERE phone = ?').get(expPhone)) as any;
+  assert.equal(Number(expRow?.is_active), 0);
+  assert.equal(expRow?.expired_reason, 'AUTH_KEY_UNREGISTERED');
+  await db.prepare('DELETE FROM telegram_user_sessions WHERE phone = ?').run(expPhone);
+
+  // 4. Fair update eviction: busy account cannot evict quiet account when maxTotal is hit
+  pendingLocalUpdates.length = 0;
+  try {
+    pushPendingLocalUpdate({
+      id: 'quiet_1',
+      accountId: 'acc_quiet',
+      chatId: 'tg_1',
+      sender: 'peer',
+      senderName: 'Quiet',
+      text: 'important',
+      timestamp: '10:00',
+      createdAt: 1000,
+    }, 10, 5);
+    for (let i = 0; i < 6; i++) {
+      pushPendingLocalUpdate({
+        id: `busy_${i}`,
+        accountId: 'acc_busy',
+        chatId: 'tg_2',
+        sender: 'peer',
+        senderName: 'Busy',
+        text: `spam_${i}`,
+        timestamp: '10:01',
+        createdAt: 2000 + i,
+      }, 10, 5);
+    }
+    assert.equal(pendingLocalUpdates.some((u) => u.id === 'quiet_1'), true);
+    assert.equal(pendingLocalUpdates.length, 5);
+  } finally {
+    pendingLocalUpdates.length = 0;
+  }
+
+  // 5. Frontend contract checks
+  const appSrc = readFileSync(resolve(process.cwd(), 'src/App.tsx'), 'utf8');
+  assert.equal(appSrc.includes('adminLogout({ revokeTelegramSessions: true })'), true);
+  assert.equal(appSrc.includes('if (selectAccountSeqRef.current !== seq)'), true);
+  assert.equal(appSrc.includes('currentAccountStatus={currentAccount?.status}'), true);
+  const apiSrc = readFileSync(resolve(process.cwd(), 'src/services/apiService.ts'), 'utf8');
+  assert.equal(apiSrc.includes('getLocalCustomerProfile(chatId, effectiveAccountId)'), true);
+  assert.equal(apiSrc.includes('purgeCryptoSeed()'), true);
+  const chatListSrc = readFileSync(resolve(process.cwd(), 'src/components/ChatList.tsx'), 'utf8');
+  assert.equal(chatListSrc.includes("currentAccountStatus === 'expired'"), true);
+});
+
 process.on('beforeExit', () => {
   process.exit(0);
 });

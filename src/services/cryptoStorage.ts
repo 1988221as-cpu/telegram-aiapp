@@ -178,8 +178,8 @@ export function encryptDataSync(dataStr: string): string {
 
     return `${SYNC_CIPHER_PREFIX}${bytesToBase64(iv)}:${bytesToBase64(ciphertext)}`;
   } catch (err) {
-    console.warn('[WebCryptoStorage] Sync encryption fallback:', err);
-    return `${ENCRYPTION_PREFIX}raw:${btoa(encodeURIComponent(dataStr))}`;
+    console.warn('[WebCryptoStorage] Sync encryption warning:', err);
+    throw err;
   }
 }
 
@@ -431,5 +431,18 @@ export function clearCryptoStorageCache(): void {
   inMemoryCache.clear();
   cachedCryptoKey = null;
   initPromise = null;
+}
+
+/**
+ * Purges both the in-memory decryption cache and the persisted encryption seed key.
+ * Call on explicit logout / local privacy shred so no decryption material remains.
+ */
+export function purgeCryptoSeed(): void {
+  clearCryptoStorageCache();
+  if (typeof window !== 'undefined') {
+    try {
+      localStorage.removeItem(KEY_STORE_KEY);
+    } catch {}
+  }
 }
 

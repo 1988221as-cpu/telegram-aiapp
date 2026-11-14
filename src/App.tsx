@@ -660,7 +660,7 @@ export default function App() {
   const notifiedExpiredRef = useRef<Set<string>>(new Set());
 
   const handleMemberLogout = async () => {
-    await adminLogout();
+    await adminLogout({ revokeTelegramSessions: true });
     purgeAllLocalChatData();
     notifiedExpiredRef.current.clear();
     setAccounts([]);
@@ -830,7 +830,7 @@ export default function App() {
       });
 
       // Also sync live MTProto cloud dialogs if this is a connected personal Telegram account
-      if (activeAccountId && (activeAccountId.startsWith('acc_tg_') || activeAccountId !== 'acc_telegram_bot')) {
+      if (activeAccountId && activeAccountId.startsWith('acc_tg_')) {
         fetchTelegramUserDialogsDetailedApi(activeAccountId).then((res) => {
           if (!isMounted) return;
           if (!res.ok) {
@@ -1506,7 +1506,7 @@ export default function App() {
     setCustomerProfile(null);
 
     fetchTelegramUserDialogsDetailedApi(accountId).then((res) => {
-      if (selectAccountSeqRef.current !== seq && activeAccountIdRef.current !== accountId) {
+      if (selectAccountSeqRef.current !== seq) {
         return;
       }
       if (!res.ok && res.code === 'TELEGRAM_SESSION_EXPIRED') {
@@ -2167,6 +2167,13 @@ export default function App() {
           onToggleMarkUnread={handleToggleMarkUnread}
           onDeleteChat={handleDeleteChat}
           onNewChatClick={() => setIsContactsOpen(true)}
+          currentAccountStatus={currentAccount?.status}
+          onReloginCurrentAccount={() => {
+            if (currentAccount) {
+              setReloginAccount(currentAccount);
+            }
+            setIsMultiAccountOpen(true);
+          }}
         />
 
         {/* 3. Official Telegram Center Main Chat Workbench Pane (flex-1) */}

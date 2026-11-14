@@ -1592,12 +1592,14 @@ function getOrGenerateDeviceSecret(): string {
 const PERSISTENT_DEVICE_SECRET = getOrGenerateDeviceSecret();
 
 if (
-  process.env.NODE_ENV === 'production' &&
+  (process.env.NODE_ENV === 'production' || isTurso) &&
   !process.env.SESSION_ENCRYPTION_KEY &&
   !process.env.APP_SESSION_SECRET
 ) {
   console.warn(
-    '[Security Warning] SESSION_ENCRYPTION_KEY / APP_SESSION_SECRET 未配置，当前使用本地 .device_secret 派生密钥，建议在生产环境变量中显式配置独立强密钥。'
+    isTurso && !isPersistentVolume
+      ? '[Security Warning] 当前连接 Turso 云端数据库但未配置 SESSION_ENCRYPTION_KEY / APP_SESSION_SECRET 且本地无持久卷，容器重建后 .device_secret 变更将导致已加密的 Telegram 会话无法解密！请在环境变量显式配置固定强密钥。'
+      : '[Security Warning] SESSION_ENCRYPTION_KEY / APP_SESSION_SECRET 未配置，当前使用本地 .device_secret 派生密钥，建议在生产环境变量中显式配置独立强密钥。'
   );
 }
 
@@ -2142,6 +2144,19 @@ function hashJwtForRevocation(token: string): string {
   return crypto.createHash('sha256').update(token, 'utf8').digest('hex');
 }
 
+export async function loadRevokedJwtTokensFromDb(): Promise<void> {
+  try {
+    const now = Date.now();
+    await db.prepare('DELETE FROM revoked_jwt_tokens WHERE expires_at <= ?').run(now);
+    const rows = (await db.prepare('SELECT token_hash, expires_at FROM revoked_jwt_tokens WHERE expires_at > ?').all(now)) as any[];
+    for (const row of rows) {
+      if (row?.token_hash && typeof row?.expires_at === 'number') {
+        revokedJwtTokens.set(String(row.token_hash), Number(row.expires_at));
+      }
+    }
+  } catch {}
+}
+
 export function revokeJwtToken(token: string, expMs?: number): void {
   if (!token || typeof token !== 'string') return;
   const now = Date.now();
@@ -2152,7 +2167,12 @@ export function revokeJwtToken(token: string, expMs?: number): void {
     typeof expMs === 'number' && Number.isFinite(expMs) && expMs > now
       ? expMs
       : now + SESSION_MAX_AGE_MS;
-  revokedJwtTokens.set(hashJwtForRevocation(token), effectiveExp);
+  const digest = hashJwtForRevocation(token);
+  revokedJwtTokens.set(digest, effectiveExp);
+  void db
+    .prepare('INSERT OR REPLACE INTO revoked_jwt_tokens (token_hash, expires_at) VALUES (?, ?)')
+    .run(digest, effectiveExp)
+    .catch(() => {});
 }
 
 export function isJwtTokenRevoked(token?: string): boolean {
@@ -3536,6 +3556,34 @@ async function deliverOutboundTelegramMessage(
       );
 
     if (!personalAccount?.client) {
+      const normalizedUid = effectiveAccountId.replace(/^acc_tg_/, '');
+      let expiredInfo =
+        recentlyExpiredAccounts.get(normalizedUid) ||
+        recentlyExpiredAccounts.get(effectiveAccountId);
+      if (!expiredInfo && normalizedUid) {
+        try {
+          const row = (await db
+            .prepare('SELECT user_id, phone, is_active, expired_reason FROM telegram_user_sessions WHERE (user_id = ? OR phone = ?) AND is_active = 0 LIMIT 1')
+            .get(normalizedUid, effectiveAccountId)) as any;
+          if (row) {
+            expiredInfo = {
+              accountId: `acc_tg_${row.user_id || normalizedUid}`,
+              userId: row.user_id || normalizedUid,
+              phone: row.phone || undefined,
+              reason: row.expired_reason || 'Telegram 登录会话已失效，请重新扫码或验证码登录',
+              expiredAt: Date.now(),
+            };
+          }
+        } catch {}
+      }
+      if (expiredInfo) {
+        return {
+          delivered: false,
+          channel: 'mtproto',
+          sessionExpired: true,
+          error: expiredInfo.reason || 'Telegram 登录会话已失效，请重新扫码或验证码登录',
+        };
+      }
       return {
         delivered: false,
         channel: 'mtproto',
@@ -10744,10 +10792,11 @@ export async function markTelegramSessionExpired(opts: {
 
   if (resolvedPhone || resolvedUserId) {
     const normPhone = resolvedPhone ? normalizePhoneNumber(resolvedPhone) : '';
+    const expiredReasonText = reason || 'Telegram 会话已失效或在其他设备注销';
     try {
       await db
-        .prepare('UPDATE telegram_user_sessions SET is_active = 0, session_string = "", updated_at = ? WHERE phone = ? OR phone = ? OR user_id = ?')
-        .run(Date.now(), resolvedPhone || '', normPhone || '', resolvedUserId || '');
+        .prepare("UPDATE telegram_user_sessions SET is_active = 0, session_string = '', expired_reason = ?, updated_at = ? WHERE phone = ? OR phone = ? OR user_id = ?")
+        .run(expiredReasonText, Date.now(), resolvedPhone || '', normPhone || '', resolvedUserId || '');
     } catch {}
   }
 
@@ -10801,6 +10850,13 @@ function clearExpiredAccountRecord(userId?: string, phone?: string) {
   if (phone) {
     recentlyExpiredAccounts.delete(phone);
     recentlyExpiredAccounts.delete(normalizePhoneNumber(phone));
+  }
+  if (userId || phone) {
+    const normPhone = phone ? normalizePhoneNumber(phone) : '';
+    void db
+      .prepare('UPDATE telegram_user_sessions SET expired_reason = NULL WHERE phone = ? OR phone = ? OR user_id = ?')
+      .run(phone || '', normPhone || '', userId || '')
+      .catch(() => {});
   }
 }
 
@@ -11581,8 +11637,8 @@ app.get('/api/telegram/user/qr-status', requireTenantAuth, async (req: Request, 
   }
 });
 
-// 18.4 Submit 2FA Password for QR Code Login
-app.post('/api/telegram/user/qr-password', requireTenantAuth, async (req: Request, res: Response) => {
+// 18.4 Submit 2FA Password for QR Code Login (Protected with authAttemptLimiter)
+app.post('/api/telegram/user/qr-password', requireTenantAuth, authAttemptLimiter, async (req: Request, res: Response) => {
   try {
     const { sessionId, password } = req.body;
     if (!sessionId || !activeQrSessions.has(sessionId)) {
@@ -11874,11 +11930,44 @@ app.get('/api/telegram/user/status', requireTenantAuth, async (_req: Request, re
       }
     }
 
+    let expiredRows: any[] = [];
+    try {
+      expiredRows = (await db.prepare(`
+        SELECT phone, user_id, expired_reason, updated_at
+        FROM telegram_user_sessions
+        WHERE is_active = 0 AND expired_reason IS NOT NULL AND TRIM(expired_reason) != ''
+        ORDER BY updated_at DESC
+      `).all()) as any[];
+    } catch {
+      expiredRows = [];
+    }
+
+    const expiredMap = new Map<string, ExpiredTelegramAccountInfo>();
+    for (const row of expiredRows) {
+      const uid = row.user_id ? String(row.user_id) : '';
+      const accId = uid ? `acc_tg_${uid}` : String(row.phone || '');
+      if (accId && !seenUserIds.has(uid)) {
+        expiredMap.set(accId, {
+          accountId: accId,
+          userId: uid || undefined,
+          phone: row.phone ? String(row.phone) : undefined,
+          reason: String(row.expired_reason || 'Telegram 登录会话已失效，请重新登录'),
+          expiredAt: Number(row.updated_at) || Date.now(),
+        });
+      }
+    }
+    for (const exp of recentlyExpiredAccounts.values()) {
+      const accId = exp.accountId || (exp.userId ? `acc_tg_${exp.userId}` : exp.phone || '');
+      if (accId && !seenUserIds.has(exp.userId || '')) {
+        expiredMap.set(accId, exp);
+      }
+    }
+
     res.json({
       ok: true,
       hasActiveSession: inMemoryActiveList.some((u) => u.isConnected),
       activeUsers: inMemoryActiveList,
-      expiredAccounts: Array.from(recentlyExpiredAccounts.values()),
+      expiredAccounts: Array.from(expiredMap.values()),
     });
   } catch (err: any) {
     res.status(500).json({ ok: false, error: err.message });
@@ -12299,6 +12388,18 @@ app.post('/api/telegram/user/disconnect', requireTenantAuth, async (req: Request
       try {
         await db.prepare('DELETE FROM telegram_user_sessions WHERE phone = ? OR phone = ? OR user_id = ?').run(p || '', normPhone || '', uid || '');
       } catch {}
+    }
+
+    // Purge any queued real-time updates belonging to the logged-out account
+    const targetAccountIds = new Set<string>(
+      [accountId, uid, uid ? `acc_tg_${uid}` : '', p, normPhone].filter(Boolean) as string[]
+    );
+    if (targetAccountIds.size > 0 && pendingLocalUpdates.length > 0) {
+      for (let i = pendingLocalUpdates.length - 1; i >= 0; i--) {
+        if (targetAccountIds.has(pendingLocalUpdates[i].accountId)) {
+          pendingLocalUpdates.splice(i, 1);
+        }
+      }
     }
 
     res.json({
@@ -15533,7 +15634,20 @@ export function pushPendingLocalUpdate(upd: LocalIncomingUpdate, maxPerAccount =
     if (oldestIdx >= 0) pendingLocalUpdates.splice(oldestIdx, 1);
   }
   while (pendingLocalUpdates.length > maxTotal) {
-    pendingLocalUpdates.shift();
+    const countsByAcc = new Map<string, number>();
+    for (const item of pendingLocalUpdates) {
+      countsByAcc.set(item.accountId, (countsByAcc.get(item.accountId) || 0) + 1);
+    }
+    let busiestAcc = pendingLocalUpdates[0].accountId;
+    let busiestCount = 0;
+    for (const [acc, cnt] of countsByAcc.entries()) {
+      if (cnt > busiestCount) {
+        busiestCount = cnt;
+        busiestAcc = acc;
+      }
+    }
+    const evictIdx = pendingLocalUpdates.findIndex((item) => item.accountId === busiestAcc);
+    pendingLocalUpdates.splice(evictIdx >= 0 ? evictIdx : 0, 1);
   }
 }
 
@@ -16048,6 +16162,7 @@ export async function restoreTelegramUserSessionsOnStartup(bearerToken?: string)
 async function startServer() {
   try {
     await initDatabase();
+    await loadRevokedJwtTokensFromDb();
     await purgePersistedTelegramApiCredentialsFromDb();
     await seedDatabaseIfEmpty();
     await restoreTelegramUserSessionsOnStartup();

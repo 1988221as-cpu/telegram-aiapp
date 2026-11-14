@@ -400,6 +400,20 @@ export async function initDatabase() {
   try {
     await db.exec(`ALTER TABLE telegram_user_sessions ADD COLUMN api_hash TEXT DEFAULT NULL`);
   } catch {}
+  try {
+    await db.exec(`ALTER TABLE telegram_user_sessions ADD COLUMN expired_reason TEXT DEFAULT NULL`);
+  } catch {}
+
+  try {
+    await db.execute(`
+      CREATE TABLE IF NOT EXISTS revoked_jwt_tokens (
+        token_hash TEXT PRIMARY KEY,
+        expires_at INTEGER NOT NULL
+      )
+    `);
+  } catch (err: any) {
+    console.warn('[Database] revoked_jwt_tokens table init check:', err.message);
+  }
 
   // Ensure initial global persona and evolution engine configs exist in system_config (clean blank initial state)
   try {
@@ -572,10 +586,23 @@ export async function exportDatabaseSnapshot() {
     turso.execute('SELECT * FROM system_config'),
   ]);
 
-  const safeConfigRows = (config.rows || []).filter((row: any) => {
-    const key = String(row?.key || '');
-    return key !== 'telegram_api_credentials' && key !== 'custom_llm_config';
-  });
+  const safeConfigRows = (config.rows || [])
+    .filter((row: any) => {
+      const key = String(row?.key || '');
+      return key !== 'telegram_api_credentials' && key !== 'custom_llm_config';
+    })
+    .map((row: any) => {
+      if (String(row?.key || '') === 'translation_settings' && typeof row?.value === 'string') {
+        try {
+          const parsed = JSON.parse(row.value);
+          if (parsed && typeof parsed === 'object') {
+            const { geminiApiKey: _g, googleApiKey: _gk, ...safeSettings } = parsed;
+            return { ...row, value: JSON.stringify(safeSettings) };
+          }
+        } catch {}
+      }
+      return row;
+    });
 
   const snapshot = {
     version: '1.3',
