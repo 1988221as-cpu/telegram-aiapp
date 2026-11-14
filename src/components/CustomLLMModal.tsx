@@ -51,6 +51,8 @@ function sanitizeConfigForUi(cfg: CustomLLMConfig): CustomLLMConfig {
   const enabled = Boolean(cfg.enabled);
   const rawModel = (cfg.modelName || '').trim();
   const modelName = engineMode === 'custom' ? rawModel || 'gpt-4o-mini' : rawModel;
+  const cleanEngineKey = (cfg.engineLicenseKey || '').trim();
+  const cleanKbKey = (cfg.knowledgeBaseApiKey || '').trim();
   return {
     ...cfg,
     enabled,
@@ -61,7 +63,8 @@ function sanitizeConfigForUi(cfg: CustomLLMConfig): CustomLLMConfig {
     baseUrl,
     knowledgeBaseApiUrl: '',
     enableKnowledgeBaseRAG: engineMode === 'cloud' && enabled,
-    engineLicenseKey: '',
+    engineLicenseKey: cleanEngineKey || undefined,
+    knowledgeBaseApiKey: cleanKbKey || undefined,
   };
 }
 
@@ -676,11 +679,16 @@ export const CustomLLMModal: React.FC<CustomLLMModalProps> = ({
                     const cleaned = e.target.value
                       .replace(/^[^\x21-\x7E]+|[^\x21-\x7E]+$/g, '')
                       .replace(/[^\x20-\x7E]/g, '');
-                    setFormData({ ...formData, apiKey: cleaned });
+                    setFormData({ ...formData, apiKey: cleaned, hasApiKey: false });
                   }}
                   placeholder="sk-... 密钥安全直传"
                   className="w-full bg-white dark:bg-[#090f19] border border-[#cbd5e1] dark:border-[#1e3148] rounded-lg px-3 py-2 text-xs font-mono text-[#0f172a] dark:text-[#eef4fb] placeholder-[#94a3b8] dark:placeholder-[#4e657e] focus:outline-none focus:border-[#2ba0ff]"
                 />
+                {(formData.hasApiKey || /^[^*\s]{1,4}\*{4,}[^*\s]{1,4}$/.test((formData.apiKey || '').trim())) && (
+                  <p className="text-[10.5px] text-emerald-600 dark:text-emerald-400 leading-snug">
+                    服务端已安全保存原密钥（当前为脱敏显示）；保持不变即可沿用原密钥，重新输入新密钥可覆盖。
+                  </p>
+                )}
               </div>
 
               {/* Chat & Memory Model Selector (shown when Priority Custom Key Reply is ON) */}

@@ -92,14 +92,14 @@ export const CustomerMemoryDrawer: React.FC<CustomerMemoryDrawerProps> = ({
     chatId: chatId || 'current',
     accountId: effectiveAccountId,
     clientName: chatTitle || '当前联系人',
-    relationshipStage: '沟通中',
-    ageEstimate: '待分析',
-    occupation: '待分析',
-    locationTimezone: '待确认',
-    toneStyle: '自然亲切、高效沟通',
+    relationshipStage: '尚未分析',
+    ageEstimate: '',
+    occupation: '',
+    locationTimezone: '',
+    toneStyle: '',
     likesInterests: [],
     dislikesTaboos: [],
-    emotionalNeeds: '暂无记录',
+    emotionalNeeds: '',
     keyMemories: [],
     totalMessagesCount: 0,
     updatedAt: Date.now(),
@@ -249,18 +249,18 @@ export const CustomerMemoryDrawer: React.FC<CustomerMemoryDrawerProps> = ({
     setEditLocation(currentProfile.locationTimezone || '');
     setEditOccupation(currentProfile.occupation || '');
     setEditTone(currentProfile.toneStyle || '');
-    setEditStage(currentProfile.relationshipStage || '沟通中');
+    setEditStage(currentProfile.relationshipStage || '');
     setIsEditingAttributes(true);
   };
 
   const handleSaveAttributes = () => {
     const updated = {
       ...currentProfile,
-      ageEstimate: editAge.trim() || '待确认',
-      locationTimezone: editLocation.trim() || '待确认',
-      occupation: editOccupation.trim() || '待确认',
-      toneStyle: editTone.trim() || '自然亲切、高效沟通',
-      relationshipStage: editStage.trim() || '沟通中',
+      ageEstimate: editAge.trim(),
+      locationTimezone: editLocation.trim(),
+      occupation: editOccupation.trim(),
+      toneStyle: editTone.trim(),
+      relationshipStage: editStage.trim() || '尚未分析',
       updatedAt: Date.now(),
     };
     commitProfileUpdate(updated);
@@ -295,7 +295,7 @@ export const CustomerMemoryDrawer: React.FC<CustomerMemoryDrawerProps> = ({
                   {chatTitle || '当前联系人'} · 全息记忆
                 </h2>
                 <span className="text-[11px] text-[#64748b] dark:text-[#7b93ad] shrink-0">
-                  · {currentProfile.relationshipStage || '沟通中'}
+                  · {currentProfile.relationshipStage || '尚未分析'}
                 </span>
               </div>
             </div>

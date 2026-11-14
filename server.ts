@@ -592,13 +592,99 @@ function buildRailwayAuthHeaders(
   return headers;
 }
 
+export function maskSecretValue(raw?: unknown): string {
+  const str = typeof raw === 'string' ? raw.trim() : '';
+  if (!str) return '';
+  if (str.length <= 8) {
+    return `${str.slice(0, 2)}****${str.slice(-2)}`;
+  }
+  return `${str.slice(0, 4)}****${str.slice(-4)}`;
+}
+
+export function isMaskedSecretPlaceholder(raw?: unknown, storedSecret?: unknown): boolean {
+  const str = typeof raw === 'string' ? raw.trim() : '';
+  if (!str) return false;
+  const stored = typeof storedSecret === 'string' ? storedSecret.trim() : '';
+  if (stored && str === maskSecretValue(stored)) {
+    return true;
+  }
+  return /^\*{4,}$/.test(str) || /^[^*\s]{1,4}\*{4,}[^*\s]{1,4}$/.test(str);
+}
+
+export function resolveSecretUpdate(
+  incoming: unknown,
+  stored: unknown,
+  preserveWhenUndefined = true
+): string {
+  const storedStr = typeof stored === 'string' ? stored.trim() : '';
+  if (incoming === undefined || incoming === null) {
+    return preserveWhenUndefined ? storedStr : '';
+  }
+  const incomingStr = typeof incoming === 'string' ? incoming.trim() : '';
+  if (isMaskedSecretPlaceholder(incomingStr, storedStr)) {
+    return storedStr;
+  }
+  return incomingStr;
+}
+
+export function maskCustomLlmConfigForResponse(config: any): any {
+  if (!config || typeof config !== 'object') return config;
+  const sanitized = sanitizePublicCustomLlmConfig(config);
+  const rawApiKey = typeof sanitized.apiKey === 'string' ? sanitized.apiKey.trim() : '';
+  const rawKbKey = typeof sanitized.knowledgeBaseApiKey === 'string' ? sanitized.knowledgeBaseApiKey.trim() : '';
+  const rawEngineKey = typeof sanitized.engineLicenseKey === 'string' ? sanitized.engineLicenseKey.trim() : '';
+  return {
+    ...sanitized,
+    apiKey: maskSecretValue(rawApiKey),
+    hasApiKey: Boolean(rawApiKey),
+    knowledgeBaseApiKey: maskSecretValue(rawKbKey),
+    hasKnowledgeBaseApiKey: Boolean(rawKbKey),
+    engineLicenseKey: maskSecretValue(rawEngineKey),
+    hasEngineLicenseKey: Boolean(rawEngineKey),
+  };
+}
+
+export function maskTranslationSettingsForResponse(settings: any): any {
+  if (!settings || typeof settings !== 'object') return settings;
+  const rawGeminiKey = typeof settings.geminiApiKey === 'string' ? settings.geminiApiKey.trim() : '';
+  const rawGoogleKey = typeof settings.googleApiKey === 'string' ? settings.googleApiKey.trim() : '';
+  return {
+    ...settings,
+    geminiApiKey: maskSecretValue(rawGeminiKey),
+    hasGeminiApiKey: Boolean(rawGeminiKey),
+    googleApiKey: maskSecretValue(rawGoogleKey),
+    hasGoogleApiKey: Boolean(rawGoogleKey),
+  };
+}
+
+export function mergeCustomLlmConfigWithStoredSecrets(incoming: any, stored: any): any {
+  if (!incoming || typeof incoming !== 'object') return stored;
+  const base = stored && typeof stored === 'object' ? stored : {};
+  const merged = sanitizePublicCustomLlmConfig({
+    ...base,
+    ...incoming,
+    apiKey: resolveSecretUpdate(incoming.apiKey, base.apiKey, true),
+    knowledgeBaseApiKey: resolveSecretUpdate(incoming.knowledgeBaseApiKey, base.knowledgeBaseApiKey, true),
+    engineLicenseKey: resolveSecretUpdate(incoming.engineLicenseKey, base.engineLicenseKey, true),
+  });
+  return merged;
+}
+
 function sanitizePublicCustomLlmConfig(config: any): any {
   if (!config || typeof config !== 'object') return config;
   const unwrapped =
     config.config && typeof config.config === 'object' && 'success' in config
       ? config.config
       : config;
-  const { success: _s, config: _c, settings: _st, ...clean } = unwrapped as any;
+  const {
+    success: _s,
+    config: _c,
+    settings: _st,
+    hasApiKey: _hak,
+    hasKnowledgeBaseApiKey: _hkb,
+    hasEngineLicenseKey: _hek,
+    ...clean
+  } = unwrapped as any;
   if (typeof clean.baseUrl === 'string' && isBuiltInCloudGatewayUrl(clean.baseUrl)) {
     clean.baseUrl = '';
     if (!clean.engineMode) clean.engineMode = 'cloud';
@@ -623,15 +709,22 @@ let activeServerCustomLlmConfig: any = null;
 
 export async function syncServerCustomLlmConfig(config: any) {
   if (!config || typeof config !== 'object') return;
+  const existing = await getServerCustomLlmConfig().catch(() => null);
   const sanitized = sanitizePublicCustomLlmConfig(config);
-  activeServerCustomLlmConfig = { ...sanitized };
+  const merged = {
+    ...sanitized,
+    apiKey: resolveSecretUpdate(sanitized.apiKey, existing?.apiKey, true),
+    knowledgeBaseApiKey: resolveSecretUpdate(sanitized.knowledgeBaseApiKey, existing?.knowledgeBaseApiKey, true),
+    engineLicenseKey: resolveSecretUpdate(sanitized.engineLicenseKey, existing?.engineLicenseKey, true),
+  };
+  activeServerCustomLlmConfig = { ...merged };
   railwayKbCache.clear();
   try {
     await db.prepare(`
       INSERT INTO system_config (key, value, updated_at)
       VALUES ('custom_llm_config', ?, ?)
       ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
-    `).run(JSON.stringify(sanitized), Date.now());
+    `).run(JSON.stringify(merged), Date.now());
   } catch {}
 }
 
@@ -656,6 +749,7 @@ export function normalizeStrictTranslationEngine(engine?: string): 'google' | 'g
 
 export async function syncServerTranslationSettings(settings: any) {
   if (!settings || typeof settings !== 'object') return;
+  const existing = await getServerTranslationSettings().catch(() => null);
   const raw =
     settings.settings && typeof settings.settings === 'object' && 'success' in settings
       ? settings.settings
@@ -669,8 +763,8 @@ export async function syncServerTranslationSettings(settings: any) {
     showOriginalAndTranslation: raw.showOriginalAndTranslation !== false,
     preferredEngine: normalizedEngine,
     geminiModel: typeof raw.geminiModel === 'string' ? raw.geminiModel.trim() : '',
-    geminiApiKey: typeof raw.geminiApiKey === 'string' ? raw.geminiApiKey.trim() : '',
-    googleApiKey: typeof raw.googleApiKey === 'string' ? raw.googleApiKey.trim() : '',
+    geminiApiKey: resolveSecretUpdate(raw.geminiApiKey, existing?.geminiApiKey, true),
+    googleApiKey: resolveSecretUpdate(raw.googleApiKey, existing?.googleApiKey, true),
     customModelName: typeof raw.customModelName === 'string' ? raw.customModelName.trim() : '',
   };
   activeServerTranslationSettings = { ...clean };
@@ -693,7 +787,14 @@ export async function getServerTranslationSettings(): Promise<any> {
         parsedRaw && typeof parsedRaw === 'object' && parsedRaw.settings && typeof parsedRaw.settings === 'object' && 'success' in parsedRaw
           ? parsedRaw.settings
           : parsedRaw;
-      const { success: _s, config: _c, settings: _st, ...cleanParsed } = parsed || {};
+      const {
+        success: _s,
+        config: _c,
+        settings: _st,
+        hasGeminiApiKey: _hg,
+        hasGoogleApiKey: _hgk,
+        ...cleanParsed
+      } = parsed || {};
       const normalizedEngine = normalizeStrictTranslationEngine(cleanParsed?.preferredEngine) || 'gemini';
       activeServerTranslationSettings = { ...cleanParsed, preferredEngine: normalizedEngine };
       return activeServerTranslationSettings;
@@ -912,6 +1013,17 @@ export async function callCustomLlm({
   if (!isCloudEngineMode && !customConfig?.baseUrl) {
     if (throwOnError) throw new Error('自定义大模型 Base URL 未配置');
     return null;
+  }
+
+  if (
+    isMaskedSecretPlaceholder(customConfig?.apiKey) ||
+    isMaskedSecretPlaceholder(customConfig?.engineLicenseKey) ||
+    isMaskedSecretPlaceholder(customConfig?.knowledgeBaseApiKey)
+  ) {
+    const stored = await getServerCustomLlmConfig().catch(() => null);
+    if (stored) {
+      customConfig = mergeCustomLlmConfigWithStoredSecrets(customConfig, stored);
+    }
   }
 
   // Synchronize to background cache asynchronously
@@ -1430,7 +1542,8 @@ export async function applyAudioPitchAndRateWithFfmpeg(
  */
 export async function queryKnowledgeRAG(
   queryText: string,
-  maxResults = 3
+  maxResults = 3,
+  accountId?: string
 ): Promise<{
   context: string;
   matchedCount: number;
@@ -1484,16 +1597,19 @@ export async function queryKnowledgeRAG(
       };
     }
 
-    // 3. Query SQL with targeted LIKE conditions strictly on searchTerms
+    // 3. Query SQL with targeted LIKE conditions strictly scoped by accountId (never cross-account leak)
+    const cleanScopeAccount = typeof accountId === 'string' ? accountId.trim() : '';
+    const scopeVariants = cleanScopeAccount ? getScopedAccountIdVariants(cleanScopeAccount) : ['global'];
+    const scopePlaceholders = scopeVariants.map(() => '?').join(', ');
     const whereParts = searchTerms.map(() => '(keywords LIKE ? OR title LIKE ? OR content LIKE ?)');
     const sql = `
       SELECT id, category, title, content, keywords, hit_count
       FROM knowledge_base
-      WHERE is_active = 1 AND (${whereParts.join(' OR ')})
+      WHERE is_active = 1 AND account_id IN (${scopePlaceholders}) AND (${whereParts.join(' OR ')})
       ORDER BY hit_count DESC
       LIMIT 25
     `;
-    const params: any[] = [];
+    const params: any[] = [...scopeVariants];
     for (const t of searchTerms) {
       const pattern = `%${t}%`;
       params.push(pattern, pattern, pattern);
@@ -3815,6 +3931,42 @@ export function getScopedAccountIdVariants(accountId?: string): string[] {
   return Array.from(set);
 }
 
+export function resolveScopedAiAccountId(
+  req: Request
+): { ok: true; accountId: string } | { ok: false; status: number; error: string } {
+  const authContext = (req as any).auth;
+  const session = authContext?.session;
+  const rawRequested =
+    typeof req.body?.accountId === 'string' && req.body.accountId.trim()
+      ? req.body.accountId.trim()
+      : typeof req.query?.accountId === 'string' && req.query.accountId.trim()
+      ? req.query.accountId.trim()
+      : '';
+
+  if (authContext?.isBot) {
+    if (rawRequested && rawRequested !== 'acc_telegram_bot') {
+      return { ok: false, status: 403, error: 'Bot 会话禁止跨账号访问其他账号的知识库或人设数据' };
+    }
+    return { ok: true, accountId: 'acc_telegram_bot' };
+  }
+
+  const effective = String(authContext?.effectiveAccountId || session?.accountId || 'acc_1').trim() || 'acc_1';
+  if (!rawRequested) {
+    return { ok: true, accountId: effective };
+  }
+
+  const authorized: string[] = Array.isArray(session?.authorizedAccounts) ? session.authorizedAccounts : [];
+  if (
+    rawRequested === effective ||
+    rawRequested.startsWith('acc_tg_') ||
+    authorized.includes(rawRequested)
+  ) {
+    return { ok: true, accountId: rawRequested };
+  }
+
+  return { ok: false, status: 403, error: `无权访问未授权账号 (${rawRequested}) 的知识库或进化数据` };
+}
+
 export async function getScopedCustomerProfile(chatId: string, accountId?: string): Promise<any | undefined> {
   const effAcc = String(accountId || 'acc_1').trim() || 'acc_1';
   const variants = getScopedAccountIdVariants(effAcc);
@@ -3846,6 +3998,42 @@ export async function getScopedCustomerProfile(chatId: string, accountId?: strin
   } catch {}
 
   return undefined;
+}
+
+export async function getScopedChatTargetLang(
+  chatId?: string | number | null,
+  accountId?: string | null
+): Promise<string> {
+  const { customerId, altCustomerId, accountId: effAcc } = resolveCanonicalChatIds(chatId, accountId);
+  if (!customerId) return '';
+  const variants = getScopedAccountIdVariants(effAcc);
+  if ((effAcc === 'acc_telegram_bot' || effAcc === 'acc_1') && !variants.includes('acc_telegram_bot')) {
+    variants.push('acc_telegram_bot');
+  }
+  if (effAcc === 'acc_telegram_bot' && !variants.includes('acc_1')) {
+    variants.push('acc_1');
+  }
+  const chatIds = altCustomerId && altCustomerId !== customerId ? [customerId, altCustomerId] : [customerId];
+  const chatPh = chatIds.map(() => '?').join(', ');
+  const accPh = variants.map(() => '?').join(', ');
+  try {
+    const rows = (await db
+      .prepare(
+        `SELECT account_id, chat_id, target_lang, updated_at
+         FROM chat_language_prefs
+         WHERE chat_id IN (${chatPh}) AND account_id IN (${accPh})
+         ORDER BY updated_at DESC`
+      )
+      .all(...chatIds, ...variants)) as any[];
+    const exactMatch =
+      rows.find((r) => r?.chat_id === customerId && r?.account_id === effAcc) ||
+      rows.find((r) => r?.account_id === effAcc) ||
+      rows[0];
+    const targetLang = String(exactMatch?.target_lang || '').trim();
+    return targetLang && targetLang !== 'Auto' ? targetLang : '';
+  } catch {
+    return '';
+  }
 }
 
 export async function upsertScopedCustomerProfile(params: {
@@ -4309,6 +4497,7 @@ export async function resolveUnifiedEvolutionCorpus(params: {
 
   let dbMsgs: any[] = [];
   try {
+    // Strictly forbid cross-account DB sampling when accountId is missing
     if (accVariants.length > 0) {
       const accPlaceholders = accVariants.map(() => '?').join(', ');
       dbMsgs = (await db
@@ -4320,23 +4509,13 @@ export async function resolveUnifiedEvolutionCorpus(params: {
           FROM messages WHERE account_id IN (${accPlaceholders}) ORDER BY created_at DESC LIMIT ?`
         )
         .all(...accVariants, limit)) as any[];
-    } else {
-      dbMsgs = (await db
-        .prepare(
-          `SELECT
-            id, chat_id as chatId, account_id as accountId, sender, sender_name as senderName,
-            text, translated_text as translatedText, stt_text as sttText, timestamp, created_at as createdAt,
-            telegram_message_id as telegramMessageId
-          FROM messages ORDER BY created_at DESC LIMIT ?`
-        )
-        .all(limit)) as any[];
     }
   } catch {}
 
   const accVariantSet = new Set(accVariants);
   const filteredClientMessages = Array.isArray(clientMessages)
     ? clientMessages.filter((m) => {
-        if (!cleanAccountId) return true;
+        if (!cleanAccountId) return false;
         if (!m?.accountId) return true;
         const msgAcc = String(m.accountId).trim();
         return msgAcc === cleanAccountId || accVariantSet.has(msgAcc);
@@ -4345,7 +4524,7 @@ export async function resolveUnifiedEvolutionCorpus(params: {
 
   const normalizedClient = filteredClientMessages
     .slice(-limit)
-    .map((m) => normalizeStoredMessageRecord(m, m?.chatId || 'client_synced', cleanAccountId || 'acc_1'))
+    .map((m) => normalizeStoredMessageRecord(m, m?.chatId || 'client_synced', cleanAccountId))
     .filter((m): m is UnifiedChatMessage => Boolean(m));
 
   if (normalizedClient.length > 0) {
@@ -4357,10 +4536,8 @@ export async function resolveUnifiedEvolutionCorpus(params: {
   }
 
   let cloudMsgs: any[] = [];
-  if (dbMsgs.length + normalizedClient.length < 6 && connectedUserClients.size > 0) {
-    const connected = cleanAccountId
-      ? resolveConnectedTelegramUser(cleanAccountId)
-      : Array.from(connectedUserClients.values())[0];
+  if (cleanAccountId && dbMsgs.length + normalizedClient.length < 6 && connectedUserClients.size > 0) {
+    const connected = resolveConnectedTelegramUser(cleanAccountId);
     if (connected?.client) {
       try {
         const dialogs = await Promise.race([
@@ -4992,7 +5169,7 @@ async function deliverOutboundTelegramMessage(
       if (!audioUrl && !_localDiskPath) {
         return { delivered: false, channel: 'mtproto', error: '语音消息缺少音频地址，无法发送至 Telegram' };
       }
-      console.log(`[MTProto Outbound] Personal account sending native voice note to ${rawTgId} (${audioDuration || 5}s)...`);
+      console.log(`[MTProto Outbound] Personal account sending native voice note to ${rawTgId} (${audioDuration > 0 ? `${audioDuration}s` : '未知时长'})...`);
       try {
         const source = await resolveOutboundMediaSource(audioUrl, _localDiskPath, '语音');
         const oggBuffer = await convertAudioToOggOpus(source.diskPath || source.buffer!);
@@ -6237,7 +6414,7 @@ app.post('/api/llm/config', requireTenantAuth, async (req: Request, res: Respons
 app.get('/api/llm/config', requireTenantAuth, async (req: Request, res: Response) => {
   try {
     const config = await getServerCustomLlmConfig();
-    const publicConfig = config && typeof config === 'object' ? { ...config, engineLicenseKey: '' } : config;
+    const publicConfig = maskCustomLlmConfigForResponse(config);
     return res.json({ success: true, config: publicConfig });
   } catch (err: any) {
     return res.status(500).json({ error: err.message });
@@ -6261,7 +6438,8 @@ app.post('/api/translate/settings', requireTenantAuth, async (req: Request, res:
 app.get('/api/translate/settings', requireTenantAuth, async (req: Request, res: Response) => {
   try {
     const settings = await getServerTranslationSettings();
-    return res.json({ success: true, settings });
+    const publicSettings = maskTranslationSettingsForResponse(settings);
+    return res.json({ success: true, settings: publicSettings });
   } catch (err: any) {
     return res.status(500).json({ error: err.message });
   }
@@ -6269,16 +6447,22 @@ app.get('/api/translate/settings', requireTenantAuth, async (req: Request, res: 
 
 // ==================== AI KNOWLEDGE BASE & TRAINING API ====================
 
-// Fetch all knowledge items, training logs, and intelligence metrics (Protected with requireTenantAuth)
+// Fetch all knowledge items, training logs, and intelligence metrics (Strictly scoped by account_id)
 app.get('/api/knowledge', requireTenantAuth, async (req: Request, res: Response) => {
   try {
+    const scope = resolveScopedAiAccountId(req);
+    if (!scope.ok) return res.status(scope.status).json({ error: scope.error });
+    const variants = getScopedAccountIdVariants(scope.accountId);
+    const placeholders = variants.map(() => '?').join(', ');
+
     const rawItems = (await db.prepare(`
-      SELECT id, category, title, content, keywords, source_type as sourceType,
+      SELECT id, account_id as accountId, category, title, content, keywords, source_type as sourceType,
              source_file as sourceFile, is_active as isActive, hit_count as hitCount,
              created_at as createdAt, updated_at as updatedAt
       FROM knowledge_base
+      WHERE account_id IN (${placeholders})
       ORDER BY updated_at DESC
-    `).all()) as any[];
+    `).all(...variants)) as any[];
 
     const items = rawItems.map((r) => ({
       ...r,
@@ -6287,11 +6471,12 @@ app.get('/api/knowledge', requireTenantAuth, async (req: Request, res: Response)
     }));
 
     const logs = (await db.prepare(`
-      SELECT id, log_type as logType, details, items_learned as itemsLearned, created_at as createdAt
+      SELECT id, account_id as accountId, log_type as logType, details, items_learned as itemsLearned, created_at as createdAt
       FROM training_logs
+      WHERE account_id IN (${placeholders})
       ORDER BY created_at DESC
       LIMIT 25
-    `).all()) as any[];
+    `).all(...variants)) as any[];
 
     const totalItems = items.length;
     const activeItemsCount = items.filter((i) => i.isActive).length;
@@ -6315,9 +6500,11 @@ app.get('/api/knowledge', requireTenantAuth, async (req: Request, res: Response)
   }
 });
 
-// Add manual knowledge item (Protected with requireTenantAuth)
+// Add manual knowledge item (Strictly scoped by account_id)
 app.post('/api/knowledge', requireTenantAuth, async (req: Request, res: Response) => {
   try {
+    const scope = resolveScopedAiAccountId(req);
+    if (!scope.ok) return res.status(scope.status).json({ error: scope.error });
     const { category = 'dating_playbook', title, content, keywords = [] } = req.body;
     if (!title || !content) {
       return res.status(400).json({ error: '标题与知识内容为必填项' });
@@ -6328,10 +6515,11 @@ app.post('/api/knowledge', requireTenantAuth, async (req: Request, res: Response
 
     await db.prepare(`
       INSERT INTO knowledge_base (
-        id, category, title, content, keywords, source_type, source_file, is_active, hit_count, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        id, account_id, category, title, content, keywords, source_type, source_file, is_active, hit_count, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       id,
+      scope.accountId,
       category,
       title,
       content,
@@ -6345,10 +6533,11 @@ app.post('/api/knowledge', requireTenantAuth, async (req: Request, res: Response
     );
 
     await db.prepare(`
-      INSERT INTO training_logs (id, log_type, details, items_learned, created_at)
-      VALUES (?, ?, ?, ?, ?)
+      INSERT INTO training_logs (id, account_id, log_type, details, items_learned, created_at)
+      VALUES (?, ?, ?, ?, ?, ?)
     `).run(
       `log_${now}`,
+      scope.accountId,
       'manual_add',
       `人工添加并训练新知识条目: 【${title}】`,
       1,
@@ -6364,6 +6553,8 @@ app.post('/api/knowledge', requireTenantAuth, async (req: Request, res: Response
 // Upload and train custom file knowledge with real AI categorization (no regex fallback)
 app.post('/api/knowledge/upload', requireTenantAuth, async (req: Request, res: Response) => {
   try {
+    const scope = resolveScopedAiAccountId(req);
+    if (!scope.ok) return res.status(scope.status).json({ success: false, error: scope.error });
     const { fileName, fileContent, category = 'auto', customConfig } = req.body;
     if (!fileContent || typeof fileContent !== 'string' || !fileContent.trim()) {
       return res.status(400).json({ success: false, error: '文件内容不能为空' });
@@ -6445,8 +6636,8 @@ ${fileContent}
 
     const insert = db.prepare(`
       INSERT INTO knowledge_base (
-        id, category, title, content, keywords, source_type, source_file, is_active, hit_count, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        id, account_id, category, title, content, keywords, source_type, source_file, is_active, hit_count, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
     let count = 0;
@@ -6461,6 +6652,7 @@ ${fileContent}
 
       await insert.run(
         `know_doc_${now}_${i}`,
+        scope.accountId,
         finalCat,
         String(item.title || `${baseName} (第${i + 1}条)`).trim(),
         String(item.content).trim(),
@@ -6476,10 +6668,11 @@ ${fileContent}
     }
 
     await db.prepare(`
-      INSERT INTO training_logs (id, log_type, details, items_learned, created_at)
-      VALUES (?, ?, ?, ?, ?)
+      INSERT INTO training_logs (id, account_id, log_type, details, items_learned, created_at)
+      VALUES (?, ?, ?, ?, ?, ?)
     `).run(
       `log_upload_${now}`,
+      scope.accountId,
       'file_import',
       `导入文档《${fileName || '知识文档'}》，经大模型 (${modelUsed}) 智能分类入库 ${count} 个知识切片`,
       count,
@@ -6492,24 +6685,35 @@ ${fileContent}
   }
 });
 
-// Toggle knowledge item active (Protected with requireTenantAuth)
+// Toggle knowledge item active (Strictly scoped by account_id)
 app.patch('/api/knowledge/:id/toggle', requireTenantAuth, async (req: Request, res: Response) => {
   try {
+    const scope = resolveScopedAiAccountId(req);
+    if (!scope.ok) return res.status(scope.status).json({ error: scope.error });
+    const variants = getScopedAccountIdVariants(scope.accountId);
+    const placeholders = variants.map(() => '?').join(', ');
     const { id } = req.params;
-    await db.prepare(`
+    const result = await db.prepare(`
       UPDATE knowledge_base
       SET is_active = CASE WHEN is_active = 1 THEN 0 ELSE 1 END, updated_at = ?
-      WHERE id = ?
-    `).run(Date.now(), id);
+      WHERE id = ? AND account_id IN (${placeholders})
+    `).run(Date.now(), id, ...variants);
+    if (!result.changes) {
+      return res.status(404).json({ error: '未找到当前账号下的该知识条目' });
+    }
     res.json({ success: true });
   } catch (error: any) {
     res.status(500).json({ error: error.message });
   }
 });
 
-// Update existing knowledge item (Protected with requireTenantAuth)
+// Update existing knowledge item (Strictly scoped by account_id)
 app.put('/api/knowledge/:id', requireTenantAuth, async (req: Request, res: Response) => {
   try {
+    const scope = resolveScopedAiAccountId(req);
+    if (!scope.ok) return res.status(scope.status).json({ error: scope.error });
+    const variants = getScopedAccountIdVariants(scope.accountId);
+    const placeholders = variants.map(() => '?').join(', ');
     const { id } = req.params;
     const { title, category, content, keywords, isActive } = req.body;
     if (!title || !content) {
@@ -6519,10 +6723,10 @@ app.put('/api/knowledge/:id', requireTenantAuth, async (req: Request, res: Respo
     const kwJson = JSON.stringify(Array.isArray(keywords) ? keywords : [keywords].filter(Boolean));
     const now = Date.now();
 
-    await db.prepare(`
+    const result = await db.prepare(`
       UPDATE knowledge_base
       SET title = ?, category = ?, content = ?, keywords = ?, is_active = COALESCE(?, is_active), updated_at = ?
-      WHERE id = ?
+      WHERE id = ? AND account_id IN (${placeholders})
     `).run(
       String(title).trim(),
       category || 'life_emotion',
@@ -6530,8 +6734,12 @@ app.put('/api/knowledge/:id', requireTenantAuth, async (req: Request, res: Respo
       kwJson,
       isActive !== undefined ? (isActive ? 1 : 0) : null,
       now,
-      id
+      id,
+      ...variants
     );
+    if (!result.changes) {
+      return res.status(404).json({ error: '未找到当前账号下的该知识条目' });
+    }
 
     res.json({ success: true });
   } catch (error: any) {
@@ -6539,14 +6747,18 @@ app.put('/api/knowledge/:id', requireTenantAuth, async (req: Request, res: Respo
   }
 });
 
-// Clear all or category knowledge items (Protected with requireTenantAuth)
+// Clear all or category knowledge items (Strictly scoped by account_id)
 app.delete('/api/knowledge/clear-all', requireTenantAuth, async (req: Request, res: Response) => {
   try {
+    const scope = resolveScopedAiAccountId(req);
+    if (!scope.ok) return res.status(scope.status).json({ error: scope.error });
+    const variants = getScopedAccountIdVariants(scope.accountId);
+    const placeholders = variants.map(() => '?').join(', ');
     const { category } = req.query;
     if (category && typeof category === 'string' && category !== 'all') {
-      await db.prepare('DELETE FROM knowledge_base WHERE category = ?').run(category);
+      await db.prepare(`DELETE FROM knowledge_base WHERE category = ? AND account_id IN (${placeholders})`).run(category, ...variants);
     } else {
-      await db.prepare('DELETE FROM knowledge_base').run();
+      await db.prepare(`DELETE FROM knowledge_base WHERE account_id IN (${placeholders})`).run(...variants);
     }
     // Record seed flag so deleted records are never resurrected on server restart
     await db.prepare(`
@@ -6560,11 +6772,20 @@ app.delete('/api/knowledge/clear-all', requireTenantAuth, async (req: Request, r
   }
 });
 
-// Delete knowledge item (Protected with requireTenantAuth)
+// Delete knowledge item (Strictly scoped by account_id)
 app.delete('/api/knowledge/:id', requireTenantAuth, async (req: Request, res: Response) => {
   try {
+    const scope = resolveScopedAiAccountId(req);
+    if (!scope.ok) return res.status(scope.status).json({ error: scope.error });
+    const variants = getScopedAccountIdVariants(scope.accountId);
+    const placeholders = variants.map(() => '?').join(', ');
     const { id } = req.params;
-    await db.prepare('DELETE FROM knowledge_base WHERE id = ?').run(id);
+    const result = await db
+      .prepare(`DELETE FROM knowledge_base WHERE id = ? AND account_id IN (${placeholders})`)
+      .run(id, ...variants);
+    if (!result.changes) {
+      return res.status(404).json({ error: '未找到当前账号下的该知识条目' });
+    }
     // Record seed flag so deleting default records does not cause them to be recreated on reboot
     await db.prepare(`
       INSERT INTO system_config (key, value, updated_at)
@@ -6580,6 +6801,8 @@ app.delete('/api/knowledge/:id', requireTenantAuth, async (req: Request, res: Re
 // Auto-train & distill endpoint (Zero-DB compliant: accepts text payload, never injects hardcoded fake data)
 app.post('/api/knowledge/train-auto', requireTenantAuth, async (req: Request, res: Response) => {
   try {
+    const scope = resolveScopedAiAccountId(req);
+    if (!scope.ok) return res.status(scope.status).json({ error: scope.error });
     const { sampleTexts = [] } = req.body;
     const now = Date.now();
 
@@ -6594,8 +6817,8 @@ app.post('/api/knowledge/train-auto', requireTenantAuth, async (req: Request, re
     let addedCount = 0;
     const insert = db.prepare(`
       INSERT INTO knowledge_base (
-        id, category, title, content, keywords, source_type, source_file, is_active, hit_count, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        id, account_id, category, title, content, keywords, source_type, source_file, is_active, hit_count, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
     for (let i = 0; i < sampleTexts.length; i++) {
@@ -6606,6 +6829,7 @@ app.post('/api/knowledge/train-auto', requireTenantAuth, async (req: Request, re
       const keywords = JSON.stringify(text.split(/[\s,，。！？]+/).filter(w => w.length >= 2).slice(0, 6));
       await insert.run(
         itemId,
+        scope.accountId,
         'custom_playbook',
         title,
         text,
@@ -6632,24 +6856,28 @@ app.post('/api/knowledge/train-auto', requireTenantAuth, async (req: Request, re
 
 // ==================== GLOBAL PERSONA & EVOLUTION ENGINE APIS ====================
 
-// 1. Fetch Global Persona Configuration
+// 1. Fetch Persona Configuration (Strictly scoped by accountId)
 app.get('/api/persona/config', requireTenantAuth, async (req: Request, res: Response) => {
   try {
-    const persona = await getGlobalPersonaFromDb();
+    const scope = resolveScopedAiAccountId(req);
+    if (!scope.ok) return res.status(scope.status).json({ error: scope.error });
+    const persona = await getGlobalPersonaFromDb(scope.accountId);
     res.json({ success: true, persona });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
   }
 });
 
-// 2. Save Global Persona Configuration
+// 2. Save Persona Configuration (Strictly scoped by accountId)
 app.post('/api/persona/config', requireTenantAuth, async (req: Request, res: Response) => {
   try {
+    const scope = resolveScopedAiAccountId(req);
+    if (!scope.ok) return res.status(scope.status).json({ error: scope.error });
     const persona = req.body;
     if (!persona || typeof persona !== 'object') {
       return res.status(400).json({ error: '无效的人设配置数据' });
     }
-    const ok = await saveGlobalPersonaToDb(persona);
+    const ok = await saveGlobalPersonaToDb(persona, scope.accountId);
     if (!ok) {
       return res.status(500).json({ error: '保存人设配置到数据库失败' });
     }
@@ -6659,26 +6887,30 @@ app.post('/api/persona/config', requireTenantAuth, async (req: Request, res: Res
   }
 });
 
-// 2.1 Reset Global Persona Configuration to Clean Blank Initial State
-app.post('/api/persona/reset', requireTenantAuth, async (_req: Request, res: Response) => {
+// 2.1 Reset Persona Configuration to Clean Blank Initial State (Strictly scoped by accountId)
+app.post('/api/persona/reset', requireTenantAuth, async (req: Request, res: Response) => {
   try {
-    const persona = await resetGlobalPersonaInDb();
+    const scope = resolveScopedAiAccountId(req);
+    if (!scope.ok) return res.status(scope.status).json({ error: scope.error });
+    const persona = await resetGlobalPersonaInDb(scope.accountId);
     res.json({ success: true, persona });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
   }
 });
 
-// 2.2 Explicit User Action: Import Reference Persona Template
-app.post('/api/persona/import-template', requireTenantAuth, async (_req: Request, res: Response) => {
+// 2.2 Explicit User Action: Import Reference Persona Template (Strictly scoped by accountId)
+app.post('/api/persona/import-template', requireTenantAuth, async (req: Request, res: Response) => {
   try {
+    const scope = resolveScopedAiAccountId(req);
+    if (!scope.ok) return res.status(scope.status).json({ error: scope.error });
     const templatePersona = {
       ...PERSONA_TEMPLATE_PRESET,
       personalityTraits: [...PERSONA_TEMPLATE_PRESET.personalityTraits],
       tabooKeywords: [...PERSONA_TEMPLATE_PRESET.tabooKeywords],
       stagedPrompts: { ...PERSONA_TEMPLATE_PRESET.stagedPrompts },
     };
-    const ok = await saveGlobalPersonaToDb(templatePersona);
+    const ok = await saveGlobalPersonaToDb(templatePersona, scope.accountId);
     if (!ok) {
       return res.status(500).json({ error: '导入参考人设模板到数据库失败' });
     }
@@ -6776,17 +7008,19 @@ export function buildActivePersonaAndEvolutionContext(
   };
 }
 
-// 3. Sandbox Real-time Simulation Test Reply
+// 3. Sandbox Real-time Simulation Test Reply (Strictly scoped by accountId)
 app.post('/api/persona/test-reply', aiGenerationLimiter, requireTenantAuth, async (req: Request, res: Response) => {
   try {
+    const scope = resolveScopedAiAccountId(req);
+    if (!scope.ok) return res.status(scope.status).json({ success: false, error: scope.error });
     const { message, stage = 'icebreaker', chatTranscript, recentChatHistory, customConfig } = req.body;
     if (!message || typeof message !== 'string' || !message.trim()) {
       return res.status(400).json({ error: '测试客户发言不能为空' });
     }
 
-    const persona = await getGlobalPersonaFromDb();
-    const evolution = await getEvolutionStateFromDb();
-    const rag = await queryKnowledgeRAG(message, 3);
+    const persona = await getGlobalPersonaFromDb(scope.accountId);
+    const evolution = await getEvolutionStateFromDb(scope.accountId);
+    const rag = await queryKnowledgeRAG(message, 3, scope.accountId);
 
     const personaCtx = buildActivePersonaAndEvolutionContext(persona, evolution, stage, 5);
     const activeStage = personaCtx.activeStage;
@@ -6831,18 +7065,20 @@ ${rag.matchedCount > 0 && rag.context ? `【专属知识库命中参考（自然
     const serverPersonaCfg = await getServerCustomLlmConfig().catch(() => null);
     const effectivePersonaConfig =
       customConfig && typeof customConfig === 'object'
-        ? {
-            ...(serverPersonaCfg || {}),
-            ...customConfig,
-            enabled:
-              typeof customConfig.enabled === 'boolean'
-                ? customConfig.enabled
-                : serverPersonaCfg?.enabled !== false,
-            explicitlyDisabled:
-              typeof customConfig.enabled === 'boolean'
-                ? !customConfig.enabled
-                : Boolean(customConfig.explicitlyDisabled ?? serverPersonaCfg?.explicitlyDisabled),
-          }
+        ? (() => {
+            const merged = mergeCustomLlmConfigWithStoredSecrets(customConfig, serverPersonaCfg);
+            return {
+              ...merged,
+              enabled:
+                typeof customConfig.enabled === 'boolean'
+                  ? customConfig.enabled
+                  : serverPersonaCfg?.enabled !== false,
+              explicitlyDisabled:
+                typeof customConfig.enabled === 'boolean'
+                  ? !customConfig.enabled
+                  : Boolean(customConfig.explicitlyDisabled ?? serverPersonaCfg?.explicitlyDisabled),
+            };
+          })()
         : serverPersonaCfg;
 
     if (
@@ -6928,7 +7164,7 @@ ${rag.matchedCount > 0 && rag.context ? `【专属知识库命中参考（自然
     }
 
     if (reply) {
-      void incrementEvolutionHabitUsage(activeHabitIds);
+      void incrementEvolutionHabitUsage(activeHabitIds, scope.accountId);
     }
 
     res.json({
@@ -6945,17 +7181,21 @@ ${rag.matchedCount > 0 && rag.context ? `【专属知识库命中参考（自然
   }
 });
 
-// 4. Fetch Evolution Engine Status & Logs
+// 4. Fetch Evolution Engine Status & Logs (Strictly scoped by accountId)
 app.get('/api/evolution/status', requireTenantAuth, async (req: Request, res: Response) => {
   try {
-    const state = await getEvolutionStateFromDb();
+    const scope = resolveScopedAiAccountId(req);
+    if (!scope.ok) return res.status(scope.status).json({ error: scope.error });
+    const variants = getScopedAccountIdVariants(scope.accountId);
+    const placeholders = variants.map(() => '?').join(', ');
+    const state = await getEvolutionStateFromDb(scope.accountId);
     const logs = (await db.prepare(`
-      SELECT id, log_type as logType, details, items_learned as itemsLearned, created_at as createdAt
+      SELECT id, account_id as accountId, log_type as logType, details, items_learned as itemsLearned, created_at as createdAt
       FROM training_logs
-      WHERE log_type IN ('evolution_learn', 'habit_toggle', 'manual_add', 'system_init')
+      WHERE account_id IN (${placeholders}) AND log_type IN ('evolution_learn', 'habit_toggle', 'manual_add', 'system_init')
       ORDER BY created_at DESC
       LIMIT 15
-    `).all()) as any[];
+    `).all(...variants)) as any[];
 
     res.json({ success: true, state, logs });
   } catch (err: any) {
@@ -6976,15 +7216,19 @@ export async function invokeEvolutionOrAnalysisLlm({
   timeoutMs?: number;
 }): Promise<{ text: string; source: string; usedBackendCustomLlm: boolean }> {
   const serverCustomCfg = await getServerCustomLlmConfig().catch(() => null);
+  const resolvedIncomingCustomConfig =
+    customConfig && typeof customConfig === 'object'
+      ? mergeCustomLlmConfigWithStoredSecrets(customConfig, serverCustomCfg)
+      : undefined;
   const isExplicitDualOff = Boolean(
-    (customConfig && (customConfig.enabled === false || customConfig.explicitlyDisabled)) ||
-      (!customConfig && serverCustomCfg && (serverCustomCfg.enabled === false || serverCustomCfg.explicitlyDisabled))
+    (resolvedIncomingCustomConfig && (resolvedIncomingCustomConfig.enabled === false || resolvedIncomingCustomConfig.explicitlyDisabled)) ||
+      (!resolvedIncomingCustomConfig && serverCustomCfg && (serverCustomCfg.enabled === false || serverCustomCfg.explicitlyDisabled))
   );
   if (isExplicitDualOff) {
     throw new Error('未配置可用的大模型（当前处于双关状态：官方大模型与自有密钥均已关闭，请在「模型」开启任一引擎）');
   }
 
-  let effectiveCustomConfig = customConfig?.enabled ? customConfig : serverCustomCfg;
+  let effectiveCustomConfig = resolvedIncomingCustomConfig?.enabled ? resolvedIncomingCustomConfig : serverCustomCfg;
   if (!effectiveCustomConfig && (userJwt || lastActiveUserJwt || (process.env.RAILWAY_BRAIN_KEY || '').trim())) {
     effectiveCustomConfig = {
       enabled: true,
@@ -7095,19 +7339,21 @@ export async function syncLearnedPatternsToBackendLlm({
   const savedCfg = await getServerCustomLlmConfig().catch(() => null);
   const effectiveCfg =
     customConfig && typeof customConfig === 'object'
-      ? {
-          ...(savedCfg || {}),
-          ...customConfig,
-          enabled:
-            typeof customConfig.enabled === 'boolean'
-              ? customConfig.enabled
-              : savedCfg?.enabled !== false,
-          explicitlyDisabled:
-            typeof customConfig.enabled === 'boolean'
-              ? !customConfig.enabled
-              : Boolean(customConfig.explicitlyDisabled ?? savedCfg?.explicitlyDisabled),
-          engineMode: customConfig.engineMode || savedCfg?.engineMode || 'cloud',
-        }
+      ? (() => {
+          const merged = mergeCustomLlmConfigWithStoredSecrets(customConfig, savedCfg);
+          return {
+            ...merged,
+            enabled:
+              typeof customConfig.enabled === 'boolean'
+                ? customConfig.enabled
+                : savedCfg?.enabled !== false,
+            explicitlyDisabled:
+              typeof customConfig.enabled === 'boolean'
+                ? !customConfig.enabled
+                : Boolean(customConfig.explicitlyDisabled ?? savedCfg?.explicitlyDisabled),
+            engineMode: customConfig.engineMode || savedCfg?.engineMode || 'cloud',
+          };
+        })()
       : savedCfg;
 
   const isDualOff = Boolean(
@@ -7127,7 +7373,11 @@ export async function syncLearnedPatternsToBackendLlm({
   }
 
   const serverCfg = effectiveCfg;
-  const engineLicenseKey = customConfig?.engineLicenseKey || serverCfg?.engineLicenseKey || '';
+  const engineLicenseKey = resolveSecretUpdate(
+    customConfig?.engineLicenseKey,
+    serverCfg?.engineLicenseKey,
+    true
+  );
   const hasExplicitBackendAuth = Boolean(
     userJwt ||
     engineLicenseKey ||
@@ -7204,11 +7454,11 @@ export async function syncLearnedPatternsToBackendLlm({
   }
 }
 
-// Helper: Increment real appliedCount for active habits actually used in a live reply
-async function incrementEvolutionHabitUsage(habitIds: string[]): Promise<void> {
+// Helper: Increment real appliedCount for active habits actually used in a live reply (Scoped by accountId)
+async function incrementEvolutionHabitUsage(habitIds: string[], accountId?: string): Promise<void> {
   if (!Array.isArray(habitIds) || habitIds.length === 0) return;
   try {
-    const state = await getEvolutionStateFromDb();
+    const state = await getEvolutionStateFromDb(accountId);
     if (!state || !Array.isArray(state.habits)) return;
     const idSet = new Set(habitIds);
     let modified = false;
@@ -7220,25 +7470,29 @@ async function incrementEvolutionHabitUsage(habitIds: string[]): Promise<void> {
       return h;
     });
     if (modified) {
-      await saveEvolutionStateToDb({ ...state, habits: updatedHabits });
+      await saveEvolutionStateToDb({ ...state, habits: updatedHabits }, accountId);
     }
   } catch {}
 }
 
-// 5. Trigger Self-Training & Habit Self-Evolution Engine (Unified Cloud + Local + DB corpus + Real LLM)
+// 5. Trigger Self-Training & Habit Self-Evolution Engine (Strictly account-scoped, zero cross-account sampling)
 app.post('/api/evolution/learn', aiGenerationLimiter, requireTenantAuth, async (req: Request, res: Response) => {
   try {
-    const { sampleTexts = [], messages: clientMessages, customConfig, accountId: bodyAccountId } = req.body || {};
-    const authContext = (req as any).auth;
-    const targetEvolutionAccountId =
-      typeof bodyAccountId === 'string' && bodyAccountId.trim()
-        ? bodyAccountId.trim()
-        : authContext?.effectiveAccountId;
-    const currentState = await getEvolutionStateFromDb();
+    const scope = resolveScopedAiAccountId(req);
+    if (!scope.ok) return res.status(scope.status).json({ success: false, error: scope.error });
+    const { sampleTexts = [], messages: clientMessages, customConfig } = req.body || {};
+    const targetEvolutionAccountId = scope.accountId;
+    if (!targetEvolutionAccountId) {
+      return res.status(400).json({
+        success: false,
+        error: '缺少有效账号标识，严禁跨账号混合抽取进化语料',
+      });
+    }
+    const currentState = await getEvolutionStateFromDb(targetEvolutionAccountId);
     const now = Date.now();
     const bearerJwt = extractBearerToken(req);
 
-    // Collect genuine unified conversation corpus from DB, client synced messages, Telegram cloud, and sampleTexts
+    // Collect genuine unified conversation corpus strictly scoped to targetEvolutionAccountId
     const corpusResult = await resolveUnifiedEvolutionCorpus({
       sampleTexts,
       clientMessages,
@@ -7339,7 +7593,7 @@ ${messagesCorpus.slice(0, 3500)}
       customConfig,
     });
 
-    // 3. Merge into local evolution state with real counters
+    // 3. Merge into scoped evolution state with real counters
     const mergedHabits = [...newlyLearnedHabits, ...(currentState.habits || [])].slice(0, 30);
     const updatedState = {
       ...currentState,
@@ -7350,14 +7604,15 @@ ${messagesCorpus.slice(0, 3500)}
       habits: mergedHabits,
     };
 
-    await saveEvolutionStateToDb(updatedState);
+    await saveEvolutionStateToDb(updatedState, targetEvolutionAccountId);
 
-    // 4. Record truthful training log
+    // 4. Record truthful training log scoped to targetEvolutionAccountId
     await db.prepare(`
-      INSERT INTO training_logs (id, log_type, details, items_learned, created_at)
-      VALUES (?, ?, ?, ?, ?)
+      INSERT INTO training_logs (id, account_id, log_type, details, items_learned, created_at)
+      VALUES (?, ?, ?, ?, ?, ?)
     `).run(
       `log_evo_${now}`,
+      targetEvolutionAccountId,
       'evolution_learn',
       `经大模型 (${extractionSource}) 从 ${analyzedConversationsCount} 组真实会话语料提炼 ${newlyLearnedHabits.length} 项沟通技巧与风格${
         backendSyncResult.synced ? '，并已同步强化云端后台大模型' : ''
@@ -7382,14 +7637,16 @@ ${messagesCorpus.slice(0, 3500)}
   }
 });
 
-// 6. Toggle Habit Item Active Status
+// 6. Toggle Habit Item Active Status (Strictly scoped by accountId)
 app.post('/api/evolution/toggle-habit', requireTenantAuth, async (req: Request, res: Response) => {
   try {
+    const scope = resolveScopedAiAccountId(req);
+    if (!scope.ok) return res.status(scope.status).json({ error: scope.error });
     const { habitId } = req.body;
     if (!habitId) {
       return res.status(400).json({ error: '缺少 habitId' });
     }
-    const state = await getEvolutionStateFromDb();
+    const state = await getEvolutionStateFromDb(scope.accountId);
     let found = false;
     const updatedHabits = (state.habits || []).map((h: any) => {
       if (h.id === habitId) {
@@ -7404,7 +7661,7 @@ app.post('/api/evolution/toggle-habit', requireTenantAuth, async (req: Request, 
     }
 
     const updatedState = { ...state, habits: updatedHabits };
-    await saveEvolutionStateToDb(updatedState);
+    await saveEvolutionStateToDb(updatedState, scope.accountId);
     res.json({ success: true, state: updatedState });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
@@ -7486,6 +7743,26 @@ function formatRemoteKbHttpError(status: number, rawBody: string): string {
   return `云端知识库服务异常 (HTTP ${status})${detail ? `: ${detail}` : ''}`;
 }
 
+export function buildRemoteKbCacheKey(
+  targetUrl: string,
+  cleanQuery: string,
+  apiKey?: string,
+  userJwt?: string,
+  engineLicenseKey?: string
+): string {
+  const effectiveLicense = sanitizeHttpHeaderValue(
+    engineLicenseKey || process.env.RAILWAY_BRAIN_KEY || ''
+  );
+  const effectiveApiKey = sanitizeHttpHeaderValue(apiKey || '');
+  const effectiveUserJwt = sanitizeHttpHeaderValue(userJwt || '');
+  const credHash = crypto
+    .createHash('sha256')
+    .update(`${effectiveLicense}|${effectiveApiKey}|${effectiveUserJwt}`)
+    .digest('hex')
+    .slice(0, 24);
+  return `${targetUrl}::cred_${credHash}::${cleanQuery.toLowerCase().slice(0, 120)}`;
+}
+
 export async function searchRailwayKnowledgeBase(
   query: string,
   apiUrl?: string,
@@ -7505,8 +7782,7 @@ export async function searchRailwayKnowledgeBase(
     ? apiUrl.trim()
     : `${getRailwayBrainBaseUrl()}/api/knowledge/search`;
 
-  const authSuffix = sanitizeHttpHeaderValue(engineLicenseKey || apiKey || '') ? ':keyed' : ':std';
-  const cacheKey = `${targetUrl}${authSuffix}:::${cleanQuery.toLowerCase()}`;
+  const cacheKey = buildRemoteKbCacheKey(targetUrl, cleanQuery, apiKey, userJwt, engineLicenseKey);
   const now = Date.now();
   const cached = railwayKbCache.get(cacheKey);
   if (cached && (now - cached.timestamp < RAILWAY_KB_CACHE_TTL_MS)) {
@@ -7666,19 +7942,21 @@ app.post('/api/knowledge/remote-search', aiGenerationLimiter, requireTenantAuth,
     const savedCfg = await getServerCustomLlmConfig().catch(() => null);
     const effectiveCfg =
       customConfig && typeof customConfig === 'object'
-        ? {
-            ...(savedCfg || {}),
-            ...customConfig,
-            enabled:
-              typeof customConfig.enabled === 'boolean'
-                ? customConfig.enabled
-                : savedCfg?.enabled !== false,
-            explicitlyDisabled:
-              typeof customConfig.enabled === 'boolean'
-                ? !customConfig.enabled
-                : Boolean(customConfig.explicitlyDisabled ?? savedCfg?.explicitlyDisabled),
-            engineMode: customConfig.engineMode || savedCfg?.engineMode || 'cloud',
-          }
+        ? (() => {
+            const merged = mergeCustomLlmConfigWithStoredSecrets(customConfig, savedCfg);
+            return {
+              ...merged,
+              enabled:
+                typeof customConfig.enabled === 'boolean'
+                  ? customConfig.enabled
+                  : savedCfg?.enabled !== false,
+              explicitlyDisabled:
+                typeof customConfig.enabled === 'boolean'
+                  ? !customConfig.enabled
+                  : Boolean(customConfig.explicitlyDisabled ?? savedCfg?.explicitlyDisabled),
+              engineMode: customConfig.engineMode || savedCfg?.engineMode || 'cloud',
+            };
+          })()
         : savedCfg;
 
     const isDualOff = Boolean(
@@ -7719,8 +7997,17 @@ app.post('/api/knowledge/remote-search', aiGenerationLimiter, requireTenantAuth,
     }
 
     const userJwt = extractBearerToken(req);
-    const engineKey = customConfig?.engineLicenseKey || req.body?.engineLicenseKey || savedCfg?.engineLicenseKey;
-    const result = await searchRailwayKnowledgeBase(query, apiUrl, apiKey, 7000, userJwt, engineKey);
+    const resolvedApiKey = resolveSecretUpdate(
+      apiKey,
+      savedCfg?.knowledgeBaseApiKey || savedCfg?.apiKey,
+      true
+    );
+    const engineKey = resolveSecretUpdate(
+      customConfig?.engineLicenseKey ?? req.body?.engineLicenseKey,
+      savedCfg?.engineLicenseKey,
+      true
+    );
+    const result = await searchRailwayKnowledgeBase(query, apiUrl, resolvedApiKey, 7000, userJwt, engineKey);
     if (!result.ok) {
       return res.status(result.statusCode && result.statusCode >= 400 && result.statusCode < 600 ? result.statusCode : 502).json(result);
     }
@@ -7750,7 +8037,11 @@ app.post('/api/training/feedback', aiGenerationLimiter, requireTenantAuth, async
     if (isDualOff || isCustomPriority) {
       return res.json({ ok: true, syncedToCloud: false, skipped: true });
     }
-    const effectiveEngineKey = engineLicenseKey || serverCfg?.engineLicenseKey || '';
+    const effectiveEngineKey = resolveSecretUpdate(
+      engineLicenseKey,
+      serverCfg?.engineLicenseKey,
+      true
+    );
     const targetUrl = `${getRailwayBrainBaseUrl()}/api/v1/training/feedback`;
 
     try {
@@ -7781,17 +8072,24 @@ app.post('/api/training/feedback', aiGenerationLimiter, requireTenantAuth, async
 
 // ==================== FULL CHAT DIALOGUE CORPUS & STYLE LEARNING ====================
 
-// 1. Get all dialogue transcripts (Protected with requireTenantAuth)
-app.get('/api/transcripts', requireTenantAuth, async (_req: Request, res: Response) => {
+// 1. Get all dialogue transcripts (Protected with requireTenantAuth + strictly scoped by account_id)
+app.get('/api/transcripts', requireTenantAuth, async (req: Request, res: Response) => {
   try {
+    const scope = resolveScopedAiAccountId(req);
+    if (!scope.ok) return res.status(scope.status).json({ error: scope.error });
+    const variants = getScopedAccountIdVariants(scope.accountId);
+    const placeholders = variants.map(() => '?').join(', ');
+
     const transcripts = (await db.prepare(`
-      SELECT id, title, description, dialogue_text, learned_style, round_count, character_count, is_active, created_at, updated_at
+      SELECT id, account_id, title, description, dialogue_text, learned_style, round_count, character_count, is_active, created_at, updated_at
       FROM chat_transcripts
+      WHERE account_id IN (${placeholders})
       ORDER BY created_at DESC
-    `).all()) as any[];
+    `).all(...variants)) as any[];
 
     const mapped = transcripts.map((t) => ({
       id: t.id,
+      accountId: t.account_id || scope.accountId,
       title: t.title,
       description: t.description || '',
       dialogueText: t.dialogue_text,
@@ -7809,9 +8107,12 @@ app.get('/api/transcripts', requireTenantAuth, async (_req: Request, res: Respon
   }
 });
 
-// 2. Add or upload full chat transcript with genuine LLM style distillation & backend LLM sync
+// 2. Add or upload full chat transcript with genuine LLM style distillation & backend LLM sync (Account-scoped)
 app.post('/api/transcripts', requireTenantAuth, async (req: Request, res: Response) => {
   try {
+    const scope = resolveScopedAiAccountId(req);
+    if (!scope.ok) return res.status(scope.status).json({ success: false, error: scope.error });
+
     const { title, description = '', dialogueText, learnedStyle, customConfig } = req.body;
     if (!title || !dialogueText || !String(dialogueText).trim()) {
       return res.status(400).json({ success: false, error: '标题与整篇对话文本为必填项' });
@@ -7854,10 +8155,11 @@ ${String(dialogueText).slice(0, 5000)}`;
 
     await db.prepare(`
       INSERT INTO chat_transcripts (
-        id, title, description, dialogue_text, learned_style, round_count, character_count, is_active, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        id, account_id, title, description, dialogue_text, learned_style, round_count, character_count, is_active, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       id,
+      scope.accountId,
       title,
       description,
       dialogueText,
@@ -7885,10 +8187,11 @@ ${String(dialogueText).slice(0, 5000)}`;
     });
 
     await db.prepare(`
-      INSERT INTO training_logs (id, log_type, details, items_learned, created_at)
-      VALUES (?, ?, ?, ?, ?)
+      INSERT INTO training_logs (id, account_id, log_type, details, items_learned, created_at)
+      VALUES (?, ?, ?, ?, ?, ?)
     `).run(
       `log_trans_${now}`,
+      scope.accountId,
       'transcript_import',
       `新增整篇对话示范《${title}》（共 ${roundCount} 轮，${characterCount} 字），经${styleModelUsed ? `大模型 (${styleModelUsed})` : '人工指定'}提炼沟通风格${syncRes.synced ? '并同步至后台大模型' : ''}`,
       1,
@@ -7910,10 +8213,11 @@ ${String(dialogueText).slice(0, 5000)}`;
 // 3. Import full transcript directly from an existing customer's unified cloud + local + DB chat with real LLM style distillation
 app.post('/api/transcripts/import-from-chat/:chatId', requireTenantAuth, async (req: Request, res: Response) => {
   try {
+    const scope = resolveScopedAiAccountId(req);
+    if (!scope.ok) return res.status(scope.status).json({ success: false, error: scope.error });
     const { chatId } = req.params;
-    const { customTitle, chatTitle, customConfig, messages: clientMessages, accountId } = req.body || {};
-    const authContext = (req as any).auth;
-    const effectiveAccountId = authContext?.effectiveAccountId || accountId || 'acc_1';
+    const { customTitle, chatTitle, customConfig, messages: clientMessages } = req.body || {};
+    const effectiveAccountId = scope.accountId;
     const bearerJwt = extractBearerToken(req);
 
     const resolved = await resolveUnifiedChatMessages({
@@ -7968,10 +8272,11 @@ app.post('/api/transcripts/import-from-chat/:chatId', requireTenantAuth, async (
 
     await db.prepare(`
       INSERT INTO chat_transcripts (
-        id, title, description, dialogue_text, learned_style, round_count, character_count, is_active, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        id, account_id, title, description, dialogue_text, learned_style, round_count, character_count, is_active, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       id,
+      effectiveAccountId,
       title,
       `从数据库导出与客户 ${clientName} 的完整对话并由大模型 (${styleModelUsed}) 提炼沟通习惯。`,
       dialogueText,
@@ -7999,10 +8304,11 @@ app.post('/api/transcripts/import-from-chat/:chatId', requireTenantAuth, async (
     });
 
     await db.prepare(`
-      INSERT INTO training_logs (id, log_type, details, items_learned, created_at)
-      VALUES (?, ?, ?, ?, ?)
+      INSERT INTO training_logs (id, account_id, log_type, details, items_learned, created_at)
+      VALUES (?, ?, ?, ?, ?, ?)
     `).run(
       `log_chat_import_${now}`,
+      effectiveAccountId,
       'chat_to_transcript',
       `成功将客户 ${clientName} 的全篇对话（共 ${messages.length} 条）转化为整文示范并经 (${styleModelUsed}) 提炼习惯${syncRes.synced ? '，已同步强化后台大模型' : ''}`,
       1,
@@ -8015,26 +8321,44 @@ app.post('/api/transcripts/import-from-chat/:chatId', requireTenantAuth, async (
   }
 });
 
-// 4. Toggle transcript active (Protected with requireTenantAuth)
+// 4. Toggle transcript active (Protected with requireTenantAuth + account_id isolation)
 app.patch('/api/transcripts/:id/toggle', requireTenantAuth, async (req: Request, res: Response) => {
   try {
+    const scope = resolveScopedAiAccountId(req);
+    if (!scope.ok) return res.status(scope.status).json({ error: scope.error });
+    const variants = getScopedAccountIdVariants(scope.accountId);
+    const placeholders = variants.map(() => '?').join(', ');
+
     const { id } = req.params;
-    await db.prepare(`
+    const result = await db.prepare(`
       UPDATE chat_transcripts
       SET is_active = CASE WHEN is_active = 1 THEN 0 ELSE 1 END, updated_at = ?
-      WHERE id = ?
-    `).run(Date.now(), id);
+      WHERE id = ? AND account_id IN (${placeholders})
+    `).run(Date.now(), id, ...variants);
+    if (!result.changes) {
+      return res.status(404).json({ error: '未找到当前账号下的该对话实录' });
+    }
     res.json({ success: true });
   } catch (error: any) {
     res.status(500).json({ error: error.message });
   }
 });
 
-// 5. Delete transcript (Protected with requireTenantAuth)
+// 5. Delete transcript (Protected with requireTenantAuth + account_id isolation)
 app.delete('/api/transcripts/:id', requireTenantAuth, async (req: Request, res: Response) => {
   try {
+    const scope = resolveScopedAiAccountId(req);
+    if (!scope.ok) return res.status(scope.status).json({ error: scope.error });
+    const variants = getScopedAccountIdVariants(scope.accountId);
+    const placeholders = variants.map(() => '?').join(', ');
+
     const { id } = req.params;
-    await db.prepare('DELETE FROM chat_transcripts WHERE id = ?').run(id);
+    const result = await db
+      .prepare(`DELETE FROM chat_transcripts WHERE id = ? AND account_id IN (${placeholders})`)
+      .run(id, ...variants);
+    if (!result.changes) {
+      return res.status(404).json({ error: '未找到当前账号下的该对话实录' });
+    }
     res.json({ success: true });
   } catch (error: any) {
     res.status(500).json({ error: error.message });
@@ -8486,7 +8810,9 @@ export function detectSourceLangCode(text: string): string {
   if (!clean) return '';
   const stripped = clean
     .replace(/https?:\/\/\S+/gi, ' ')
+    .replace(/\btg:\/\/\S+/gi, ' ')
     .replace(/\bwww\.\S+/gi, ' ')
+    .replace(/\bt\.me\/\S+/gi, ' ')
     .replace(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi, ' ')
     .replace(/@[a-zA-Z0-9_]+/g, ' ')
     .trim();
@@ -8554,15 +8880,15 @@ export function detectSourceLangCode(text: string): string {
   ) {
     return 'pl';
   }
-  if (
-    /\b(goedemorgen|goedemiddag|goedenavond|hoe gaat|hoe is het|met jou|dank je|dank u|alsjeblieft|alstublieft|tot ziens|welkom|graag|vandaag|nederlands|ik ben|ik wil|jij bent|het is)\b/i.test(stripped)
-  ) {
+  const dutchMarkerRegex =
+    /\b(goedemorgen|goedemiddag|goedenavond|hoe gaat|hoe is het|hoe maakt u het|alles goed|met jou|met u|dank je|dank u|bedankt|alvast|alsjeblieft|alstublieft|gefeliciteerd|welterusten|fijne|prettige|prettig|gezellig|tot ziens|tot zo|tot straks|tot morgen|tot snel|doei|welkom|graag|vandaag|nederlands|ik ben|ik heb|ik wil|jij bent|jij hebt|het is)\b/i;
+  if (dutchMarkerRegex.test(stripped)) {
     return 'nl';
   }
   if (
     /ß/.test(stripped) ||
     (/\b(guten tag|guten morgen|danke|bitte|wie geht|hallo|tschüss|tschuess|auf wiedersehen|ich bin|nicht|sehr gut)\b/i.test(stripped) &&
-      !/\b(goedemorgen|goedemiddag|goedenavond|hoe gaat|hoe is het|met jou|dank je|dank u|alsjeblieft|alstublieft|tot ziens|welkom|graag|vandaag|nederlands|ik ben|ik wil|jij bent|het is)\b/i.test(stripped))
+      !dutchMarkerRegex.test(stripped))
   ) {
     return 'de';
   }
@@ -8965,9 +9291,7 @@ app.post('/api/translate', translationLimiter, requireTenantAuth, async (req: Re
     const savedCustomConfig = await getServerCustomLlmConfig();
 
     const effectiveGoogleKey =
-      typeof googleApiKey === 'string' && googleApiKey.trim()
-        ? googleApiKey.trim()
-        : savedTransSettings?.googleApiKey;
+      resolveSecretUpdate(googleApiKey, savedTransSettings?.googleApiKey, true) || undefined;
 
     const effectiveGeminiModel =
       typeof geminiModel === 'string' && geminiModel.trim()
@@ -8975,9 +9299,7 @@ app.post('/api/translate', translationLimiter, requireTenantAuth, async (req: Re
         : savedTransSettings?.geminiModel;
 
     const effectiveGeminiKey =
-      typeof geminiApiKey === 'string' && geminiApiKey.trim()
-        ? geminiApiKey.trim()
-        : savedTransSettings?.geminiApiKey;
+      resolveSecretUpdate(geminiApiKey, savedTransSettings?.geminiApiKey, true) || undefined;
 
     const effectiveCustomModelName =
       typeof customModelName === 'string' && customModelName.trim()
@@ -8987,6 +9309,7 @@ app.post('/api/translate', translationLimiter, requireTenantAuth, async (req: Re
     const effectiveCustomConfig =
       customConfig && typeof customConfig === 'object'
         ? (() => {
+            const merged = mergeCustomLlmConfigWithStoredSecrets(customConfig, savedCustomConfig);
             const explicitEnabled = typeof customConfig.enabled === 'boolean' ? customConfig.enabled : undefined;
             const explicitDisabled =
               typeof customConfig.explicitlyDisabled === 'boolean' ? customConfig.explicitlyDisabled : undefined;
@@ -9007,13 +9330,11 @@ app.post('/api/translate', translationLimiter, requireTenantAuth, async (req: Re
                 ? customConfig.engineMode
                 : savedCustomConfig?.engineMode;
             return {
-              ...(savedCustomConfig || {}),
-              ...customConfig,
+              ...merged,
               enabled: resolvedEnabled,
               explicitlyDisabled: resolvedExplicitlyDisabled,
               engineMode: resolvedEngineMode,
               baseUrl: customConfig.baseUrl || savedCustomConfig?.baseUrl || '',
-              apiKey: customConfig.apiKey || savedCustomConfig?.apiKey || '',
             };
           })()
         : savedCustomConfig;
@@ -9061,10 +9382,11 @@ app.post('/api/translate', translationLimiter, requireTenantAuth, async (req: Re
     const resolvedCustomModelName = effectiveCustomModelName;
 
     const effectiveLicenseKey =
-      (typeof engineLicenseKey === 'string' && engineLicenseKey.trim()) ||
-      (typeof effectiveCustomConfig?.engineLicenseKey === 'string' && effectiveCustomConfig.engineLicenseKey.trim()) ||
-      (typeof savedCustomConfig?.engineLicenseKey === 'string' && savedCustomConfig.engineLicenseKey.trim()) ||
-      undefined;
+      resolveSecretUpdate(
+        engineLicenseKey,
+        effectiveCustomConfig?.engineLicenseKey || savedCustomConfig?.engineLicenseKey,
+        true
+      ) || undefined;
 
     const result = await performStrictTranslation({
       text,
@@ -9096,20 +9418,21 @@ app.post('/api/audio/transcribe', aiGenerationLimiter, requireTenantAuth, async 
     const savedCustomConfig = await getServerCustomLlmConfig().catch(() => null);
     const effectiveCustomConfig =
       customConfig && typeof customConfig === 'object'
-        ? {
-            ...(savedCustomConfig || {}),
-            ...customConfig,
-            enabled:
-              typeof customConfig.enabled === 'boolean'
-                ? customConfig.enabled
-                : savedCustomConfig?.enabled !== false,
-            explicitlyDisabled:
-              typeof customConfig.enabled === 'boolean'
-                ? !customConfig.enabled
-                : Boolean(customConfig.explicitlyDisabled ?? savedCustomConfig?.explicitlyDisabled),
-            baseUrl: customConfig.baseUrl || savedCustomConfig?.baseUrl || '',
-            apiKey: customConfig.apiKey || savedCustomConfig?.apiKey || '',
-          }
+        ? (() => {
+            const merged = mergeCustomLlmConfigWithStoredSecrets(customConfig, savedCustomConfig);
+            return {
+              ...merged,
+              enabled:
+                typeof customConfig.enabled === 'boolean'
+                  ? customConfig.enabled
+                  : savedCustomConfig?.enabled !== false,
+              explicitlyDisabled:
+                typeof customConfig.enabled === 'boolean'
+                  ? !customConfig.enabled
+                  : Boolean(customConfig.explicitlyDisabled ?? savedCustomConfig?.explicitlyDisabled),
+              baseUrl: customConfig.baseUrl || savedCustomConfig?.baseUrl || '',
+            };
+          })()
         : savedCustomConfig;
 
     const isDualOff = Boolean(
@@ -9508,20 +9831,22 @@ app.post('/api/audio/tts-clone', aiGenerationLimiter, requireTenantAuth, async (
     const savedCustomConfig = await getServerCustomLlmConfig().catch(() => null);
     const effectiveTtsConfig =
       customConfig && typeof customConfig === 'object'
-        ? {
-            ...(savedCustomConfig || {}),
-            ...customConfig,
-            enabled:
-              typeof customConfig.enabled === 'boolean'
-                ? customConfig.enabled
-                : savedCustomConfig?.enabled !== false,
-            explicitlyDisabled:
-              typeof customConfig.explicitlyDisabled === 'boolean'
-                ? customConfig.explicitlyDisabled
-                : typeof customConfig.enabled === 'boolean'
-                ? !customConfig.enabled
-                : Boolean(savedCustomConfig?.explicitlyDisabled),
-          }
+        ? (() => {
+            const merged = mergeCustomLlmConfigWithStoredSecrets(customConfig, savedCustomConfig);
+            return {
+              ...merged,
+              enabled:
+                typeof customConfig.enabled === 'boolean'
+                  ? customConfig.enabled
+                  : savedCustomConfig?.enabled !== false,
+              explicitlyDisabled:
+                typeof customConfig.explicitlyDisabled === 'boolean'
+                  ? customConfig.explicitlyDisabled
+                  : typeof customConfig.enabled === 'boolean'
+                  ? !customConfig.enabled
+                  : Boolean(savedCustomConfig?.explicitlyDisabled),
+            };
+          })()
         : savedCustomConfig;
 
     const isDualOff = Boolean(
@@ -9558,9 +9883,7 @@ app.post('/api/audio/tts-clone', aiGenerationLimiter, requireTenantAuth, async (
       ''
     ).replace(/\/+$/, '');
     const cleanApiKey = sanitizeHttpHeaderValue(
-      (typeof customConfig?.apiKey === 'string' && customConfig.apiKey.trim()) ||
-      (typeof savedCustomConfig?.apiKey === 'string' && savedCustomConfig.apiKey.trim()) ||
-      ''
+      resolveSecretUpdate(customConfig?.apiKey, savedCustomConfig?.apiKey, true)
     );
 
     const isPriorityCustomTts = Boolean(
@@ -9816,6 +10139,7 @@ app.post('/api/audio/tts-clone', aiGenerationLimiter, requireTenantAuth, async (
               model: openAiTtsModel,
               input: text,
               voice: mappedOpenAiVoice,
+              ...(/gpt-4o-mini-tts/i.test(openAiTtsModel) && toneStyle ? { instructions: toneStyle } : {}),
               response_format: 'mp3',
             }),
             signal: AbortSignal.timeout(25000),
@@ -9908,21 +10232,27 @@ app.post('/api/audio/tts-clone', aiGenerationLimiter, requireTenantAuth, async (
 export async function getCnTranslationIfForeign(
   text: string,
   overrideCustomConfig?: any,
-  userJwt?: string
+  userJwt?: string,
+  overrideTargetLang?: string
 ): Promise<string> {
   if (!text || typeof text !== 'string') return '';
   const stripped = text
     .trim()
     .replace(/https?:\/\/\S+/gi, ' ')
+    .replace(/\btg:\/\/\S+/gi, ' ')
     .replace(/\bwww\.\S+/gi, ' ')
+    .replace(/\bt\.me\/\S+/gi, ' ')
     .replace(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi, ' ')
     .replace(/@[a-zA-Z0-9_]+/g, ' ')
     .trim();
   if (!stripped || !/\p{L}/u.test(stripped)) return '';
   try {
     const transSettings = await getServerTranslationSettings();
+    const cleanedOverrideTarget = typeof overrideTargetLang === 'string' ? overrideTargetLang.trim() : '';
     const targetLang =
-      transSettings?.defaultTargetLang && transSettings.defaultTargetLang !== 'Auto'
+      cleanedOverrideTarget && cleanedOverrideTarget !== 'Auto'
+        ? cleanedOverrideTarget
+        : transSettings?.defaultTargetLang && transSettings.defaultTargetLang !== 'Auto'
         ? transSettings.defaultTargetLang
         : 'Chinese';
 
@@ -10357,18 +10687,20 @@ app.post('/api/llm/chat', aiGenerationLimiter, requireTenantAuth, async (req: Re
     const serverCustomCfgForChat = await getServerCustomLlmConfig().catch(() => null);
     const effectiveChatConfig =
       customConfig && typeof customConfig === 'object'
-        ? {
-            ...(serverCustomCfgForChat || {}),
-            ...customConfig,
-            enabled:
-              typeof customConfig.enabled === 'boolean'
-                ? customConfig.enabled
-                : serverCustomCfgForChat?.enabled !== false,
-            explicitlyDisabled:
-              typeof customConfig.enabled === 'boolean'
-                ? !customConfig.enabled
-                : Boolean(customConfig.explicitlyDisabled ?? serverCustomCfgForChat?.explicitlyDisabled),
-          }
+        ? (() => {
+            const merged = mergeCustomLlmConfigWithStoredSecrets(customConfig, serverCustomCfgForChat);
+            return {
+              ...merged,
+              enabled:
+                typeof customConfig.enabled === 'boolean'
+                  ? customConfig.enabled
+                  : serverCustomCfgForChat?.enabled !== false,
+              explicitlyDisabled:
+                typeof customConfig.enabled === 'boolean'
+                  ? !customConfig.enabled
+                  : Boolean(customConfig.explicitlyDisabled ?? serverCustomCfgForChat?.explicitlyDisabled),
+            };
+          })()
         : serverCustomCfgForChat;
     if (
       effectiveChatConfig &&
@@ -10386,10 +10718,18 @@ app.post('/api/llm/chat', aiGenerationLimiter, requireTenantAuth, async (req: Re
       chatId,
       authContext?.effectiveAccountId || reqAccountId
     );
+    const explicitInboundTarget =
+      typeof req.body?.inboundTargetLang === 'string' &&
+      req.body.inboundTargetLang.trim() &&
+      req.body.inboundTargetLang.trim() !== 'Auto'
+        ? req.body.inboundTargetLang.trim()
+        : '';
+    const chatTranslationTargetLang =
+      explicitInboundTarget || (await getScopedChatTargetLang(customerId, accountId)) || undefined;
 
-    // Step 3: Read real Persona & active evolution habits from DB
-    const globalPersona = await getGlobalPersonaFromDb().catch(() => DEFAULT_GLOBAL_PERSONA);
-    const evolutionState = await getEvolutionStateFromDb().catch(() => DEFAULT_EVOLUTION_STATE);
+    // Step 3: Read real Persona & active evolution habits strictly scoped by accountId
+    const globalPersona = await getGlobalPersonaFromDb(accountId).catch(() => DEFAULT_GLOBAL_PERSONA);
+    const evolutionState = await getEvolutionStateFromDb(accountId).catch(() => DEFAULT_EVOLUTION_STATE);
     const personaCtx = buildActivePersonaAndEvolutionContext(globalPersona, evolutionState, undefined, 3);
     const globalPersonaContext = personaCtx.context;
     const injectedHabitIds = personaCtx.activeHabitIds;
@@ -10462,7 +10802,7 @@ app.post('/api/llm/chat', aiGenerationLimiter, requireTenantAuth, async (req: Re
             found: true,
             customerId: String(p.chat_id || customerId),
             clientName: String(p.client_name || '').trim(),
-            relationshipStage: String(p.relationship_stage || '活跃联系人').trim(),
+            relationshipStage: String(p.relationship_stage || '').trim() || '尚未沟通',
             ageEstimate: String(p.age_estimate || '-').trim(),
             occupation: String(p.occupation || '').trim(),
             locationTimezone: String(p.location_timezone || '').trim(),
@@ -10565,7 +10905,7 @@ ${memoryGuideline}`;
     }
 
     try {
-      const ragResult = await queryKnowledgeRAG(recentChatText, 3);
+      const ragResult = await queryKnowledgeRAG(recentChatText, 3, accountId);
       if (ragResult.context) {
         knowledgeContext += ragResult.context;
         matchedKnowledgeCount += ragResult.matchedCount;
@@ -10576,13 +10916,15 @@ ${memoryGuideline}`;
 
     let transcriptContext = '';
     try {
+      const chatAccVariants = getScopedAccountIdVariants(accountId);
+      const chatAccPlaceholders = chatAccVariants.map(() => '?').join(', ');
       const activeTranscripts = (await db.prepare(`
         SELECT id, title, description, dialogue_text, learned_style
         FROM chat_transcripts
-        WHERE is_active = 1
+        WHERE is_active = 1 AND account_id IN (${chatAccPlaceholders})
         ORDER BY created_at DESC
         LIMIT 2
-      `).all()) as any[];
+      `).all(...chatAccVariants)) as any[];
 
       if (activeTranscripts.length > 0) {
         transcriptContext = `
@@ -10765,8 +11107,13 @@ ${transcriptContext}${langRequirement}`;
             const d = await resGemini.json();
             const replyText = d?.candidates?.[0]?.content?.parts?.[0]?.text?.trim();
             if (replyText) {
-              void incrementEvolutionHabitUsage(injectedHabitIds);
-              const cnTranslation = await getCnTranslationIfForeign(replyText, effectiveChatConfig, userJwt);
+              void incrementEvolutionHabitUsage(injectedHabitIds, accountId);
+              const cnTranslation = await getCnTranslationIfForeign(
+                replyText,
+                effectiveChatConfig,
+                userJwt,
+                chatTranslationTargetLang
+              );
               return res.json({
                 replyText,
                 cnTranslation,
@@ -10820,8 +11167,13 @@ ${transcriptContext}${langRequirement}`;
                       .trim()
                   : '';
                 if (replyText) {
-                  void incrementEvolutionHabitUsage(injectedHabitIds);
-                  const cnTranslation = await getCnTranslationIfForeign(replyText, effectiveChatConfig, userJwt);
+                  void incrementEvolutionHabitUsage(injectedHabitIds, accountId);
+                  const cnTranslation = await getCnTranslationIfForeign(
+                    replyText,
+                    effectiveChatConfig,
+                    userJwt,
+                    chatTranslationTargetLang
+                  );
                   return res.json({
                     replyText,
                     cnTranslation,
@@ -10888,8 +11240,13 @@ ${transcriptContext}${langRequirement}`;
                 const data = await response.json();
                 const replyText = data?.choices?.[0]?.message?.content?.trim();
                 if (replyText) {
-                  void incrementEvolutionHabitUsage(injectedHabitIds);
-                  const cnTranslation = await getCnTranslationIfForeign(replyText, effectiveChatConfig, userJwt);
+                  void incrementEvolutionHabitUsage(injectedHabitIds, accountId);
+                  const cnTranslation = await getCnTranslationIfForeign(
+                    replyText,
+                    effectiveChatConfig,
+                    userJwt,
+                    chatTranslationTargetLang
+                  );
                   return res.json({
                     replyText,
                     cnTranslation,
@@ -10962,8 +11319,13 @@ ${transcriptContext}${langRequirement}`;
           const rawText = geminiRes.text?.trim() || '';
 
           if (rawText) {
-            void incrementEvolutionHabitUsage(injectedHabitIds);
-            const cnTranslation = await getCnTranslationIfForeign(rawText, effectiveChatConfig, userJwt);
+            void incrementEvolutionHabitUsage(injectedHabitIds, accountId);
+            const cnTranslation = await getCnTranslationIfForeign(
+              rawText,
+              effectiveChatConfig,
+              userJwt,
+              chatTranslationTargetLang
+            );
             return res.json({
               replyText: rawText,
               cnTranslation,
@@ -11293,15 +11655,21 @@ function formatFriendlyPingError({
 app.post('/api/llm/ping', aiGenerationLimiter, requireTenantAuth, async (req: Request, res: Response) => {
   try {
     const { baseUrl, apiKey, modelName, protocol = 'openai', customHeaders, engineMode, engineLicenseKey } = req.body;
+    const savedCfgForPing = await getServerCustomLlmConfig().catch(() => null);
+    const effectiveEngineLicenseKey = resolveSecretUpdate(
+      engineLicenseKey,
+      savedCfgForPing?.engineLicenseKey,
+      true
+    );
     const isCloudPing =
       engineMode === 'cloud' ||
-      (!baseUrl && Boolean(engineLicenseKey || process.env.RAILWAY_BRAIN_KEY || extractBearerToken(req)));
+      (!baseUrl && Boolean(effectiveEngineLicenseKey || process.env.RAILWAY_BRAIN_KEY || extractBearerToken(req)));
     if (!baseUrl && !isCloudPing) return res.status(400).json({ ok: false, error: 'Base URL is required' });
 
     const cleanBaseUrl = isCloudPing
       ? `${getRailwayBrainBaseUrl()}/v1`
       : (typeof baseUrl === 'string' ? baseUrl : '').replace(/[^\x20-\x7E]/g, '').trim().replace(/\/+$/, '');
-    const cleanKey = sanitizeHttpHeaderValue(apiKey);
+    const cleanKey = sanitizeHttpHeaderValue(resolveSecretUpdate(apiKey, savedCfgForPing?.apiKey, false));
     const hasExplicitModel = Boolean(modelName && typeof modelName === 'string' && modelName.trim());
     const effectiveModel = hasExplicitModel
       ? modelName.trim()
@@ -11597,7 +11965,7 @@ app.post('/api/llm/ping', aiGenerationLimiter, requireTenantAuth, async (req: Re
         const userJwt = extractBearerToken(req);
         const headers: Record<string, string> = isCloudPing
           ? {
-              ...buildRailwayAuthHeaders(cleanKey, userJwt, engineLicenseKey),
+              ...buildRailwayAuthHeaders(cleanKey, userJwt, effectiveEngineLicenseKey),
               ...extraHeaders,
             }
           : {
@@ -13239,7 +13607,7 @@ async function processTelegramMessageAsync(
       }
     }
     try {
-      const ragResult = await queryKnowledgeRAG(combinedText, 3);
+      const ragResult = await queryKnowledgeRAG(combinedText, 3, 'acc_telegram_bot');
       if (ragResult.matchedCount > 0 && ragResult.context) {
         knowledgeContext += ragResult.context;
         genuineMatchedKnowledge = ragResult.matchedItems;
@@ -13248,13 +13616,13 @@ async function processTelegramMessageAsync(
       console.warn('[Telegram Webhook RAG] Knowledge retrieval failed:', knowErr.message);
     }
 
-    // 7. Full Dialogue Transcripts & Authentic Demonstrations
+    // 7. Full Dialogue Transcripts & Authentic Demonstrations (Strictly Bot Account Scoped)
     let transcriptContext = '';
     try {
       const activeTranscripts = (await db.prepare(`
         SELECT id, title, description, dialogue_text, learned_style
         FROM chat_transcripts
-        WHERE is_active = 1
+        WHERE is_active = 1 AND account_id = 'acc_telegram_bot'
         ORDER BY created_at DESC
         LIMIT 2
       `).all()) as any[];
@@ -13274,7 +13642,7 @@ ${t.dialogue_text.split('\n').slice(-12).join('\n')}
       console.warn('[Telegram Webhook RAG] Transcript retrieval failed:', transErr.message);
     }
 
-    // 8. Generate intelligent AI response aligned with active Global Persona, Evolution Habits & Custom LLM
+    // 8. Generate intelligent AI response aligned with active Global Persona, Evolution Habits & Custom LLM (Strictly Bot Account Scoped)
     let replyText = '';
     let isImage = false;
     let imageUrl = '';
@@ -13286,8 +13654,8 @@ ${t.dialogue_text.split('\n').slice(-12).join('\n')}
       hasConfiguredPersona: false,
     };
     try {
-      const globalPersona = await getGlobalPersonaFromDb();
-      const webhookEvo = await getEvolutionStateFromDb();
+      const globalPersona = await getGlobalPersonaFromDb('acc_telegram_bot');
+      const webhookEvo = await getEvolutionStateFromDb('acc_telegram_bot');
       webhookPersonaContext = buildActivePersonaAndEvolutionContext(globalPersona, webhookEvo, undefined, 3);
     } catch {}
     const webhookHabitIds = webhookPersonaContext.activeHabitIds;
@@ -13389,7 +13757,7 @@ ${dialogueTranscript}
       return;
     }
 
-    void incrementEvolutionHabitUsage(webhookHabitIds);
+    void incrementEvolutionHabitUsage(webhookHabitIds, 'acc_telegram_bot');
 
     // 5. Intelligent Voice Routing: Detect if user sent voice or requested voice
     const isVoiceRequested = Boolean(voiceFileId) || /(想听.*声音|发语音|语音|发条语音|说句话|录音|打电话|听听你的声音|voice note|voice message)/i.test(effectiveIncomingText);
@@ -13418,7 +13786,13 @@ ${dialogueTranscript}
     let replyTranslatedToChinese = '';
     try {
       if (replyText) {
-        replyTranslatedToChinese = await getCnTranslationIfForeign(replyText, undefined, lastActiveUserJwt || undefined);
+        const webhookChatTargetLang = (await getScopedChatTargetLang(chatId, 'acc_telegram_bot')) || undefined;
+        replyTranslatedToChinese = await getCnTranslationIfForeign(
+          replyText,
+          undefined,
+          lastActiveUserJwt || undefined,
+          webhookChatTargetLang
+        );
       }
     } catch {
       // non-fatal
@@ -21774,13 +22148,13 @@ export function attachTelegramClientMessageListener(client: TelegramClient, phon
               const taboos = p ? safeJsonParse<string[]>(p.dislikes_taboos, []) : [];
               const memories = p ? safeJsonParse<any[]>(p.key_memories, []) : [];
 
-              // Retrieve active Global Persona, Evolution state, and Oral Transcript styles
+              // Retrieve active Global Persona, Evolution state, and Oral Transcript styles strictly scoped by accountId
               let autoPersonaContext = '';
               let autoHabitIds: string[] = [];
               let hasAutoConfiguredPersona = false;
               try {
-                const autoPersona = await getGlobalPersonaFromDb();
-                const autoEvo = await getEvolutionStateFromDb();
+                const autoPersona = await getGlobalPersonaFromDb(accountId);
+                const autoEvo = await getEvolutionStateFromDb(accountId);
                 const autoCtx = buildActivePersonaAndEvolutionContext(autoPersona, autoEvo, undefined, 3);
                 autoPersonaContext = autoCtx.context;
                 autoHabitIds = autoCtx.activeHabitIds;
@@ -21789,9 +22163,13 @@ export function attachTelegramClientMessageListener(client: TelegramClient, phon
 
               let oralStyleContext = '';
               try {
+                const autoAccVariants = getScopedAccountIdVariants(accountId);
+                const autoAccPlaceholders = autoAccVariants.map(() => '?').join(', ');
                 const activeTranscripts = (await db
-                  .prepare(`SELECT title, learned_style FROM chat_transcripts WHERE is_active = 1 ORDER BY updated_at DESC LIMIT 2`)
-                  .all()) as any[];
+                  .prepare(
+                    `SELECT title, learned_style FROM chat_transcripts WHERE is_active = 1 AND account_id IN (${autoAccPlaceholders}) ORDER BY updated_at DESC LIMIT 2`
+                  )
+                  .all(...autoAccVariants)) as any[];
                 if (activeTranscripts.length > 0) {
                   oralStyleContext =
                     '\n【高匹配整文口语表达范式】:\n' +
@@ -21849,7 +22227,7 @@ export function attachTelegramClientMessageListener(client: TelegramClient, phon
                 }
               }
               try {
-                const localRag = await queryKnowledgeRAG(effectiveIncomingText, 2);
+                const localRag = await queryKnowledgeRAG(effectiveIncomingText, 2, accountId);
                 if (localRag.matchedCount > 0 && localRag.context) {
                   kbContext += `\n${localRag.context}\n`;
                 }
@@ -21976,11 +22354,17 @@ ${kbContext}${langConstraint}
                 const rawPeer: any = /^-?\d+$/.test(cleanPeer) ? Number(cleanPeer) : cleanPeer;
                 markOutboundMessageSent(canonicalChatId, replyText, accountId);
                 await client.sendMessage(rawPeer, { message: replyText });
-                void incrementEvolutionHabitUsage(autoHabitIds);
+                void incrementEvolutionHabitUsage(autoHabitIds, accountId);
                 const replyMsgId = `msg_auto_${Date.now()}`;
                 let replyZh = '';
                 try {
-                  replyZh = await getCnTranslationIfForeign(replyText, serverCustomConfig, lastActiveUserJwt || undefined);
+                  const autopilotChatTargetLang = (await getScopedChatTargetLang(canonicalChatId, accountId)) || undefined;
+                  replyZh = await getCnTranslationIfForeign(
+                    replyText,
+                    serverCustomConfig,
+                    lastActiveUserJwt || undefined,
+                    autopilotChatTargetLang
+                  );
                 } catch {}
                 const replyTime = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false });
 

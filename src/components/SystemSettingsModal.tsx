@@ -162,9 +162,7 @@ export const SystemSettingsModal: React.FC<SystemSettingsModalProps> = ({
                   className={`font-medium mt-0.5 flex items-center gap-1 ${
                     cryptoInfo.mode === 'fallback_stream'
                       ? 'text-amber-400'
-                      : cryptoInfo.mode === 'electron_aes_gcm'
-                        ? 'text-sky-400'
-                        : 'text-emerald-400'
+                      : 'text-emerald-400'
                   }`}
                 >
                   {cryptoInfo.mode === 'fallback_stream' ? (

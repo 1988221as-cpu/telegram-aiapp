@@ -267,6 +267,7 @@ export const UnifiedRightDock: React.FC<UnifiedRightDockProps> = ({
               embedded={true}
               onClose={onClose}
               customConfig={customLLMConfig}
+              activeAccountId={activeAccountId}
             />
           )}
         </div>

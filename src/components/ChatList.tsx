@@ -36,13 +36,13 @@ export function formatChatSubtitle(chat: Chat): string {
     if (clean) return `@${clean}`;
   }
   if (chat.isChannel) {
-    return chat.membersCount && chat.membersCount > 0
-      ? `频道 · ${chat.membersCount} 位订阅者`
+    return chat.memberCount && chat.memberCount > 0
+      ? `频道 · ${chat.memberCount} 位订阅者`
       : '频道会话';
   }
   if (chat.isGroup) {
-    return chat.membersCount && chat.membersCount > 0
-      ? `群组 · ${chat.membersCount} 位成员`
+    return chat.memberCount && chat.memberCount > 0
+      ? `群组 · ${chat.memberCount} 位成员`
       : '群组会话';
   }
   if (chat.isBot) {

@@ -88,6 +88,7 @@ function formatMediaSizeLabel(bytes: number): string {
 
 export function getLanguageDisplayName(code: string): string {
   if (!code) return '英语';
+  if (code === 'Auto' || code === 'auto') return '自动识别';
   if (code === 'Turkish' || code === 'Türkçe' || code === 'tr') return '土耳其语';
   if (code === 'Chinese' || code === 'zh-CN') return '中文';
   if (code === 'Traditional Chinese' || code === 'zh-TW') return '繁体中文';
@@ -124,7 +125,9 @@ export function detectClientLangCode(text: string): string {
   if (!clean) return '';
   const stripped = clean
     .replace(/https?:\/\/\S+/gi, ' ')
+    .replace(/\btg:\/\/\S+/gi, ' ')
     .replace(/\bwww\.\S+/gi, ' ')
+    .replace(/\bt\.me\/\S+/gi, ' ')
     .replace(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi, ' ')
     .replace(/@[a-zA-Z0-9_]+/g, ' ')
     .trim();
@@ -192,15 +195,15 @@ export function detectClientLangCode(text: string): string {
   ) {
     return 'pl';
   }
-  if (
-    /\b(goedemorgen|goedemiddag|goedenavond|hoe gaat|hoe is het|met jou|dank je|dank u|alsjeblieft|alstublieft|tot ziens|welkom|graag|vandaag|nederlands|ik ben|ik wil|jij bent|het is)\b/i.test(stripped)
-  ) {
+  const dutchMarkerRegex =
+    /\b(goedemorgen|goedemiddag|goedenavond|hoe gaat|hoe is het|hoe maakt u het|alles goed|met jou|met u|dank je|dank u|bedankt|alvast|alsjeblieft|alstublieft|gefeliciteerd|welterusten|fijne|prettige|prettig|gezellig|tot ziens|tot zo|tot straks|tot morgen|tot snel|doei|welkom|graag|vandaag|nederlands|ik ben|ik heb|ik wil|jij bent|jij hebt|het is)\b/i;
+  if (dutchMarkerRegex.test(stripped)) {
     return 'nl';
   }
   if (
     /ß/.test(stripped) ||
     (/\b(guten tag|guten morgen|danke|bitte|wie geht|hallo|tschüss|tschuess|auf wiedersehen|ich bin|nicht|sehr gut)\b/i.test(stripped) &&
-      !/\b(goedemorgen|goedemiddag|goedenavond|hoe gaat|hoe is het|met jou|dank je|dank u|alsjeblieft|alstublieft|tot ziens|welkom|graag|vandaag|nederlands|ik ben|ik wil|jij bent|het is)\b/i.test(stripped))
+      !dutchMarkerRegex.test(stripped))
   ) {
     return 'de';
   }
@@ -266,7 +269,9 @@ export function hasTranslatableLetters(text: string): boolean {
   const stripped = text
     .trim()
     .replace(/https?:\/\/\S+/gi, ' ')
+    .replace(/\btg:\/\/\S+/gi, ' ')
     .replace(/\bwww\.\S+/gi, ' ')
+    .replace(/\bt\.me\/\S+/gi, ' ')
     .replace(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi, ' ')
     .replace(/@[a-zA-Z0-9_]+/g, ' ')
     .trim();
@@ -562,15 +567,17 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
     let mounted = true;
     fetchGlobalPersonaApi()
       .then((res) => {
-        if (mounted && res?.success && res.persona?.personaName) {
-          setActivePersonaName(res.persona.personaName);
+        if (mounted) {
+          setActivePersonaName(res?.success && res.persona?.personaName ? res.persona.personaName : '默认人设');
         }
       })
-      .catch(() => {});
+      .catch(() => {
+        if (mounted) setActivePersonaName('默认人设');
+      });
     return () => {
       mounted = false;
     };
-  }, []);
+  }, [currentAccountId]);
 
   // Telegram Features State
   const [localChatInfoOpen, setLocalChatInfoOpen] = useState(false);
@@ -1638,12 +1645,20 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
       try {
         const tempAudio = new Audio(previewUrl);
         await new Promise((resolve) => {
+          const timer = setTimeout(() => {
+            tempAudio.onloadedmetadata = null;
+            tempAudio.onerror = null;
+            resolve(null);
+          }, 1500);
           tempAudio.onloadedmetadata = () => {
-            duration = Math.round(tempAudio.duration) || 0;
+            clearTimeout(timer);
+            duration = Number.isFinite(tempAudio.duration) && tempAudio.duration > 0 ? Math.max(1, Math.round(tempAudio.duration)) : 0;
             resolve(null);
           };
-          tempAudio.onerror = () => resolve(null);
-          setTimeout(resolve, 800);
+          tempAudio.onerror = () => {
+            clearTimeout(timer);
+            resolve(null);
+          };
         });
       } catch {}
 
@@ -1653,7 +1668,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
         sender: 'me',
         isAudio: true,
         audioUrl: previewUrl,
-        audioDuration: duration || 5,
+        audioDuration: duration,
         text: '🎤 语音消息',
         mediaFile: file,
         replyTo: replyingTo ? buildReplyPayload(replyingTo, chat?.title) : undefined,
@@ -1737,19 +1752,27 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
         try {
           const tempAudio = new Audio(previewUrl);
           await new Promise((resolve) => {
+            const timer = setTimeout(() => {
+              tempAudio.onloadedmetadata = null;
+              tempAudio.onerror = null;
+              resolve(null);
+            }, 1500);
             tempAudio.onloadedmetadata = () => {
-              duration = Math.round(tempAudio.duration) || 0;
+              clearTimeout(timer);
+              duration = Number.isFinite(tempAudio.duration) && tempAudio.duration > 0 ? Math.max(1, Math.round(tempAudio.duration)) : 0;
               resolve(null);
             };
-            tempAudio.onerror = () => resolve(null);
-            setTimeout(resolve, 800);
+            tempAudio.onerror = () => {
+              clearTimeout(timer);
+              resolve(null);
+            };
           });
         } catch {}
         onSendMessage({
           sender: 'me',
           isAudio: true,
           audioUrl: previewUrl,
-          audioDuration: duration || 5,
+          audioDuration: duration,
           text: '🎤 语音消息',
           mediaFile: file,
           replyTo: replyPayload,
@@ -2283,13 +2306,35 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
             type: audioBlob.type || 'audio/webm',
           });
           const audioUrl = URL.createObjectURL(audioFile);
+          let recordedSeconds = recordDurationRef.current > 0 ? recordDurationRef.current : 0;
+          try {
+            const probe = new Audio(audioUrl);
+            await new Promise((resolve) => {
+              const timer = setTimeout(() => {
+                probe.onloadedmetadata = null;
+                probe.onerror = null;
+                resolve(null);
+              }, 1200);
+              probe.onloadedmetadata = () => {
+                clearTimeout(timer);
+                if (Number.isFinite(probe.duration) && probe.duration > 0) {
+                  recordedSeconds = Math.max(1, Math.round(probe.duration));
+                }
+                resolve(null);
+              };
+              probe.onerror = () => {
+                clearTimeout(timer);
+                resolve(null);
+              };
+            });
+          } catch {}
 
           onSendMessage({
             chatId: chat?.id,
             accountId: currentAccountId,
             sender: 'me',
             isAudio: true,
-            audioDuration: recordDurationRef.current || 1,
+            audioDuration: recordedSeconds,
             audioUrl,
             mediaFile: audioFile,
             text: '🎤 语音消息',
@@ -2829,7 +2874,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                       const isLangSelected =
                         lang.code !== 'Auto' &&
                         Boolean(chat.sourceLang && chat.sourceLang !== 'Auto') &&
-                        outboundTargetLang === lang.code;
+                        normalizeChatLangCode(outboundTargetLang) === normalizeChatLangCode(lang.code);
                       const isSelected = isAutoSelected || isLangSelected;
                       return (
                         <button

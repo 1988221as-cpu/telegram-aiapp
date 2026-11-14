@@ -240,8 +240,7 @@ export const VoiceCloneStudioModal: React.FC<VoiceCloneStudioModalProps> = ({
     : VOICE_PROFILES.find((v) => v.id === selectedVoice) || VOICE_PROFILES[0];
 
   const activeEmotion = EMOTION_PRESETS[selectedEmotionIdx] || EMOTION_PRESETS[0];
-
-  const estimatedSeconds = Math.max(2, Math.ceil(text.trim().length / (4.5 * speedRate)));
+  const supportsEmotionInstructions = !isCustomOpenAiGateway || /gpt-4o-mini-tts/i.test(ttsEngine);
 
   const handlePreviewVoice = async () => {
     if (!text.trim()) return;
@@ -422,7 +421,7 @@ export const VoiceCloneStudioModal: React.FC<VoiceCloneStudioModalProps> = ({
                 <span className="text-[11px] text-[#7f93a5] tabular-nums">
                   {audioUrl && realAudioDuration
                     ? `${text.length} 字 · 实测 ${realAudioDuration} 秒`
-                    : `${text.length} 字 · 预估约 ${estimatedSeconds} 秒`}
+                    : `${text.length} 字 · 待合成后读取实测时长`}
                 </span>
               </div>
               <textarea
@@ -616,9 +615,16 @@ export const VoiceCloneStudioModal: React.FC<VoiceCloneStudioModalProps> = ({
 
             {/* 3. Tone Style & Emotion Presets */}
             <div>
-              <label className="block text-xs font-semibold text-[#7f93a5] mb-2">
-                情绪与语气风格 (Emotion & Tone)
-              </label>
+              <div className="flex items-center justify-between gap-2 mb-2">
+                <label className="text-xs font-semibold text-[#7f93a5]">
+                  情绪与语气风格 (Emotion & Tone)
+                </label>
+                {!supportsEmotionInstructions && (
+                  <span className="text-[10.5px] text-amber-400">
+                    当前模型 ({ttsEngine}) 不支持语气指令，仅 gpt-4o-mini-tts / Gemini 生效
+                  </span>
+                )}
+              </div>
               <div className="flex flex-wrap gap-1.5">
                 {EMOTION_PRESETS.map((em, idx) => {
                   const isSelected = selectedEmotionIdx === idx;
@@ -626,14 +632,17 @@ export const VoiceCloneStudioModal: React.FC<VoiceCloneStudioModalProps> = ({
                     <button
                       key={em.label}
                       type="button"
+                      disabled={!supportsEmotionInstructions}
                       onClick={() => {
                         setSelectedEmotionIdx(idx);
                         invalidateSynthesizedAudio();
                       }}
-                      className={`px-3 py-1.5 rounded-xl text-xs font-medium transition-all cursor-pointer border ${
-                        isSelected
-                          ? 'bg-[#2481cc] text-white border-[#2481cc] shadow-sm'
-                          : 'bg-[#152230] border-[#1e2f42] text-[#7f93a5] hover:text-white hover:border-[#2ba0ff]/40'
+                      className={`px-3 py-1.5 rounded-xl text-xs font-medium transition-all border ${
+                        !supportsEmotionInstructions
+                          ? 'opacity-45 cursor-not-allowed bg-[#152230] border-[#1e2f42] text-[#7f93a5]'
+                          : isSelected
+                          ? 'bg-[#2481cc] text-white border-[#2481cc] shadow-sm cursor-pointer'
+                          : 'bg-[#152230] border-[#1e2f42] text-[#7f93a5] hover:text-white hover:border-[#2ba0ff]/40 cursor-pointer'
                       }`}
                     >
                       {em.label}
@@ -644,55 +653,85 @@ export const VoiceCloneStudioModal: React.FC<VoiceCloneStudioModalProps> = ({
             </div>
 
             {/* 4. Server-side ffmpeg Speed & Pitch Controls */}
-            <div className="space-y-2.5 pt-1 text-xs p-3 rounded-xl bg-[#14202d] border border-[#1e2f42]">
-              <div className="flex items-center justify-between gap-2 flex-wrap">
-                <span className="text-[#9bb3c9] font-medium flex items-center gap-1.5">
-                  <Sliders className="w-3.5 h-3.5 text-[#2ba0ff]" /> 语速节奏：
-                </span>
-                <div className="flex items-center gap-1.5">
-                  {[0.8, 1.0, 1.2].map((rate) => (
-                    <button
-                      key={rate}
-                      type="button"
-                      onClick={() => {
-                        setSpeedRate(rate);
-                        invalidateSynthesizedAudio();
-                      }}
-                      className={`px-2.5 py-1 rounded-lg text-xs font-semibold transition-all cursor-pointer ${
-                        Math.abs(speedRate - rate) < 0.03
-                          ? 'bg-[#2481cc] text-white'
-                          : 'bg-[#152230] text-[#7f93a5] hover:text-white'
-                      }`}
-                    >
-                      {rate === 0.8 ? '0.8x 慢速' : rate === 1.0 ? '1.0x 标准' : '1.2x 轻快'}
-                    </button>
-                  ))}
+            <div className="space-y-3 pt-1 text-xs p-3 rounded-xl bg-[#14202d] border border-[#1e2f42]">
+              <div className="space-y-1.5">
+                <div className="flex items-center justify-between gap-2 flex-wrap">
+                  <span className="text-[#9bb3c9] font-medium flex items-center gap-1.5">
+                    <Sliders className="w-3.5 h-3.5 text-[#2ba0ff]" /> 语速节奏：
+                    <span className="text-white font-mono tabular-nums">{speedRate.toFixed(2)}x</span>
+                  </span>
+                  <div className="flex items-center gap-1.5">
+                    {[0.8, 1.0, 1.2].map((rate) => (
+                      <button
+                        key={rate}
+                        type="button"
+                        onClick={() => {
+                          setSpeedRate(rate);
+                          invalidateSynthesizedAudio();
+                        }}
+                        className={`px-2.5 py-1 rounded-lg text-xs font-semibold transition-all cursor-pointer ${
+                          Math.abs(speedRate - rate) < 0.015
+                            ? 'bg-[#2481cc] text-white'
+                            : 'bg-[#152230] text-[#7f93a5] hover:text-white'
+                        }`}
+                      >
+                        {rate === 0.8 ? '0.8x 慢速' : rate === 1.0 ? '1.0x 标准' : '1.2x 轻快'}
+                      </button>
+                    ))}
+                  </div>
                 </div>
+                <input
+                  type="range"
+                  min="0.8"
+                  max="1.2"
+                  step="0.05"
+                  value={speedRate}
+                  onChange={(e) => {
+                    setSpeedRate(parseFloat(e.target.value));
+                    invalidateSynthesizedAudio();
+                  }}
+                  className="w-full h-1 bg-[#1e2f42] rounded-lg appearance-none cursor-pointer accent-[#2ba0ff]"
+                />
               </div>
 
-              <div className="flex items-center justify-between gap-2 flex-wrap">
-                <span className="text-[#9bb3c9] font-medium flex items-center gap-1.5">
-                  <AudioWaveform className="w-3.5 h-3.5 text-[#2ba0ff]" /> 音高基线：
-                </span>
-                <div className="flex items-center gap-1.5">
-                  {[0.9, 1.0, 1.15].map((p) => (
-                    <button
-                      key={p}
-                      type="button"
-                      onClick={() => {
-                        setPitchRate(p);
-                        invalidateSynthesizedAudio();
-                      }}
-                      className={`px-2.5 py-1 rounded-lg text-xs font-semibold transition-all cursor-pointer ${
-                        Math.abs(pitchRate - p) < 0.03
-                          ? 'bg-[#2481cc] text-white'
-                          : 'bg-[#152230] text-[#7f93a5] hover:text-white'
-                      }`}
-                    >
-                      {p === 0.9 ? '0.9x 低沉' : p === 1.0 ? '1.0x 原声调' : '1.15x 清亮'}
-                    </button>
-                  ))}
+              <div className="space-y-1.5">
+                <div className="flex items-center justify-between gap-2 flex-wrap">
+                  <span className="text-[#9bb3c9] font-medium flex items-center gap-1.5">
+                    <AudioWaveform className="w-3.5 h-3.5 text-[#2ba0ff]" /> 音高基线：
+                    <span className="text-white font-mono tabular-nums">{pitchRate.toFixed(2)}x</span>
+                  </span>
+                  <div className="flex items-center gap-1.5">
+                    {[0.9, 1.0, 1.15].map((p) => (
+                      <button
+                        key={p}
+                        type="button"
+                        onClick={() => {
+                          setPitchRate(p);
+                          invalidateSynthesizedAudio();
+                        }}
+                        className={`px-2.5 py-1 rounded-lg text-xs font-semibold transition-all cursor-pointer ${
+                          Math.abs(pitchRate - p) < 0.015
+                            ? 'bg-[#2481cc] text-white'
+                            : 'bg-[#152230] text-[#7f93a5] hover:text-white'
+                        }`}
+                      >
+                        {p === 0.9 ? '0.9x 低沉' : p === 1.0 ? '1.0x 原声调' : '1.15x 清亮'}
+                      </button>
+                    ))}
+                  </div>
                 </div>
+                <input
+                  type="range"
+                  min="0.8"
+                  max="1.2"
+                  step="0.05"
+                  value={pitchRate}
+                  onChange={(e) => {
+                    setPitchRate(parseFloat(e.target.value));
+                    invalidateSynthesizedAudio();
+                  }}
+                  className="w-full h-1 bg-[#1e2f42] rounded-lg appearance-none cursor-pointer accent-[#2ba0ff]"
+                />
               </div>
             </div>
           </div>

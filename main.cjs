@@ -63,24 +63,27 @@ function isSafeStorageReady() {
 
 function persistMasterKeyBytes(keyBuf) {
   const { dpapiPath, fallbackPath } = getMasterKeyStoragePaths();
-  if (isSafeStorageReady()) {
-    const sealed = safeStorage.encryptString(keyBuf.toString('base64'));
-    fs.writeFileSync(dpapiPath, sealed);
-    try {
-      if (fs.existsSync(fallbackPath)) fs.unlinkSync(fallbackPath);
-    } catch {}
-    return true;
+  if (!isSafeStorageReady()) {
+    return false;
   }
-  fs.writeFileSync(fallbackPath, keyBuf.toString('base64'), { encoding: 'utf8', mode: 0o600 });
-  return false;
+  const sealed = safeStorage.encryptString(keyBuf.toString('base64'));
+  fs.writeFileSync(dpapiPath, sealed);
+  try {
+    if (fs.existsSync(fallbackPath)) fs.unlinkSync(fallbackPath);
+  } catch {}
+  return true;
 }
 
 function getOrCreateMasterKeyBytes() {
+  if (!isSafeStorageReady()) {
+    cachedDpapiMasterKey = null;
+    return null;
+  }
   if (cachedDpapiMasterKey && Buffer.isBuffer(cachedDpapiMasterKey) && cachedDpapiMasterKey.length === 32) {
     return cachedDpapiMasterKey;
   }
   const { dpapiPath, fallbackPath } = getMasterKeyStoragePaths();
-  if (isSafeStorageReady() && fs.existsSync(dpapiPath)) {
+  if (fs.existsSync(dpapiPath)) {
     try {
       const sealed = fs.readFileSync(dpapiPath);
       const b64 = safeStorage.decryptString(sealed);
@@ -97,17 +100,16 @@ function getOrCreateMasterKeyBytes() {
     try {
       const b64 = fs.readFileSync(fallbackPath, 'utf8').trim();
       const decoded = Buffer.from(b64, 'base64');
-      if (decoded.length === 32) {
-        if (isSafeStorageReady()) {
-          persistMasterKeyBytes(decoded);
-        }
+      if (decoded.length === 32 && persistMasterKeyBytes(decoded)) {
         cachedDpapiMasterKey = decoded;
         return cachedDpapiMasterKey;
       }
     } catch {}
   }
   const fresh = crypto.randomBytes(32);
-  persistMasterKeyBytes(fresh);
+  if (!persistMasterKeyBytes(fresh)) {
+    return null;
+  }
   cachedDpapiMasterKey = fresh;
   return cachedDpapiMasterKey;
 }
@@ -131,7 +133,7 @@ function registerCryptoIpcHandlers() {
     event.returnValue = {
       isElectron: true,
       hardwareProtected,
-      storageMode: hardwareProtected ? 'dpapi_aes_gcm' : 'electron_aes_gcm',
+      storageMode: hardwareProtected ? 'dpapi_aes_gcm' : 'dpapi_unavailable',
     };
   });
 
@@ -142,6 +144,10 @@ function registerCryptoIpcHandlers() {
     }
     try {
       const key = getOrCreateMasterKeyBytes();
+      if (!key) {
+        event.returnValue = null;
+        return;
+      }
       const iv = crypto.randomBytes(12);
       const cipher = crypto.createCipheriv('aes-256-gcm', key, iv);
       const encrypted = Buffer.concat([cipher.update(plaintext, 'utf8'), cipher.final()]);
@@ -179,6 +185,10 @@ function registerCryptoIpcHandlers() {
       const tag = combined.subarray(combined.length - 16);
       const enc = combined.subarray(0, combined.length - 16);
       const key = getOrCreateMasterKeyBytes();
+      if (!key) {
+        event.returnValue = null;
+        return;
+      }
       const decipher = crypto.createDecipheriv('aes-256-gcm', key, iv);
       decipher.setAuthTag(tag);
       const decrypted = Buffer.concat([decipher.update(enc), decipher.final()]).toString('utf8');
@@ -189,7 +199,7 @@ function registerCryptoIpcHandlers() {
   });
 
   ipcMain.on('hs-crypto:migrate-legacy-seed', (event, legacySeedBase64) => {
-    if (!isAuthorizedCryptoIpcEvent(event) || typeof legacySeedBase64 !== 'string') {
+    if (!isAuthorizedCryptoIpcEvent(event) || typeof legacySeedBase64 !== 'string' || !isSafeStorageReady()) {
       event.returnValue = false;
       return;
     }
@@ -201,10 +211,11 @@ function registerCryptoIpcHandlers() {
       }
       const { dpapiPath, fallbackPath } = getMasterKeyStoragePaths();
       if (!fs.existsSync(dpapiPath) && !fs.existsSync(fallbackPath)) {
-        persistMasterKeyBytes(decoded);
-        cachedDpapiMasterKey = decoded;
-        event.returnValue = true;
-        return;
+        if (persistMasterKeyBytes(decoded)) {
+          cachedDpapiMasterKey = decoded;
+          event.returnValue = true;
+          return;
+        }
       }
       event.returnValue = false;
     } catch {

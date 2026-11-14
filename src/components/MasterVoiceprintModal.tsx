@@ -12,7 +12,6 @@ import { MasterVoiceprint } from '../types';
 import {
   getMasterVoiceprint,
   saveMasterVoiceprint,
-  DEFAULT_SAMPLE_TRANSCRIPT,
 } from '../services/voiceprintStorage';
 
 const TTS_MODEL_PRESETS: Array<{ value: string; label: string }> = [
@@ -86,18 +85,14 @@ export const MasterVoiceprintModal: React.FC<MasterVoiceprintModalProps> = ({
     const updated: MasterVoiceprint = {
       id: voiceprint?.id || 'master_' + Date.now(),
       name: name.trim() || '个人预设音色档',
-      sampleAudioUrl: '',
-      duration: 0,
-      recordedAt: Date.now(),
       enabledAsDefault,
       pitch,
       rate,
-      warmth: 100,
       timbreTag: '预设音色 · 服务端 ffmpeg 真实调速调音高',
-      sampleTranscript: DEFAULT_SAMPLE_TRANSCRIPT,
       baseVoice,
       gender: baseVoice === 'Fenrir' || baseVoice === 'Puck' || baseVoice === 'Charon' ? 'male' : 'female',
       ttsModel: resolvedTtsModel,
+      updatedAt: Date.now(),
     };
 
     const saveRes = saveMasterVoiceprint(updated);

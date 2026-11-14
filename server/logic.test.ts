@@ -1308,8 +1308,24 @@ test('Issue #12: unified message sync, deduplication, chat resolution, and evolu
     assert.equal(resolved.messages.length, 3);
     assert.equal(resolved.messages[2].text, 'Great, I will confirm the booking slot right now.');
 
-    // 4. Verify resolveUnifiedEvolutionCorpus picks up unified client + DB messages
+    // 4. Verify resolveUnifiedEvolutionCorpus forbids cross-account sampling when accountId is omitted and includes scoped DB + client when accountId is provided
+    const unscopedCorpus = await resolveUnifiedEvolutionCorpus({
+      clientMessages: [
+        {
+          id: `msg_evo_unscoped_${now}`,
+          chatId: testChatId,
+          accountId: 'acc_1',
+          sender: 'peer',
+          text: 'Should not sample without accountId',
+          createdAt: now + 500,
+        },
+      ],
+    });
+    assert.equal(unscopedCorpus.corpusText.includes('freight schedule'), false);
+    assert.equal(unscopedCorpus.corpusText.includes('Should not sample without accountId'), false);
+
     const corpus = await resolveUnifiedEvolutionCorpus({
+      accountId: 'acc_1',
       clientMessages: [
         {
           id: `msg_evo_${now}`,
@@ -2124,11 +2140,17 @@ test('Priority Custom Key mode: mutually exclusive with Cloud RAG and routes cha
   const serverSrc = readFileSync(resolve(process.cwd(), 'server.ts'), 'utf8');
   assert.match(serverSrc, /app\.post\('\/api\/customer\/analyze\/:chatId'[\s\S]*?useCustomPriorityMemory[\s\S]*?engineMode:\s*'custom'[\s\S]*?analysisPrompt/);
   assert.match(serverSrc, /app\.post\('\/api\/translate'[\s\S]*?isPriorityCustomGateway[\s\S]*?'custom_llm'/);
-  assert.match(serverSrc, /getCnTranslationIfForeign\(replyText,\s*effectiveChatConfig,\s*userJwt\)/);
-  assert.match(serverSrc, /getCnTranslationIfForeign\(replyText,\s*undefined,\s*lastActiveUserJwt \|\| undefined\)/);
   assert.match(
     serverSrc,
-    /async function getCnTranslationIfForeign\(\s*text:\s*string,\s*overrideCustomConfig\?:\s*any,\s*userJwt\?:\s*string/
+    /getCnTranslationIfForeign\(\s*replyText,\s*effectiveChatConfig,\s*userJwt,\s*chatTranslationTargetLang\s*\)/
+  );
+  assert.match(
+    serverSrc,
+    /getCnTranslationIfForeign\(\s*replyText,\s*undefined,\s*lastActiveUserJwt \|\| undefined,\s*webhookChatTargetLang\s*\)/
+  );
+  assert.match(
+    serverSrc,
+    /async function getCnTranslationIfForeign\(\s*text:\s*string,\s*overrideCustomConfig\?:\s*any,\s*userJwt\?:\s*string,\s*overrideTargetLang\?:\s*string/
   );
 });
 
@@ -4799,10 +4821,11 @@ test('Audit #2 & #3 regressions: translateText 3-state race elimination, /api/au
 test('Audit P2 (#5-#8): Dutch vs German detection, non-letter skip, non-Latin getCnTranslationIfForeign, and ChatArea outbound/Auto UX fixes', async () => {
   const { readFileSync } = await import('node:fs');
   const { resolve } = await import('node:path');
-  const { initDatabase } = await import('./db.ts');
+  const { db, initDatabase } = await import('./db.ts');
   const {
     detectSourceLangCode,
     getCnTranslationIfForeign,
+    getScopedChatTargetLang,
     syncServerCustomLlmConfig,
     getServerCustomLlmConfig,
     syncServerTranslationSettings,
@@ -4818,12 +4841,27 @@ test('Audit P2 (#5-#8): Dutch vs German detection, non-letter skip, non-Latin ge
   await initDatabase();
 
   // #5: Dutch 'hallo' phrases must NOT be hijacked by German, while German still detects as 'de'
-  for (const nlSample of ['Hallo, ik ben Jan', 'Hallo, alsjeblieft', 'Hallo, hoe is het']) {
+  for (const nlSample of [
+    'Hallo, ik ben Jan',
+    'Hallo, alsjeblieft',
+    'Hallo, hoe is het',
+    'Hallo, bedankt!',
+    'Hallo, gefeliciteerd!',
+    'Hallo, welterusten',
+    'Hallo, doei!',
+    'Hallo, gezellig!',
+    'Hallo, fijne dag!',
+    'Hallo, prettige dag!',
+    'Hallo, tot zo!',
+    'Hallo, alles goed?',
+  ]) {
     assert.equal(detectSourceLangCode(nlSample), 'nl', `server detectSourceLangCode failed for: ${nlSample}`);
     assert.equal(detectClientLangCode(nlSample), 'nl', `client detectClientLangCode failed for: ${nlSample}`);
   }
-  assert.equal(detectSourceLangCode('Hallo, wie geht es dir?'), 'de');
-  assert.equal(detectClientLangCode('Hallo, wie geht es dir?'), 'de');
+  for (const deSample of ['Hallo, wie geht es dir?', 'Hallo, ich bin Max', 'Hallo, das ist prima!']) {
+    assert.equal(detectSourceLangCode(deSample), 'de', `server detectSourceLangCode failed for: ${deSample}`);
+    assert.equal(detectClientLangCode(deSample), 'de', `client detectClientLangCode failed for: ${deSample}`);
+  }
   // Mixed Kanji + Kana Japanese must resolve to 'ja', not 'zh-CN'
   assert.equal(detectSourceLangCode('確認しました。ありがとうございます！'), 'ja');
   assert.equal(detectClientLangCode('確認しました。ありがとうございます！'), 'ja');
@@ -4831,12 +4869,20 @@ test('Audit P2 (#5-#8): Dutch vs German detection, non-letter skip, non-Latin ge
   // #6: hasTranslatableLetters skips pure digits, URLs, emails, @mentions, emojis
   assert.equal(hasTranslatableLetters('123456'), false);
   assert.equal(hasTranslatableLetters('https://t.me/abc'), false);
+  assert.equal(hasTranslatableLetters('t.me/my_channel'), false);
+  assert.equal(hasTranslatableLetters('t.me/+AbCdEf123'), false);
+  assert.equal(hasTranslatableLetters('tg://resolve?domain=alice'), false);
   assert.equal(hasTranslatableLetters('www.example.com/order/99'), false);
   assert.equal(hasTranslatableLetters('user@example.com'), false);
   assert.equal(hasTranslatableLetters('@alice_bot'), false);
   assert.equal(hasTranslatableLetters('100.50 👍'), false);
   assert.equal(hasTranslatableLetters('Hello @alice'), true);
+  assert.equal(hasTranslatableLetters('Check t.me/my_channel'), true);
   assert.equal(hasTranslatableLetters('订单号 123456'), true);
+  assert.equal(detectSourceLangCode('t.me/my_channel'), '');
+  assert.equal(detectSourceLangCode('tg://resolve?domain=alice'), '');
+  assert.equal(detectClientLangCode('t.me/my_channel'), '');
+  assert.equal(detectClientLangCode('tg://resolve?domain=alice'), '');
 
   const chatAreaSrc = readFileSync(resolve(process.cwd(), 'src/components/ChatArea.tsx'), 'utf8');
   assert.match(chatAreaSrc, /!queryText \|\| !hasTranslatableLetters\(queryText\)/);
@@ -4847,6 +4893,12 @@ test('Audit P2 (#5-#8): Dutch vs German detection, non-letter skip, non-Latin ge
   assert.equal(
     getOutboundTargetLanguage({ id: 'c1', sourceLang: 'Auto', targetLang: 'Chinese' } as any, { defaultSourceLang: 'Auto' } as any, [
       { id: 'm1', sender: 'peer', text: 'Hallo, ik ben Jan', timestamp: '10:00' } as any,
+    ]),
+    'Dutch'
+  );
+  assert.equal(
+    getOutboundTargetLanguage({ id: 'c1b', sourceLang: 'Auto', targetLang: 'Chinese' } as any, { defaultSourceLang: 'Auto' } as any, [
+      { id: 'm1b', sender: 'peer', text: 'Hallo, bedankt!', timestamp: '10:00' } as any,
     ]),
     'Dutch'
   );
@@ -4862,9 +4914,13 @@ test('Audit P2 (#5-#8): Dutch vs German detection, non-letter skip, non-Latin ge
     ]),
     'Swedish'
   );
+  assert.equal(getLanguageDisplayName('Auto'), '自动识别');
+  assert.equal(getLanguageDisplayName('auto'), '自动识别');
   assert.equal(getLanguageDisplayName('Dutch'), '荷兰语');
   assert.equal(getLanguageDisplayName('Polish'), '波兰语');
   assert.equal(getLanguageDisplayName('Swedish'), '瑞典语');
+  assert.match(chatAreaSrc, /normalizeChatLangCode\(outboundTargetLang\)\s*===\s*normalizeChatLangCode\(lang\.code\)/);
+  assert.equal(chatAreaSrc.includes('outboundTargetLang === lang.code'), false);
   assert.match(chatAreaSrc, /if \(lang\.code === 'Auto'\)\s*\{\s*onUpdateChatLanguage\?\.\(chat\.id,\s*'Auto',\s*chat\.targetLang \|\| 'Auto'\);/);
 
   // #7: getCnTranslationIfForeign detects ja/ko/th/he/el and honors non-Chinese defaultTargetLang, skipping only same-language & non-letter texts
@@ -4918,7 +4974,14 @@ test('Audit P2 (#5-#8): Dutch vs German detection, non-letter skip, non-Latin ge
     assert.equal(await getCnTranslationIfForeign('你好，请稍等'), '');
     assert.equal(await getCnTranslationIfForeign('123456'), '');
     assert.equal(await getCnTranslationIfForeign('https://t.me/abc @alice'), '');
+    assert.equal(await getCnTranslationIfForeign('t.me/my_channel tg://resolve?domain=alice'), '');
+    assert.equal(await getCnTranslationIfForeign('t.me/+AbCdEf123 888 🚀'), '');
+    assert.equal(await getCnTranslationIfForeign('tg://join?invite=xyz123'), '');
     assert.equal(fetchCalls, callsBeforeSkip);
+
+    // Mixed natural language + Telegram shortlink must still translate
+    const mixedShortlinkOut = await getCnTranslationIfForeign('Check t.me/my_channel');
+    assert.match(mixedShortlinkOut, /^\[TRANS:zh-CN\]/);
 
     // Non-Chinese defaultTargetLang ('English'): Chinese reply MUST translate to English; English reply MUST skip
     await syncServerTranslationSettings({
@@ -4933,6 +4996,49 @@ test('Audit P2 (#5-#8): Dutch vs German detection, non-letter skip, non-Latin ge
     const callsBeforeEnSkip = fetchCalls;
     assert.equal(await getCnTranslationIfForeign('Hello, how can I help you today?'), '');
     assert.equal(fetchCalls, callsBeforeEnSkip);
+
+    // Per-chat overrideTargetLang ('Japanese') overrides global defaultTargetLang ('English')
+    const zhToJaOverride = await getCnTranslationIfForeign('你好，请稍等', undefined, undefined, 'Japanese');
+    assert.match(zhToJaOverride, /^\[TRANS:ja\]/);
+    const enToJaOverride = await getCnTranslationIfForeign('Hello, see you soon!', undefined, undefined, 'Japanese');
+    assert.match(enToJaOverride, /^\[TRANS:ja\]/);
+
+    const callsBeforeJaSkip = fetchCalls;
+    assert.equal(await getCnTranslationIfForeign('確認しました。ありがとうございます！', undefined, undefined, 'Japanese'), '');
+    assert.equal(fetchCalls, callsBeforeJaSkip);
+
+    // Explicit 'Auto' or empty overrideTargetLang falls back to global defaultTargetLang ('English')
+    const zhFallbackToGlobal = await getCnTranslationIfForeign('你好，请稍等', undefined, undefined, 'Auto');
+    assert.match(zhFallbackToGlobal, /^\[TRANS:en\]/);
+    const zhEmptyFallbackToGlobal = await getCnTranslationIfForeign('你好，请稍等', undefined, undefined, '');
+    assert.match(zhEmptyFallbackToGlobal, /^\[TRANS:en\]/);
+
+    // SQLite chat_language_prefs lookup + /api/llm/chat, Webhook, and MTProto autopilot call wiring
+    const testChatIdA = `tg_pref_test_${Date.now()}`;
+    const testChatIdAuto = `tg_pref_auto_${Date.now()}`;
+    const testAccountA = 'acc_tg_888001';
+    const testAccountB = 'acc_tg_888002';
+    try {
+      await db.prepare(`
+        INSERT INTO chat_language_prefs (account_id, chat_id, source_lang, target_lang, updated_at)
+        VALUES (?, ?, 'Auto', 'Japanese', ?)
+      `).run(testAccountA, testChatIdA, Date.now());
+      await db.prepare(`
+        INSERT INTO chat_language_prefs (account_id, chat_id, source_lang, target_lang, updated_at)
+        VALUES (?, ?, 'Auto', 'Auto', ?)
+      `).run(testAccountA, testChatIdAuto, Date.now());
+
+      assert.equal(await getScopedChatTargetLang(testChatIdA, testAccountA), 'Japanese');
+      assert.equal(await getScopedChatTargetLang(testChatIdA.replace(/^tg_/, ''), testAccountA), 'Japanese');
+      assert.equal(await getScopedChatTargetLang(testChatIdAuto, testAccountA), '');
+      assert.equal(await getScopedChatTargetLang(testChatIdA, testAccountB), '');
+    } finally {
+      await db.prepare(`DELETE FROM chat_language_prefs WHERE chat_id IN (?, ?)`).run(testChatIdA, testChatIdAuto);
+    }
+
+    assert.match(serverSrc, /chatTranslationTargetLang\s*=\s*explicitInboundTarget \|\| \(await getScopedChatTargetLang\(customerId,\s*accountId\)\) \|\| undefined/);
+    assert.match(serverSrc, /webhookChatTargetLang\s*=\s*\(await getScopedChatTargetLang\(chatId,\s*'acc_telegram_bot'\)\) \|\| undefined/);
+    assert.match(serverSrc, /autopilotChatTargetLang\s*=\s*\(await getScopedChatTargetLang\(canonicalChatId,\s*accountId\)\) \|\| undefined/);
   } finally {
     globalThis.fetch = prevFetch;
     await syncServerTranslationSettings(
@@ -5968,13 +6074,13 @@ test('Audit Item 1-5: no fake durations, versions, contact labels, cloning claim
 
   // 4. ChatList formatChatSubtitle accurately handles all chat types without fake label
   assert.equal(formatChatSubtitle({ id: '1', title: 'Alice', username: '@alice_dev' } as any), '@alice_dev');
-  assert.equal(formatChatSubtitle({ id: '2', title: 'News', isChannel: true, membersCount: 120 } as any), '频道 · 120 位订阅者');
-  assert.equal(formatChatSubtitle({ id: '3', title: 'VIP Group', isGroup: true, membersCount: 18 } as any), '群组 · 18 位成员');
+  assert.equal(formatChatSubtitle({ id: '2', title: 'News', isChannel: true, memberCount: 120 } as any), '频道 · 120 位订阅者');
+  assert.equal(formatChatSubtitle({ id: '3', title: 'VIP Group', isGroup: true, memberCount: 18 } as any), '群组 · 18 位成员');
   assert.equal(formatChatSubtitle({ id: '4', title: 'Helper', isBot: true } as any), 'Telegram 机器人');
   assert.equal(formatChatSubtitle({ id: '5', title: 'Bob', phone: '+8613800138000' } as any), '+8613800138000');
   assert.equal(formatChatSubtitle({ id: '6', title: 'Stranger' } as any), '未设置用户名');
 
-  // 5. Crypto storage reports fallback honestly when outside Electron/WebCrypto and encryptDataAsync does not catch/downgrade WebCrypto errors
+  // 5. Crypto storage reports fallback honestly when outside Electron/WebCrypto and NEVER silently downgrades writes
   const secInfo = getCryptoStorageSecurityInfo();
   assert.equal(secInfo.mode, 'fallback_stream');
   assert.equal(secInfo.hardwareProtected, false);
@@ -5987,12 +6093,348 @@ test('Audit Item 1-5: no fake durations, versions, contact labels, cloning claim
     cryptoSrc.indexOf('export async function encryptDataAsync'),
     cryptoSrc.indexOf('export async function decryptDataAsync')
   );
-  assert.equal(/catch\s*[\(\{][\s\S]*?encryptFallbackSyncStream/.test(asyncEncryptFn), false);
+  assert.equal(asyncEncryptFn.includes('encryptFallbackSyncStream'), false);
+  const syncSetFn = cryptoSrc.slice(
+    cryptoSrc.indexOf('export function secureSetItemSync'),
+    cryptoSrc.indexOf('export async function secureGetItemAsync')
+  );
+  assert.equal(syncSetFn.includes('encryptFallbackSyncStream'), false);
+
+  const mainSrc = readFileSync(resolve(process.cwd(), 'main.cjs'), 'utf8');
+  assert.equal(mainSrc.includes('fs.writeFileSync(fallbackPath'), false, 'main.cjs must never write plaintext master key to disk');
+  assert.match(mainSrc, /dpapi_unavailable/);
+
+  // 6. Sensitive auth session, member profile, deleted message IDs, and voiceprint use encrypted storage
+  const apiSrc = readFileSync(resolve(process.cwd(), 'src/services/apiService.ts'), 'utf8');
+  assert.equal(apiSrc.includes('localStorage.setItem(SESSION_STORAGE_KEY'), false);
+  assert.equal(apiSrc.includes('localStorage.setItem(MEMBER_USER_STORAGE_KEY'), false);
+  assert.equal(apiSrc.includes('localStorage.setItem(scopedKey, JSON.stringify(trimmed))'), false);
+  const vpSrc = readFileSync(resolve(process.cwd(), 'src/services/voiceprintStorage.ts'), 'utf8');
+  assert.equal(vpSrc.includes('localStorage.setItem('), false);
+  assert.match(vpSrc, /secureSetItemSync/);
+
+  // 7. No fake audio durations, fake voice preview time, or fake relationship defaults remain
+  const chatAreaSrc = readFileSync(resolve(process.cwd(), 'src/components/ChatArea.tsx'), 'utf8');
+  assert.equal(chatAreaSrc.includes('duration || 5'), false);
+  assert.equal(chatAreaSrc.includes('recordDurationRef.current || 1'), false);
+  const memorySrc = readFileSync(resolve(process.cwd(), 'src/components/CustomerMemoryDrawer.tsx'), 'utf8');
+  assert.equal(memorySrc.includes('自然亲切、高效沟通'), false);
+  const serverSrc = readFileSync(resolve(process.cwd(), 'server.ts'), 'utf8');
+  assert.equal(serverSrc.includes("'活跃联系人'"), false);
+  assert.equal(serverSrc.includes('audioDuration || 5'), false);
+  assert.equal(studioSrc.includes('预估约'), false);
 
   const sysSettingsSrc = readFileSync(resolve(process.cwd(), 'src/components/SystemSettingsModal.tsx'), 'utf8');
   assert.match(sysSettingsSrc, /cryptoInfo\.mode === 'fallback_stream'/);
   assert.match(sysSettingsSrc, /cryptoInfo\.detail/);
 });
+
+test('Section 4 P0: backup secret stripping, config secret masking/preservation, credential-isolated KB cache, and multi-account AI data isolation', async () => {
+  const { readFileSync } = await import('node:fs');
+  const { resolve } = await import('node:path');
+  const http = await import('node:http');
+  const { createHmac } = await import('node:crypto');
+  const {
+    db,
+    getGlobalPersonaFromDb,
+    saveGlobalPersonaToDb,
+    getEvolutionStateFromDb,
+    saveEvolutionStateToDb,
+    DEFAULT_GLOBAL_PERSONA,
+    DEFAULT_EVOLUTION_STATE,
+  } = await import('../server/db.ts');
+  const {
+    app,
+    syncServerCustomLlmConfig,
+    getServerCustomLlmConfig,
+    syncServerTranslationSettings,
+    getServerTranslationSettings,
+    queryKnowledgeRAG,
+    buildRemoteKbCacheKey,
+  } = await import('../server.ts');
+
+  // 1. DatabaseModal backup export strips all secret keys from both decrypted and local fallback payloads
+  const dbModalSrc = readFileSync(resolve(process.cwd(), 'src/components/DatabaseModal.tsx'), 'utf8');
+  assert.match(dbModalSrc, /SENSITIVE_CONFIG_BACKUP_KEYS\s*=\s*new Set\(\['tg_pro_llm_config',\s*'tg_pro_trans_settings'\]\)/);
+  assert.match(dbModalSrc, /function sanitizeBackupEntry/);
+  for (const secretField of ['apiKey', 'knowledgeBaseApiKey', 'engineLicenseKey', 'geminiApiKey', 'googleApiKey']) {
+    assert.equal(dbModalSrc.includes(secretField), true, `DatabaseModal must sanitize ${secretField}`);
+  }
+  const customLlmModalSrc = readFileSync(resolve(process.cwd(), 'src/components/CustomLLMModal.tsx'), 'utf8');
+  assert.match(customLlmModalSrc, /当前为脱敏显示/);
+
+  // 2. buildRemoteKbCacheKey isolates cache entries by credential SHA-256 hash
+  const ck1 = buildRemoteKbCacheKey('https://kb.example/search', 'hello', 'key-A', 'jwt-1', 'lic-1');
+  const ck2 = buildRemoteKbCacheKey('https://kb.example/search', 'hello', 'key-B', 'jwt-1', 'lic-1');
+  const ck3 = buildRemoteKbCacheKey('https://kb.example/search', 'hello', 'key-A', 'jwt-2', 'lic-1');
+  const ck4 = buildRemoteKbCacheKey('https://kb.example/search', 'hello', 'key-A', 'jwt-1', 'lic-2');
+  const ckSame = buildRemoteKbCacheKey('https://kb.example/search', 'HELLO', 'key-A', 'jwt-1', 'lic-1');
+  assert.equal(ck1, ckSame);
+  assert.notEqual(ck1, ck2);
+  assert.notEqual(ck1, ck3);
+  assert.notEqual(ck1, ck4);
+  assert.equal(ck1.includes('key-A'), false);
+  assert.equal(ck1.includes('jwt-1'), false);
+  assert.equal(ck1.includes('lic-1'), false);
+
+  // 3. Runtime HTTP tests for secret masking & multi-account AI isolation
+  const prevJwtSecret = process.env.JWT_SECRET;
+  const prevCustomCfg = await getServerCustomLlmConfig().catch(() => null);
+  const prevTransSettings = await getServerTranslationSettings().catch(() => null);
+
+  process.env.JWT_SECRET = 'p0_section4_jwt_secret';
+  const srv = http.createServer(app);
+  await new Promise<void>((r) => srv.listen(0, '127.0.0.1', r));
+  const port = (srv.address() as any).port;
+
+  const headerB64 = Buffer.from(JSON.stringify({ alg: 'HS256', typ: 'JWT' })).toString('base64url');
+  const payloadB64 = Buffer.from(
+    JSON.stringify({ sub: 'member_p0', username: 'member_p0', role: 'member', exp: Math.floor(Date.now() / 1000) + 3600 })
+  ).toString('base64url');
+  const sigB64 = createHmac('sha256', process.env.JWT_SECRET).update(`${headerB64}.${payloadB64}`).digest('base64url');
+  const memberJwt = `${headerB64}.${payloadB64}.${sigB64}`;
+
+  const accA = `acc_tg_p0_a_${Date.now()}`;
+  const accB = `acc_tg_p0_b_${Date.now()}`;
+  let kbIdA = '';
+  let kbIdB = '';
+  const transIdA = `trans_p0_a_${Date.now()}`;
+  const transIdB = `trans_p0_b_${Date.now()}`;
+
+  try {
+    // 3a. Config secret masking & preservation on GET / POST
+    await syncServerCustomLlmConfig({
+      enabled: true,
+      engineMode: 'custom',
+      protocol: 'openai',
+      baseUrl: 'https://api.example.com/v1',
+      apiKey: 'sk-real-secret-99887766',
+      knowledgeBaseApiKey: 'kb-secret-11223344',
+      engineLicenseKey: 'lic-secret-55667788',
+      modelName: 'gpt-4o-mini',
+    });
+    await syncServerTranslationSettings({
+      defaultSourceLang: 'Auto',
+      defaultTargetLang: 'Chinese',
+      preferredEngine: 'gemini',
+      geminiModel: 'gemma-4-26b-a4b-it',
+      geminiApiKey: 'AIza-real-gemini-123456',
+      googleApiKey: 'AIza-real-google-654321',
+    });
+
+    const getLlmRes = await fetch(`http://127.0.0.1:${port}/api/llm/config`, {
+      headers: { Authorization: `Bearer ${memberJwt}`, 'X-Account-Id': accA },
+    });
+    assert.equal(getLlmRes.status, 200);
+    const getLlmData = (await getLlmRes.json()) as any;
+    assert.equal(getLlmData.config.apiKey, 'sk-r****7766');
+    assert.equal(getLlmData.config.hasApiKey, true);
+    assert.equal(getLlmData.config.knowledgeBaseApiKey, 'kb-s****3344');
+    assert.equal(getLlmData.config.hasKnowledgeBaseApiKey, true);
+    assert.equal(getLlmData.config.engineLicenseKey, 'lic-****7788');
+    assert.equal(getLlmData.config.hasEngineLicenseKey, true);
+
+    const getTransRes = await fetch(`http://127.0.0.1:${port}/api/translate/settings`, {
+      headers: { Authorization: `Bearer ${memberJwt}`, 'X-Account-Id': accA },
+    });
+    assert.equal(getTransRes.status, 200);
+    const getTransData = (await getTransRes.json()) as any;
+    assert.equal(getTransData.settings.geminiApiKey, 'AIza****3456');
+    assert.equal(getTransData.settings.hasGeminiApiKey, true);
+    assert.equal(getTransData.settings.googleApiKey, 'AIza****4321');
+    assert.equal(getTransData.settings.hasGoogleApiKey, true);
+
+    // Round-trip POST with masked values MUST preserve stored secrets (NOT overwrite DB with ****)
+    const postLlmRes = await fetch(`http://127.0.0.1:${port}/api/llm/config`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${memberJwt}`, 'X-Account-Id': accA },
+      body: JSON.stringify({
+        ...getLlmData.config,
+        modelName: 'gpt-4o',
+      }),
+    });
+    assert.equal(postLlmRes.status, 200);
+    const storedAfterMaskedPost = await getServerCustomLlmConfig();
+    assert.equal(storedAfterMaskedPost.apiKey, 'sk-real-secret-99887766');
+    assert.equal(storedAfterMaskedPost.knowledgeBaseApiKey, 'kb-secret-11223344');
+    assert.equal(storedAfterMaskedPost.engineLicenseKey, 'lic-secret-55667788');
+    assert.equal(storedAfterMaskedPost.modelName, 'gpt-4o');
+
+    // Clear apiKey explicitly with '' clears stored apiKey without clearing engineLicenseKey when omitted
+    const clearKeyRes = await fetch(`http://127.0.0.1:${port}/api/llm/config`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${memberJwt}`, 'X-Account-Id': accA },
+      body: JSON.stringify({
+        enabled: true,
+        engineMode: 'cloud',
+        apiKey: '',
+      }),
+    });
+    assert.equal(clearKeyRes.status, 200);
+    const storedAfterClear = await getServerCustomLlmConfig();
+    assert.equal(storedAfterClear.apiKey, '');
+    assert.equal(storedAfterClear.engineLicenseKey, 'lic-secret-55667788');
+
+    const postTransRes = await fetch(`http://127.0.0.1:${port}/api/translate/settings`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${memberJwt}`, 'X-Account-Id': accA },
+      body: JSON.stringify({
+        ...getTransData.settings,
+        defaultTargetLang: 'English',
+      }),
+    });
+    assert.equal(postTransRes.status, 200);
+    const storedTransAfterMasked = await getServerTranslationSettings();
+    assert.equal(storedTransAfterMasked.geminiApiKey, 'AIza-real-gemini-123456');
+    assert.equal(storedTransAfterMasked.googleApiKey, 'AIza-real-google-654321');
+    assert.equal(storedTransAfterMasked.defaultTargetLang, 'English');
+
+    // 3b. Knowledge Base strict account isolation (CRUD + RAG)
+    const addKbA = await fetch(`http://127.0.0.1:${port}/api/knowledge`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${memberJwt}`, 'X-Account-Id': accA },
+      body: JSON.stringify({
+        category: '产品报价',
+        title: '账号A报价隐私文档',
+        content: '账号A专属VIP报价方案 alpha_secret_token_991',
+        keywords: 'alpha_secret_token_991, 报价',
+      }),
+    });
+    assert.equal(addKbA.status, 200);
+    kbIdA = ((await addKbA.json()) as any).id;
+
+    const addKbB = await fetch(`http://127.0.0.1:${port}/api/knowledge`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${memberJwt}`, 'X-Account-Id': accB },
+      body: JSON.stringify({
+        category: '售后指南',
+        title: '账号B售后规范',
+        content: '账号B专属售后流程 beta_secret_token_882',
+        keywords: 'beta_secret_token_882, 售后',
+      }),
+    });
+    assert.equal(addKbB.status, 200);
+    kbIdB = ((await addKbB.json()) as any).id;
+
+    const listKbA = (await (
+      await fetch(`http://127.0.0.1:${port}/api/knowledge`, {
+        headers: { Authorization: `Bearer ${memberJwt}`, 'X-Account-Id': accA },
+      })
+    ).json()) as any;
+    assert.equal(listKbA.items.some((x: any) => x.id === kbIdA), true);
+    assert.equal(listKbA.items.some((x: any) => x.id === kbIdB), false);
+
+    // Cross-account toggle/delete on kbIdB from accA MUST fail with 404
+    const crossToggleRes = await fetch(`http://127.0.0.1:${port}/api/knowledge/${kbIdB}/toggle`, {
+      method: 'PATCH',
+      headers: { Authorization: `Bearer ${memberJwt}`, 'X-Account-Id': accA },
+    });
+    assert.equal(crossToggleRes.status, 404);
+
+    const crossDelRes = await fetch(`http://127.0.0.1:${port}/api/knowledge/${kbIdB}`, {
+      method: 'DELETE',
+      headers: { Authorization: `Bearer ${memberJwt}`, 'X-Account-Id': accA },
+    });
+    assert.equal(crossDelRes.status, 404);
+
+    // queryKnowledgeRAG strictly isolates hits per account
+    const ragA = await queryKnowledgeRAG('beta_secret_token_882 alpha_secret_token_991', 5, accA);
+    assert.equal(ragA.context.includes('账号A报价隐私文档'), true);
+    assert.equal(ragA.context.includes('账号B售后规范'), false);
+
+    const ragB = await queryKnowledgeRAG('beta_secret_token_882 alpha_secret_token_991', 5, accB);
+    assert.equal(ragB.context.includes('账号B售后规范'), true);
+    assert.equal(ragB.context.includes('账号A报价隐私文档'), false);
+
+    // 3c. Chat Transcripts strict account isolation
+    const nowTs = Date.now();
+    await db
+      .prepare(
+        `INSERT INTO chat_transcripts (id, account_id, title, dialogue_text, learned_style, is_active, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, 1, ?, ?)`
+      )
+      .run(transIdA, accA, '账号A对话范本', '我: 你好A', '简洁口语A', nowTs, nowTs);
+    await db
+      .prepare(
+        `INSERT INTO chat_transcripts (id, account_id, title, dialogue_text, learned_style, is_active, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, 1, ?, ?)`
+      )
+      .run(transIdB, accB, '账号B对话范本', '我: 你好B', '简洁口语B', nowTs, nowTs);
+
+    const transListA = (await (
+      await fetch(`http://127.0.0.1:${port}/api/transcripts`, {
+        headers: { Authorization: `Bearer ${memberJwt}`, 'X-Account-Id': accA },
+      })
+    ).json()) as any[];
+    assert.equal(transListA.some((t) => t.id === transIdA), true);
+    assert.equal(transListA.some((t) => t.id === transIdB), false);
+
+    const crossDelTrans = await fetch(`http://127.0.0.1:${port}/api/transcripts/${transIdB}`, {
+      method: 'DELETE',
+      headers: { Authorization: `Bearer ${memberJwt}`, 'X-Account-Id': accA },
+    });
+    assert.equal(crossDelTrans.status, 404);
+
+    // 3d. Global Persona & Evolution State strict account isolation (HTTP + DB)
+    const savePersonaA = await fetch(`http://127.0.0.1:${port}/api/persona/config`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${memberJwt}`, 'X-Account-Id': accA },
+      body: JSON.stringify({ ...DEFAULT_GLOBAL_PERSONA, personaName: '苏晓A' }),
+    });
+    assert.equal(savePersonaA.status, 200);
+
+    const savePersonaB = await fetch(`http://127.0.0.1:${port}/api/persona/config`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${memberJwt}`, 'X-Account-Id': accB },
+      body: JSON.stringify({ ...DEFAULT_GLOBAL_PERSONA, personaName: '顾沉B' }),
+    });
+    assert.equal(savePersonaB.status, 200);
+
+    const personaResA = (await (
+      await fetch(`http://127.0.0.1:${port}/api/persona/config`, {
+        headers: { Authorization: `Bearer ${memberJwt}`, 'X-Account-Id': accA },
+      })
+    ).json()) as any;
+    const personaResB = (await (
+      await fetch(`http://127.0.0.1:${port}/api/persona/config`, {
+        headers: { Authorization: `Bearer ${memberJwt}`, 'X-Account-Id': accB },
+      })
+    ).json()) as any;
+    assert.equal(personaResA.persona.personaName, '苏晓A');
+    assert.equal(personaResB.persona.personaName, '顾沉B');
+
+    const freshAcc = `acc_tg_p0_fresh_${Date.now()}`;
+    const freshPersona = await getGlobalPersonaFromDb(freshAcc);
+    assert.equal(freshPersona.personaName, DEFAULT_GLOBAL_PERSONA.personaName);
+
+    await saveEvolutionStateToDb({ ...DEFAULT_EVOLUTION_STATE, evolutionLevel: 7 }, accA);
+    const evoB = await getEvolutionStateFromDb(accB);
+    assert.equal(evoB.evolutionLevel, DEFAULT_EVOLUTION_STATE.evolutionLevel);
+    const evoA = await getEvolutionStateFromDb(accA);
+    assert.equal(evoA.evolutionLevel, 7);
+  } finally {
+    try {
+      if (kbIdA) await db.prepare('DELETE FROM knowledge_base WHERE id = ?').run(kbIdA);
+      if (kbIdB) await db.prepare('DELETE FROM knowledge_base WHERE id = ?').run(kbIdB);
+      await db.prepare('DELETE FROM chat_transcripts WHERE id IN (?, ?)').run(transIdA, transIdB);
+      await db.prepare('DELETE FROM training_logs WHERE account_id IN (?, ?)').run(accA, accB);
+      await db
+        .prepare('DELETE FROM system_config WHERE key IN (?, ?, ?, ?)')
+        .run(
+          `global_persona_config::${accA}`,
+          `global_persona_config::${accB}`,
+          `evolution_engine_state::${accA}`,
+          `evolution_engine_state::${accB}`
+        );
+    } catch {}
+    await syncServerCustomLlmConfig(prevCustomCfg || { enabled: true, engineMode: 'cloud', apiKey: '', engineLicenseKey: '' });
+    await syncServerTranslationSettings(prevTransSettings || { preferredEngine: 'gemini', geminiApiKey: '', googleApiKey: '' });
+    await new Promise<void>((r) => srv.close(() => r()));
+    if (prevJwtSecret === undefined) delete process.env.JWT_SECRET;
+    else process.env.JWT_SECRET = prevJwtSecret;
+  }
+});
+
 
 
 

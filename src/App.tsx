@@ -18,7 +18,7 @@ import {
 } from './components/TelegramSettingsModal';
 import { MemberAuthModal } from './components/MemberAuthModal';
 import { TelegramVoiceCallModal } from './components/TelegramVoiceCallModal';
-import { getMasterVoiceprint } from './services/voiceprintStorage';
+import { getMasterVoiceprint, hydrateMasterVoiceprint } from './services/voiceprintStorage';
 import {
   INITIAL_ACCOUNTS,
   INITIAL_CHATS,
@@ -61,6 +61,7 @@ import {
   purgeAllLocalChatData,
   deleteLocalMessage,
   recordDeletedMessageId,
+  getDeletedMessageStorageKey,
   isMessageDeleted,
   deleteMessageFromDb,
   batchDeleteTelegramMessagesApi,
@@ -102,7 +103,7 @@ import {
 } from './services/apiService';
 
 
-import { secureGetItemSync, secureSetItemSync, secureGetItemAsync } from './services/cryptoStorage';
+import { secureGetItemSync, secureSetItemSync, secureGetItemAsync, secureRemoveItem } from './services/cryptoStorage';
 import {
   savePendingMediaBlob,
   getPendingMediaBlob,
@@ -585,18 +586,21 @@ export default function App() {
 
   const [callRecords, setCallRecords] = useState<TelegramCallRecord[]>(() => {
     try {
-      const saved = localStorage.getItem('tg_pro_call_records');
-      return saved ? sanitizeCallRecords(JSON.parse(saved)) : [];
+      const saved = secureGetItemSync<TelegramCallRecord[]>('tg_pro_call_records');
+      return saved ? sanitizeCallRecords(saved) : [];
     } catch {
       return [];
     }
   });
 
+  const [isHydrated, setIsHydrated] = useState(false);
+
   useEffect(() => {
+    if (!isHydrated) return;
     try {
-      localStorage.setItem('tg_pro_call_records', JSON.stringify(callRecords));
+      secureSetItemSync('tg_pro_call_records', callRecords);
     } catch {}
-  }, [callRecords]);
+  }, [callRecords, isHydrated]);
 
   // Keep Master Voiceprint state reactively synchronized
   useEffect(() => {
@@ -648,8 +652,6 @@ export default function App() {
     } catch {}
   }, [clientPrefs]);
 
-  const [isHydrated, setIsHydrated] = useState(false);
-
   const rehydrateFromLocalStorage = async (isRestore = false) => {
     try {
       const [savedAccs, savedChats, savedMsgs, savedTrans, savedLLM] = await Promise.all([
@@ -682,6 +684,19 @@ export default function App() {
       if (savedChats && Array.isArray(savedChats) && savedChats.length > 0) {
         nextChats = sanitizeChats(savedChats);
         setChats(nextChats);
+      }
+
+      const deletedKeySet = new Set<string>([
+        getDeletedMessageStorageKey(''),
+        ...(resolvedActiveAccId ? [getDeletedMessageStorageKey(resolvedActiveAccId)] : []),
+        ...((nextAccounts || accounts || []).map((a) => getDeletedMessageStorageKey(a.id))),
+      ]);
+      await Promise.all(
+        Array.from(deletedKeySet).map((delKey) => secureGetItemAsync<string[]>(delKey).catch(() => null))
+      );
+      const hydratedVoiceprint = await hydrateMasterVoiceprint();
+      if (hydratedVoiceprint) {
+        setIsMasterVoiceActive(!!hydratedVoiceprint.enabledAsDefault);
       }
 
       const reconstructed: Record<string, Message[]> = {};
@@ -720,7 +735,7 @@ export default function App() {
           }
         }
         try {
-          localStorage.removeItem('tg_pro_messages');
+          secureRemoveItem('tg_pro_messages');
         } catch {}
       }
 
@@ -811,12 +826,13 @@ export default function App() {
         setTranslationSettings((prev) => enforceTranslationEngineForLlm(normalizedSavedLlm, prev));
       }
 
+      const hydratedCalls = await secureGetItemAsync<TelegramCallRecord[]>('tg_pro_call_records');
+      if (hydratedCalls) {
+        setCallRecords(sanitizeCallRecords(hydratedCalls));
+      }
+
       if (isRestore) {
         setContacts(getScopedContacts(resolvedActiveAccId || activeAccountIdRef.current));
-        try {
-          const savedCalls = localStorage.getItem('tg_pro_call_records');
-          if (savedCalls) setCallRecords(sanitizeCallRecords(JSON.parse(savedCalls)));
-        } catch {}
         const savedTheme = localStorage.getItem('tg_pro_theme');
         if (savedTheme === 'dark' || savedTheme === 'light') {
           setTheme(savedTheme);
@@ -827,7 +843,7 @@ export default function App() {
             setClientPrefs({ ...DEFAULT_TELEGRAM_CLIENT_PREFS, ...JSON.parse(savedPrefs) });
           }
         } catch {}
-        const mv = getMasterVoiceprint();
+        const mv = (await hydrateMasterVoiceprint()) || getMasterVoiceprint();
         setIsMasterVoiceActive(!!mv?.enabledAsDefault);
 
         const curChatId = activeChatIdRef.current;

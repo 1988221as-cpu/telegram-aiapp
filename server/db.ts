@@ -334,6 +334,7 @@ export async function initDatabase() {
     -- 4. AI Training Knowledge Base
     CREATE TABLE IF NOT EXISTS knowledge_base (
       id TEXT PRIMARY KEY,
+      account_id TEXT DEFAULT 'global',
       category TEXT NOT NULL,
       title TEXT NOT NULL,
       content TEXT NOT NULL,
@@ -352,6 +353,7 @@ export async function initDatabase() {
     -- 5. AI Training & Evolution History Logs
     CREATE TABLE IF NOT EXISTS training_logs (
       id TEXT PRIMARY KEY,
+      account_id TEXT DEFAULT 'global',
       log_type TEXT NOT NULL,
       details TEXT NOT NULL,
       items_learned INTEGER NOT NULL,
@@ -361,6 +363,7 @@ export async function initDatabase() {
     -- 6. Full Chat Dialogue Corpus
     CREATE TABLE IF NOT EXISTS chat_transcripts (
       id TEXT PRIMARY KEY,
+      account_id TEXT DEFAULT 'global',
       title TEXT NOT NULL,
       description TEXT,
       dialogue_text TEXT NOT NULL,
@@ -434,6 +437,25 @@ export async function initDatabase() {
   } catch {}
   try {
     await db.exec(`ALTER TABLE messages ADD COLUMN reactions_json TEXT`);
+  } catch {}
+
+  try {
+    await db.exec(`ALTER TABLE knowledge_base ADD COLUMN account_id TEXT DEFAULT 'global'`);
+  } catch {}
+  try {
+    await db.exec(`CREATE INDEX IF NOT EXISTS idx_knowledge_account ON knowledge_base (account_id)`);
+  } catch {}
+  try {
+    await db.exec(`ALTER TABLE chat_transcripts ADD COLUMN account_id TEXT DEFAULT 'global'`);
+  } catch {}
+  try {
+    await db.exec(`CREATE INDEX IF NOT EXISTS idx_transcripts_account ON chat_transcripts (account_id)`);
+  } catch {}
+  try {
+    await db.exec(`ALTER TABLE training_logs ADD COLUMN account_id TEXT DEFAULT 'global'`);
+  } catch {}
+  try {
+    await db.exec(`CREATE INDEX IF NOT EXISTS idx_training_logs_account ON training_logs (account_id)`);
   } catch {}
 
   // Ensure telegram_user_sessions exists and has api_id/api_hash columns
@@ -550,16 +572,30 @@ export const DEFAULT_EVOLUTION_STATE = {
   habits: [] as any[],
 };
 
-export async function getGlobalPersonaFromDb(): Promise<any> {
+export function resolvePersonaConfigKey(accountId?: string): string {
+  const clean = typeof accountId === 'string' ? accountId.trim() : '';
+  if (!clean || clean === 'global') return 'global_persona_config';
+  return `global_persona_config::${clean}`;
+}
+
+export function resolveEvolutionConfigKey(accountId?: string): string {
+  const clean = typeof accountId === 'string' ? accountId.trim() : '';
+  if (!clean || clean === 'global') return 'evolution_engine_state';
+  return `evolution_engine_state::${clean}`;
+}
+
+export async function getGlobalPersonaFromDb(accountId?: string): Promise<any> {
+  const configKey = resolvePersonaConfigKey(accountId);
   try {
-    const row = (await db.prepare("SELECT value FROM system_config WHERE key = 'global_persona_config'").get()) as any;
+    const row = (await db.prepare('SELECT value FROM system_config WHERE key = ?').get(configKey)) as any;
     if (row && row.value) {
+      const parsed = JSON.parse(row.value);
       return {
         ...DEFAULT_GLOBAL_PERSONA,
-        ...JSON.parse(row.value),
+        ...parsed,
         stagedPrompts: {
           ...DEFAULT_GLOBAL_PERSONA.stagedPrompts,
-          ...(JSON.parse(row.value)?.stagedPrompts || {}),
+          ...(parsed?.stagedPrompts || {}),
         },
       };
     }
@@ -572,14 +608,15 @@ export async function getGlobalPersonaFromDb(): Promise<any> {
   };
 }
 
-export async function saveGlobalPersonaToDb(persona: any): Promise<boolean> {
+export async function saveGlobalPersonaToDb(persona: any, accountId?: string): Promise<boolean> {
+  const configKey = resolvePersonaConfigKey(accountId);
   try {
     const valueStr = JSON.stringify(persona);
     await db.prepare(`
       INSERT INTO system_config (key, value, updated_at)
-      VALUES ('global_persona_config', ?, ?)
+      VALUES (?, ?, ?)
       ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
-    `).run(valueStr, Date.now());
+    `).run(configKey, valueStr, Date.now());
     return true;
   } catch (err: any) {
     console.error('[Database] saveGlobalPersonaToDb error:', err.message);
@@ -587,7 +624,7 @@ export async function saveGlobalPersonaToDb(persona: any): Promise<boolean> {
   }
 }
 
-export async function resetGlobalPersonaInDb(): Promise<any> {
+export async function resetGlobalPersonaInDb(accountId?: string): Promise<any> {
   const blankPersona = {
     ...DEFAULT_GLOBAL_PERSONA,
     stagedPrompts: { ...DEFAULT_GLOBAL_PERSONA.stagedPrompts },
@@ -595,7 +632,7 @@ export async function resetGlobalPersonaInDb(): Promise<any> {
     tabooKeywords: [],
   };
   try {
-    await saveGlobalPersonaToDb(blankPersona);
+    await saveGlobalPersonaToDb(blankPersona, accountId);
     return blankPersona;
   } catch (err: any) {
     console.error('[Database] resetGlobalPersonaInDb error:', err.message);
@@ -603,9 +640,10 @@ export async function resetGlobalPersonaInDb(): Promise<any> {
   }
 }
 
-export async function getEvolutionStateFromDb(): Promise<any> {
+export async function getEvolutionStateFromDb(accountId?: string): Promise<any> {
+  const configKey = resolveEvolutionConfigKey(accountId);
   try {
-    const row = (await db.prepare("SELECT value FROM system_config WHERE key = 'evolution_engine_state'").get()) as any;
+    const row = (await db.prepare('SELECT value FROM system_config WHERE key = ?').get(configKey)) as any;
     if (row && row.value) {
       const parsed = JSON.parse(row.value);
       return {
@@ -620,14 +658,15 @@ export async function getEvolutionStateFromDb(): Promise<any> {
   return { ...DEFAULT_EVOLUTION_STATE, habits: [] };
 }
 
-export async function saveEvolutionStateToDb(state: any): Promise<boolean> {
+export async function saveEvolutionStateToDb(state: any, accountId?: string): Promise<boolean> {
+  const configKey = resolveEvolutionConfigKey(accountId);
   try {
     const valueStr = JSON.stringify(state);
     await db.prepare(`
       INSERT INTO system_config (key, value, updated_at)
-      VALUES ('evolution_engine_state', ?, ?)
+      VALUES (?, ?, ?)
       ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
-    `).run(valueStr, Date.now());
+    `).run(configKey, valueStr, Date.now());
     return true;
   } catch (err: any) {
     console.error('[Database] saveEvolutionStateToDb error:', err.message);
@@ -819,10 +858,10 @@ export async function restoreDatabaseSnapshot(snapshot: any): Promise<{ success:
     for (const k of tables.knowledge_base) {
       await db.prepare(`
         INSERT OR REPLACE INTO knowledge_base (
-          id, category, title, content, keywords, source_type, source_file, is_active, hit_count, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          id, account_id, category, title, content, keywords, source_type, source_file, is_active, hit_count, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
-        k.id, k.category, k.title, k.content, k.keywords, k.source_type, k.source_file,
+        k.id, k.account_id || 'global', k.category, k.title, k.content, k.keywords, k.source_type, k.source_file,
         k.is_active, k.hit_count, k.created_at, k.updated_at
       );
     }
@@ -832,10 +871,10 @@ export async function restoreDatabaseSnapshot(snapshot: any): Promise<{ success:
     for (const t of tables.chat_transcripts) {
       await db.prepare(`
         INSERT OR REPLACE INTO chat_transcripts (
-          id, title, description, dialogue_text, learned_style, round_count, character_count, is_active, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          id, account_id, title, description, dialogue_text, learned_style, round_count, character_count, is_active, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
-        t.id, t.title, t.description, t.dialogue_text, t.learned_style, t.round_count,
+        t.id, t.account_id || 'global', t.title, t.description, t.dialogue_text, t.learned_style, t.round_count,
         t.character_count, t.is_active, t.created_at, t.updated_at
       );
     }
@@ -883,10 +922,10 @@ export async function restoreDatabaseSnapshot(snapshot: any): Promise<{ success:
       for (const tl of tables.training_logs) {
         await db.prepare(`
           INSERT OR REPLACE INTO training_logs (
-            id, log_type, details, items_learned, created_at
-          ) VALUES (?, ?, ?, ?, ?)
+            id, account_id, log_type, details, items_learned, created_at
+          ) VALUES (?, ?, ?, ?, ?, ?)
         `).run(
-          tl.id, tl.log_type ?? 'manual', tl.details ?? '', Number(tl.items_learned) || 0, Number(tl.created_at) || Date.now()
+          tl.id, tl.account_id || 'global', tl.log_type ?? 'manual', tl.details ?? '', Number(tl.items_learned) || 0, Number(tl.created_at) || Date.now()
         );
       }
     } catch (e: any) {
@@ -1047,10 +1086,10 @@ export async function purgeDatabaseBusinessData(): Promise<{
     }
   }
 
-  // Also clear global persona / evolution state entries in system_config while preserving auth & API gateway settings
+  // Also clear global & per-account persona / evolution state entries in system_config while preserving auth & API gateway settings
   try {
     await db.execute(
-      `DELETE FROM system_config WHERE key IN ('global_persona', 'global_persona_config', 'evolution_engine_state', 'evolution_state')`
+      `DELETE FROM system_config WHERE key IN ('global_persona', 'global_persona_config', 'evolution_engine_state', 'evolution_state') OR key LIKE 'global_persona_config::%' OR key LIKE 'evolution_engine_state::%'`
     );
   } catch {
     // ignore

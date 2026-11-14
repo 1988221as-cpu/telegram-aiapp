@@ -368,7 +368,8 @@ function encryptFallbackSyncStream(dataStr: string): string {
 /**
  * Synchronous encryption:
  * - In Electron: Uses genuine OS-backed AES-256-GCM via safeStorage master key (`enc:gcm256:<iv>:<ct+tag>`).
- * - Outside Electron (Node tests / insecure fallback): Uses ephemeral-key synchronous stream cipher (`enc:gcm256:s256:...`).
+ * - In Browser: Fails closed (throws) instead of silently downgrading to weak XOR cipher.
+ * - In Node unit test env (`typeof window === 'undefined'`): Allows 256-bit stream round-trip verification.
  */
 export function encryptDataSync(dataStr: string): string {
   const bridge = getElectronBridge();
@@ -377,6 +378,10 @@ export function encryptDataSync(dataStr: string): string {
     if (gcmCipher && isTrueAesGcmCiphertext(gcmCipher)) {
       return gcmCipher;
     }
+    throw new Error('Electron OS DPAPI AES-256-GCM 不可用，已禁止降级加密');
+  }
+  if (typeof window !== 'undefined') {
+    throw new Error('浏览器环境仅支持 WebCrypto AES-256-GCM 异步落盘，已禁止同步降级流加密');
   }
   return encryptFallbackSyncStream(dataStr);
 }
@@ -493,10 +498,11 @@ export async function encryptDataAsync(data: any): Promise<string> {
     if (gcmCipher && isTrueAesGcmCiphertext(gcmCipher)) {
       return gcmCipher;
     }
+    throw new Error('Electron OS DPAPI AES-256-GCM 不可用，已禁止降级写入本地存储');
   }
 
   if (!hasWebCryptoSubtle()) {
-    return encryptFallbackSyncStream(jsonStr);
+    throw new Error('当前环境缺少 WebCrypto AES-256-GCM 安全上下文，已禁止降级写入本地存储');
   }
 
   const key = await getOrCreateCryptoKey();
@@ -560,12 +566,13 @@ export async function decryptDataAsync<T = any>(encryptedStr: string | null): Pr
  * Synchronously reads from in-memory cache or decrypts synchronously when supported.
  */
 export function secureGetItemSync<T = any>(storageKey: string): T | null {
-  if (typeof window === 'undefined') return null;
+  if (typeof window === 'undefined' && typeof localStorage === 'undefined') return null;
 
   if (inMemoryCache.has(storageKey)) {
     return inMemoryCache.get(storageKey) as T;
   }
 
+  if (typeof localStorage === 'undefined') return null;
   const raw = localStorage.getItem(storageKey);
   if (!raw) return null;
 
@@ -636,13 +643,13 @@ export async function secureSetItemAsync(storageKey: string, data: any): Promise
 }
 
 /**
- * Saves an item into in-memory cache synchronously and persists as genuine AES-256-GCM:
- * - In Electron: synchronous DPAPI + AES-256-GCM via main process IPC.
- * - In Browser: serialized WebCrypto AES-256-GCM write using IndexedDB non-extractable key
- *   (never stores plaintext seed or s256 XOR ciphertext when WebCrypto is available).
+ * Saves an item into in-memory cache synchronously and persists ONLY as genuine AES-256-GCM:
+ * - In Electron: synchronous DPAPI + AES-256-GCM via main process IPC (never downgrades if DPAPI unavailable).
+ * - In Browser: serialized WebCrypto AES-256-GCM write using IndexedDB non-extractable key.
+ * - In insecure context without DPAPI/WebCrypto: keeps in memory only; never writes downgraded XOR ciphertext.
  */
 export function secureSetItemSync(storageKey: string, data: any): void {
-  if (typeof window === 'undefined') return;
+  if (typeof window === 'undefined' && typeof localStorage === 'undefined') return;
 
   inMemoryCache.set(storageKey, data);
 
@@ -652,17 +659,13 @@ export function secureSetItemSync(storageKey: string, data: any): void {
     const gcmCipher = bridge.encryptSync(jsonStr);
     if (gcmCipher && isTrueAesGcmCiphertext(gcmCipher)) {
       localStorage.setItem(storageKey, gcmCipher);
-      return;
     }
+    return;
   }
 
   if (hasWebCryptoSubtle()) {
     enqueueAsyncAesGcmPersist(storageKey, data);
-    return;
   }
-
-  const jsonStr = typeof data === 'string' ? data : JSON.stringify(data);
-  localStorage.setItem(storageKey, encryptFallbackSyncStream(jsonStr));
 }
 
 /**
@@ -700,7 +703,7 @@ export async function secureGetItemAsync<T = any>(storageKey: string): Promise<T
 export function secureRemoveItem(storageKey: string): void {
   inMemoryCache.delete(storageKey);
   pendingAsyncWrites.delete(storageKey);
-  if (typeof window !== 'undefined') {
+  if (typeof localStorage !== 'undefined') {
     try {
       localStorage.removeItem(storageKey);
     } catch {}
@@ -742,7 +745,7 @@ export function purgeCryptoSeed(): void {
 }
 
 export function getCryptoStorageSecurityInfo(): {
-  mode: 'dpapi_aes_gcm' | 'electron_aes_gcm' | 'webcrypto_idb_aes_gcm' | 'fallback_stream';
+  mode: 'dpapi_aes_gcm' | 'webcrypto_idb_aes_gcm' | 'fallback_stream';
   label: string;
   detail: string;
   hardwareProtected: boolean;
@@ -760,9 +763,9 @@ export function getCryptoStorageSecurityInfo(): {
         };
       }
       return {
-        mode: 'electron_aes_gcm',
-        label: '主进程密钥 + AES-256-GCM（DPAPI 未启用）',
-        detail: '由 Electron 主进程隔离密钥文件执行同步 AES-256-GCM 加密（系统级 DPAPI 不可用）。',
+        mode: 'fallback_stream',
+        label: '未启用 AES-256-GCM（系统 DPAPI 不可用，已禁止降级写入）',
+        detail: 'Electron 主进程无法启用系统级 safeStorage/DPAPI，系统已禁止明文或弱加密落盘，仅限当前内存会话。',
         hardwareProtected: false,
       };
     } catch {}
@@ -777,8 +780,8 @@ export function getCryptoStorageSecurityInfo(): {
   }
   return {
     mode: 'fallback_stream',
-    label: '未启用 AES-256-GCM（非安全上下文临时混淆）',
-    detail: '当前环境缺少 Electron 桥接与 WebCrypto 安全上下文，仅使用临时流混淆且不可视作硬件级加密。',
+    label: '未启用 AES-256-GCM（非安全上下文，已禁止降级写入）',
+    detail: '当前环境缺少 Electron DPAPI 桥接与 WebCrypto 安全上下文，系统已禁止降级加密落盘，仅保留当前内存会话。',
     hardwareProtected: false,
   };
 }

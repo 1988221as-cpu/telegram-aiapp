@@ -17,6 +17,14 @@ import {
 } from '../types';
 import { normalizeLanguageCode } from '../data/mockData';
 import { clearAccountPendingMediaBlobs, purgeAllPendingMediaBlobs } from './pendingMediaStorage';
+import {
+  secureGetItemSync,
+  secureSetItemSync,
+  secureRemoveItem,
+  secureGetItemAsync,
+  decryptDataAsync,
+  purgeCryptoSeed,
+} from './cryptoStorage';
 
 declare const __APP_VERSION__: string | undefined;
 export const APP_VERSION =
@@ -47,7 +55,8 @@ const ACTIVE_ACCOUNT_STORAGE_KEY = 'tg_pro_active_account_id';
 
 let currentSessionToken: string = (() => {
   if (typeof window !== 'undefined') {
-    return localStorage.getItem(SESSION_STORAGE_KEY) || '';
+    const val = secureGetItemSync<string>(SESSION_STORAGE_KEY);
+    return typeof val === 'string' ? val : '';
   }
   return '';
 })();
@@ -82,9 +91,9 @@ export function setSessionToken(token: string) {
   currentSessionToken = token;
   if (typeof window !== 'undefined') {
     if (token) {
-      localStorage.setItem(SESSION_STORAGE_KEY, token);
+      secureSetItemSync(SESSION_STORAGE_KEY, token);
     } else {
-      localStorage.removeItem(SESSION_STORAGE_KEY);
+      secureRemoveItem(SESSION_STORAGE_KEY);
     }
   }
 }
@@ -116,8 +125,7 @@ export async function fetchLocalDeviceId(): Promise<{ deviceId: string; maxTeleg
 export function getStoredMemberUser(): MemberUser | null {
   if (typeof window === 'undefined') return null;
   try {
-    const raw = localStorage.getItem(MEMBER_USER_STORAGE_KEY);
-    return raw ? JSON.parse(raw) : null;
+    return secureGetItemSync<MemberUser>(MEMBER_USER_STORAGE_KEY);
   } catch {
     return null;
   }
@@ -126,9 +134,9 @@ export function getStoredMemberUser(): MemberUser | null {
 export function setStoredMemberUser(user: MemberUser | null) {
   if (typeof window === 'undefined') return;
   if (user) {
-    localStorage.setItem(MEMBER_USER_STORAGE_KEY, JSON.stringify(user));
+    secureSetItemSync(MEMBER_USER_STORAGE_KEY, user);
   } else {
-    localStorage.removeItem(MEMBER_USER_STORAGE_KEY);
+    secureRemoveItem(MEMBER_USER_STORAGE_KEY);
   }
 }
 
@@ -139,6 +147,15 @@ export async function initSessionHandshake(): Promise<{
   code?: string;
   message?: string;
 }> {
+  if (typeof window !== 'undefined') {
+    if (!currentSessionToken) {
+      const hydratedToken = await secureGetItemAsync<string>(SESSION_STORAGE_KEY);
+      if (typeof hydratedToken === 'string' && hydratedToken) {
+        currentSessionToken = hydratedToken;
+      }
+    }
+    await secureGetItemAsync<MemberUser>(MEMBER_USER_STORAGE_KEY);
+  }
   if (!currentSessionToken) {
     return { authenticated: false };
   }
@@ -2432,18 +2449,9 @@ export async function purgeDatabaseApi(): Promise<{
   }
 }
 
-import {
-  secureGetItemSync,
-  secureSetItemSync,
-  secureRemoveItem,
-  secureGetItemAsync,
-  decryptDataAsync,
-  purgeCryptoSeed
-} from './cryptoStorage';
-
 // ==================== LOCAL ENCRYPTED STORAGE REPOSITORY ====================
-// Chat messages, transcripts, accounts, and customer notes are stored locally using a 256-bit salted stream cipher
-// (and WebCrypto AES-256-GCM for async reads/writes), capped at MAX_LOCAL_MESSAGES_PER_CHAT per chat.
+// Chat messages, transcripts, accounts, and customer notes are stored locally using AES-256-GCM,
+// capped at MAX_LOCAL_MESSAGES_PER_CHAT per chat.
 
 export const MAX_LOCAL_MESSAGES_PER_CHAT = 100;
 
@@ -2469,9 +2477,7 @@ function buildDeletedIdEntryKey(messageId: string, chatId?: string): string {
 export function isMessageDeleted(messageId: string, accountId?: string, chatId?: string): boolean {
   try {
     const scopedKey = getDeletedMessageStorageKey(accountId);
-    const raw = localStorage.getItem(scopedKey);
-    if (!raw) return false;
-    const list: string[] = JSON.parse(raw);
+    const list = secureGetItemSync<string[]>(scopedKey);
     if (!Array.isArray(list)) return false;
     const cleanId = String(messageId || '').trim();
     if (chatId && isLegacyAmbiguousTelegramMessageId(cleanId)) {
@@ -2489,14 +2495,14 @@ export function recordDeletedMessageIds(messageIds: string[], accountId?: string
   if (!Array.isArray(messageIds) || messageIds.length === 0) return;
   try {
     const scopedKey = getDeletedMessageStorageKey(accountId);
-    const raw = localStorage.getItem(scopedKey);
-    const set = new Set<string>(raw ? JSON.parse(raw) : []);
+    const existing = secureGetItemSync<string[]>(scopedKey);
+    const set = new Set<string>(Array.isArray(existing) ? existing : []);
     for (const id of messageIds) {
       if (id) set.add(buildDeletedIdEntryKey(id, chatId));
     }
     const arr = Array.from(set);
     const trimmed = arr.length > MAX_DELETED_MESSAGE_IDS ? arr.slice(-MAX_DELETED_MESSAGE_IDS) : arr;
-    localStorage.setItem(scopedKey, JSON.stringify(trimmed));
+    secureSetItemSync(scopedKey, trimmed);
   } catch {}
 }
 
@@ -4029,7 +4035,8 @@ export function collectLocalSyncedMessages(
   try {
     if (typeof localStorage === 'undefined') return [];
     const targetAcc = (accountId ?? currentActiveAccountId ?? '').trim();
-    const prefix = targetAcc ? `tg_desktop_msgs_${targetAcc}_` : 'tg_desktop_msgs_';
+    if (!targetAcc) return [];
+    const prefix = `tg_desktop_msgs_${targetAcc}_`;
     const collected: Partial<Message>[] = [];
     for (let i = 0; i < localStorage.length; i++) {
       const key = localStorage.key(i) || '';

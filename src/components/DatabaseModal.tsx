@@ -37,6 +37,31 @@ const EXACT_BACKUP_KEYS = new Set([
   'tg_deleted_message_ids',
 ]);
 
+function sanitizeBackupEntry(key: string, value: any): any {
+  if (!value || typeof value !== 'object') return value;
+  if (key === 'tg_pro_llm_config') {
+    const clone = { ...value };
+    clone.apiKey = '';
+    clone.knowledgeBaseApiKey = '';
+    clone.engineLicenseKey = '';
+    delete clone.hasApiKey;
+    delete clone.hasKnowledgeBaseApiKey;
+    delete clone.hasEngineLicenseKey;
+    return clone;
+  }
+  if (key === 'tg_pro_trans_settings') {
+    const clone = { ...value };
+    delete clone.geminiApiKey;
+    delete clone.googleApiKey;
+    delete clone.hasGeminiApiKey;
+    delete clone.hasGoogleApiKey;
+    return clone;
+  }
+  return value;
+}
+
+const SENSITIVE_CONFIG_BACKUP_KEYS = new Set(['tg_pro_llm_config', 'tg_pro_trans_settings']);
+
 function shouldBackupLocalKey(key: string): boolean {
   if (!key || EXCLUDED_BACKUP_KEYS.has(key)) return false;
   return (
@@ -108,10 +133,18 @@ export const DatabaseModal: React.FC<DatabaseModalProps> = ({ isOpen, onClose, o
       for (let i = 0; i < localStorage.length; i++) {
         const key = localStorage.key(i) || '';
         if (shouldBackupLocalKey(key)) {
-          localPayload[key] = localStorage.getItem(key);
           const decoded = await secureGetItemAsync(key);
-          if (decoded !== null && decoded !== undefined) {
-            decryptedPayload[key] = decoded;
+          if (SENSITIVE_CONFIG_BACKUP_KEYS.has(key)) {
+            if (decoded && typeof decoded === 'object') {
+              const sanitized = sanitizeBackupEntry(key, decoded);
+              decryptedPayload[key] = sanitized;
+              localPayload[key] = JSON.stringify(sanitized);
+            }
+          } else {
+            localPayload[key] = localStorage.getItem(key);
+            if (decoded !== null && decoded !== undefined) {
+              decryptedPayload[key] = decoded;
+            }
           }
         }
       }

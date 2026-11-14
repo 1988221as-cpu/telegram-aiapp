@@ -34,6 +34,7 @@ interface KnowledgeEvolutionModalProps {
   onClose: () => void;
   customConfig?: CustomLLMConfig;
   embedded?: boolean;
+  activeAccountId?: string;
 }
 
 export const KnowledgeEvolutionModal: React.FC<KnowledgeEvolutionModalProps> = ({
@@ -41,6 +42,7 @@ export const KnowledgeEvolutionModal: React.FC<KnowledgeEvolutionModalProps> = (
   onClose,
   customConfig,
   embedded = false,
+  activeAccountId,
 }) => {
   const [activeTab, setActiveTab] = useState<'persona' | 'sandbox'>('persona');
 
@@ -73,7 +75,7 @@ export const KnowledgeEvolutionModal: React.FC<KnowledgeEvolutionModalProps> = (
   useEffect(() => {
     if (!isOpen && !embedded) return;
     loadPersonaData();
-  }, [isOpen, embedded]);
+  }, [isOpen, embedded, activeAccountId]);
 
   const loadPersonaData = async () => {
     setIsLoadingPersona(true);

@@ -165,9 +165,11 @@ export interface CustomLLMConfig {
   explicitlyDisabled?: boolean;
   engineMode?: 'cloud' | 'custom';
   engineLicenseKey?: string;
+  hasEngineLicenseKey?: boolean;
   protocol: 'openai' | 'gemini' | 'anthropic';
   baseUrl: string;
   apiKey: string;
+  hasApiKey?: boolean;
   modelName: string;
   temperature: number;
   customHeaders: string;
@@ -175,6 +177,7 @@ export interface CustomLLMConfig {
   enableKnowledgeBaseRAG?: boolean;
   knowledgeBaseApiUrl?: string;
   knowledgeBaseApiKey?: string;
+  hasKnowledgeBaseApiKey?: boolean;
   pingStatus?: {
     ok: boolean;
     latencyMs?: number;
@@ -191,7 +194,9 @@ export interface TranslationSettings {
   preferredEngine: 'gemini' | 'google' | 'custom_llm';
   geminiModel?: string;
   geminiApiKey?: string;
+  hasGeminiApiKey?: boolean;
   googleApiKey?: string;
+  hasGoogleApiKey?: boolean;
   customModelName?: string;
 }
 
@@ -224,18 +229,20 @@ export interface CustomerProfile {
 export interface MasterVoiceprint {
   id: string;
   name: string;
-  sampleAudioUrl?: string;
-  duration: number;
-  recordedAt: number;
   enabledAsDefault: boolean;
   pitch: number;
   rate: number;
-  warmth: number;
   timbreTag: string;
-  sampleTranscript: string;
   baseVoice?: 'Kore' | 'Zephyr' | 'Fenrir' | 'Puck' | 'Charon';
   gender?: 'female' | 'male';
   ttsModel?: string;
+  updatedAt?: number;
+  // Legacy optional fields kept solely for reading pre-upgrade saved configs
+  sampleAudioUrl?: string;
+  duration?: number;
+  recordedAt?: number;
+  warmth?: number;
+  sampleTranscript?: string;
 }
 
 export interface TelegramContact {
