@@ -47,9 +47,8 @@ const CHAT_MEMORY_MODEL_PRESETS: Array<{ value: string; label: string }> = [
 
 function normalizeUiProtocol(
   rawProtocol: any,
-  engineMode: 'cloud' | 'custom'
+  _engineMode?: 'cloud' | 'custom'
 ): 'auto' | 'openai' | 'gemini' | 'anthropic' {
-  if (engineMode !== 'custom') return 'openai';
   if (
     rawProtocol === 'auto' ||
     rawProtocol === 'openai' ||

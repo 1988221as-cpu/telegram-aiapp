@@ -779,12 +779,20 @@ export function inferGatewayProtocolFromUrlAndModel(
 ): 'openai' | 'gemini' | 'anthropic' {
   const url = (baseUrl || '').toLowerCase();
   const model = (modelName || '').toLowerCase().trim();
-  if (url.includes('googleapis.com')) return 'gemini';
-  if (url.includes('anthropic.com')) return 'anthropic';
+  const isGoogleOpenAiCompat = url.includes('googleapis.com') && (url.includes('/openai') || url.includes('/chat/completions'));
+
   if (explicitProtocol === 'openai' || explicitProtocol === 'gemini' || explicitProtocol === 'anthropic') {
-    if (url.includes('openai.com') || url.includes('deepseek.com')) return 'openai';
+    if ((url.includes('api.openai.com') || url.includes('api.deepseek.com')) && !url.includes('googleapis.com')) {
+      return 'openai';
+    }
+    if (url.includes('api.anthropic.com')) {
+      return 'anthropic';
+    }
     return explicitProtocol;
   }
+  if (isGoogleOpenAiCompat) return 'openai';
+  if (url.includes('googleapis.com')) return 'gemini';
+  if (url.includes('anthropic.com')) return 'anthropic';
   if (url.includes('openai.com') || url.includes('deepseek.com')) return 'openai';
   if (url.includes('/v1beta')) return 'gemini';
   if (!url && model.includes('claude')) return 'anthropic';
@@ -2191,14 +2199,76 @@ export async function fetchDatabaseStatus(): Promise<any> {
 
 // ==================== TELEGRAM PERSONAL CLIENT DIALOGS & ACCOUNTS ====================
 
+const telegramDialogsCooldownMap = new Map<string, number>();
+
+export function getClientTelegramFloodCooldown(accountKey?: string): {
+  retryAfterSeconds: number;
+  floodWaitUntil: number;
+} | null {
+  const key = String(accountKey || '__default__');
+  const until = telegramDialogsCooldownMap.get(key) || 0;
+  if (!until || until <= Date.now()) {
+    if (until) telegramDialogsCooldownMap.delete(key);
+    return null;
+  }
+  return {
+    retryAfterSeconds: Math.max(1, Math.ceil((until - Date.now()) / 1000)),
+    floodWaitUntil: until,
+  };
+}
+
+export function recordClientTelegramFloodCooldown(
+  accountKey: string | undefined,
+  floodWaitUntil?: number,
+  retryAfterSeconds?: number
+): void {
+  const key = String(accountKey || '__default__');
+  const now = Date.now();
+  const resolvedUntil =
+    typeof floodWaitUntil === 'number' && floodWaitUntil > now
+      ? floodWaitUntil
+      : typeof retryAfterSeconds === 'number' && retryAfterSeconds > 0
+        ? now + retryAfterSeconds * 1000
+        : 0;
+  if (resolvedUntil > now) {
+    const prev = telegramDialogsCooldownMap.get(key) || 0;
+    if (resolvedUntil > prev) {
+      telegramDialogsCooldownMap.set(key, resolvedUntil);
+    }
+  }
+}
+
 export async function fetchTelegramUserDialogsDetailedApi(
   accountId?: string,
-  phone?: string
-): Promise<{ ok: boolean; dialogs: any[]; code?: string; error?: string; isConnected?: boolean }> {
+  phone?: string,
+  options?: { force?: boolean }
+): Promise<{
+  ok: boolean;
+  dialogs: any[];
+  code?: string;
+  error?: string;
+  isConnected?: boolean;
+  retryAfterSeconds?: number;
+  floodWaitUntil?: number;
+  cached?: boolean;
+}> {
+  const cooldownKey = accountId || phone;
+  const activeCooldown = getClientTelegramFloodCooldown(cooldownKey);
+  if (activeCooldown) {
+    return {
+      ok: false,
+      dialogs: [],
+      code: 'TELEGRAM_FLOOD_WAIT',
+      retryAfterSeconds: activeCooldown.retryAfterSeconds,
+      floodWaitUntil: activeCooldown.floodWaitUntil,
+      error: `Telegram 官方风控冷却中，请等待 ${activeCooldown.retryAfterSeconds} 秒后再试`,
+    };
+  }
   try {
     const query = new URLSearchParams();
     if (accountId) query.set('accountId', accountId);
     if (phone) query.set('phone', phone);
+    if (options?.force) query.set('force', '1');
     const res = await fetchWithTimeout(
       `/api/telegram/user/dialogs?${query.toString()}`,
       { headers: getAuthHeaders(accountId) },
@@ -2210,14 +2280,20 @@ export async function fetchTelegramUserDialogsDetailedApi(
         ok: Boolean(data?.ok),
         dialogs: Array.isArray(data?.dialogs) ? data.dialogs : [],
         isConnected: typeof data?.isConnected === 'boolean' ? data.isConnected : undefined,
+        cached: typeof data?.cached === 'boolean' ? data.cached : undefined,
         code: data?.code,
         error: data?.error || data?.message,
       };
     }
+    if (res.status === 429 || data?.code === 'TELEGRAM_FLOOD_WAIT') {
+      recordClientTelegramFloodCooldown(cooldownKey, data?.floodWaitUntil, data?.retryAfterSeconds);
+    }
     return {
       ok: false,
-      dialogs: [],
-      code: data?.code,
+      dialogs: Array.isArray(data?.dialogs) ? data.dialogs : [],
+      code: data?.code || (res.status === 429 ? 'TELEGRAM_FLOOD_WAIT' : undefined),
+      retryAfterSeconds: typeof data?.retryAfterSeconds === 'number' ? data.retryAfterSeconds : undefined,
+      floodWaitUntil: typeof data?.floodWaitUntil === 'number' ? data.floodWaitUntil : undefined,
       error: data?.error || data?.message || `HTTP ${res.status}`,
     };
   } catch (err: any) {

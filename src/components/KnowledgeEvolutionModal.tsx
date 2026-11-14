@@ -204,6 +204,8 @@ export const KnowledgeEvolutionModal: React.FC<KnowledgeEvolutionModalProps> = (
   // 5. Sandbox State
   const [sandboxStage, setSandboxStage] = useState<StagedPromptKey>('icebreaker');
   const [sandboxInput, setSandboxInput] = useState<string>('');
+  const [sandboxRecentHistory, setSandboxRecentHistory] = useState<string>('');
+  const [showRecentHistoryInput, setShowRecentHistoryInput] = useState<boolean>(false);
   const [sandboxChatTranscript, setSandboxChatTranscript] = useState<string>('');
   const [showTranscriptInput, setShowTranscriptInput] = useState<boolean>(false);
   const [sandboxResult, setSandboxResult] = useState<{
@@ -688,6 +690,7 @@ export const KnowledgeEvolutionModal: React.FC<KnowledgeEvolutionModalProps> = (
       const res = await testPersonaReplyApi({
         message: sandboxInput.trim(),
         stage: sandboxStage,
+        recentChatHistory: sandboxRecentHistory.trim() || undefined,
         chatTranscript: sandboxChatTranscript.trim() || undefined,
         customConfig,
         accountId: activeAccountId,
@@ -1913,8 +1916,33 @@ export const KnowledgeEvolutionModal: React.FC<KnowledgeEvolutionModalProps> = (
                 <div className="border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] rounded-xl p-3 bg-white dark:bg-[#08101a] aurora:bg-[#081014] space-y-2">
                   <div className="flex items-center justify-between">
                     <label className="text-xs font-semibold text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] flex items-center gap-1.5">
+                      <MessageCircle className="w-3.5 h-3.5 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf]" />
+                      <span>多轮历史消息上下文 (可选 · 最多30轮)</span>
+                    </label>
+                    <button
+                      type="button"
+                      onClick={() => setShowRecentHistoryInput(!showRecentHistoryInput)}
+                      className="text-[10px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] hover:text-[#0f172a] dark:hover:text-white aurora:hover:text-[#ecf6f8] cursor-pointer transition-colors"
+                    >
+                      {showRecentHistoryInput ? '收起' : '展开'}
+                    </button>
+                  </div>
+                  {showRecentHistoryInput && (
+                    <textarea
+                      rows={3}
+                      value={sandboxRecentHistory}
+                      onChange={(e) => setSandboxRecentHistory(e.target.value)}
+                      placeholder={'每行一条，例如：\n对方: 你好，想了解一下结算周期\n我: 你好呀，我们这边支持日常实时对账'}
+                      className="w-full bg-[#f8fafc] dark:bg-[#060b14] aurora:bg-[#060c0f] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] rounded-lg p-2 text-xs text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] placeholder-[#94a3b8] dark:placeholder-[#4e657e] aurora:placeholder-[#5a7782] focus:outline-none focus:border-[#2481cc] dark:focus:border-[#2ba0ff] aurora:focus:border-[#2dd4bf] font-sans"
+                    />
+                  )}
+                </div>
+
+                <div className="border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] rounded-xl p-3 bg-white dark:bg-[#08101a] aurora:bg-[#081014] space-y-2">
+                  <div className="flex items-center justify-between">
+                    <label className="text-xs font-semibold text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] flex items-center gap-1.5">
                       <Sparkles className="w-3.5 h-3.5 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf]" />
-                      <span>上下文语境样本 (可选)</span>
+                      <span>整文语气示范片段 (可选)</span>
                     </label>
                     <button
                       type="button"
@@ -1929,7 +1957,7 @@ export const KnowledgeEvolutionModal: React.FC<KnowledgeEvolutionModalProps> = (
                       rows={3}
                       value={sandboxChatTranscript}
                       onChange={(e) => setSandboxChatTranscript(e.target.value)}
-                      placeholder="粘贴几句历史对话上下文，测试模型与当前语气的连贯程度..."
+                      placeholder="粘贴整文示范对话，测试模型对口语习惯与语气节奏的复刻效果..."
                       className="w-full bg-[#f8fafc] dark:bg-[#060b14] aurora:bg-[#060c0f] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] rounded-lg p-2 text-xs text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] placeholder-[#94a3b8] dark:placeholder-[#4e657e] aurora:placeholder-[#5a7782] focus:outline-none focus:border-[#2481cc] dark:focus:border-[#2ba0ff] aurora:focus:border-[#2dd4bf] font-sans"
                     />
                   )}

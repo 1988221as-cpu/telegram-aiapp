@@ -28,6 +28,7 @@ export interface Chat {
   statusText?: string;
   lastMessage: string;
   lastTime: string;
+  lastDate?: number;
   unreadCount: number;
   sourceLang: string;
   targetLang: string;

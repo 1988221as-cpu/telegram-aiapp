@@ -479,6 +479,9 @@ export function buildCustomGeminiUrl(baseUrl: string, modelName?: string): strin
   if (!cleanModel) {
     throw new Error('自有 Gemini 协议网关未填写模型型号 (Model Name)，已拦截空模型请求');
   }
+  if (/(?:\/v1beta\/models|\/v1\/models)$/i.test(clean)) {
+    return `${clean}/${cleanModel}:generateContent`;
+  }
   if (!clean.includes('/v1beta/models') && !clean.includes('/v1/models')) {
     clean = clean.replace(/\/v1beta$/i, '').replace(/\/v1$/i, '');
     return `${clean}/v1beta/models/${cleanModel}:generateContent`;
@@ -493,12 +496,20 @@ export function inferGatewayProtocol(
 ): 'openai' | 'gemini' | 'anthropic' {
   const url = (baseUrl || '').toLowerCase();
   const model = (modelName || '').toLowerCase().trim();
-  if (url.includes('googleapis.com')) return 'gemini';
-  if (url.includes('anthropic.com')) return 'anthropic';
+  const isGoogleOpenAiCompat = url.includes('googleapis.com') && (url.includes('/openai') || url.includes('/chat/completions'));
+
   if (explicitProtocol === 'gemini' || explicitProtocol === 'anthropic' || explicitProtocol === 'openai') {
-    if (url.includes('openai.com') || url.includes('deepseek.com')) return 'openai';
+    if ((url.includes('api.openai.com') || url.includes('api.deepseek.com')) && !url.includes('googleapis.com')) {
+      return 'openai';
+    }
+    if (url.includes('api.anthropic.com')) {
+      return 'anthropic';
+    }
     return explicitProtocol;
   }
+  if (isGoogleOpenAiCompat) return 'openai';
+  if (url.includes('googleapis.com')) return 'gemini';
+  if (url.includes('anthropic.com')) return 'anthropic';
   if (url.includes('openai.com') || url.includes('deepseek.com')) return 'openai';
   if (url.includes('/v1beta')) return 'gemini';
   if (!url && model.includes('claude')) return 'anthropic';
@@ -991,6 +1002,17 @@ async function buildModelUsageDetails({
   });
 }
 
+export function extractUpstreamErrDetail(rawText: string): string {
+  const clean = String(rawText || '').trim();
+  if (!clean) return '';
+  const parsed = safeJsonParse<any>(clean, null);
+  const msg =
+    parsed?.error?.message ||
+    parsed?.message ||
+    (typeof parsed?.error === 'string' ? parsed.error : '');
+  return String(msg || clean).replace(/\s+/g, ' ').trim().slice(0, 400);
+}
+
 export async function callCustomLlm({
   customConfig,
   messages,
@@ -1047,6 +1069,7 @@ export async function callCustomLlm({
   }
 
   let lastErrorMsg = '';
+  let lastStatusCode = 502;
 
   try {
     const cleanBaseUrl = isCloudEngineMode
@@ -1070,9 +1093,14 @@ export async function callCustomLlm({
     try {
       if (!isCloudEngineMode && effectiveProtocol === 'gemini') {
         const explicitGeminiModel = typeof customConfig.modelName === 'string' ? customConfig.modelName.trim() : '';
-        if (!explicitGeminiModel) {
+        if (!cleanBaseUrl.includes(':generateContent') && !explicitGeminiModel) {
+          lastStatusCode = 400;
           lastErrorMsg = '自有 Gemini 协议网关未填写模型型号 (Model Name)，已拦截空模型请求，请填写具体 Gemini 模型 ID';
-          if (throwOnError) throw new Error(lastErrorMsg);
+          if (throwOnError) {
+            const err: any = new Error(lastErrorMsg);
+            err.statusCode = 400;
+            throw err;
+          }
           return null;
         }
         const targetUrl = buildCustomGeminiUrl(cleanBaseUrl, explicitGeminiModel);
@@ -1111,18 +1139,29 @@ export async function callCustomLlm({
         }
 
         try {
-          const resGemini = await safeSsrfFetch(targetUrl, {
-            method: 'POST',
-            headers,
-            body: JSON.stringify(payload),
-            signal: controller.signal,
-          });
+          const resGemini = await fetchWithRetry(
+            targetUrl,
+            {
+              method: 'POST',
+              headers,
+              body: JSON.stringify(payload),
+              signal: controller.signal,
+            },
+            { timeoutMs, maxRetries: 1, baseDelayMs: 250 }
+          );
           if (resGemini.ok) {
             const rawBody = await resGemini.text().catch(() => '');
-            const d = safeJsonParse<any>(rawBody, null);
-            if (d?.error) {
-              const errMsg = d.error?.message || (typeof d.error === 'string' ? d.error : JSON.stringify(d.error));
-              lastErrorMsg = `自定义 Gemini 网关返回错误: ${String(errMsg).slice(0, 400)}`;
+            const cleanRaw = rawBody.trim();
+            const d = safeJsonParse<any>(cleanRaw, null);
+            if (!d || typeof d !== 'object') {
+              lastStatusCode = 502;
+              const looksHtml = /^<(?:!doctype|html|head|body)/i.test(cleanRaw);
+              lastErrorMsg = looksHtml
+                ? `自定义 Gemini 网关返回了 HTML 页面而非 API JSON 响应（可能是接口路径错误）: ${cleanRaw.replace(/\s+/g, ' ').slice(0, 220)}`
+                : `自定义 Gemini 网关返回非 JSON 响应: ${cleanRaw.replace(/\s+/g, ' ').slice(0, 220)}`;
+            } else if (d?.error || d?.ok === false) {
+              lastStatusCode = 502;
+              lastErrorMsg = `自定义 Gemini 网关返回错误: ${extractUpstreamErrDetail(cleanRaw)}`;
             } else {
               const replyText = d?.candidates?.[0]?.content?.parts?.[0]?.text?.trim();
               if (replyText) {
@@ -1134,15 +1173,17 @@ export async function callCustomLlm({
                 }).catch(() => {});
                 return replyText;
               }
-              lastErrorMsg = d
-                ? '自定义 Gemini 网关未返回有效文本内容'
-                : `自定义 Gemini 网关返回非 JSON 响应: ${rawBody.slice(0, 240)}`;
+              lastStatusCode = 502;
+              lastErrorMsg = '自定义 Gemini 网关未返回有效文本内容';
             }
           } else {
             const errBody = await resGemini.text().catch(() => '');
-            lastErrorMsg = `自定义 Gemini 网关返回 HTTP ${resGemini.status}${errBody ? `: ${errBody.slice(0, 400)}` : ''}`;
+            lastStatusCode = resGemini.status;
+            const detail = extractUpstreamErrDetail(errBody);
+            lastErrorMsg = `自定义 Gemini 网关返回 HTTP ${resGemini.status}${detail ? `: ${detail}` : ''}`;
           }
         } catch (err: any) {
+          lastStatusCode = 503;
           lastErrorMsg = err?.message || String(err);
           console.warn('[Custom LLM Gemini Protocol Warning]:', lastErrorMsg);
         }
@@ -1164,25 +1205,38 @@ export async function callCustomLlm({
 
         for (const targetUrl of candidateUrls) {
           try {
-            const response = await safeSsrfFetch(targetUrl, {
-              method: 'POST',
-              headers,
-              body: JSON.stringify({
-                model: customConfig.modelName || 'claude-3-5-sonnet-20241022',
-                max_tokens: maxTokens,
-                temperature: anthropicTemp,
-                ...(anthropicSystem ? { system: anthropicSystem } : {}),
-                messages: anthropicMessages,
-              }),
-              signal: controller.signal,
-            });
+            const response = await fetchWithRetry(
+              targetUrl,
+              {
+                method: 'POST',
+                headers,
+                body: JSON.stringify({
+                  model: customConfig.modelName || 'claude-3-5-sonnet-20241022',
+                  max_tokens: maxTokens,
+                  temperature: anthropicTemp,
+                  ...(anthropicSystem ? { system: anthropicSystem } : {}),
+                  messages: anthropicMessages,
+                }),
+                signal: controller.signal,
+              },
+              { timeoutMs, maxRetries: 1, baseDelayMs: 250 }
+            );
 
             if (response.ok) {
               const rawBody = await response.text().catch(() => '');
-              const data = safeJsonParse<any>(rawBody, null);
-              if (data?.error) {
-                const errMsg = data.error?.message || (typeof data.error === 'string' ? data.error : JSON.stringify(data.error));
-                lastErrorMsg = `Anthropic 模型网关返回错误: ${String(errMsg).slice(0, 400)}`;
+              const cleanRaw = rawBody.trim();
+              const data = safeJsonParse<any>(cleanRaw, null);
+              if (!data || typeof data !== 'object') {
+                lastStatusCode = 502;
+                const looksHtml = /^<(?:!doctype|html|head|body)/i.test(cleanRaw);
+                lastErrorMsg = looksHtml
+                  ? `Anthropic 模型网关返回了 HTML 页面而非 API JSON 响应（可能是接口路径错误）: ${cleanRaw.replace(/\s+/g, ' ').slice(0, 220)}`
+                  : `Anthropic 模型网关返回非 JSON 响应: ${cleanRaw.replace(/\s+/g, ' ').slice(0, 220)}`;
+                break;
+              }
+              if (data?.error || data?.ok === false) {
+                lastStatusCode = 502;
+                lastErrorMsg = `Anthropic 模型网关返回错误: ${extractUpstreamErrDetail(cleanRaw)}`;
                 break;
               }
               const replyText = Array.isArray(data?.content)
@@ -1201,15 +1255,18 @@ export async function callCustomLlm({
                 }).catch(() => {});
                 return replyText;
               }
-              lastErrorMsg = data
-                ? 'Anthropic 模型网关返回空内容'
-                : `Anthropic 模型网关返回非 JSON 响应: ${rawBody.slice(0, 240)}`;
+              lastStatusCode = 502;
+              lastErrorMsg = 'Anthropic 模型网关未返回有效文本内容';
+              break;
             } else {
               const errBody = await response.text().catch(() => '');
-              lastErrorMsg = `Anthropic 模型网关返回 HTTP ${response.status}${errBody ? `: ${errBody.slice(0, 400)}` : ''}`;
+              lastStatusCode = response.status;
+              const detail = extractUpstreamErrDetail(errBody);
+              lastErrorMsg = `Anthropic 模型网关返回 HTTP ${response.status}${detail ? `: ${detail}` : ''}`;
             }
             if (response.status !== 404) break;
           } catch (e: any) {
+            lastStatusCode = 503;
             lastErrorMsg = e?.message || String(e);
           }
         }
@@ -1253,25 +1310,38 @@ export async function callCustomLlm({
 
         for (const targetUrl of candidateUrls) {
           try {
-            const response = await safeSsrfFetch(targetUrl, {
-              method: 'POST',
-              headers,
-              body: JSON.stringify({
-                ...(extraPayload || {}),
-                model: resolvedRequestModel,
-                messages: formattedMessages,
-                temperature: customConfig.temperature ?? temperature,
-                max_tokens: maxTokens,
-              }),
-              signal: controller.signal,
-            });
+            const response = await fetchWithRetry(
+              targetUrl,
+              {
+                method: 'POST',
+                headers,
+                body: JSON.stringify({
+                  ...(extraPayload || {}),
+                  model: resolvedRequestModel,
+                  messages: formattedMessages,
+                  temperature: customConfig.temperature ?? temperature,
+                  max_tokens: maxTokens,
+                }),
+                signal: controller.signal,
+              },
+              { timeoutMs, maxRetries: 1, baseDelayMs: 250 }
+            );
 
             if (response.ok) {
               const rawBody = await response.text().catch(() => '');
-              const data = safeJsonParse<any>(rawBody, null);
-              if (data?.error) {
-                const errMsg = data.error?.message || (typeof data.error === 'string' ? data.error : JSON.stringify(data.error));
-                lastErrorMsg = `自定义模型网关返回错误: ${String(errMsg).slice(0, 400)}`;
+              const cleanRaw = rawBody.trim();
+              const data = safeJsonParse<any>(cleanRaw, null);
+              if (!data || typeof data !== 'object') {
+                lastStatusCode = 502;
+                const looksHtml = /^<(?:!doctype|html|head|body)/i.test(cleanRaw);
+                lastErrorMsg = looksHtml
+                  ? `自定义模型网关返回了 HTML 页面而非 API JSON 响应（可能是接口路径错误）: ${cleanRaw.replace(/\s+/g, ' ').slice(0, 220)}`
+                  : `自定义模型网关返回非 JSON 响应: ${cleanRaw.replace(/\s+/g, ' ').slice(0, 220)}`;
+                break;
+              }
+              if (data?.error || data?.ok === false) {
+                lastStatusCode = 502;
+                lastErrorMsg = `自定义模型网关返回错误: ${extractUpstreamErrDetail(cleanRaw)}`;
                 break;
               }
               const replyText = data?.choices?.[0]?.message?.content?.trim();
@@ -1286,15 +1356,18 @@ export async function callCustomLlm({
                 }
                 return replyText;
               }
-              lastErrorMsg = data
-                ? '自定义模型网关返回空内容'
-                : `自定义模型网关返回非 JSON 响应: ${rawBody.slice(0, 240)}`;
+              lastStatusCode = 502;
+              lastErrorMsg = '自定义模型网关未返回有效文本内容';
+              break;
             } else {
               const errBody = await response.text().catch(() => '');
-              lastErrorMsg = `自定义模型网关返回 HTTP ${response.status}${errBody ? `: ${errBody.slice(0, 400)}` : ''}`;
+              lastStatusCode = response.status;
+              const detail = extractUpstreamErrDetail(errBody);
+              lastErrorMsg = `自定义模型网关返回 HTTP ${response.status}${detail ? `: ${detail}` : ''}`;
             }
             if (response.status !== 404) break;
           } catch (e: any) {
+            lastStatusCode = 503;
             lastErrorMsg = e?.message || String(e);
             // try next candidate url
           }
@@ -1305,11 +1378,18 @@ export async function callCustomLlm({
     }
   } catch (err: any) {
     lastErrorMsg = err?.message || String(err);
+    if (typeof err?.statusCode === 'number') {
+      lastStatusCode = err.statusCode;
+    }
     console.warn('[callCustomLlm Error]:', lastErrorMsg);
   }
 
   if (throwOnError) {
-    throw new Error(lastErrorMsg || '自定义大模型请求失败，未能获取有效响应');
+    const err: any = new Error(lastErrorMsg || '自定义大模型请求失败，未能获取有效响应');
+    if (lastStatusCode >= 400 && lastStatusCode < 600) {
+      err.statusCode = lastStatusCode;
+    }
+    throw err;
   }
   return null;
 }
@@ -1774,6 +1854,7 @@ export interface ConnectedTelegramUser {
   apiId: number;
   apiHash: string;
   connectedAt: number;
+  dialogsFetchedAt?: number;
   dialogs: Array<{
     id: string;
     rawId: string;
@@ -1791,6 +1872,154 @@ export interface ConnectedTelegramUser {
 
 // In-memory active connected Telegram personal user accounts (kept purely in local memory)
 export const connectedUserClients = new Map<string, ConnectedTelegramUser>();
+
+// ==================== TELEGRAM ACCOUNT-LEVEL FLOOD_WAIT CIRCUIT BREAKER ====================
+export const TELEGRAM_DIALOGS_CACHE_TTL_MS = 25_000;
+
+export interface TelegramFloodCooldownEntry {
+  accountKey: string;
+  retryAfterSeconds: number;
+  floodWaitUntil: number;
+  method?: string;
+  recordedAt: number;
+}
+
+export const telegramAccountFloodCooldowns = new Map<string, TelegramFloodCooldownEntry>();
+
+export function extractFloodWaitSeconds(err: any): number | null {
+  if (err === null || err === undefined) return null;
+  if (typeof err === 'number' && Number.isFinite(err) && err > 0) {
+    return Math.min(86400, Math.max(1, Math.ceil(err)));
+  }
+  const rawMsg = String(err?.errorMessage || err?.message || err || '');
+  const match =
+    rawMsg.match(/FLOOD_WAIT_(\d+)/i) ||
+    rawMsg.match(/FLOOD_PREMIUM_WAIT_(\d+)/i) ||
+    rawMsg.match(/A wait of (\d+) seconds/i);
+  if (match) {
+    const parsed = parseInt(match[1], 10);
+    if (Number.isFinite(parsed) && parsed > 0) {
+      return Math.min(86400, Math.max(1, parsed));
+    }
+  }
+  const numericSeconds = Number(err?.seconds);
+  const classOrName = String(err?.className || err?.name || '').toUpperCase();
+  if (
+    Number.isFinite(numericSeconds) &&
+    numericSeconds > 0 &&
+    (rawMsg.toUpperCase().includes('FLOOD') || classOrName.includes('FLOOD'))
+  ) {
+    return Math.min(86400, Math.max(1, Math.ceil(numericSeconds)));
+  }
+  return null;
+}
+
+function resolveFloodCooldownKeys(ctx?: {
+  accountId?: string;
+  userId?: string;
+  phone?: string;
+}): string[] {
+  const keys = new Set<string>();
+  const rawAcc = String(ctx?.accountId || '').trim();
+  const rawUid = String(ctx?.userId || '').trim() || (rawAcc.startsWith('acc_tg_') ? rawAcc.replace(/^acc_tg_/, '') : '');
+  const rawPhone = String(ctx?.phone || '').trim();
+  if (rawAcc) keys.add(rawAcc);
+  if (rawUid) {
+    keys.add(rawUid);
+    keys.add(`acc_tg_${rawUid}`);
+  }
+  if (rawPhone) {
+    keys.add(rawPhone);
+    const norm = normalizePhoneNumber(rawPhone);
+    if (norm) keys.add(norm);
+  }
+  return Array.from(keys);
+}
+
+export function recordTelegramFloodWait(
+  ctx: { accountId?: string; userId?: string; phone?: string } | undefined,
+  errOrSeconds: any,
+  method?: string,
+  now = Date.now()
+): TelegramFloodCooldownEntry | null {
+  const secs = extractFloodWaitSeconds(errOrSeconds);
+  if (!secs) return null;
+  const keys = resolveFloodCooldownKeys(ctx);
+  if (keys.length === 0) return null;
+
+  const newUntil = now + secs * 1000;
+  let maxUntil = newUntil;
+  for (const k of keys) {
+    const prev = telegramAccountFloodCooldowns.get(k);
+    if (prev && prev.floodWaitUntil > maxUntil) {
+      maxUntil = prev.floodWaitUntil;
+    }
+  }
+  const effectiveSecs = Math.max(1, Math.ceil((maxUntil - now) / 1000));
+  const entry: TelegramFloodCooldownEntry = {
+    accountKey: keys[0],
+    retryAfterSeconds: effectiveSecs,
+    floodWaitUntil: maxUntil,
+    method,
+    recordedAt: now,
+  };
+  for (const k of keys) {
+    telegramAccountFloodCooldowns.set(k, { ...entry, accountKey: k });
+  }
+  console.warn(
+    `[Telegram FLOOD_WAIT Circuit Breaker] Account [${keys.join(', ')}] entering cooldown for ${effectiveSecs}s (method=${method || 'unknown'})`
+  );
+  return entry;
+}
+
+export function getTelegramFloodCooldown(
+  ctx?: { accountId?: string; userId?: string; phone?: string },
+  now = Date.now()
+): { active: true; retryAfterSeconds: number; floodWaitUntil: number; method?: string } | null {
+  const keys = resolveFloodCooldownKeys(ctx);
+  if (keys.length === 0) return null;
+  let best: TelegramFloodCooldownEntry | null = null;
+  for (const k of keys) {
+    const entry = telegramAccountFloodCooldowns.get(k);
+    if (!entry) continue;
+    if (entry.floodWaitUntil <= now) {
+      telegramAccountFloodCooldowns.delete(k);
+      continue;
+    }
+    if (!best || entry.floodWaitUntil > best.floodWaitUntil) {
+      best = entry;
+    }
+  }
+  if (!best) return null;
+  return {
+    active: true,
+    retryAfterSeconds: Math.max(1, Math.ceil((best.floodWaitUntil - now) / 1000)),
+    floodWaitUntil: best.floodWaitUntil,
+    method: best.method,
+  };
+}
+
+export function clearTelegramFloodCooldown(ctx?: {
+  accountId?: string;
+  userId?: string;
+  phone?: string;
+}): void {
+  const keys = resolveFloodCooldownKeys(ctx);
+  for (const k of keys) {
+    telegramAccountFloodCooldowns.delete(k);
+  }
+}
+
+export function pruneExpiredTelegramFloodCooldowns(now = Date.now()): number {
+  let pruned = 0;
+  for (const [k, entry] of telegramAccountFloodCooldowns.entries()) {
+    if (!entry || entry.floodWaitUntil <= now) {
+      telegramAccountFloodCooldowns.delete(k);
+      pruned++;
+    }
+  }
+  return pruned;
+}
 
 function formatTelegramFileSize(bytes?: number): string {
   const n = Number(bytes || 0);
@@ -1895,14 +2124,17 @@ function formatTelegramUserStatus(userEntity: any): { isOnline: boolean; statusT
 }
 
 export async function fetchTelegramUserDialogs(client: TelegramClient, limit = 150, explicitUserId?: string) {
+  const ownerUserId = explicitUserId || ((client as any)?._selfId ? String((client as any)._selfId) : '');
+  const accountScope = ownerUserId ? `acc_tg_${ownerUserId}` : '';
   try {
-    const ownerUserId = explicitUserId || ((client as any)?._selfId ? String((client as any)._selfId) : '');
-    const accountScope = ownerUserId ? `acc_tg_${ownerUserId}` : '';
     const mainDialogs = await client.getDialogs({ limit });
     let archivedDialogs: any[] = [];
     try {
       archivedDialogs = await client.getDialogs({ limit: Math.min(limit, 80), folder: 1 });
-    } catch {
+    } catch (archivedErr: any) {
+      if (isTelegramSessionExpiredError(archivedErr) || extractFloodWaitSeconds(archivedErr) !== null) {
+        throw archivedErr;
+      }
       archivedDialogs = [];
     }
 
@@ -1982,6 +2214,17 @@ export async function fetchTelegramUserDialogs(client: TelegramClient, limit = 1
     });
   } catch (err: any) {
     if (isTelegramSessionExpiredError(err)) {
+      throw err;
+    }
+    const floodSeconds = extractFloodWaitSeconds(err);
+    if (floodSeconds !== null) {
+      if (accountScope || ownerUserId) {
+        recordTelegramFloodWait(
+          { accountId: accountScope || undefined, userId: ownerUserId || undefined },
+          floodSeconds,
+          'messages.GetDialogs'
+        );
+      }
       throw err;
     }
     console.warn('[Telegram User Dialogs Warning]:', err.message);
@@ -3253,7 +3496,6 @@ export async function requireTenantAuth(req: Request, res: Response, next: NextF
 // Global API Interceptor: Protects all local business /api routes with JWT RS256/ES256/HS256 auth
 app.use('/api', (req: Request, res: Response, next: NextFunction) => {
   const openPaths = [
-    '/auth/logout',
     '/auth/status',
     '/auth/session-init',
     '/auth/device-id',
@@ -3618,8 +3860,18 @@ app.get('/api/auth/status', async (req: Request, res: Response) => {
   });
 });
 
-// 0.2 Logout Endpoint
-app.post('/api/auth/logout', async (req: Request, res: Response) => {
+// 0.2 Logout Endpoint (Protected: Origin + Valid Authenticated Member Session Required)
+app.post('/api/auth/logout', requireTenantAuth, async (req: Request, res: Response) => {
+  const authContext = (req as any).auth;
+  const session = authContext?.session;
+  if (!session || session.isBot || authContext?.isBot) {
+    return res.status(403).json({
+      ok: false,
+      code: 'AUTH_MEMBER_REQUIRED',
+      error: '权限不足：仅已登录桌面端会员可执行退出注销操作',
+    });
+  }
+
   const bearerToken = extractBearerToken(req);
   const revokeTelegramSessions = Boolean(req.body?.revokeTelegramSessions);
 
@@ -3627,9 +3879,7 @@ app.post('/api/auth/logout', async (req: Request, res: Response) => {
     revokeJwtToken(bearerToken, extractJwtExpMsUnsafe(bearerToken));
   }
   clearInMemoryTelegramApiCredentials(bearerToken || undefined);
-  if (bearerToken && lastActiveUserJwt === bearerToken) {
-    lastActiveUserJwt = '';
-  } else if (!bearerToken) {
+  if (bearerToken && (!lastActiveUserJwt || lastActiveUserJwt === bearerToken)) {
     lastActiveUserJwt = '';
   }
 
@@ -3649,6 +3899,7 @@ app.post('/api/auth/logout', async (req: Request, res: Response) => {
     await destroyTelegramClientSafely(u.client);
   }
   connectedUserClients.clear();
+  telegramAccountFloodCooldowns.clear();
 
   for (const pending of activeUserClients.values()) {
     if (pending.timeoutTimer) clearTimeout(pending.timeoutTimer);
@@ -5165,6 +5416,9 @@ async function deliverOutboundTelegramMessage(
   telegramMessageId?: number;
   error?: string;
   sessionExpired?: boolean;
+  floodWait?: boolean;
+  retryAfterSeconds?: number;
+  floodWaitUntil?: number;
 }> {
   const {
     chatId,
@@ -5321,6 +5575,23 @@ async function deliverOutboundTelegramMessage(
       };
     }
 
+    const floodCtx = {
+      accountId: effectiveAccountId,
+      userId: personalAccount.userId,
+      phone: personalAccount.phone,
+    };
+    const activeFlood = getTelegramFloodCooldown(floodCtx);
+    if (activeFlood) {
+      return {
+        delivered: false,
+        channel: 'mtproto',
+        floodWait: true,
+        retryAfterSeconds: activeFlood.retryAfterSeconds,
+        floodWaitUntil: activeFlood.floodWaitUntil,
+        error: formatTelegramError({ errorMessage: `FLOOD_WAIT_${activeFlood.retryAfterSeconds}` }),
+      };
+    }
+
     const rawTgId = String(chatId).replace(/^tg_/, '');
     const rawPeer: any = rawTgId === personalAccount.userId ? 'me' : (/^-?\d+$/.test(rawTgId) ? Number(rawTgId) : rawTgId);
 
@@ -5348,6 +5619,17 @@ async function deliverOutboundTelegramMessage(
       } catch (voiceErr: any) {
         const errMsg = formatTelegramError(voiceErr);
         console.error(`[MTProto Voice Send Error]:`, errMsg);
+        const floodEntry = recordTelegramFloodWait(floodCtx, voiceErr, 'sendFile.voice');
+        if (floodEntry) {
+          return {
+            delivered: false,
+            channel: 'mtproto',
+            floodWait: true,
+            retryAfterSeconds: floodEntry.retryAfterSeconds,
+            floodWaitUntil: floodEntry.floodWaitUntil,
+            error: `语音发送失败: ${errMsg}`,
+          };
+        }
         if (isTelegramSessionExpiredError(voiceErr)) {
           await markTelegramSessionExpired({
             accountId: effectiveAccountId,
@@ -5397,6 +5679,17 @@ async function deliverOutboundTelegramMessage(
       } catch (photoErr: any) {
         const errMsg = formatTelegramError(photoErr);
         console.error(`[MTProto Photo Send Error]:`, errMsg);
+        const floodEntry = recordTelegramFloodWait(floodCtx, photoErr, 'sendFile.photo');
+        if (floodEntry) {
+          return {
+            delivered: false,
+            channel: 'mtproto',
+            floodWait: true,
+            retryAfterSeconds: floodEntry.retryAfterSeconds,
+            floodWaitUntil: floodEntry.floodWaitUntil,
+            error: `图片发送失败: ${errMsg}`,
+          };
+        }
         if (isTelegramSessionExpiredError(photoErr)) {
           await markTelegramSessionExpired({
             accountId: effectiveAccountId,
@@ -5447,6 +5740,17 @@ async function deliverOutboundTelegramMessage(
       } catch (vidErr: any) {
         const errMsg = formatTelegramError(vidErr);
         console.error(`[MTProto Video Send Error]:`, errMsg);
+        const floodEntry = recordTelegramFloodWait(floodCtx, vidErr, 'sendFile.video');
+        if (floodEntry) {
+          return {
+            delivered: false,
+            channel: 'mtproto',
+            floodWait: true,
+            retryAfterSeconds: floodEntry.retryAfterSeconds,
+            floodWaitUntil: floodEntry.floodWaitUntil,
+            error: `视频发送失败: ${errMsg}`,
+          };
+        }
         if (isTelegramSessionExpiredError(vidErr)) {
           await markTelegramSessionExpired({
             accountId: effectiveAccountId,
@@ -5488,6 +5792,17 @@ async function deliverOutboundTelegramMessage(
       } catch (fileErr: any) {
         const errMsg = formatTelegramError(fileErr);
         console.error(`[MTProto File Send Error]:`, errMsg);
+        const floodEntry = recordTelegramFloodWait(floodCtx, fileErr, 'sendFile.document');
+        if (floodEntry) {
+          return {
+            delivered: false,
+            channel: 'mtproto',
+            floodWait: true,
+            retryAfterSeconds: floodEntry.retryAfterSeconds,
+            floodWaitUntil: floodEntry.floodWaitUntil,
+            error: `文件发送失败: ${errMsg}`,
+          };
+        }
         if (isTelegramSessionExpiredError(fileErr)) {
           await markTelegramSessionExpired({
             accountId: effectiveAccountId,
@@ -5517,6 +5832,19 @@ async function deliverOutboundTelegramMessage(
   } catch (tgSyncErr: any) {
     const errMsg = formatTelegramError(tgSyncErr);
     console.warn(`[Telegram Outbound Push Error]:`, errMsg);
+    if (effectiveAccountId !== 'acc_telegram_bot') {
+      const floodEntry = recordTelegramFloodWait({ accountId: effectiveAccountId }, tgSyncErr, 'messages.SendMessage');
+      if (floodEntry) {
+        return {
+          delivered: false,
+          channel: 'mtproto',
+          floodWait: true,
+          retryAfterSeconds: floodEntry.retryAfterSeconds,
+          floodWaitUntil: floodEntry.floodWaitUntil,
+          error: errMsg,
+        };
+      }
+    }
     if (effectiveAccountId !== 'acc_telegram_bot' && isTelegramSessionExpiredError(tgSyncErr)) {
       await markTelegramSessionExpired({
         accountId: effectiveAccountId,
@@ -5603,7 +5931,7 @@ app.post('/api/messages', requireTenantAuth, parseMultipartMessageUpload, async 
       );
     }
 
-    res.status(deliveryResult.sessionExpired ? 401 : 200).json({
+    res.status(deliveryResult.sessionExpired ? 401 : deliveryResult.floodWait ? 429 : 200).json({
       success: deliveryResult.delivered,
       id: msgId,
       telegramMessageId: deliveryResult.telegramMessageId,
@@ -5618,6 +5946,13 @@ app.post('/api/messages', requireTenantAuth, parseMultipartMessageUpload, async 
       ...(outboundPayload.audioUrl ? { audioUrl: outboundPayload.audioUrl } : {}),
       ...(outboundPayload.fileUrl ? { fileUrl: outboundPayload.fileUrl } : {}),
       ...(deliveryResult.sessionExpired ? { code: 'TELEGRAM_SESSION_EXPIRED' } : {}),
+      ...(deliveryResult.floodWait
+        ? {
+            code: 'TELEGRAM_FLOOD_WAIT',
+            retryAfterSeconds: deliveryResult.retryAfterSeconds,
+            floodWaitUntil: deliveryResult.floodWaitUntil,
+          }
+        : {}),
       error: deliveryResult.error,
     });
   } catch (error: any) {
@@ -5695,7 +6030,7 @@ app.post('/api/messages/:id/retry', requireTenantAuth, parseMultipartMessageUplo
         String(outboundPayload.chatId),
         targetAcc
       );
-      return res.status(retryResult.sessionExpired ? 401 : 200).json({
+      return res.status(retryResult.sessionExpired ? 401 : retryResult.floodWait ? 429 : 200).json({
         success: retryResult.delivered,
         delivered: retryResult.delivered,
         telegramMessageId: retryResult.telegramMessageId,
@@ -5706,6 +6041,13 @@ app.post('/api/messages/:id/retry', requireTenantAuth, parseMultipartMessageUplo
         ...(outboundPayload.audioUrl ? { audioUrl: outboundPayload.audioUrl } : {}),
         ...(outboundPayload.fileUrl ? { fileUrl: outboundPayload.fileUrl } : {}),
         ...(retryResult.sessionExpired ? { code: 'TELEGRAM_SESSION_EXPIRED' } : {}),
+        ...(retryResult.floodWait
+          ? {
+              code: 'TELEGRAM_FLOOD_WAIT',
+              retryAfterSeconds: retryResult.retryAfterSeconds,
+              floodWaitUntil: retryResult.floodWaitUntil,
+            }
+          : {}),
         error: retryResult.error,
         message: retryResult.delivered ? 'Message retry delivered' : (retryResult.error || 'Message retry failed'),
       });
@@ -5817,7 +6159,7 @@ app.post('/api/messages/:id/retry', requireTenantAuth, parseMultipartMessageUplo
       }
     } catch {}
 
-    res.status(dbRetryResult.sessionExpired ? 401 : 200).json({
+    res.status(dbRetryResult.sessionExpired ? 401 : dbRetryResult.floodWait ? 429 : 200).json({
       success: dbRetryResult.delivered,
       delivered: dbRetryResult.delivered,
       telegramMessageId: dbRetryResult.telegramMessageId,
@@ -5828,6 +6170,13 @@ app.post('/api/messages/:id/retry', requireTenantAuth, parseMultipartMessageUplo
       ...(dbOutboundPayload.audioUrl ? { audioUrl: dbOutboundPayload.audioUrl } : {}),
       ...(dbOutboundPayload.fileUrl ? { fileUrl: dbOutboundPayload.fileUrl } : {}),
       ...(dbRetryResult.sessionExpired ? { code: 'TELEGRAM_SESSION_EXPIRED' } : {}),
+      ...(dbRetryResult.floodWait
+        ? {
+            code: 'TELEGRAM_FLOOD_WAIT',
+            retryAfterSeconds: dbRetryResult.retryAfterSeconds,
+            floodWaitUntil: dbRetryResult.floodWaitUntil,
+          }
+        : {}),
       error: dbRetryResult.error,
       message: dbRetryResult.delivered ? 'Message retry delivered' : (dbRetryResult.error || 'Message retry failed'),
     });
@@ -6241,11 +6590,14 @@ app.post('/api/customer/analyze/:chatId', requireTenantAuth, async (req: Request
               typeof customConfig.enabled === 'boolean'
                 ? !customConfig.enabled
                 : Boolean(customConfig.explicitlyDisabled ?? serverCustomCfg?.explicitlyDisabled),
-            baseUrl: (customConfig.baseUrl || serverCustomCfg?.baseUrl || '').trim(),
-            apiKey: (customConfig.apiKey || serverCustomCfg?.apiKey || '').trim(),
+            baseUrl: (typeof customConfig.baseUrl === 'string' ? customConfig.baseUrl : (serverCustomCfg?.baseUrl || '')).trim(),
+            apiKey: (typeof customConfig.apiKey === 'string' ? customConfig.apiKey : (serverCustomCfg?.apiKey || '')).trim(),
             modelName:
               (customConfig.engineMode || serverCustomCfg?.engineMode) === 'custom'
-                ? (customConfig.modelName || serverCustomCfg?.modelName || 'gpt-4o-mini').trim()
+                ? (typeof customConfig.modelName === 'string'
+                    ? customConfig.modelName
+                    : (serverCustomCfg?.modelName || '')
+                  ).trim()
                 : (customConfig.modelName && /^(gemini|gemma)/i.test(String(customConfig.modelName).trim())
                     ? String(customConfig.modelName).trim()
                     : 'gemini-4-hydrogen'),
@@ -6454,8 +6806,17 @@ ${conversationTranscript}`;
         });
       }
 
-      const customModel = (effectiveAnalyzeConfig?.modelName || '').trim() || 'gpt-4o-mini';
-      const inferredProto = inferGatewayProtocol(cleanCustomUrl, customModel, effectiveAnalyzeConfig?.protocol);
+      const rawCustomModel = typeof effectiveAnalyzeConfig?.modelName === 'string' ? effectiveAnalyzeConfig.modelName.trim() : '';
+      const inferredProto = inferGatewayProtocol(cleanCustomUrl, rawCustomModel, effectiveAnalyzeConfig?.protocol);
+      if (inferredProto === 'gemini' && !cleanCustomUrl.includes(':generateContent') && !rawCustomModel) {
+        return res.status(400).json({
+          success: false,
+          blocked: true,
+          source: 'custom_llm_missing_model',
+          error: '自有 Gemini 协议网关未填写模型型号 (Model Name)，已拦截空模型请求，请先在「模型」填写具体 Gemini 模型 ID。',
+        });
+      }
+      const customModel = rawCustomModel || (inferredProto === 'anthropic' ? 'claude-3-5-sonnet-20241022' : 'gpt-4o-mini');
       try {
         const txt = await callCustomLlm({
           customConfig: {
@@ -7364,7 +7725,7 @@ app.post('/api/persona/test-reply', aiGenerationLimiter, requireTenantAuth, asyn
 
     const bearerJwt = extractBearerToken(req);
     const serverPersonaCfg = await getServerCustomLlmConfig().catch(() => null);
-    const effectivePersonaConfig =
+    let effectivePersonaConfig =
       customConfig && typeof customConfig === 'object'
         ? (() => {
             const merged = mergeCustomLlmConfigWithStoredSecrets(customConfig, serverPersonaCfg);
@@ -7390,6 +7751,16 @@ app.post('/api/persona/test-reply', aiGenerationLimiter, requireTenantAuth, asyn
         success: false,
         error: '未配置可用的大模型（当前处于双关状态：官方大模型与自有密钥均已关闭），无法执行人设试聊，请先在「模型」开启任一引擎。',
       });
+    }
+
+    if (!effectivePersonaConfig && (bearerJwt || lastActiveUserJwt || (process.env.RAILWAY_BRAIN_KEY || '').trim())) {
+      effectivePersonaConfig = {
+        enabled: true,
+        explicitlyDisabled: false,
+        engineMode: 'cloud',
+        modelName: 'gemini-4-hydrogen',
+        enableKnowledgeBaseRAG: true,
+      };
     }
 
     const persona = await getGlobalPersonaFromDb(scope.accountId);
@@ -7486,10 +7857,17 @@ app.post('/api/persona/test-reply', aiGenerationLimiter, requireTenantAuth, asyn
 
     const coldStartGuideline = buildUnifiedColdStartGuideline(true, []);
     const antiAiDirective = buildUnifiedAntiAiDirective(UNIFIED_REPLY_HISTORY_LIMIT);
-    const budgeted = applyPromptCharacterBudget({
-      persona: personaCtx.hasConfiguredPersona
+    const sandboxBasePersona = `${
+      personaCtx.hasConfiguredPersona
         ? personaCtx.context
-        : '你是一位真诚自然、高效有温度的沟通助手，请严格依据用户的真实上下文进行自然回复。',
+        : '你是一位真诚自然、高效有温度的沟通助手，请严格依据用户的真实上下文进行自然回复。'
+    }${
+      !personaCtx.hasConfiguredPersona && personaCtx.context
+        ? `\n\n${personaCtx.context}`
+        : ''
+    }`;
+    const budgeted = applyPromptCharacterBudget({
+      persona: sandboxBasePersona,
       antiAi: antiAiDirective,
       coldStartGuideline,
       knowledge: knowledgeContext.trim(),
@@ -7505,83 +7883,45 @@ app.post('/api/persona/test-reply', aiGenerationLimiter, requireTenantAuth, asyn
     let reply = '';
     let replySource = '';
 
-    // 1. Strictly enforce Custom LLM / Cloud Brain when enabled — NEVER fall back to Gemini or fake templates
-    if (effectivePersonaConfig?.enabled) {
-      try {
-        const customRes = await callCustomLlm({
-          customConfig: effectivePersonaConfig,
-          systemInstruction,
-          messages: llmMessages,
-          temperature: 0.7,
-          maxTokens: 500,
-          userJwt: bearerJwt,
-          throwOnError: true,
-          skipSync: true,
-        });
-        if (!customRes || !customRes.trim()) {
-          return res.status(502).json({
-            success: false,
-            error: '自定义大模型 / 云端引擎未返回有效回复内容（严禁降级代答）',
-          });
-        }
-        reply = customRes.trim();
-        replySource =
-          effectivePersonaConfig?.engineMode === 'cloud' ||
-          (effectivePersonaConfig?.engineMode !== 'custom' && !effectivePersonaConfig?.baseUrl?.trim())
-            ? 'lingxi_cloud_brain'
-            : `custom_llm:${effectivePersonaConfig.modelName || 'custom'}`;
-      } catch (err: any) {
-        return res.status(503).json({
-          success: false,
-          error: `自定义大模型 / 云端引擎调用失败（严禁降级切回 Gemini 或使用模板假回复）: ${err?.message || String(err)}`,
-        });
-      }
-    } else {
-      // 2. Single official Gemini model (no blind multi-model waterfall, no hardcoded template fake replies)
-      const selectedModel = resolveGeminiModel(req.body.model || customConfig?.geminiModel, 'chat');
-      if (!isGeminiAvailable()) {
-        const circuit = getGeminiCircuitStatus();
-        return res.status(circuit.isBlocked ? 503 : 400).json({
-          success: false,
-          error: circuit.isBlocked
-            ? `Gemini 大模型当前不可用: ${circuit.reason}`
-            : '未配置可用的大模型（请配置 GEMINI_API_KEY 或启用自定义大模型）',
-        });
-      }
+    // 1. Strictly enforce Custom LLM / Cloud Brain — NEVER silently fall back to local GEMINI_API_KEY or fake templates
+    if (!effectivePersonaConfig?.enabled) {
+      return res.status(401).json({
+        success: false,
+        blocked: true,
+        source: 'llm_unconfigured_guard',
+        error: '未获取到会员授权令牌或自定义大模型配置，请先登录会员账号或在「模型」配置自有模型网关（严禁静默降级）。',
+      });
+    }
 
-      try {
-        const ai = createGeminiClient();
-        const contextTranscript = recent30Turns
-          .map((m) => `${m.sender === 'peer' ? '对方' : '我'}: ${m.text}`)
-          .join('\n');
-        const contentsPrompt =
-          recent30Turns.length > 1
-            ? `最近 ${recent30Turns.length} 条真实双方对话：\n${contextTranscript}\n\n请严格结合真实人设与上下文直接输出最新一条自然回复：`
-            : cleanIncomingMessage;
-        const resp = await ai.models.generateContent({
-          model: selectedModel,
-          contents: contentsPrompt,
-          config: {
-            systemInstruction,
-            temperature: 0.75,
-          },
-        });
-        const txt = resp.text?.trim();
-        if (!txt) {
-          return res.status(502).json({
-            success: false,
-            error: `Gemini(${selectedModel}) 未返回有效回复内容`,
-          });
-        }
-        reply = txt;
-        replySource = selectedModel;
-      } catch (modelErr: any) {
-        handleGeminiApiError(`test-reply model ${selectedModel}`, modelErr);
-        return res.status(503).json({
+    try {
+      const customRes = await callCustomLlm({
+        customConfig: effectivePersonaConfig,
+        systemInstruction,
+        messages: llmMessages,
+        temperature: 0.7,
+        maxTokens: 500,
+        userJwt: bearerJwt,
+        throwOnError: true,
+        skipSync: true,
+      });
+      if (!customRes || !customRes.trim()) {
+        return res.status(502).json({
           success: false,
-          error: `Gemini(${selectedModel}) 调用失败: ${modelErr?.message || String(modelErr)}`,
+          error: '自定义大模型 / 云端引擎未返回有效回复内容（严禁降级代答）',
         });
       }
+      reply = customRes.trim();
+      replySource =
+        effectivePersonaConfig?.engineMode === 'cloud' ||
+        (effectivePersonaConfig?.engineMode !== 'custom' && !effectivePersonaConfig?.baseUrl?.trim())
+          ? 'lingxi_cloud_brain'
+          : `custom_llm:${effectivePersonaConfig.modelName || 'custom'}`;
+    } catch (err: any) {
+      const errStatus = typeof err?.statusCode === 'number' && err.statusCode >= 400 && err.statusCode < 600 ? err.statusCode : 503;
+      return res.status(errStatus).json({
+        success: false,
+        error: `自定义大模型 / 云端引擎调用失败（严禁降级切回或使用模板假回复）: ${err?.message || String(err)}`,
+      });
     }
 
     if (reply) {
@@ -7701,43 +8041,7 @@ export async function invokeEvolutionOrAnalysisLlm({
     };
   }
 
-  const selectedModel = resolveGeminiModel(
-    customConfig?.geminiModel || customConfig?.modelName || effectiveCustomConfig?.geminiModel,
-    'analysis'
-  );
-  if (!isGeminiAvailable()) {
-    const circuit = getGeminiCircuitStatus();
-    throw new Error(
-      circuit.isBlocked
-        ? `Gemini 大模型不可用: ${circuit.reason}`
-        : '未配置可用的大模型（请配置 GEMINI_API_KEY 或启用后台/自定义大模型）'
-    );
-  }
-
-  try {
-    const ai = createGeminiClient();
-    const resp = await Promise.race([
-      ai.models.generateContent({
-        model: selectedModel,
-        contents: prompt,
-      }),
-      new Promise<never>((_, reject) =>
-        setTimeout(() => reject(new Error(`Gemini(${selectedModel}) analysis timeout`)), timeoutMs)
-      ),
-    ]);
-    const text = (resp as any)?.text?.trim();
-    if (!text) {
-      throw new Error(`Gemini(${selectedModel}) 未返回有效内容`);
-    }
-    return {
-      text,
-      source: selectedModel,
-      usedBackendCustomLlm: false,
-    };
-  } catch (err: any) {
-    handleGeminiApiError(`EvolutionAnalysis(${selectedModel})`, err);
-    throw err;
-  }
+  throw new Error('未获取到会员授权令牌或自定义大模型配置，请先登录会员账号或在「模型」配置自有网关（严禁静默降级）');
 }
 
 // Helper: Push newly distilled chat skills & styles to the user's Backend LLM Brain so it learns across conversations
@@ -9773,11 +10077,19 @@ export async function performStrictTranslation({
       throw err;
     }
 
-    const resolvedModel =
+    const rawModel =
       (typeof customModelName === 'string' && customModelName.trim()) ||
       (typeof customConfig.modelName === 'string' && customConfig.modelName.trim()) ||
-      'gpt-4o-mini';
-    const inferredProtocol = inferGatewayProtocol(baseUrl, resolvedModel, customConfig.protocol);
+      '';
+    const inferredProtocol = inferGatewayProtocol(baseUrl, rawModel, customConfig.protocol);
+    if (inferredProtocol === 'gemini' && !baseUrl.includes(':generateContent') && !rawModel) {
+      const err: any = new Error('自有 Gemini 协议网关未填写模型型号 (Model Name)，已拦截空模型请求，请先填写具体 Gemini 模型 ID');
+      err.statusCode = 400;
+      throw err;
+    }
+    const resolvedModel =
+      rawModel ||
+      (inferredProtocol === 'anthropic' ? 'claude-3-5-sonnet-20241022' : 'gpt-4o-mini');
 
     const targetLabel = resolvePromptLanguageName(targetLang);
     const prompt = `Translate the following text into ${targetLabel}. Keep emojis, slang, linebreaks, and casual style. Return ONLY the translated text:\n\n${text}`;
@@ -10289,32 +10601,8 @@ app.post('/api/audio/transcribe', aiGenerationLimiter, requireTenantAuth, async 
       }
     }
 
-    const selectedModel = resolveGeminiModel(model, 'transcribe');
-    if (isGeminiAvailable()) {
-      try {
-        const ai = createGeminiClient();
-        const response = await ai.models.generateContent({
-          model: selectedModel,
-          contents: {
-            parts: [
-              { inlineData: { mimeType: effectiveMimeType, data: cleanBase64 } },
-              { text: 'Transcribe this voice message accurately into text verbatim.' },
-            ],
-          },
-        });
-        const text = response.text?.trim();
-        if (!text) {
-          return res.status(502).json({ error: `Gemini(${selectedModel}) 未返回有效语音识别文本` });
-        }
-        return res.json({ text, modelUsed: selectedModel });
-      } catch (e: any) {
-        handleGeminiApiError(`AudioTranscribe(${selectedModel})`, e);
-        return res.status(503).json({ error: `语音识别失败 (${selectedModel}): ${e?.message || String(e)}` });
-      }
-    }
-
     const isCloudEndpointMissing = cloudSttStatus === 404 || cloudSttStatus === 405 || cloudSttStatus === 501;
-    return res.status(isCloudEndpointMissing ? 501 : cloudSttStatus >= 400 ? cloudSttStatus : 400).json({
+    return res.status(isCloudEndpointMissing ? 501 : cloudSttStatus >= 400 ? cloudSttStatus : 401).json({
       error: isCloudEndpointMissing
         ? '当前云端网关暂未开通语音转文字 (STT) 端点；如需使用语音转文字，请前往「模型 → 接入自有模型网关」配置支持 Whisper 或 Gemini 音频的模型接口。'
         : cloudSttErr
@@ -10588,46 +10876,8 @@ app.post('/api/audio/tts-clone', aiGenerationLimiter, requireTenantAuth, async (
         }
       }
 
-      if (isGeminiAvailable()) {
-        try {
-          const ai = createGeminiClient();
-          const response = await ai.models.generateContent({
-            model: resolveGeminiModel(requestedModel, 'tts'),
-            contents: [{ role: 'user', parts: [{ text }] }],
-            config: {
-              responseModalities: ['AUDIO'],
-              speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: chosenVoice } } },
-              systemInstruction: toneStyle
-                ? `Please speak in an authentic, natural voice with tone and style: ${toneStyle}`
-                : undefined,
-            },
-          });
-          const audioPart = response.candidates?.[0]?.content?.parts?.[0]?.inlineData;
-          const base64Audio = audioPart?.data;
-          if (base64Audio && Buffer.from(base64Audio, 'base64').length > 0) {
-            const mimeType = audioPart?.mimeType || 'audio/wav';
-            const format: 'mp3' | 'wav' | 'ogg' =
-              mimeType.includes('ogg') ? 'ogg' : mimeType.includes('mp3') ? 'mp3' : 'wav';
-            const finalized = await finalizeSynthesizedAudio(Buffer.from(base64Audio, 'base64'), format);
-            return res.json({
-              audioUrl: finalized.audioUrl,
-              format: finalized.format,
-              voiceName: chosenVoice,
-              toneStyle,
-              speechRate: effectiveRate,
-              pitch: effectivePitch,
-              audioProcessed: finalized.audioProcessed,
-              modelUsed: resolveGeminiModel(requestedModel, 'tts'),
-              routingReason: '通过官方 Gemini 引擎合成预设音色语音',
-            });
-          }
-        } catch (e: any) {
-          handleGeminiApiError('CloudTtsClone', e);
-        }
-      }
-
       const isMissingEndpoint = cloudTtsStatus === 404 || cloudTtsStatus === 405 || cloudTtsStatus === 501;
-      return res.status(isMissingEndpoint ? 400 : cloudTtsStatus || 400).json({
+      return res.status(isMissingEndpoint ? 400 : cloudTtsStatus || 401).json({
         ok: false,
         error: isMissingEndpoint ? '云端网关暂未开通语音合成端点，需配置自有网关' : '语音合成需使用自有模型网关',
         message: isMissingEndpoint
@@ -10894,7 +11144,7 @@ export async function getCnTranslationIfForeign(
       engine = configuredEngine === 'google' ? 'google' : 'gemini';
     }
     const resolvedCustomModel = isPriorityCustom
-      ? (customConfig?.modelName || transSettings?.customModelName || 'gpt-4o-mini')
+      ? (customConfig?.modelName || transSettings?.customModelName || '')
       : (transSettings?.customModelName || customConfig?.modelName);
     const result = await performStrictTranslation({
       text,
@@ -11573,7 +11823,7 @@ app.post('/api/llm/chat', aiGenerationLimiter, requireTenantAuth, async (req: Re
 
     // Enforce Dual-Off strict guard (when both Cloud & Custom engines are disabled, forbid all LLM generation)
     const serverCustomCfgForChat = await getServerCustomLlmConfig().catch(() => null);
-    const effectiveChatConfig =
+    let effectiveChatConfig =
       customConfig && typeof customConfig === 'object'
         ? (() => {
             const merged = mergeCustomLlmConfigWithStoredSecrets(customConfig, serverCustomCfgForChat);
@@ -11599,6 +11849,16 @@ app.post('/api/llm/chat', aiGenerationLimiter, requireTenantAuth, async (req: Re
         blocked: true,
         source: 'llm_dual_off_guard',
       });
+    }
+    const chatBearerJwt = extractBearerToken(req);
+    if (!effectiveChatConfig && (chatBearerJwt || lastActiveUserJwt || (process.env.RAILWAY_BRAIN_KEY || '').trim())) {
+      effectiveChatConfig = {
+        enabled: true,
+        explicitlyDisabled: false,
+        engineMode: 'cloud',
+        modelName: 'gemini-4-hydrogen',
+        enableKnowledgeBaseRAG: true,
+      };
     }
 
     // Step 2: Read & normalize current Customer ID + Account ID (prefer verified tenant account)
@@ -11918,16 +12178,6 @@ ${customerMemories.map((m: any) => `  * [${m.date}] ${m.topic}: ${m.summary} (�
 
         let lastUpstreamStatus = 503;
         let lastUpstreamError = '';
-        const extractUpstreamErrDetail = (rawText: string): string => {
-          const clean = String(rawText || '').trim();
-          if (!clean) return '';
-          const parsed = safeJsonParse<any>(clean, null);
-          const msg =
-            parsed?.error?.message ||
-            parsed?.message ||
-            (typeof parsed?.error === 'string' ? parsed.error : '');
-          return String(msg || clean).replace(/\s+/g, ' ').trim().slice(0, 400);
-        };
 
         if (!isCloudBrainChat && effectiveChatProtocol === 'gemini') {
           const cleanGeminiChatModel = String(effectiveChatConfig.modelName || '').trim();
@@ -12207,87 +12457,11 @@ ${customerMemories.map((m: any) => `  * [${m.date}] ${m.topic}: ${m.summary} (�
       }
     }
 
-    // Step 8b & 9: Direct Server-Side Gemini Execution with 30-Message Context & Transient Retry
-    const lastUserMsg = recent30Messages[recent30Messages.length - 1]?.text || '';
-    const routeDecision = determineChatRouting(lastUserMsg, recent30Messages, matchedKnowledgeCount);
-    const targetModel = resolveGeminiModel(
-      req.body.model || effectiveChatConfig?.geminiModel || effectiveChatConfig?.modelName || routeDecision.selectedModel,
-      'chat'
-    );
-    let chatErrorMsg = '';
-
-    if (isGeminiAvailable()) {
-      const ai = createGeminiClient();
-      const contextTranscript = recent30Messages
-        .map((m) => `${m.sender === 'peer' ? '对方' : '我'}: ${m.text}`)
-        .join('\n');
-
-      const promptText = `最近 ${recent30Messages.length} 条真实双方对话：\n${contextTranscript}\n\n请严格结合真实人设与客户全息档案记忆直接输出最新一条自然回复：`;
-
-      for (let attempt = 0; attempt <= 2; attempt++) {
-        try {
-          const timeoutPromise = new Promise<never>((_, reject) =>
-            setTimeout(() => reject(new Error(`Gemini(${targetModel}) chat timeout`)), 15000)
-          );
-
-          const geminiRes = await Promise.race([
-            ai.models.generateContent({
-              model: targetModel,
-              contents: promptText,
-              config: {
-                systemInstruction: fullSystemInstruction,
-              },
-            }),
-            timeoutPromise,
-          ]);
-
-          const rawText = geminiRes.text?.trim() || '';
-
-          if (rawText) {
-            void incrementEvolutionHabitUsage(injectedHabitIds, accountId);
-            const cnTranslation = await getCnTranslationIfForeign(
-              rawText,
-              effectiveChatConfig,
-              userJwt,
-              chatTranslationTargetLang
-            );
-            return res.json({
-              replyText: rawText,
-              cnTranslation,
-              source: targetModel,
-              routing: {
-                model: targetModel,
-                reason: routeDecision.reason,
-                category: routeDecision.category,
-                ratioGroup: routeDecision.estimatedRatio,
-              },
-              pipeline: pipelineMeta,
-            });
-          }
-          chatErrorMsg = `Gemini(${targetModel}) 未返回有效回复内容`;
-          break;
-        } catch (e: any) {
-          const is429 = handleGeminiApiError(`RoutedChat(${targetModel})`, e);
-          chatErrorMsg = e?.message || String(e);
-          const isTransient = !is429 && /timeout|503|502|500|fetch failed|ECONNRESET/i.test(chatErrorMsg);
-          if (!isTransient || attempt === 2) break;
-          await new Promise((resolve) => setTimeout(resolve, 400 * Math.pow(2, attempt)));
-        }
-      }
-    } else {
-      const circuit = getGeminiCircuitStatus();
-      chatErrorMsg = circuit.isBlocked ? circuit.reason : '未配置可用的 Gemini API 密钥';
-    }
-
-    return res.status(503).json({
-      error: `AI回复生成失败 (${targetModel}): ${chatErrorMsg || '模型未配置或服务不可用'}`,
-      source: 'system_error',
-      routing: {
-        model: targetModel,
-        reason: routeDecision.reason,
-        category: routeDecision.category,
-        ratioGroup: routeDecision.estimatedRatio,
-      },
+    // No silent local GEMINI_API_KEY fallback when neither Cloud auth nor Custom Gateway is configured
+    return res.status(401).json({
+      error: '未获取到会员授权令牌或自定义大模型配置，请先登录会员账号或在「模型」配置自有模型网关（严禁静默降级）。',
+      blocked: true,
+      source: 'llm_unconfigured_guard',
     });
   } catch (error: any) {
     res.status(500).json({ error: error.message });
@@ -13990,45 +14164,10 @@ export async function generateTtsAudio(
     }
   }
 
-  if (!isGeminiAvailable()) {
-    const circuit = getGeminiCircuitStatus();
-    throw new Error(
-      cloudTtsFailureMsg ||
-        circuit.reason ||
-        'TTS voice generation unavailable: 云端语音合成端点未开通且未配置本地 Gemini 密钥'
-    );
-  }
-  let lastError = '';
-  try {
-    const ai = createGeminiClient();
-    const response = await ai.models.generateContent({
-      model: ttsModel,
-      contents: [
-        {
-          role: 'user',
-          parts: [{ text, speechMetadata: { style: toneStyle || 'Warm, authentic human tone' } }],
-        },
-      ],
-      config: {
-        responseModalities: ['AUDIO'],
-        speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: chosenVoice } } },
-      },
-    });
-
-    const base64Audio = response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
-    if (base64Audio && Buffer.from(base64Audio, 'base64').length > 0) {
-      return {
-        audioUrl: `data:audio/wav;base64,${base64Audio}`,
-        duration,
-      };
-    }
-    lastError = `TTS 模型 ${ttsModel} 未返回有效音频数据`;
-  } catch (e: any) {
-    handleGeminiApiError(`TelegramTTS(${ttsModel})`, e);
-    lastError = e?.message || String(e);
-  }
-
-  throw new Error(`TTS voice generation failed (${ttsModel}): ${lastError}`);
+  throw new Error(
+    cloudTtsFailureMsg ||
+      'TTS voice generation unavailable: 云端语音合成端点未返回有效音频或未登录会员授权（严禁静默降级）'
+  );
 }
 
 // Shared Helper: Transcribe an audio buffer strictly obeying 3-state mutual exclusion
@@ -14231,47 +14370,13 @@ export async function transcribeAudioBufferStrictly(
     }
   }
 
-  if (!isGeminiAvailable()) {
-    const circuit = getGeminiCircuitStatus();
-    return {
-      ok: false,
-      text: '',
-      error: cloudSttErr
-        ? `云端语音转文字网关暂不可用 (${cloudSttErr})`
-        : circuit.reason || '未获取到云端语音转文字授权且未配置本地密钥',
-    };
-  }
-  try {
-    const ai = createGeminiClient();
-    const response = await ai.models.generateContent({
-      model: sttModel,
-      contents: {
-        parts: [
-          { inlineData: { mimeType, data: base64Audio } },
-          {
-            text: 'Transcribe this voice message accurately into text verbatim. Output only the verbatim transcribed spoken words without markdown, explanation or quotes.',
-          },
-        ],
-      },
-    });
-
-    const transcribedText = response.text?.trim() || '';
-    if (!transcribedText) {
-      return {
-        ok: false,
-        text: '',
-        error: `Gemini STT (${sttModel}) 未识别出有效文字内容`,
-      };
-    }
-    return { ok: true, text: transcribedText };
-  } catch (geminiErr: any) {
-    handleGeminiApiError('TelegramVoiceSTT', geminiErr);
-    return {
-      ok: false,
-      text: '',
-      error: `语音转写失败 (${sttModel}): ${geminiErr?.message || String(geminiErr)}`,
-    };
-  }
+  return {
+    ok: false,
+    text: '',
+    error: cloudSttErr
+      ? `云端语音转文字网关暂不可用 (${cloudSttErr})`
+      : '未获取到会员授权令牌，请先登录会员账号或在「模型」配置自有网关（严禁静默降级）',
+  };
 }
 
 // Helper: Download voice file from Telegram Bot API and transcribe strictly obeying 3-state mutual exclusion
@@ -14493,7 +14598,7 @@ async function processTelegramMessageAsync(
             engine = configuredEngine === 'google' ? 'google' : 'gemini';
           }
           const resolvedCustomModel = isPriorityCustom && configuredEngine !== 'custom_llm'
-            ? (customConfig?.modelName || transSettings?.customModelName || 'gpt-4o-mini')
+            ? (customConfig?.modelName || transSettings?.customModelName || '')
             : (transSettings?.customModelName || customConfig?.modelName);
 
           let chatPrefTargetLang = '';
@@ -14548,9 +14653,9 @@ async function processTelegramMessageAsync(
     // 1. Fetch the most recent 30 conversation messages for this chat in chronological order (strictly Bot / acc_1 scope)
     const altBotChatId = chatId.startsWith('tg_') ? chatId.replace(/^tg_/, '') : `tg_${chatId}`;
     const recentMessages = (await db.prepare(`
-      SELECT sender, sender_name, text, stt_text, created_at
+      SELECT id, sender, sender_name, text, stt_text, image_caption, is_audio, is_image, is_video, is_file, timestamp, created_at
       FROM (
-        SELECT sender, sender_name, text, stt_text, created_at
+        SELECT id, sender, sender_name, text, stt_text, image_caption, is_audio, is_image, is_video, is_file, timestamp, created_at
         FROM messages
         WHERE (chat_id = ? OR chat_id = ?) AND account_id IN ('acc_telegram_bot', 'acc_1')
         ORDER BY created_at DESC
@@ -14582,29 +14687,43 @@ async function processTelegramMessageAsync(
       profile = await getScopedCustomerProfile(chatId, 'acc_telegram_bot');
     }
 
-    // 3. Assemble full multi-turn conversational history
-    const conversationHistory: Array<{ role: 'user' | 'assistant'; text: string; sender: string }> = recentMessages.map((m: any) => {
-      const isPeer = m.sender === 'peer';
-      const displayText = (m.text === 'Voice Message' || m.text === '[语音消息]') && m.stt_text
-        ? `[语音]: ${m.stt_text}`
-        : (m.text || m.stt_text || '');
-      return {
-        role: isPeer ? 'user' : 'assistant',
+    // 3. Assemble normalized multi-turn conversational history (strictly capped to UNIFIED_REPLY_HISTORY_LIMIT = 30)
+    const conversationHistory: Array<{ role: 'user' | 'assistant'; text: string; sender: string }> = [];
+    recentMessages.forEach((m: any, idx: number) => {
+      const normalized = normalizeMessageTurn(m, idx + 1);
+      if (!normalized) return;
+      const isPeer = normalized.sender === 'peer';
+      const displayText =
+        normalized.mediaType === 'voice'
+          ? `[语音]: ${normalized.text}`
+          : normalized.mediaType === 'image'
+          ? `[图片]: ${normalized.text}`
+          : normalized.text;
+      conversationHistory.push({
+        role: normalized.role,
         text: displayText,
         sender: isPeer ? (m.sender_name || profile?.client_name || '对方') : '我',
-      };
+      });
     });
 
-    // Ensure current incoming message is the final user turn in history without duplicate
-    if (conversationHistory.length === 0 || conversationHistory[conversationHistory.length - 1].text !== effectiveIncomingText) {
+    // Ensure current incoming message is the final user turn in history without duplicate, and keep strict 30-turn cap
+    const cleanIncomingForHistory = String(effectiveIncomingText || '').trim();
+    if (
+      cleanIncomingForHistory &&
+      (conversationHistory.length === 0 ||
+        conversationHistory[conversationHistory.length - 1].role !== 'user' ||
+        conversationHistory[conversationHistory.length - 1].text.replace(/^\[(?:语音|图片)\]:\s*/, '').trim() !==
+          cleanIncomingForHistory)
+    ) {
       conversationHistory.push({
         role: 'user',
-        text: effectiveIncomingText,
+        text: cleanIncomingForHistory,
         sender: senderName || profile?.client_name || '对方',
       });
     }
+    const boundedHistory = conversationHistory.slice(-UNIFIED_REPLY_HISTORY_LIMIT);
 
-    const dialogueTranscript = conversationHistory.map((item) => `${item.sender}: ${item.text}`).join('\n');
+    const dialogueTranscript = boundedHistory.map((item) => `${item.sender}: ${item.text}`).join('\n');
 
     // 5. Build holographic memory prompt context
     let profileContext = '';
@@ -14636,10 +14755,31 @@ async function processTelegramMessageAsync(
     );
 
     // 6. RAG Knowledge Base Retrieval (Cloud Brain KB if enabled + Local SQL-level RAG — strictly genuine matches only, unified 4-msg window)
-    const serverCustomConfig = await getServerCustomLlmConfig();
+    const rawWebhookCustomConfig = await getServerCustomLlmConfig().catch(() => null);
+    const isWebhookDualOff = Boolean(
+      rawWebhookCustomConfig &&
+        (rawWebhookCustomConfig.enabled === false || rawWebhookCustomConfig.explicitlyDisabled)
+    );
+    if (isWebhookDualOff) {
+      console.warn(
+        `[Telegram Webhook Dual-Off Guard] Chat ${chatId}: 当前处于双关状态（官方大模型与自有密钥均已关闭），跳过自动回复并保持静默。`
+      );
+      return;
+    }
+    const serverCustomConfig =
+      rawWebhookCustomConfig ||
+      (lastActiveUserJwt || (process.env.RAILWAY_BRAIN_KEY || '').trim()
+        ? {
+            enabled: true,
+            explicitlyDisabled: false,
+            engineMode: 'cloud',
+            modelName: 'gemini-4-hydrogen',
+            enableKnowledgeBaseRAG: true,
+          }
+        : null);
     let knowledgeContext = '';
     let genuineMatchedKnowledge: any[] = [];
-    const combinedText = buildUnifiedRagQuery(conversationHistory, effectiveIncomingText);
+    const combinedText = buildUnifiedRagQuery(boundedHistory, effectiveIncomingText);
     if (isCloudKnowledgeBaseEnabled(serverCustomConfig)) {
       let railwayRes: RemoteKbSearchResult;
       try {
@@ -14758,7 +14898,7 @@ ${dialogueTranscript}
 对方最新发送的消息: "${effectiveIncomingText}"
 请直接回复最新一条消息：`;
 
-    const webhookLlmMessages = conversationHistory.map((m) => ({
+    const webhookLlmMessages = boundedHistory.map((m) => ({
       role: m.role,
       content: m.text,
     }));
@@ -14772,35 +14912,17 @@ ${dialogueTranscript}
           temperature: 0.7,
           maxTokens: 500,
           userJwt: lastActiveUserJwt || undefined,
+          throwOnError: true,
           skipSync: true,
         });
         if (customReply?.trim()) {
           replyText = customReply.trim();
         }
       } catch (err: any) {
-        console.warn('[Telegram Webhook Custom LLM Guard]: 自定义大模型失败，严格保持静默（严禁切回 Gemini）:', err?.message || err);
+        console.warn('[Telegram Webhook LLM Guard]: 大模型调用失败，严格保持静默（严禁静默降级）:', err?.message || err);
       }
-    } else if (!(serverCustomConfig && (serverCustomConfig.enabled === false || serverCustomConfig.explicitlyDisabled)) && isGeminiAvailable()) {
-      const targetModel = resolveGeminiModel(serverCustomConfig?.geminiModel, 'chat');
-      try {
-        const ai = createGeminiClient();
-        const timeoutPromise = new Promise<never>((_, reject) =>
-          setTimeout(() => reject(new Error('Gemini Telegram generation timeout')), 8000)
-        );
-
-        const response = await Promise.race([
-          ai.models.generateContent({
-            model: targetModel,
-            contents: webhookPromptText,
-            config: { systemInstruction: webhookSystemPrompt },
-          }),
-          timeoutPromise,
-        ]);
-
-        replyText = response.text?.trim() || '';
-      } catch (err: any) {
-        handleGeminiApiError('TelegramPersonaReply', err);
-      }
+    } else {
+      console.warn(`[Telegram Webhook Guard] Chat ${chatId}: 未获取到会员授权令牌或自定义大模型配置，严格保持静默`);
     }
 
     if (!replyText) {
@@ -16298,6 +16420,17 @@ async function handleMtprotoRouteError(
   statusWhenNotExpired = 400
 ) {
   const errMsg = formatTelegramError(err);
+  const floodEntry = recordTelegramFloodWait(ctx, err, 'mtproto_route');
+  if (floodEntry) {
+    return res.status(429).json({
+      ok: false,
+      cloudSynced: false,
+      code: 'TELEGRAM_FLOOD_WAIT',
+      retryAfterSeconds: floodEntry.retryAfterSeconds,
+      floodWaitUntil: floodEntry.floodWaitUntil,
+      error: errMsg,
+    });
+  }
   if (isTelegramSessionExpiredError(err)) {
     await markTelegramSessionExpired({
       accountId: ctx.accountId,
@@ -16387,11 +16520,10 @@ async function cleanupPendingUserClient(phone: string) {
 // Format raw Telegram errors into clear, actionable messages
 export function formatTelegramError(err: any): string {
   const msg = String(err?.errorMessage || err?.message || '');
-  const floodMatch = msg.match(/FLOOD_WAIT_(\d+)/i);
-  if (floodMatch) {
-    const secs = parseInt(floodMatch[1], 10);
-    const mins = Math.ceil(secs / 60);
-    return `请求过于频繁，Telegram 官方风控限制：请等待 ${mins} 分钟后再试 (${secs} 秒)`;
+  const floodSecs = extractFloodWaitSeconds(err);
+  if (floodSecs !== null) {
+    const mins = Math.ceil(floodSecs / 60);
+    return `请求过于频繁，Telegram 官方风控限制：请等待 ${mins} 分钟后再试 (${floodSecs} 秒)`;
   }
   if (isTelegramSessionExpiredError(err)) {
     return 'Telegram 登录会话已失效或在其他设备被注销，请重新登录该账号';
@@ -16483,6 +16615,17 @@ app.post('/api/telegram/user/send-code', requireTenantAuth, async (req: Request,
     const cleanPhone = normalizePhoneNumber(phone);
     if (!cleanPhone || cleanPhone.length < 6) {
       return res.status(400).json({ ok: false, error: '手机号码格式无效，请输入正确的国际手机号码 (例如: +8613800000000 或 +12125550123)' });
+    }
+
+    const sendCodeCooldown = getTelegramFloodCooldown({ phone: cleanPhone });
+    if (sendCodeCooldown) {
+      return res.status(429).json({
+        ok: false,
+        code: 'TELEGRAM_FLOOD_WAIT',
+        retryAfterSeconds: sendCodeCooldown.retryAfterSeconds,
+        floodWaitUntil: sendCodeCooldown.floodWaitUntil,
+        error: formatTelegramError({ errorMessage: `FLOOD_WAIT_${sendCodeCooldown.retryAfterSeconds}` }),
+      });
     }
 
     const activeUniqueUsers = new Set(Array.from(connectedUserClients.values()).map((u) => u.userId));
@@ -16633,6 +16776,17 @@ app.post('/api/telegram/user/send-code', requireTenantAuth, async (req: Request,
     });
   } catch (err: any) {
     console.error('[Telegram User Auth SendCode Error]:', err);
+    const cleanPhone = typeof req.body?.phone === 'string' ? normalizePhoneNumber(req.body.phone) : '';
+    const floodEntry = cleanPhone ? recordTelegramFloodWait({ phone: cleanPhone }, err, 'auth.SendCode') : null;
+    if (floodEntry) {
+      return res.status(429).json({
+        ok: false,
+        code: 'TELEGRAM_FLOOD_WAIT',
+        retryAfterSeconds: floodEntry.retryAfterSeconds,
+        floodWaitUntil: floodEntry.floodWaitUntil,
+        error: formatTelegramError(err),
+      });
+    }
     res.status(400).json({
       ok: false,
       error: formatTelegramError(err),
@@ -16649,6 +16803,16 @@ app.post('/api/telegram/user/resend-code', requireTenantAuth, async (req: Reques
       return res.status(400).json({ ok: false, error: '手机号码为必填项' });
     }
     const cleanPhone = normalizePhoneNumber(phone);
+    const resendCooldown = getTelegramFloodCooldown({ phone: cleanPhone });
+    if (resendCooldown) {
+      return res.status(429).json({
+        ok: false,
+        code: 'TELEGRAM_FLOOD_WAIT',
+        retryAfterSeconds: resendCooldown.retryAfterSeconds,
+        floodWaitUntil: resendCooldown.floodWaitUntil,
+        error: formatTelegramError({ errorMessage: `FLOOD_WAIT_${resendCooldown.retryAfterSeconds}` }),
+      });
+    }
     const userSession = activeUserClients.get(cleanPhone);
     if (!userSession || !userSession.client || !userSession.phoneCodeHash) {
       return res.status(400).json({ ok: false, code: 'TELEGRAM_AUTH_SESSION_EXPIRED', error: '会话已过期，请重新点击发送验证码' });
@@ -16686,10 +16850,21 @@ app.post('/api/telegram/user/resend-code', requireTenantAuth, async (req: Reques
     });
   } catch (err: any) {
     console.error('[Telegram User Auth ResendCode Error]:', err);
+    const cleanPhone = req.body?.phone ? normalizePhoneNumber(String(req.body.phone)) : '';
+    const floodEntry = cleanPhone ? recordTelegramFloodWait({ phone: cleanPhone }, err, 'auth.ResendCode') : null;
+    if (floodEntry) {
+      return res.status(429).json({
+        ok: false,
+        code: 'TELEGRAM_FLOOD_WAIT',
+        retryAfterSeconds: floodEntry.retryAfterSeconds,
+        floodWaitUntil: floodEntry.floodWaitUntil,
+        error: formatTelegramError(err),
+      });
+    }
     const errMsg = String(err?.errorMessage || err?.message || '');
     const isExpired = errMsg.includes('PHONE_CODE_EXPIRED') || isTelegramSessionExpiredError(err);
-    if (isExpired && req.body?.phone) {
-      await cleanupPendingUserClient(normalizePhoneNumber(req.body.phone));
+    if (isExpired && cleanPhone) {
+      await cleanupPendingUserClient(cleanPhone);
     }
     res.status(400).json({
       ok: false,
@@ -16827,6 +17002,7 @@ async function finishQrLogin(sessionObj: QrSessionContext, user: any) {
   fetchTelegramUserDialogs(sessionObj.client, 150, String(user.id))
     .then((dialogs) => {
       userConnectedObj.dialogs = dialogs;
+      userConnectedObj.dialogsFetchedAt = Date.now();
       console.log(`[Telegram QR Auth] Synced ${dialogs.length} real dialogs into memory for user ${user.id}`);
     })
     .catch((err) => {
@@ -17328,6 +17504,7 @@ app.post('/api/telegram/user/verify-code', requireTenantAuth, authAttemptLimiter
     fetchTelegramUserDialogs(client, 150, String(me.id))
       .then((dialogs) => {
         userConnectedObj.dialogs = dialogs;
+        userConnectedObj.dialogsFetchedAt = Date.now();
         console.log(`[Telegram User Auth] Synced ${dialogs.length} real dialogs into memory for user ${me.id}`);
       })
       .catch((err) => {
@@ -17578,28 +17755,82 @@ app.get('/api/telegram/user/dialogs', requireTenantAuth, async (req: Request, re
       });
     }
 
-    // Refresh dialogs directly from Telegram MTProto
-    const rawDialogs = await fetchTelegramUserDialogs(connected.client, 150, connected.userId);
     const effectiveAccId = accountId || (req as any).auth?.effectiveAccountId || `acc_tg_${connected.userId}`;
+    const forceRefresh = req.query.force === '1' || req.query.force === 'true';
+
+    // Account-level FLOOD_WAIT circuit breaker: never fire MTProto GetDialogs while cooling down
+    const activeFlood = getTelegramFloodCooldown({
+      accountId: effectiveAccId,
+      userId: connected.userId,
+      phone: connected.phone,
+    });
+    if (activeFlood) {
+      return res.status(429).json({
+        ok: false,
+        code: 'TELEGRAM_FLOOD_WAIT',
+        retryAfterSeconds: activeFlood.retryAfterSeconds,
+        floodWaitUntil: activeFlood.floodWaitUntil,
+        error: formatTelegramError({ errorMessage: `FLOOD_WAIT_${activeFlood.retryAfterSeconds}` }),
+        dialogs: Array.isArray(connected.dialogs) ? connected.dialogs : [],
+        userId: connected.userId,
+        phone: connected.phone,
+        isConnected: Boolean(connected.client.connected),
+        fromCache: true,
+      });
+    }
+
     const dialogAccVariants = getScopedAccountIdVariants(effectiveAccId);
     const tgPrefAcc = `acc_tg_${connected.userId}`;
     if (!dialogAccVariants.includes(tgPrefAcc)) dialogAccVariants.push(tgPrefAcc);
 
-    const dialogLangPrefs = new Map<string, { sourceLang: string; targetLang: string }>();
-    try {
-      const ph = dialogAccVariants.map(() => '?').join(', ');
-      const prefRows = (await db.prepare(`
-        SELECT chat_id, source_lang, target_lang
-        FROM chat_language_prefs
-        WHERE account_id IN (${ph})
-      `).all(...dialogAccVariants)) as any[];
-      for (const r of prefRows || []) {
-        dialogLangPrefs.set(r.chat_id, {
-          sourceLang: r.source_lang || 'Auto',
-          targetLang: r.target_lang || 'Auto',
-        });
-      }
-    } catch {}
+    const loadDialogLangPrefs = async () => {
+      const prefs = new Map<string, { sourceLang: string; targetLang: string }>();
+      try {
+        const ph = dialogAccVariants.map(() => '?').join(', ');
+        const prefRows = (await db.prepare(`
+          SELECT chat_id, source_lang, target_lang
+          FROM chat_language_prefs
+          WHERE account_id IN (${ph})
+        `).all(...dialogAccVariants)) as any[];
+        for (const r of prefRows || []) {
+          prefs.set(r.chat_id, {
+            sourceLang: r.source_lang || 'Auto',
+            targetLang: r.target_lang || 'Auto',
+          });
+        }
+      } catch {}
+      return prefs;
+    };
+
+    const nowMs = Date.now();
+    if (
+      !forceRefresh &&
+      Array.isArray(connected.dialogs) &&
+      connected.dialogs.length > 0 &&
+      connected.dialogsFetchedAt &&
+      nowMs - connected.dialogsFetchedAt < TELEGRAM_DIALOGS_CACHE_TTL_MS
+    ) {
+      const dialogLangPrefs = await loadDialogLangPrefs();
+      const cachedDialogs = connected.dialogs.map((d: any) => {
+        const pref = dialogLangPrefs.get(d.id);
+        return pref
+          ? { ...d, sourceLang: pref.sourceLang, targetLang: pref.targetLang }
+          : d;
+      });
+      return res.json({
+        ok: true,
+        dialogs: cachedDialogs,
+        userId: connected.userId,
+        phone: connected.phone,
+        isConnected: Boolean(connected.client.connected),
+        totalCount: cachedDialogs.length,
+        cached: true,
+      });
+    }
+
+    // Refresh dialogs directly from Telegram MTProto
+    const rawDialogs = await fetchTelegramUserDialogs(connected.client, 150, connected.userId);
+    const dialogLangPrefs = await loadDialogLangPrefs();
 
     const dialogs = rawDialogs.map((d: any) => {
       const pref = dialogLangPrefs.get(d.id);
@@ -17608,6 +17839,7 @@ app.get('/api/telegram/user/dialogs', requireTenantAuth, async (req: Request, re
         : d;
     });
     connected.dialogs = dialogs;
+    connected.dialogsFetchedAt = Date.now();
 
     res.json({
       ok: true,
@@ -17618,6 +17850,22 @@ app.get('/api/telegram/user/dialogs', requireTenantAuth, async (req: Request, re
       totalCount: dialogs.length,
     });
   } catch (err: any) {
+    const floodEntry = recordTelegramFloodWait(
+      { accountId, userId: connected?.userId, phone: connected?.phone || phone },
+      err,
+      'messages.GetDialogs'
+    );
+    if (floodEntry) {
+      return res.status(429).json({
+        ok: false,
+        code: 'TELEGRAM_FLOOD_WAIT',
+        retryAfterSeconds: floodEntry.retryAfterSeconds,
+        floodWaitUntil: floodEntry.floodWaitUntil,
+        error: formatTelegramError(err),
+        dialogs: Array.isArray(connected?.dialogs) ? connected.dialogs : [],
+        fromCache: true,
+      });
+    }
     if (isTelegramSessionExpiredError(err)) {
       await markTelegramSessionExpired({
         accountId,
@@ -17793,6 +18041,7 @@ function startTelegramCacheCleanupTimer(): void {
     const now = Date.now();
     telegramAvatarCache.pruneExpired(now);
     telegramMediaCache.pruneExpired(now);
+    pruneExpiredTelegramFloodCooldowns(now);
   }, 5 * 60 * 1000);
   telegramCacheCleanupInterval.unref?.();
 }
@@ -17852,6 +18101,9 @@ app.get('/api/telegram/user/avatar/:chatId', async (req: Request, res: Response)
 
     for (const connected of candidates) {
       if (connected.client) {
+        if (getTelegramFloodCooldown({ accountId: cacheAccountScope, userId: connected.userId, phone: connected.phone })) {
+          continue;
+        }
         try {
           const photo = await connected.client.downloadProfilePhoto(peer, { isBig: false });
           if (photo && Buffer.isBuffer(photo) && photo.length > 0) {
@@ -17868,7 +18120,12 @@ app.get('/api/telegram/user/avatar/:chatId', async (req: Request, res: Response)
             res.setHeader('Cache-Control', 'private, max-age=3600');
             return res.send(photo);
           }
-        } catch {
+        } catch (avatarErr: any) {
+          recordTelegramFloodWait(
+            { accountId: cacheAccountScope, userId: connected.userId, phone: connected.phone },
+            avatarErr,
+            'downloadProfilePhoto'
+          );
           // peer might not exist on this client
         }
       }
@@ -18331,8 +18588,23 @@ app.get('/api/telegram/user/media/:chatId/:msgId', async (req: Request, res: Res
       return sendMediaBufferResponse(req, res, cached, forceDownload);
     }
 
+    let floodWaitEntry: TelegramFloodCooldownEntry | null = null;
     for (const candidate of candidates) {
       if (!candidate.client) continue;
+      const candCooldown = getTelegramFloodCooldown({
+        accountId: cacheAccountScope,
+        userId: candidate.userId,
+        phone: candidate.phone,
+      });
+      if (candCooldown) {
+        floodWaitEntry = {
+          accountKey: cacheAccountScope,
+          retryAfterSeconds: candCooldown.retryAfterSeconds,
+          floodWaitUntil: candCooldown.floodWaitUntil,
+          recordedAt: Date.now(),
+        };
+        continue;
+      }
       try {
         const { inputPeer } = await resolveTelegramInputPeer(candidate.client, chatId, candidate.userId);
         const msgs = await candidate.client.getMessages(inputPeer, { ids: [tgMsgId] });
@@ -18406,7 +18678,15 @@ app.get('/api/telegram/user/media/:chatId/:msgId', async (req: Request, res: Res
         telegramMediaCache.set(cacheKey, entry, Date.now());
 
         return sendMediaBufferResponse(req, res, entry, forceDownload);
-      } catch {
+      } catch (mediaErr: any) {
+        const recorded = recordTelegramFloodWait(
+          { accountId: cacheAccountScope, userId: candidate.userId, phone: candidate.phone },
+          mediaErr,
+          'downloadMedia'
+        );
+        if (recorded) {
+          floodWaitEntry = recorded;
+        }
         if (res.headersSent) {
           if (!res.destroyed) res.destroy();
           return;
@@ -18416,6 +18696,15 @@ app.get('/api/telegram/user/media/:chatId/:msgId', async (req: Request, res: Res
     }
 
     if (!res.headersSent) {
+      if (floodWaitEntry) {
+        return res.status(429).json({
+          ok: false,
+          code: 'TELEGRAM_FLOOD_WAIT',
+          retryAfterSeconds: floodWaitEntry.retryAfterSeconds,
+          floodWaitUntil: floodWaitEntry.floodWaitUntil,
+          error: formatTelegramError({ errorMessage: `FLOOD_WAIT_${floodWaitEntry.retryAfterSeconds}` }),
+        });
+      }
       return res.status(404).send('Media not found');
     }
   } catch {
@@ -20129,6 +20418,7 @@ app.post('/api/telegram/user/dialogs/pin', requireTenantAuth, async (req: Reques
         pinned: Boolean(pinned),
       })
     );
+    connected.dialogsFetchedAt = 0;
 
     return res.json({ ok: true, cloudSynced: true, pinned: Boolean(pinned) });
   } catch (err: any) {
@@ -20160,6 +20450,7 @@ app.post('/api/telegram/user/dialogs/mute', requireTenantAuth, async (req: Reque
         }),
       })
     );
+    connected.dialogsFetchedAt = 0;
 
     return res.json({ ok: true, cloudSynced: true, muted: Boolean(muted) });
   } catch (err: any) {
@@ -20191,6 +20482,7 @@ app.post('/api/telegram/user/dialogs/archive', requireTenantAuth, async (req: Re
         ],
       })
     );
+    connected.dialogsFetchedAt = 0;
 
     return res.json({ ok: true, cloudSynced: true, archived: Boolean(archived) });
   } catch (err: any) {
@@ -20223,6 +20515,7 @@ app.post('/api/telegram/user/dialogs/unread', requireTenantAuth, async (req: Req
         await connected.client.markAsRead(inputPeer);
       } catch {}
     }
+    connected.dialogsFetchedAt = 0;
 
     return res.json({ ok: true, cloudSynced: true, unread: Boolean(unread) });
   } catch (err: any) {
@@ -20261,6 +20554,7 @@ app.post('/api/telegram/user/dialogs/clear-history', requireTenantAuth, async (r
         .prepare(`DELETE FROM messages WHERE (chat_id = ? OR chat_id = ?) AND account_id IN (${accPlaceholders})`)
         .run(String(chatId), altChatId, ...accVariants);
     } catch {}
+    connected.dialogsFetchedAt = 0;
 
     return res.json({ ok: true, cloudSynced: true });
   } catch (err: any) {
@@ -20322,6 +20616,7 @@ app.post('/api/telegram/user/dialogs/delete', requireTenantAuth, async (req: Req
         .prepare(`DELETE FROM messages WHERE (chat_id = ? OR chat_id = ?) AND account_id IN (${accPlaceholders})`)
         .run(String(chatId), altChatId, ...accVariants);
     } catch {}
+    connected.dialogsFetchedAt = 0;
 
     return res.json({ ok: true, cloudSynced: true });
   } catch (err: any) {
@@ -20360,6 +20655,7 @@ app.post('/api/telegram/user/dialogs/read', requireTenantAuth, async (req: Reque
         })
       );
     } catch {}
+    connected.dialogsFetchedAt = 0;
 
     return res.json({ ok: true, cloudSynced: true });
   } catch (err: any) {
@@ -20656,6 +20952,22 @@ app.get('/api/telegram/user/chat-info/:chatId', requireTenantAuth, async (req: R
         ok: false,
         chatId,
         error: '当前账号未在线连接 Telegram MTProto，无法获取真实详情与成员列表',
+      });
+    }
+
+    const activeFlood = getTelegramFloodCooldown({
+      accountId: accountId || `acc_tg_${connected.userId}`,
+      userId: connected.userId,
+      phone: connected.phone,
+    });
+    if (activeFlood) {
+      return res.status(429).json({
+        ok: false,
+        chatId,
+        code: 'TELEGRAM_FLOOD_WAIT',
+        retryAfterSeconds: activeFlood.retryAfterSeconds,
+        floodWaitUntil: activeFlood.floodWaitUntil,
+        error: formatTelegramError({ errorMessage: `FLOOD_WAIT_${activeFlood.retryAfterSeconds}` }),
       });
     }
 
@@ -22666,6 +22978,40 @@ app.get('/api/telegram/user/messages/:chatId', requireTenantAuth, async (req: Re
       return res.json({ ok: false, fromLocalFallback: true, messages: [], hasMore: false, message: '未找到在线的 Telegram 客户端会话' });
     }
 
+    const msgFloodCooldown = getTelegramFloodCooldown({
+      accountId: accountId || `acc_tg_${connected.userId}`,
+      userId: connected.userId,
+      phone: connected.phone,
+    });
+    if (msgFloodCooldown) {
+      const localFallback = await querySqlitePaginatedMessagesFallback(
+        chatId,
+        accountId || `acc_tg_${connected.userId}`,
+        { limit, offsetId, search }
+      );
+      if (localFallback.messages.length > 0) {
+        return res.json({
+          ok: true,
+          fromLocalFallback: true,
+          floodWait: true,
+          code: 'TELEGRAM_FLOOD_WAIT',
+          retryAfterSeconds: msgFloodCooldown.retryAfterSeconds,
+          floodWaitUntil: msgFloodCooldown.floodWaitUntil,
+          messages: localFallback.messages,
+          hasMore: localFallback.hasMore,
+        });
+      }
+      return res.status(429).json({
+        ok: false,
+        code: 'TELEGRAM_FLOOD_WAIT',
+        retryAfterSeconds: msgFloodCooldown.retryAfterSeconds,
+        floodWaitUntil: msgFloodCooldown.floodWaitUntil,
+        error: formatTelegramError({ errorMessage: `FLOOD_WAIT_${msgFloodCooldown.retryAfterSeconds}` }),
+        messages: [],
+        hasMore: false,
+      });
+    }
+
     const messages = await syncTelegramUserChatMessages(connected.client, chatId, limit, connected.userId, {
       offsetId,
       search,
@@ -22709,6 +23055,11 @@ app.get('/api/telegram/user/messages/:chatId', requireTenantAuth, async (req: Re
       ...(typeof readOutboxMaxId === 'number' ? { readOutboxMaxId } : {}),
     });
   } catch (err: any) {
+    const floodEntry = recordTelegramFloodWait(
+      { accountId, userId: connected?.userId, phone: connected?.phone },
+      err,
+      'messages.GetHistory'
+    );
     if (isTelegramSessionExpiredError(err)) {
       await markTelegramSessionExpired({
         accountId,
@@ -22733,12 +23084,31 @@ app.get('/api/telegram/user/messages/:chatId', requireTenantAuth, async (req: Re
         return res.json({
           ok: true,
           fromLocalFallback: true,
+          ...(floodEntry
+            ? {
+                floodWait: true,
+                code: 'TELEGRAM_FLOOD_WAIT',
+                retryAfterSeconds: floodEntry.retryAfterSeconds,
+                floodWaitUntil: floodEntry.floodWaitUntil,
+              }
+            : {}),
           messages: localFallback.messages,
           hasMore: localFallback.hasMore,
         });
       }
     } catch {}
-    res.status(500).json({ ok: false, error: err.message, messages: [] });
+    if (floodEntry) {
+      return res.status(429).json({
+        ok: false,
+        code: 'TELEGRAM_FLOOD_WAIT',
+        retryAfterSeconds: floodEntry.retryAfterSeconds,
+        floodWaitUntil: floodEntry.floodWaitUntil,
+        error: formatTelegramError(err),
+        messages: [],
+        hasMore: false,
+      });
+    }
+    res.status(500).json({ ok: false, error: formatTelegramError(err), messages: [] });
   }
 });
 
@@ -22822,10 +23192,12 @@ app.post('/api/telegram/autopilot/toggle', requireTenantAuth, (req: Request, res
 // Real-time MTProto NewMessage event listener for personal Telegram account
 export interface LocalIncomingUpdate {
   id: string;
-  type?: 'message' | 'edit' | 'delete' | 'read_outbox' | 'pin' | 'user_status' | 'peer_blocked' | 'reactions';
+  type?: 'message' | 'edit' | 'delete' | 'read_outbox' | 'read_inbox' | 'dialog_pinned' | 'pin' | 'user_status' | 'peer_blocked' | 'reactions';
   telegramMessageId?: number;
   deletedMessageIds?: number[];
   readOutboxMaxId?: number;
+  readInboxMaxId?: number;
+  unreadCount?: number;
   pinnedMessageIds?: number[];
   pinned?: boolean;
   isOnline?: boolean;
@@ -23363,28 +23735,6 @@ ${memories.slice(-3).map((m: any) => `  * [${m.date}] ${m.topic}: ${m.summary}`)
                     }调用失败 (${autoLlmErr?.message || String(autoLlmErr)})，严格保持静默`
                   );
                 }
-              } else if (!isPriorityCustom && isGeminiAvailable()) {
-                const targetModel = resolveGeminiModel(serverCustomConfig?.geminiModel, 'chat');
-                try {
-                  const ai = createGeminiClient();
-                  const historyTranscript = recentHistoryTurns
-                    .map((t) => `${t.sender === 'me' ? '我方' : '客户'}: ${t.text}`)
-                    .join('\n');
-                  const fullPrompt = historyTranscript
-                    ? `最近历史对话：\n${historyTranscript}\n\n客户刚才发来消息：“${effectiveIncomingText}”\n请直接生成最新一句回复：`
-                    : `客户刚才发来消息：“${effectiveIncomingText}”\n请直接生成最新一句回复：`;
-                  const response = await ai.models.generateContent({
-                    model: targetModel,
-                    contents: fullPrompt,
-                    config: { systemInstruction: memoryPrompt },
-                  });
-                  const candidate = response.text?.trim();
-                  if (candidate) {
-                    replyText = candidate;
-                  }
-                } catch (modelErr: any) {
-                  handleGeminiApiError(`Autopilot(${targetModel})`, modelErr);
-                }
               } else {
                 console.warn(
                   `[HumanSense Autopilot Guard] Chat ${canonicalChatId}: 未检测到可用的大模型会话或授权令牌，跳过自动回复`
@@ -23392,10 +23742,22 @@ ${memories.slice(-3).map((m: any) => `  * [${m.date}] ${m.topic}: ${m.summary}`)
               }
 
               if (replyText) {
+                const autoFlood = getTelegramFloodCooldown({ accountId, userId });
+                if (autoFlood) {
+                  console.warn(
+                    `[HumanSense Autopilot Flood Guard] Account ${accountId} in cooldown (${autoFlood.retryAfterSeconds}s left), skipping auto-reply to ${canonicalChatId}`
+                  );
+                  return;
+                }
                 const cleanPeer = rawChatId.replace(/^tg_/, '');
                 const rawPeer: any = /^-?\d+$/.test(cleanPeer) ? Number(cleanPeer) : cleanPeer;
                 markOutboundMessageSent(canonicalChatId, replyText, accountId);
-                await client.sendMessage(rawPeer, { message: replyText });
+                try {
+                  await client.sendMessage(rawPeer, { message: replyText });
+                } catch (autoSendErr: any) {
+                  recordTelegramFloodWait({ accountId, userId }, autoSendErr, 'autopilot.sendMessage');
+                  throw autoSendErr;
+                }
                 void incrementEvolutionHabitUsage(autoHabitIds, accountId);
                 const replyMsgId = `msg_auto_${Date.now()}`;
                 let replyZh = '';
@@ -23535,6 +23897,65 @@ ${memories.slice(-3).map((m: any) => `  * [${m.date}] ${m.topic}: ${m.summary}`)
                 .run(accountId, channelChatId, alt, ...delIds);
             }
           } catch {}
+          return;
+        }
+
+        if (update instanceof Api.UpdateReadHistoryInbox) {
+          const peerChatId = resolveRawPeerChatId(update.peer);
+          if (!peerChatId) return;
+          pushPendingLocalUpdate({
+            id: `readin_${userId}_${peerChatId}_${Number(update.maxId || 0)}_${Date.now()}`,
+            type: 'read_inbox',
+            chatId: peerChatId,
+            readInboxMaxId: Number(update.maxId || 0) || undefined,
+            unreadCount: Math.max(0, Number(update.stillUnreadCount || 0)),
+            accountId,
+            sender: 'peer',
+            senderName: '',
+            text: '',
+            timestamp: '',
+            createdAt: Date.now(),
+          });
+          return;
+        }
+
+        if (update instanceof Api.UpdateReadChannelInbox) {
+          const channelChatId = update.channelId ? `tg_-100${String(update.channelId)}` : '';
+          if (!channelChatId) return;
+          pushPendingLocalUpdate({
+            id: `readchin_${userId}_${channelChatId}_${Number(update.maxId || 0)}_${Date.now()}`,
+            type: 'read_inbox',
+            chatId: channelChatId,
+            readInboxMaxId: Number(update.maxId || 0) || undefined,
+            unreadCount: Math.max(0, Number(update.stillUnreadCount || 0)),
+            accountId,
+            sender: 'peer',
+            senderName: '',
+            text: '',
+            timestamp: '',
+            createdAt: Date.now(),
+          });
+          return;
+        }
+
+        if (update instanceof Api.UpdateDialogPinned) {
+          const innerPeer = (update.peer as any)?.peer;
+          const peerChatId = resolveRawPeerChatId(innerPeer);
+          if (!peerChatId) return;
+          const connObj = connectedUserClients.get(accountId);
+          if (connObj) connObj.dialogsFetchedAt = 0;
+          pushPendingLocalUpdate({
+            id: `dlgpin_${userId}_${peerChatId}_${Date.now()}`,
+            type: 'dialog_pinned',
+            chatId: peerChatId,
+            isPinned: Boolean(update.pinned),
+            accountId,
+            sender: 'peer',
+            senderName: '',
+            text: '',
+            timestamp: '',
+            createdAt: Date.now(),
+          });
           return;
         }
 
@@ -23859,6 +24280,7 @@ export async function restoreTelegramUserSessionsOnStartup(
             fetchTelegramUserDialogs(client, 150, uidStr)
               .then((dialogs) => {
                 userObj.dialogs = dialogs;
+                userObj.dialogsFetchedAt = Date.now();
               })
               .catch(() => {});
 

@@ -180,6 +180,7 @@ function mapCloudDialogToChat(d: any, accountId: string, existing?: Chat): Chat 
     onlineCount: typeof d.onlineCount === 'number' ? d.onlineCount : existing?.onlineCount,
     lastMessage: d.lastMessage || existing?.lastMessage || '暂无消息',
     lastTime: d.lastTime || existing?.lastTime || '刚刚',
+    lastDate: typeof d.lastDate === 'number' ? d.lastDate : existing?.lastDate,
     unreadCount: typeof d.unreadCount === 'number' ? d.unreadCount : (existing?.unreadCount || 0),
     readOutboxMaxId: typeof d.readOutboxMaxId === 'number' ? d.readOutboxMaxId : existing?.readOutboxMaxId,
     readInboxMaxId: typeof d.readInboxMaxId === 'number' ? d.readInboxMaxId : existing?.readInboxMaxId,
@@ -1256,6 +1257,23 @@ export default function App() {
     });
   };
 
+  const lastDialogsSyncAtRef = useRef<Record<string, number>>({});
+  const lastFloodToastAtRef = useRef<Record<string, number>>({});
+  const triggerAccountDialogRefreshRef = useRef<((targetAccId?: string, opts?: { force?: boolean }) => Promise<void>) | null>(null);
+
+  const notifyTelegramFloodCooldown = (accId: string, errorMsg?: string, retryAfterSeconds?: number) => {
+    const now = Date.now();
+    const lastShown = lastFloodToastAtRef.current[accId] || 0;
+    if (now - lastShown < 30_000) return;
+    lastFloodToastAtRef.current[accId] = now;
+    showCloudError(
+      errorMsg ||
+        (retryAfterSeconds
+          ? `Telegram 请求触发频控保护，请等待 ${retryAfterSeconds} 秒后再试`
+          : 'Telegram 请求触发官方频控保护，已自动进入冷却期')
+    );
+  };
+
   const handleReconnectTelegram = async () => {
     if (isReconnectingAccount) return;
     setIsReconnectingAccount(true);
@@ -1267,8 +1285,14 @@ export default function App() {
       } else {
         const curAcc = activeAccountIdRef.current;
         if (curAcc && curAcc.startsWith('acc_tg_')) {
-          const dlgRes = await fetchTelegramUserDialogsDetailedApi(curAcc);
-          if (dlgRes.ok && dlgRes.dialogs.length > 0) {
+          const dlgRes = await fetchTelegramUserDialogsDetailedApi(curAcc, undefined, { force: true });
+          if (dlgRes.code === 'TELEGRAM_FLOOD_WAIT') {
+            notifyTelegramFloodCooldown(curAcc, dlgRes.error, dlgRes.retryAfterSeconds);
+          }
+          if ((dlgRes.ok || dlgRes.dialogs.length > 0) && dlgRes.dialogs.length > 0) {
+            if (dlgRes.ok) {
+              lastDialogsSyncAtRef.current[curAcc] = Date.now();
+            }
             setChats((prev) => {
               const otherChats = prev.filter((c) => c.accountId !== curAcc);
               const prevMap = new Map<string, Chat>();
@@ -1329,7 +1353,104 @@ export default function App() {
       if (existingChat) setActiveChatId(existingChat.id);
     }
 
-    const syncChats = () => {
+    const LOW_FREQUENCY_DIALOG_FALLBACK_INTERVAL_MS = 180_000;
+    const DIALOG_MIN_REFRESH_GAP_MS = 20_000;
+
+    const applyCloudDialogs = (realDialogs: any[]) => {
+      setChats((prev) => {
+        const otherChats = prev.filter((c) => c.accountId !== targetAccId);
+        const prevAccountChats = prev.filter((c) => c.accountId === targetAccId);
+        const prevMap = new Map<string, Chat>();
+        prevAccountChats.forEach((c) => prevMap.set(c.id, c));
+
+        const nextAccountChats: Chat[] = realDialogs.map((d: any) =>
+          mapCloudDialogToChat(d, targetAccId, prevMap.get(d.id))
+        );
+        const cloudIds = new Set(nextAccountChats.map((c) => c.id));
+        prevAccountChats.forEach((c) => {
+          if (!c.id.startsWith('tg_') && !cloudIds.has(c.id)) {
+            nextAccountChats.push(c);
+          }
+        });
+        return [...nextAccountChats, ...otherChats];
+      });
+    };
+
+    const syncDialogsFromCloud = async (opts?: { force?: boolean }) => {
+      if (!targetAccId.startsWith('acc_tg_')) return;
+      const seq = selectAccountSeqRef.current;
+      try {
+        const res = await fetchTelegramUserDialogsDetailedApi(targetAccId, undefined, opts);
+        if (selectAccountSeqRef.current !== seq) return;
+        if (!isMounted || activeAccountIdRef.current !== targetAccId) return;
+        if (!res.ok) {
+          if (res.code === 'TELEGRAM_SESSION_EXPIRED') {
+            markAccountExpiredUi(targetAccId, res.error);
+          } else if (res.code === 'TELEGRAM_FLOOD_WAIT') {
+            notifyTelegramFloodCooldown(targetAccId, res.error, res.retryAfterSeconds);
+            if (Array.isArray(res.dialogs) && res.dialogs.length > 0) {
+              applyCloudDialogs(res.dialogs);
+            }
+          } else if (pendingAutoSelectAccountRef.current === targetAccId && !activeChatIdRef.current) {
+            pendingAutoSelectAccountRef.current = null;
+            const existingChat = chatsRef.current.find((c) => c.accountId === targetAccId);
+            if (existingChat) setActiveChatId(existingChat.id);
+          }
+          return;
+        }
+
+        lastDialogsSyncAtRef.current[targetAccId] = Date.now();
+        const realDialogs = res.dialogs;
+        applyCloudDialogs(realDialogs);
+
+        if (pendingAutoSelectAccountRef.current === targetAccId && !activeChatIdRef.current) {
+          pendingAutoSelectAccountRef.current = null;
+          if (realDialogs.length > 0) {
+            setActiveChatId(realDialogs[0].id);
+          } else {
+            const existingChat = chatsRef.current.find((c) => c.accountId === targetAccId);
+            if (existingChat) setActiveChatId(existingChat.id);
+          }
+        }
+
+        if (realDialogs.length > 0 && activeAccountIdRef.current === targetAccId) {
+          const dialogById = new Map<string, any>();
+          realDialogs.forEach((d: any) => {
+            if (d && d.id && !d.isGroup && !d.isChannel) {
+              dialogById.set(d.id, d);
+            }
+          });
+          if (dialogById.size > 0) {
+            setContacts((prev) => {
+              let changed = false;
+              const next = prev.map((ct) => {
+                const d = dialogById.get(ct.id);
+                if (!d) return ct;
+                const nextStatus = d.isOnline ? ('online' as const) : ('offline' as const);
+                const nextStatusText = typeof d.statusText === 'string' ? d.statusText : ct.statusText;
+                const nextName = typeof d.title === 'string' && d.title.trim() ? d.title.trim() : ct.name;
+                if (ct.status !== nextStatus || ct.statusText !== nextStatusText || ct.name !== nextName) {
+                  changed = true;
+                  return {
+                    ...ct,
+                    name: nextName,
+                    status: nextStatus,
+                    ...(nextStatusText ? { statusText: nextStatusText } : {}),
+                  };
+                }
+                return ct;
+              });
+              if (changed) {
+                saveScopedContacts(next, targetAccId);
+              }
+              return changed ? next : prev;
+            });
+          }
+        }
+      } catch {}
+    };
+
+    const syncChats = (opts?: { force?: boolean }) => {
       fetchChatsFromDb(targetAccId).then((dbChats) => {
         if (isMounted && dbChats && dbChats.length > 0) {
           const scopedDbChats = dbChats.filter((dbc: Chat) => {
@@ -1362,95 +1483,54 @@ export default function App() {
 
       // Also sync live MTProto cloud dialogs if this is a connected personal Telegram account
       if (targetAccId.startsWith('acc_tg_')) {
-        const seq = selectAccountSeqRef.current;
-        fetchTelegramUserDialogsDetailedApi(targetAccId).then((res) => {
-          if (selectAccountSeqRef.current !== seq) {
-            return;
-          }
-          if (!isMounted || activeAccountIdRef.current !== targetAccId) return;
-          if (!res.ok) {
-            if (res.code === 'TELEGRAM_SESSION_EXPIRED') {
-              markAccountExpiredUi(targetAccId, res.error);
-            } else if (pendingAutoSelectAccountRef.current === targetAccId && !activeChatIdRef.current) {
-              pendingAutoSelectAccountRef.current = null;
-              const existingChat = chatsRef.current.find((c) => c.accountId === targetAccId);
-              if (existingChat) setActiveChatId(existingChat.id);
-            }
-            return;
-          }
-          const realDialogs = res.dialogs;
-          setChats((prev) => {
-            const otherChats = prev.filter((c) => c.accountId !== targetAccId);
-            const prevAccountChats = prev.filter((c) => c.accountId === targetAccId);
-            const prevMap = new Map<string, Chat>();
-            prevAccountChats.forEach((c) => prevMap.set(c.id, c));
-
-            const nextAccountChats: Chat[] = realDialogs.map((d: any) =>
-              mapCloudDialogToChat(d, targetAccId, prevMap.get(d.id))
-            );
-            const cloudIds = new Set(nextAccountChats.map((c) => c.id));
-            prevAccountChats.forEach((c) => {
-              if (!c.id.startsWith('tg_') && !cloudIds.has(c.id)) {
-                nextAccountChats.push(c);
-              }
-            });
-            return [...nextAccountChats, ...otherChats];
-          });
-
-          if (pendingAutoSelectAccountRef.current === targetAccId && !activeChatIdRef.current) {
-            pendingAutoSelectAccountRef.current = null;
-            if (realDialogs.length > 0) {
-              setActiveChatId(realDialogs[0].id);
-            } else {
-              const existingChat = chatsRef.current.find((c) => c.accountId === targetAccId);
-              if (existingChat) setActiveChatId(existingChat.id);
-            }
-          }
-
-          if (realDialogs.length > 0 && activeAccountIdRef.current === targetAccId) {
-            const dialogById = new Map<string, any>();
-            realDialogs.forEach((d: any) => {
-              if (d && d.id && !d.isGroup && !d.isChannel) {
-                dialogById.set(d.id, d);
-              }
-            });
-            if (dialogById.size > 0) {
-              setContacts((prev) => {
-                let changed = false;
-                const next = prev.map((ct) => {
-                  const d = dialogById.get(ct.id);
-                  if (!d) return ct;
-                  const nextStatus = d.isOnline ? ('online' as const) : ('offline' as const);
-                  const nextStatusText = typeof d.statusText === 'string' ? d.statusText : ct.statusText;
-                  const nextName = typeof d.title === 'string' && d.title.trim() ? d.title.trim() : ct.name;
-                  if (ct.status !== nextStatus || ct.statusText !== nextStatusText || ct.name !== nextName) {
-                    changed = true;
-                    return {
-                      ...ct,
-                      name: nextName,
-                      status: nextStatus,
-                      ...(nextStatusText ? { statusText: nextStatusText } : {}),
-                    };
-                  }
-                  return ct;
-                });
-                if (changed) {
-                  saveScopedContacts(next, targetAccId);
-                }
-                return changed ? next : prev;
-              });
-            }
-          }
-        }).catch(() => {});
+        void syncDialogsFromCloud(opts);
       }
     };
 
+    triggerAccountDialogRefreshRef.current = async (reqAccId?: string, opts?: { force?: boolean }) => {
+      const effectiveAcc = reqAccId || activeAccountIdRef.current;
+      if (!isMounted || effectiveAcc !== targetAccId || !targetAccId.startsWith('acc_tg_')) return;
+      const lastAt = lastDialogsSyncAtRef.current[targetAccId] || 0;
+      if (!opts?.force && Date.now() - lastAt < DIALOG_MIN_REFRESH_GAP_MS) return;
+      await syncDialogsFromCloud(opts);
+    };
+
+    // Initial full hydration on account switch/login, followed by event-driven incremental updates
+    // and only a low-frequency (180s) visibility-aware fallback refresh to avoid Telegram FLOOD_WAIT bans.
     syncChats();
-    const chatInterval = setInterval(syncChats, 8000);
+    const chatInterval = setInterval(() => {
+      if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
+      const lastAt = lastDialogsSyncAtRef.current[targetAccId] || 0;
+      if (Date.now() - lastAt < 60_000) return;
+      syncChats();
+    }, LOW_FREQUENCY_DIALOG_FALLBACK_INTERVAL_MS);
+
+    let hiddenAt = 0;
+    const handleVisibilityChange = () => {
+      if (typeof document === 'undefined') return;
+      if (document.visibilityState === 'hidden') {
+        hiddenAt = Date.now();
+        return;
+      }
+      if (document.visibilityState === 'visible' && hiddenAt > 0 && Date.now() - hiddenAt >= 120_000) {
+        hiddenAt = 0;
+        const lastAt = lastDialogsSyncAtRef.current[targetAccId] || 0;
+        if (Date.now() - lastAt >= DIALOG_MIN_REFRESH_GAP_MS) {
+          syncChats();
+        }
+      }
+    };
+    if (typeof document !== 'undefined') {
+      document.addEventListener('visibilitychange', handleVisibilityChange);
+    }
 
     return () => {
       isMounted = false;
+      triggerAccountDialogRefreshRef.current = null;
       clearInterval(chatInterval);
+      if (typeof document !== 'undefined') {
+        document.removeEventListener('visibilitychange', handleVisibilityChange);
+      }
     };
   }, [activeAccountId, isMemberAuthenticated]);
 
@@ -1999,6 +2079,37 @@ export default function App() {
               return;
             }
 
+            if (updType === 'read_inbox') {
+              const nextUnread = typeof upd.unreadCount === 'number' ? Math.max(0, upd.unreadCount) : 0;
+              const nextReadInboxMaxId = typeof upd.readInboxMaxId === 'number' ? upd.readInboxMaxId : undefined;
+              setChats((prev) =>
+                prev.map((c) =>
+                  c.id === targetChatId && c.accountId === targetAccountId
+                    ? {
+                        ...c,
+                        unreadCount: nextUnread,
+                        ...(nextReadInboxMaxId
+                          ? { readInboxMaxId: Math.max(c.readInboxMaxId || 0, nextReadInboxMaxId) }
+                          : {}),
+                      }
+                    : c
+                )
+              );
+              return;
+            }
+
+            if (updType === 'dialog_pinned') {
+              const nextPinned = Boolean(upd.isPinned);
+              setChats((prev) =>
+                prev.map((c) =>
+                  c.id === targetChatId && c.accountId === targetAccountId
+                    ? { ...c, isPinned: nextPinned }
+                    : c
+                )
+              );
+              return;
+            }
+
             if (updType === 'read_outbox') {
               const maxId = Number(upd.readOutboxMaxId);
               if (!Number.isInteger(maxId) || maxId <= 0) return;
@@ -2338,6 +2449,11 @@ export default function App() {
             }
 
             const summaryText = formatChatMessageSummary(incomingMsg);
+            const incomingEpochSec = Math.floor((incomingMsg.createdAt || Date.now()) / 1000);
+            const hasChatInList = currentChats.some((c) => c.id === targetChatId && c.accountId === targetAccountId);
+            if (!hasChatInList && targetChatId.startsWith('tg_') && targetAccountId === currentAccId) {
+              void triggerAccountDialogRefreshRef.current?.(targetAccountId);
+            }
 
             setChats((prev) => {
               const exists = prev.some((c) => c.id === targetChatId && c.accountId === targetAccountId);
@@ -2353,6 +2469,7 @@ export default function App() {
                       : 1,
                   lastMessage: summaryText,
                   lastTime: incomingMsg.timestamp,
+                  lastDate: incomingEpochSec,
                   avatarInitial: isOfficialNotice ? 'TG' : (upd.senderName || 'TG').slice(0, 2).toUpperCase(),
                   avatarBg: '#2481cc',
                   isGroup: false,
@@ -2370,6 +2487,7 @@ export default function App() {
                       isVerified: isOfficialNotice ? true : c.isVerified,
                       lastMessage: summaryText,
                       lastTime: incomingMsg.timestamp,
+                      lastDate: Math.max(c.lastDate || 0, incomingEpochSec),
                       unreadCount:
                         c.id === activeChatIdRef.current && c.accountId === activeAccountIdRef.current
                           ? 0

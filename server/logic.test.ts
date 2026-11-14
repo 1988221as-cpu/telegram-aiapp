@@ -7692,6 +7692,631 @@ test('UI Theme Support: 3rd aurora cyan-teal mode is wired alongside light & dar
   assert.match(settingsSrc, /极光青暗/);
 });
 
+test('P2 #7 & #8 deep audit fixes: habits without persona, zero GEMINI_API_KEY silent fallback, Google OpenAI URL, /v1beta/models URL, empty Gemini model interception in analyze/translate, callCustomLlm error/HTML parity, and CustomLLMModal protocol persistence', async () => {
+  const { readFileSync } = await import('node:fs');
+  const { resolve } = await import('node:path');
+  const http = await import('node:http');
+  const { createHmac } = await import('node:crypto');
+  const { db, initDatabase, saveEvolutionStateToDb, resolveEvolutionConfigKey } = await import('./db.ts');
+  const {
+    app,
+    inferGatewayProtocol,
+    buildCustomGeminiUrl,
+    callCustomLlm,
+    performStrictTranslation,
+    syncServerCustomLlmConfig,
+    getServerCustomLlmConfig,
+    generateTtsAudio,
+    transcribeAudioBufferStrictly,
+  } = await import('../server.ts');
+  const { inferGatewayProtocolFromUrlAndModel } = await import('../src/services/apiService.ts');
+
+  await initDatabase();
+
+  // 1. Source contracts: normalizeUiProtocol preserves protocol across engineMode, KnowledgeEvolutionModal passes recentChatHistory, Webhook uses normalizeMessageTurn & boundedHistory
+  const modalSrc = readFileSync(resolve(process.cwd(), 'src/components/CustomLLMModal.tsx'), 'utf8');
+  assert.equal(/function normalizeUiProtocol[\s\S]*?if \(engineMode !== 'custom'\) return 'openai'/.test(modalSrc), false);
+
+  const keSrc = readFileSync(resolve(process.cwd(), 'src/components/KnowledgeEvolutionModal.tsx'), 'utf8');
+  assert.match(keSrc, /recentChatHistory:\s*sandboxRecentHistory\.trim\(\)/);
+
+  const serverSrc = readFileSync(resolve(process.cwd(), 'server.ts'), 'utf8');
+  assert.match(serverSrc, /processTelegramMessageAsync[\s\S]*?normalizeMessageTurn\(m,\s*idx \+ 1\)[\s\S]*?boundedHistory = conversationHistory\.slice\(-UNIFIED_REPLY_HISTORY_LIMIT\)/);
+  assert.equal(/app\.post\('\/api\/audio\/tts-clone'[\s\S]*?if \(isGeminiAvailable\(\)\)/.test(serverSrc), false);
+  assert.equal(/app\.post\('\/api\/audio\/transcribe'[\s\S]*?if \(isGeminiAvailable\(\)\)/.test(serverSrc), false);
+
+  // 2. Unit tests: buildCustomGeminiUrl with trailing /v1beta/models & Google OpenAI-compat URL detection
+  assert.equal(
+    buildCustomGeminiUrl('https://relay.example.com/v1beta/models', 'gemini-2.5-flash'),
+    'https://relay.example.com/v1beta/models/gemini-2.5-flash:generateContent'
+  );
+  assert.equal(
+    buildCustomGeminiUrl('https://relay.example.com/v1/models', 'gemini-2.5-pro'),
+    'https://relay.example.com/v1/models/gemini-2.5-pro:generateContent'
+  );
+  assert.equal(
+    inferGatewayProtocol('https://generativelanguage.googleapis.com/v1beta/openai', 'gemini-2.5-flash', 'openai'),
+    'openai'
+  );
+  assert.equal(
+    inferGatewayProtocol('https://generativelanguage.googleapis.com/v1beta/openai', 'gemini-2.5-flash', 'auto'),
+    'openai'
+  );
+  assert.equal(
+    inferGatewayProtocol('https://generativelanguage.googleapis.com', 'gemini-2.5-flash', 'auto'),
+    'gemini'
+  );
+  assert.equal(
+    inferGatewayProtocolFromUrlAndModel('https://generativelanguage.googleapis.com/v1beta/openai', 'gemini-2.5-flash', 'openai'),
+    'openai'
+  );
+  assert.equal(
+    inferGatewayProtocolFromUrlAndModel('https://generativelanguage.googleapis.com/v1beta/openai', '', 'auto'),
+    'openai'
+  );
+
+  // 3. Runtime tests with real local HTTP servers
+  const prevJwtSecret = process.env.JWT_SECRET;
+  const prevBrainUrl = process.env.RAILWAY_BRAIN_URL;
+  const prevBrainKey = process.env.RAILWAY_BRAIN_KEY;
+  const prevGeminiKey = process.env.GEMINI_API_KEY;
+  const prevCustomCfg = await getServerCustomLlmConfig().catch(() => null);
+
+  process.env.JWT_SECRET = 'p2_deep_audit_jwt_secret';
+  process.env.GEMINI_API_KEY = 'fake-local-gemini-key-must-not-be-used-for-silent-fallback';
+  delete process.env.RAILWAY_BRAIN_KEY;
+
+  let capturedSystemPrompt = '';
+  let gatewayMode: 'ok' | 'html_200' | 'err_429' = 'ok';
+
+  const mockGateway = http.createServer(async (req, res) => {
+    const chunks: Buffer[] = [];
+    for await (const c of req) chunks.push(Buffer.from(c));
+    let bodyJson: any = {};
+    try {
+      bodyJson = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+    } catch {}
+
+    if (gatewayMode === 'html_200') {
+      res.writeHead(200, { 'Content-Type': 'text/html' });
+      res.end('<!doctype html><html><body>Gateway Login</body></html>');
+      return;
+    }
+
+    if (gatewayMode === 'err_429') {
+      res.writeHead(429, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: { message: 'CALL_CUSTOM_LLM_429_DETAIL_XYZ' } }));
+      return;
+    }
+
+    if (req.url?.includes('/chat/completions')) {
+      const msgs = Array.isArray(bodyJson.messages) ? bodyJson.messages : [];
+      capturedSystemPrompt = msgs.find((m: any) => m.role === 'system')?.content || '';
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ choices: [{ message: { content: 'OK' } }] }));
+      return;
+    }
+
+    res.writeHead(404, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: { message: 'Not Found' } }));
+  });
+
+  await new Promise<void>((r) => mockGateway.listen(0, '127.0.0.1', r));
+  const mockPort = (mockGateway.address() as any).port;
+  process.env.RAILWAY_BRAIN_URL = `http://127.0.0.1:${mockPort}`;
+
+  const appSrv = http.createServer(app);
+  await new Promise<void>((r) => appSrv.listen(0, '127.0.0.1', r));
+  const appPort = (appSrv.address() as any).port;
+
+  const headerB64 = Buffer.from(JSON.stringify({ alg: 'HS256', typ: 'JWT' })).toString('base64url');
+  const payloadB64 = Buffer.from(
+    JSON.stringify({ sub: 'member_audit', username: 'member_audit', role: 'member', exp: Math.floor(Date.now() / 1000) + 3600 })
+  ).toString('base64url');
+  const sigB64 = createHmac('sha256', process.env.JWT_SECRET).update(`${headerB64}.${payloadB64}`).digest('base64url');
+  const memberJwt = `${headerB64}.${payloadB64}.${sigB64}`;
+
+  const testAcc = `acc_tg_deep_audit_${Date.now()}`;
+  const habitKey = resolveEvolutionConfigKey(testAcc);
+
+  try {
+    // 3a. /api/persona/test-reply preserves active evolution habits even when no global persona is configured
+    await saveEvolutionStateToDb(
+      {
+        autoEvolutionActive: true,
+        habits: [
+          {
+            id: 'hab_audit_1',
+            title: '先共情再确认需求',
+            description: '回复先接住情绪再用一句短问句收尾',
+            examplePattern: '懂你，这确实挺累的，今天先早点休息？',
+            isActive: true,
+            usageCount: 0,
+          },
+        ],
+      },
+      testAcc
+    );
+
+    capturedSystemPrompt = '';
+    const testReplyRes = await fetch(`http://127.0.0.1:${appPort}/api/persona/test-reply`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${memberJwt}`,
+        'X-Account-Id': testAcc,
+      },
+      body: JSON.stringify({
+        message: '今天忙到好晚',
+        customConfig: {
+          enabled: true,
+          engineMode: 'custom',
+          protocol: 'openai',
+          baseUrl: `http://127.0.0.1:${mockPort}/v1`,
+          apiKey: 'sk-test',
+          modelName: 'gpt-4o-mini',
+        },
+      }),
+    });
+    assert.equal(testReplyRes.status, 200);
+    assert.ok(capturedSystemPrompt.includes('【自进化引擎萃取的活跃沟通习惯】'));
+    assert.ok(capturedSystemPrompt.includes('先共情再确认需求'));
+
+    // 3b. Empty Gemini model interception in /api/customer/analyze/:chatId and performStrictTranslation
+    const analyzeRes = await fetch(`http://127.0.0.1:${appPort}/api/customer/analyze/tg_audit_c1`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${memberJwt}`,
+      },
+      body: JSON.stringify({
+        accountId: testAcc,
+        messages: [
+          { sender: 'peer', text: 'Hello there, nice to meet you today' },
+          { sender: 'me', text: 'Nice to meet you too, how can I help?' },
+        ],
+        customConfig: {
+          enabled: true,
+          engineMode: 'custom',
+          protocol: 'gemini',
+          baseUrl: `http://127.0.0.1:${mockPort}`,
+          apiKey: 'AIzaTestKey',
+          modelName: '',
+        },
+      }),
+    });
+    assert.equal(analyzeRes.status, 400);
+    const analyzeJson = (await analyzeRes.json()) as any;
+    assert.equal(analyzeJson.source, 'custom_llm_missing_model');
+
+    await assert.rejects(
+      () =>
+        performStrictTranslation({
+          text: 'Hello',
+          targetLang: 'Chinese',
+          engine: 'custom_llm',
+          customConfig: {
+            enabled: true,
+            engineMode: 'custom',
+            protocol: 'gemini',
+            baseUrl: `http://127.0.0.1:${mockPort}`,
+            apiKey: 'AIzaTestKey',
+            modelName: '',
+          },
+        }),
+      /拦截空模型请求/
+    );
+
+    // 3c. callCustomLlm upstream 429 detail passthrough & fake 200 HTML rejection
+    gatewayMode = 'err_429';
+    await assert.rejects(
+      async () => {
+        await callCustomLlm({
+          customConfig: {
+            enabled: true,
+            engineMode: 'custom',
+            protocol: 'openai',
+            baseUrl: `http://127.0.0.1:${mockPort}`,
+            apiKey: 'sk-test',
+            modelName: 'gpt-4o-mini',
+          },
+          messages: [{ role: 'user', content: 'hi' }],
+          throwOnError: true,
+          skipSync: true,
+        });
+      },
+      (err: any) => {
+        assert.equal(err?.statusCode, 429);
+        assert.match(String(err?.message), /CALL_CUSTOM_LLM_429_DETAIL_XYZ/);
+        return true;
+      }
+    );
+
+    gatewayMode = 'html_200';
+    await assert.rejects(
+      () =>
+        callCustomLlm({
+          customConfig: {
+            enabled: true,
+            engineMode: 'custom',
+            protocol: 'openai',
+            baseUrl: `http://127.0.0.1:${mockPort}`,
+            apiKey: 'sk-test',
+            modelName: 'gpt-4o-mini',
+          },
+          messages: [{ role: 'user', content: 'hi' }],
+          throwOnError: true,
+          skipSync: true,
+        }),
+      /HTML/
+    );
+
+    // 3d. Cloud TTS / STT must NEVER silently fall back to GEMINI_API_KEY when Cloud Brain fails
+    gatewayMode = 'err_429';
+    await assert.rejects(
+      () =>
+        generateTtsAudio('hello world', 'Kore', 'Natural', {
+          enabled: true,
+          engineMode: 'cloud',
+          engineLicenseKey: 'test-lic',
+        }),
+      /云端|TTS/
+    );
+    const sttFail = await transcribeAudioBufferStrictly(
+      Buffer.from('OggS-audio-bytes'),
+      'audio/ogg',
+      { enabled: true, engineMode: 'cloud', engineLicenseKey: 'test-lic' }
+    );
+    assert.equal(sttFail.ok, false);
+    assert.match(String(sttFail.error), /云端/);
+  } finally {
+    await db.prepare('DELETE FROM system_config WHERE key = ?').run(habitKey).catch(() => {});
+    await syncServerCustomLlmConfig(prevCustomCfg || { enabled: true, engineMode: 'cloud', apiKey: '', engineLicenseKey: '' });
+    await new Promise<void>((r) => appSrv.close(() => r()));
+    await new Promise<void>((r) => mockGateway.close(() => r()));
+    if (prevBrainUrl === undefined) delete process.env.RAILWAY_BRAIN_URL;
+    else process.env.RAILWAY_BRAIN_URL = prevBrainUrl;
+    if (prevBrainKey === undefined) delete process.env.RAILWAY_BRAIN_KEY;
+    else process.env.RAILWAY_BRAIN_KEY = prevBrainKey;
+    if (prevJwtSecret === undefined) delete process.env.JWT_SECRET;
+    else process.env.JWT_SECRET = prevJwtSecret;
+    if (prevGeminiKey === undefined) delete process.env.GEMINI_API_KEY;
+    else process.env.GEMINI_API_KEY = prevGeminiKey;
+  }
+});
+
+test('P0 #1: POST /api/auth/logout requires trusted Origin, valid non-revoked member JWT, and rejects unauthenticated or bot-token callers', async () => {
+  const http = await import('node:http');
+  const { createHmac } = await import('node:crypto');
+  const {
+    app,
+    connectedUserClients,
+    pendingLocalUpdates,
+    pushPendingLocalUpdate,
+    TELEGRAM_WEBHOOK_SECRET,
+  } = await import('../server.ts');
+
+  const prevJwtSecret = process.env.JWT_SECRET;
+  process.env.JWT_SECRET = 'p0_logout_test_jwt_secret_12345';
+
+  const makeJwt = (sub: string) => {
+    const h = Buffer.from(JSON.stringify({ alg: 'HS256', typ: 'JWT' })).toString('base64url');
+    const p = Buffer.from(
+      JSON.stringify({ sub, username: sub, role: 'member', exp: Math.floor(Date.now() / 1000) + 3600 })
+    ).toString('base64url');
+    const s = createHmac('sha256', process.env.JWT_SECRET!).update(`${h}.${p}`).digest('base64url');
+    return `${h}.${p}.${s}`;
+  };
+
+  const server = http.createServer(app);
+  await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
+  const port = (server.address() as any).port;
+
+  let destroyCalled = false;
+  const mockConnectedUser: any = {
+    client: {
+      connected: true,
+      invoke: async () => ({}),
+      destroy: async () => {
+        destroyCalled = true;
+      },
+      disconnect: async () => {},
+    },
+    phone: '+8613800009999',
+    userId: '99990001',
+    username: '@p0_logout_test',
+    firstName: 'Test',
+    avatarInitial: 'TE',
+    avatarBg: '#2481cc',
+    apiId: 12345,
+    apiHash: 'test_hash',
+    connectedAt: Date.now(),
+    dialogs: [],
+  };
+
+  connectedUserClients.set('acc_tg_99990001', mockConnectedUser);
+  connectedUserClients.set('99990001', mockConnectedUser);
+  pushPendingLocalUpdate({
+    id: 'upd_p0_logout_sentinel',
+    chatId: 'tg_123',
+    accountId: 'acc_tg_99990001',
+    sender: 'peer',
+    senderName: 'Sentinel',
+    text: 'keep me alive',
+    timestamp: '12:00',
+    createdAt: Date.now(),
+  });
+
+  try {
+    // 1. Unauthenticated request is rejected with 401 and leaves sessions untouched
+    const unauthRes = await fetch(`http://127.0.0.1:${port}/api/auth/logout`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ revokeTelegramSessions: true }),
+    });
+    assert.equal(unauthRes.status, 401);
+    const unauthJson = (await unauthRes.json()) as any;
+    assert.equal(unauthJson.code, 'AUTH_SESSION_REQUIRED');
+    assert.equal(connectedUserClients.has('acc_tg_99990001'), true);
+    assert.equal(pendingLocalUpdates.some((u) => u.id === 'upd_p0_logout_sentinel'), true);
+    assert.equal(destroyCalled, false);
+
+    // 2. Untrusted cross-origin request is rejected with 403 CSRF_ORIGIN_REJECTED even with valid JWT
+    const validJwt = makeJwt('member_p0_logout');
+    const csrfRes = await fetch(`http://127.0.0.1:${port}/api/auth/logout`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Origin: 'https://evil-attacker.example',
+        Authorization: `Bearer ${validJwt}`,
+      },
+      body: JSON.stringify({ revokeTelegramSessions: true }),
+    });
+    assert.equal(csrfRes.status, 403);
+    const csrfJson = (await csrfRes.json()) as any;
+    assert.equal(csrfJson.code, 'CSRF_ORIGIN_REJECTED');
+    assert.equal(connectedUserClients.has('acc_tg_99990001'), true);
+
+    // 3. Telegram Webhook secret token (isBot) cannot invoke member logout (403 AUTH_MEMBER_REQUIRED)
+    const botRes = await fetch(`http://127.0.0.1:${port}/api/auth/logout`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Telegram-Bot-Api-Secret-Token': TELEGRAM_WEBHOOK_SECRET,
+      },
+      body: JSON.stringify({ revokeTelegramSessions: false }),
+    });
+    assert.equal(botRes.status, 403);
+    const botJson = (await botRes.json()) as any;
+    assert.equal(botJson.code, 'AUTH_MEMBER_REQUIRED');
+    assert.equal(connectedUserClients.has('acc_tg_99990001'), true);
+
+    // 4. Valid desktop member request succeeds, revokes JWT, and cleans up clients
+    const okRes = await fetch(`http://127.0.0.1:${port}/api/auth/logout`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Origin: `http://127.0.0.1:${port}`,
+        Authorization: `Bearer ${validJwt}`,
+      },
+      body: JSON.stringify({ revokeTelegramSessions: false }),
+    });
+    assert.equal(okRes.status, 200);
+    const okJson = (await okRes.json()) as any;
+    assert.equal(okJson.ok, true);
+    assert.equal(destroyCalled, true);
+    assert.equal(connectedUserClients.has('acc_tg_99990001'), false);
+
+    // 5. Revoked JWT is immediately rejected on subsequent protected API calls
+    const reuseRes = await fetch(`http://127.0.0.1:${port}/api/telegram/user/active-accounts`, {
+      headers: { Authorization: `Bearer ${validJwt}` },
+    });
+    assert.equal(reuseRes.status, 401);
+    const reuseJson = (await reuseRes.json()) as any;
+    assert.equal(reuseJson.code, 'AUTH_SESSION_REVOKED');
+  } finally {
+    connectedUserClients.delete('acc_tg_99990001');
+    connectedUserClients.delete('99990001');
+    for (let i = pendingLocalUpdates.length - 1; i >= 0; i--) {
+      if (pendingLocalUpdates[i].id === 'upd_p0_logout_sentinel') {
+        pendingLocalUpdates.splice(i, 1);
+      }
+    }
+    await new Promise<void>((r) => server.close(() => r()));
+    if (prevJwtSecret === undefined) delete process.env.JWT_SECRET;
+    else process.env.JWT_SECRET = prevJwtSecret;
+  }
+});
+
+test('P0 #2: Account-level FLOOD_WAIT circuit breaker, dialogs TTL cache, and elimination of 8s polling bombardment', async () => {
+  const http = await import('node:http');
+  const { createHmac } = await import('node:crypto');
+  const { readFileSync } = await import('node:fs');
+  const { resolve } = await import('node:path');
+  const {
+    app,
+    connectedUserClients,
+    extractFloodWaitSeconds,
+    recordTelegramFloodWait,
+    getTelegramFloodCooldown,
+    clearTelegramFloodCooldown,
+    pruneExpiredTelegramFloodCooldowns,
+    fetchTelegramUserDialogs,
+    telegramAccountFloodCooldowns,
+  } = await import('../server.ts');
+
+  // 1. FLOOD_WAIT parser & cooldown helper unit checks
+  assert.equal(extractFloodWaitSeconds({ errorMessage: 'FLOOD_WAIT_120' }), 120);
+  assert.equal(extractFloodWaitSeconds({ errorMessage: 'FLOOD_PREMIUM_WAIT_45' }), 45);
+  assert.equal(extractFloodWaitSeconds(new Error('A wait of 75 seconds is required')), 75);
+  assert.equal(extractFloodWaitSeconds({ className: 'FloodWaitError', seconds: 90 }), 90);
+  assert.equal(extractFloodWaitSeconds(new Error('CHANNEL_PRIVATE')), null);
+
+  const testCtx = { accountId: 'acc_tg_flood_unit', userId: 'flood_unit', phone: '+8613800008888' };
+  clearTelegramFloodCooldown(testCtx);
+  const now = Date.now();
+  const recorded = recordTelegramFloodWait(testCtx, 'FLOOD_WAIT_60', 'messages.GetDialogs', now);
+  assert.ok(recorded);
+  assert.equal(recorded!.retryAfterSeconds, 60);
+  assert.ok(getTelegramFloodCooldown(testCtx, now + 5000));
+  assert.equal(getTelegramFloodCooldown(testCtx, now + 65000), null);
+  clearTelegramFloodCooldown(testCtx);
+
+  // Prune expired entry test
+  recordTelegramFloodWait(testCtx, 10, 'test', now - 20000);
+  assert.ok(pruneExpiredTelegramFloodCooldowns(now) >= 1);
+
+  // 2. fetchTelegramUserDialogs must record FLOOD_WAIT and rethrow instead of returning []
+  const floodThrowClient: any = {
+    _selfId: 'flood_rethrow_1',
+    getDialogs: async () => {
+      throw new Error('FLOOD_WAIT_180');
+    },
+  };
+  await assert.rejects(
+    () => fetchTelegramUserDialogs(floodThrowClient, 150, 'flood_rethrow_1'),
+    /FLOOD_WAIT_180/
+  );
+  const rethrowCooldown = getTelegramFloodCooldown({ userId: 'flood_rethrow_1' });
+  assert.ok(rethrowCooldown);
+  assert.ok(rethrowCooldown!.retryAfterSeconds >= 175);
+  clearTelegramFloodCooldown({ userId: 'flood_rethrow_1' });
+
+  // 3. HTTP route verification: /api/telegram/user/dialogs TTL cache + 429 short-circuit circuit breaker
+  const prevJwtSecret = process.env.JWT_SECRET;
+  process.env.JWT_SECRET = 'p0_dialogs_flood_secret_12345';
+  const server = http.createServer(app);
+  await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
+  const port = (server.address() as any).port;
+
+  const h = Buffer.from(JSON.stringify({ alg: 'HS256', typ: 'JWT' })).toString('base64url');
+  const p = Buffer.from(
+    JSON.stringify({ sub: 'member_p0_dialogs', username: 'member_p0_dialogs', role: 'member', exp: Math.floor(Date.now() / 1000) + 3600 })
+  ).toString('base64url');
+  const s = createHmac('sha256', process.env.JWT_SECRET).update(`${h}.${p}`).digest('base64url');
+  const memberJwt = `${h}.${p}.${s}`;
+
+  let getDialogsCalls = 0;
+  let shouldThrowFlood = false;
+  const uid = '77889900';
+  const accId = `acc_tg_${uid}`;
+
+  const mockDialogsClient: any = {
+    connected: true,
+    _selfId: uid,
+    getDialogs: async ({ folder }: { limit: number; folder?: number }) => {
+      getDialogsCalls++;
+      if (shouldThrowFlood) {
+        const err: any = new Error('FLOOD_WAIT_90');
+        err.errorMessage = 'FLOOD_WAIT_90';
+        throw err;
+      }
+      if (folder === 1) return [];
+      return [
+        {
+          id: 556677,
+          title: 'VIP Client Alice',
+          date: Math.floor(Date.now() / 1000),
+          unreadCount: 2,
+          pinned: false,
+          entity: { className: 'User', id: 556677, firstName: 'Alice', username: 'alice_vip' },
+          message: { message: 'Hello from Telegram' },
+          dialog: { readOutboxMaxId: 10, readInboxMaxId: 8 },
+        },
+      ];
+    },
+    destroy: async () => {},
+    disconnect: async () => {},
+  };
+
+  const mockConn: any = {
+    client: mockDialogsClient,
+    phone: '+8613800007788',
+    userId: uid,
+    username: '@p0_dialogs_tester',
+    firstName: 'Dialogs',
+    avatarInitial: 'DI',
+    avatarBg: '#2481cc',
+    apiId: 12345,
+    apiHash: 'hash',
+    connectedAt: Date.now(),
+    dialogs: [],
+  };
+  connectedUserClients.set(accId, mockConn);
+  connectedUserClients.set(uid, mockConn);
+  clearTelegramFloodCooldown({ accountId: accId, userId: uid, phone: mockConn.phone });
+
+  try {
+    // 3a. Initial request calls MTProto once (main + folder=1 = 2 calls)
+    const r1 = await fetch(`http://127.0.0.1:${port}/api/telegram/user/dialogs?accountId=${accId}`, {
+      headers: { Authorization: `Bearer ${memberJwt}` },
+    });
+    assert.equal(r1.status, 200);
+    const j1 = (await r1.json()) as any;
+    assert.equal(j1.ok, true);
+    assert.equal(j1.dialogs.length, 1);
+    assert.equal(j1.dialogs[0].title, 'VIP Client Alice');
+    const callsAfterFirst = getDialogsCalls;
+    assert.equal(callsAfterFirst, 2);
+
+    // 3b. Second immediate request hits short-TTL server cache (zero MTProto RPCs!)
+    const r2 = await fetch(`http://127.0.0.1:${port}/api/telegram/user/dialogs?accountId=${accId}`, {
+      headers: { Authorization: `Bearer ${memberJwt}` },
+    });
+    assert.equal(r2.status, 200);
+    const j2 = (await r2.json()) as any;
+    assert.equal(j2.ok, true);
+    assert.equal(j2.cached, true);
+    assert.equal(getDialogsCalls, callsAfterFirst);
+
+    // 3c. Explicit ?force=1 triggers fresh MTProto fetch and enters FLOOD_WAIT cooldown -> returns 429 + cached dialogs
+    shouldThrowFlood = true;
+    const r3 = await fetch(`http://127.0.0.1:${port}/api/telegram/user/dialogs?accountId=${accId}&force=1`, {
+      headers: { Authorization: `Bearer ${memberJwt}` },
+    });
+    assert.equal(r3.status, 429);
+    const j3 = (await r3.json()) as any;
+    assert.equal(j3.ok, false);
+    assert.equal(j3.code, 'TELEGRAM_FLOOD_WAIT');
+    assert.ok(j3.retryAfterSeconds > 0);
+    assert.equal(j3.dialogs.length, 1);
+    const callsAfterFlood = getDialogsCalls;
+    assert.ok(callsAfterFlood > callsAfterFirst);
+
+    // 3d. Subsequent ?force=1 during cooldown is blocked BEFORE touching MTProto (getDialogsCalls stays unchanged!)
+    const r4 = await fetch(`http://127.0.0.1:${port}/api/telegram/user/dialogs?accountId=${accId}&force=1`, {
+      headers: { Authorization: `Bearer ${memberJwt}` },
+    });
+    assert.equal(r4.status, 429);
+    const j4 = (await r4.json()) as any;
+    assert.equal(j4.code, 'TELEGRAM_FLOOD_WAIT');
+    assert.equal(j4.fromCache, true);
+    assert.equal(getDialogsCalls, callsAfterFlood);
+  } finally {
+    clearTelegramFloodCooldown({ accountId: accId, userId: uid, phone: mockConn.phone });
+    telegramAccountFloodCooldowns.clear();
+    connectedUserClients.delete(accId);
+    connectedUserClients.delete(uid);
+    await new Promise<void>((r) => server.close(() => r()));
+    if (prevJwtSecret === undefined) delete process.env.JWT_SECRET;
+    else process.env.JWT_SECRET = prevJwtSecret;
+  }
+
+  // 4. Verify App.tsx eliminated 8s dialogs polling & wired event-driven incremental handlers
+  const appSrc = readFileSync(resolve(process.cwd(), 'src', 'App.tsx'), 'utf8');
+  assert.equal(/setInterval\s*\(\s*syncChats\s*,\s*8000\s*\)/.test(appSrc), false);
+  assert.match(appSrc, /LOW_FREQUENCY_DIALOG_FALLBACK_INTERVAL_MS\s*=\s*180_000/);
+  assert.match(appSrc, /updType\s*===\s*'read_inbox'/);
+  assert.match(appSrc, /updType\s*===\s*'dialog_pinned'/);
+  assert.match(appSrc, /TELEGRAM_FLOOD_WAIT/);
+
+  const apiServiceSrc = readFileSync(resolve(process.cwd(), 'src', 'services', 'apiService.ts'), 'utf8');
+  assert.match(apiServiceSrc, /getClientTelegramFloodCooldown/);
+  assert.match(apiServiceSrc, /recordClientTelegramFloodCooldown/);
+});
+
+
+
 
 
 
