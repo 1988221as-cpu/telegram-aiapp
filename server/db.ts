@@ -249,7 +249,8 @@ export async function initDatabase() {
       reply_to_json TEXT,
       is_edited INTEGER DEFAULT 0,
       is_pinned INTEGER DEFAULT 0,
-      forward_from TEXT
+      forward_from TEXT,
+      reactions_json TEXT
     );
 
     CREATE INDEX IF NOT EXISTS idx_messages_chat_created ON messages (chat_id, created_at);
@@ -416,6 +417,9 @@ export async function initDatabase() {
   } catch {}
   try {
     await db.exec(`ALTER TABLE messages ADD COLUMN file_url TEXT`);
+  } catch {}
+  try {
+    await db.exec(`ALTER TABLE messages ADD COLUMN reactions_json TEXT`);
   } catch {}
 
   // Ensure telegram_user_sessions exists and has api_id/api_hash columns
@@ -698,8 +702,9 @@ export async function restoreDatabaseSnapshot(snapshot: any): Promise<{ success:
           is_audio, audio_duration, audio_url, stt_text, voice_tone,
           is_image, image_url, image_caption, is_video, video_url, video_duration,
           is_file, file_name, file_size, file_url,
-          timestamp, created_at, delivery_status, telegram_message_id
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          timestamp, created_at, delivery_status, telegram_message_id,
+          reply_to_json, is_edited, is_pinned, forward_from, reactions_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
         m.id, m.chat_id, m.account_id, m.sender, m.sender_name, m.text, m.translated_text,
         m.is_audio, m.audio_duration, m.audio_url, m.stt_text, m.voice_tone,
@@ -707,7 +712,12 @@ export async function restoreDatabaseSnapshot(snapshot: any): Promise<{ success:
         m.is_file ?? 0, m.file_name || '', m.file_size || '', m.file_url || '',
         m.timestamp, m.created_at,
         m.delivery_status || 'delivered',
-        m.telegram_message_id ?? null
+        m.telegram_message_id ?? null,
+        m.reply_to_json ?? null,
+        m.is_edited ?? 0,
+        m.is_pinned ?? 0,
+        m.forward_from ?? null,
+        m.reactions_json ?? null
       );
     }
   }

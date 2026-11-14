@@ -91,6 +91,8 @@ import {
   fetchTelegramUserContactsApi,
   getScopedContacts,
   saveScopedContacts,
+  isSignedResourceUrl,
+  refreshSignedResourceUrlsApi,
 } from './services/apiService';
 
 
@@ -168,33 +170,52 @@ function mapCloudDialogToChat(d: any, accountId: string, existing?: Chat): Chat 
   };
 }
 
+function formatChatMessageSummary(msg: Partial<Message>, emptyFallback = '暂无消息'): string {
+  if (msg.isAudio) return '🎤 语音消息';
+  if (msg.isVideo) return '🎬 [视频]';
+  if (msg.isImage) return '🖼️ [图片]';
+  if (msg.isFile) return `📁 [文件] ${msg.fileName || ''}`.trim();
+  return msg.text || emptyFallback;
+}
+
 function mergeCloudMessagesWithLocal(
   localMsgs: Message[],
   cloudMsgs: Message[],
-  options?: { preserveAllLocal?: boolean; accountId?: string }
+  options?: { preserveAllLocal?: boolean; allowEmptyCloudPrune?: boolean; accountId?: string; chatId?: string }
 ): Message[] {
   const visibleLocal = (Array.isArray(localMsgs) ? localMsgs : []).filter(
-    (m) => !isMessageDeleted(m.id, options?.accountId || m.accountId)
+    (m) => !isMessageDeleted(m.id, options?.accountId || m.accountId, options?.chatId || m.chatId)
   );
   const visibleCloud = (Array.isArray(cloudMsgs) ? cloudMsgs : []).filter(
-    (m) => !isMessageDeleted(m.id, options?.accountId || m.accountId)
+    (m) => !isMessageDeleted(m.id, options?.accountId || m.accountId, options?.chatId || m.chatId)
   );
-  if (visibleCloud.length === 0) return visibleLocal;
+  if (visibleCloud.length === 0) {
+    if (options?.allowEmptyCloudPrune) {
+      // Cloud genuinely returned an empty list (e.g. history cleared on another device):
+      // prune delivered/cloud-synced messages and keep only unsent drafts / failed items.
+      return visibleLocal.filter(
+        (lm) => lm.deliveryStatus === 'pending' || lm.deliveryStatus === 'retrying' || lm.deliveryStatus === 'failed'
+      );
+    }
+    return visibleLocal;
+  }
 
   const localById = new Map<string, Message>();
   const localByTgId = new Map<number, Message>();
   visibleLocal.forEach((m) => {
     localById.set(m.id, m);
-    if (typeof m.telegramMessageId === 'number') {
-      localByTgId.set(m.telegramMessageId, m);
+    const mTgId = resolveClientTelegramMessageId(m);
+    if (mTgId !== undefined) {
+      localByTgId.set(mTgId, m);
     }
   });
 
   const matchedLocalIds = new Set<string>();
   const mergedCloud = visibleCloud.map((cm) => {
     let lm = localById.get(cm.id);
-    if (!lm && typeof cm.telegramMessageId === 'number') {
-      lm = localByTgId.get(cm.telegramMessageId);
+    const cmTgId = resolveClientTelegramMessageId(cm);
+    if (!lm && cmTgId !== undefined) {
+      lm = localByTgId.get(cmTgId);
     }
     if (!lm) {
       lm = visibleLocal.find(
@@ -221,6 +242,8 @@ function mergeCloudMessagesWithLocal(
         imageUrl: cm.imageUrl || lm.imageUrl,
         videoUrl: cm.videoUrl || lm.videoUrl,
         fileUrl: cm.fileUrl || lm.fileUrl,
+        reactions: cm.reactions ?? lm.reactions,
+        myReactions: cm.myReactions ?? lm.myReactions,
         deliveryStatus: 'delivered' as const,
       };
     }
@@ -325,8 +348,9 @@ export default function App() {
           if (Array.isArray(list) && list.length > 0) {
             const parts = bucketKey.includes('::') ? bucketKey.split('::') : [];
             const inferredAcc = parts.length > 1 ? parts[0] : (list[0]?.accountId || fallbackAcc);
+            const inferredChat = parts.length > 1 ? parts.slice(1).join('::') : bucketKey;
             initialMap[bucketKey] = normalizeStalePendingMessages(
-              list.filter((m) => m && m.id && !isMessageDeleted(m.id, inferredAcc || m.accountId))
+              list.filter((m) => m && m.id && !isMessageDeleted(m.id, inferredAcc || m.accountId, m.chatId || inferredChat))
             );
           }
         }
@@ -559,7 +583,7 @@ export default function App() {
         if (Array.isArray(msgs) && msgs.length > 0) {
           reconstructed[msgBucketKey(acc, c.id)] = normalizeStalePendingMessages(
             msgs.filter(
-              (m) => m && m.id && !isMessageDeleted(m.id, acc) && (!acc || m.accountId === acc)
+              (m) => m && m.id && !isMessageDeleted(m.id, acc, m.chatId || c.id) && (!acc || m.accountId === acc)
             )
           );
         }
@@ -572,7 +596,7 @@ export default function App() {
           const acc = parts.length > 1 ? parts[0] : (list[0]?.accountId || resolvedActiveAccId || activeAccountIdRef.current);
           const chatKey = parts.length > 1 ? parts.slice(1).join('::') : bucketKey;
           const normalizedList = normalizeStalePendingMessages(
-            list.filter((m) => m && m.id && !isMessageDeleted(m.id, acc || m.accountId))
+            list.filter((m) => m && m.id && !isMessageDeleted(m.id, acc || m.accountId, m.chatId || chatKey))
           );
           if (normalizedList.length > 0 && (!reconstructed[bucketKey] || reconstructed[bucketKey].length === 0)) {
             reconstructed[bucketKey] = normalizedList;
@@ -1094,19 +1118,23 @@ export default function App() {
     if (localMsgs && localMsgs.length > 0) {
       setMessagesMap((prev) => ({
         ...prev,
-        [bucketKey]: localMsgs.filter((m) => !isMessageDeleted(m.id, targetAccId)),
+        [bucketKey]: localMsgs.filter((m) => !isMessageDeleted(m.id, targetAccId, m.chatId || targetChatId)),
       }));
     }
 
     if (!localMsgs || localMsgs.length === 0 || targetAccId === 'acc_telegram_bot') {
       fetchMessagesFromDb(targetChatId, targetAccId, { limit: 60 }).then((cloudMsgs) => {
         if (isMounted && cloudMsgs && cloudMsgs.length > 0) {
+          setChatHasMoreMap((prev) => ({
+            ...prev,
+            [bucketKey]: prev[bucketKey] ?? cloudMsgs.length >= 60,
+          }));
           setMessagesMap((prev) => {
             const base = getBucketMessages(prev, targetAccId, targetChatId);
             const merged = mergeCloudMessagesWithLocal(
               base.length > 0 ? base : getLocalMessages(targetChatId, targetAccId),
               cloudMsgs,
-              { accountId: targetAccId }
+              { accountId: targetAccId, chatId: targetChatId }
             );
             setLocalMessages(targetChatId, merged, targetAccId);
             return { ...prev, [bucketKey]: merged };
@@ -1134,14 +1162,18 @@ export default function App() {
             )
           );
         }
-        const cloudMsgs = cloudRes.messages;
-        if (!cloudMsgs || cloudMsgs.length === 0) return;
+        const cloudMsgs = Array.isArray(cloudRes.messages) ? cloudRes.messages : [];
+        if (cloudMsgs.length === 0 && cloudRes.fromLocalFallback) return;
         setMessagesMap((prev) => {
           const base = getBucketMessages(prev, targetAccId, targetChatId);
           const merged = mergeCloudMessagesWithLocal(
             base.length > 0 ? base : getLocalMessages(targetChatId, targetAccId),
             cloudMsgs,
-            { accountId: targetAccId }
+            {
+              accountId: targetAccId,
+              chatId: targetChatId,
+              allowEmptyCloudPrune: !cloudRes.fromLocalFallback,
+            }
           );
           setLocalMessages(targetChatId, merged, targetAccId);
           return { ...prev, [bucketKey]: merged };
@@ -1316,19 +1348,19 @@ export default function App() {
                       // UpdateDeleteMessages only applies to private/basic-group dialogs, never tg_-100* supergroups/channels
                       return !chatPart.startsWith('tg_-100') && !chatPart.startsWith('-100');
                     });
+                const matchesDeletedTgId = (m: Message) => {
+                  const msgTgId = resolveClientTelegramMessageId(m);
+                  return msgTgId !== undefined && deletedTgIds.has(msgTgId);
+                };
                 for (const key of candidateKeys) {
                   const list = prev[key];
                   if (!Array.isArray(list) || list.length === 0) continue;
-                  const removed = list.filter(
-                    (m) => typeof m.telegramMessageId === 'number' && deletedTgIds.has(m.telegramMessageId)
-                  );
+                  const chatKey = key.includes('::') ? key.split('::').slice(1).join('::') : key;
+                  const removed = list.filter(matchesDeletedTgId);
                   if (removed.length === 0) continue;
                   anyChanged = true;
-                  removed.forEach((m) => recordDeletedMessageId(m.id, targetAccountId));
-                  const remaining = list.filter(
-                    (m) => !(typeof m.telegramMessageId === 'number' && deletedTgIds.has(m.telegramMessageId))
-                  );
-                  const chatKey = key.includes('::') ? key.split('::').slice(1).join('::') : key;
+                  removed.forEach((m) => recordDeletedMessageId(m.id, targetAccountId, m.chatId || chatKey));
+                  const remaining = list.filter((m) => !matchesDeletedTgId(m));
                   setLocalMessages(chatKey, remaining, targetAccountId);
                   next[key] = remaining;
                 }
@@ -1364,9 +1396,39 @@ export default function App() {
                 if (list.length === 0) return prev;
                 let changed = false;
                 const updated = list.map((m) => {
-                  if (typeof m.telegramMessageId === 'number' && pinnedTgIds.has(m.telegramMessageId)) {
+                  const mTgId = resolveClientTelegramMessageId(m);
+                  if (mTgId !== undefined && pinnedTgIds.has(mTgId)) {
                     changed = true;
                     return { ...m, isPinned: nextPinned };
+                  }
+                  return m;
+                });
+                if (!changed) return prev;
+                setLocalMessages(targetChatId, updated, targetAccountId);
+                return { ...prev, [targetBucketKey]: updated };
+              });
+              return;
+            }
+
+            if (updType === 'reactions') {
+              const reactedTgId = typeof upd.telegramMessageId === 'number' ? upd.telegramMessageId : undefined;
+              if (!reactedTgId) return;
+              const targetBucketKey = msgBucketKey(targetAccountId, targetChatId);
+              const nextReactions =
+                upd.reactions && typeof upd.reactions === 'object' ? (upd.reactions as Record<string, number>) : {};
+              const nextMyReactions = Array.isArray(upd.myReactions) ? (upd.myReactions as string[]) : [];
+              setMessagesMap((prev) => {
+                const list = getBucketMessages(prev, targetAccountId, targetChatId);
+                if (list.length === 0) return prev;
+                let changed = false;
+                const updated = list.map((m) => {
+                  if (resolveClientTelegramMessageId(m) === reactedTgId) {
+                    changed = true;
+                    return {
+                      ...m,
+                      reactions: Object.keys(nextReactions).length > 0 ? nextReactions : undefined,
+                      myReactions: nextMyReactions.length > 0 ? nextMyReactions : undefined,
+                    };
                   }
                   return m;
                 });
@@ -1623,11 +1685,7 @@ export default function App() {
                 });
             }
 
-            const summaryText = incomingMsg.isAudio
-              ? '🎤 语音消息'
-              : incomingMsg.isImage
-              ? '🖼️ 图片消息'
-              : incomingMsg.text;
+            const summaryText = formatChatMessageSummary(incomingMsg);
 
             setChats((prev) => {
               const exists = prev.some((c) => c.id === targetChatId && c.accountId === targetAccountId);
@@ -1706,9 +1764,14 @@ export default function App() {
         return;
       }
       const targetAccId = res.chat.accountId || activeAccountId;
+      const existingSaved = chatsRef.current.find(
+        (c) => c.accountId === targetAccId && (c.id === res.chat!.id || c.id === 'chat_saved_messages')
+      );
       const realSavedChat: Chat = {
         ...res.chat,
         accountId: targetAccId,
+        sourceLang: existingSaved?.sourceLang || res.chat.sourceLang || 'Auto',
+        targetLang: existingSaved?.targetLang || res.chat.targetLang || 'Chinese',
       };
       const cloudMsgs = Array.isArray(res.messages) ? res.messages : [];
       const bucketKey = msgBucketKey(targetAccId, realSavedChat.id);
@@ -1720,8 +1783,15 @@ export default function App() {
         return [realSavedChat, ...cleaned];
       });
       setMessagesMap((prev) => {
-        setLocalMessages(realSavedChat.id, cloudMsgs, targetAccId);
-        return { ...prev, [bucketKey]: cloudMsgs };
+        const base = getBucketMessages(prev, targetAccId, realSavedChat.id);
+        const localSaved = base.length > 0 ? base : getLocalMessages(realSavedChat.id, targetAccId);
+        const merged = mergeCloudMessagesWithLocal(localSaved, cloudMsgs, {
+          accountId: targetAccId,
+          chatId: realSavedChat.id,
+          allowEmptyCloudPrune: true,
+        });
+        setLocalMessages(realSavedChat.id, merged, targetAccId);
+        return { ...prev, [bucketKey]: merged };
       });
       setActiveChatId(realSavedChat.id);
       return;
@@ -1770,7 +1840,7 @@ export default function App() {
     const mediaFile = newMsg.mediaFile;
 
     const fullMessage: Message = {
-      id: `msg_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+      id: newMsg.id || `msg_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
       telegramMessageId: newMsg.telegramMessageId,
       chatId: targetChatId,
       accountId: targetAccountId,
@@ -1822,15 +1892,7 @@ export default function App() {
         c.id === targetChatId && (!targetAccountId || c.accountId === targetAccountId)
           ? {
               ...c,
-              lastMessage: fullMessage.isAudio
-                ? '🎤 语音消息'
-                : fullMessage.isVideo
-                ? '🎬 [视频]'
-                : fullMessage.isImage
-                ? '🖼️ [图片]'
-                : fullMessage.isFile
-                ? `📁 [文件] ${fullMessage.fileName || ''}`
-                : fullMessage.text,
+              lastMessage: formatChatMessageSummary(fullMessage),
               lastTime: fullMessage.timestamp,
             }
           : c
@@ -2132,22 +2194,19 @@ export default function App() {
     }
   };
 
-  // Update per-chat translation language pair strictly scoped to activeAccountId
+  // Update per-chat translation language pair strictly scoped to activeAccountId (never mutate global defaultSourceLang/defaultTargetLang)
   const handleUpdateChatLanguage = (chatId: string, sourceLang: string, targetLang: string) => {
-    setChats((prev) =>
-      prev.map((c) =>
+    setChats((prev) => {
+      const updated = prev.map((c) =>
         c.id === chatId && (!activeAccountId || c.accountId === activeAccountId)
           ? { ...c, sourceLang, targetLang }
           : c
-      )
-    );
-    if (chatId === activeChatId) {
-      setTranslationSettings((prev) => ({
-        ...prev,
-        defaultSourceLang: sourceLang,
-        defaultTargetLang: targetLang,
-      }));
-    }
+      );
+      if (isHydrated) {
+        secureSetItemSync('tg_pro_chats', updated);
+      }
+      return updated;
+    });
   };
 
   const handleSaveCustomLLMConfig = (nextConfig: CustomLLMConfig) => {
@@ -2196,13 +2255,14 @@ export default function App() {
     const targetAccountId = activeAccountId;
     const bucketKey = msgBucketKey(targetAccountId, targetChatId);
     const targetMsg = getBucketMessages(messagesMap, targetAccountId, targetChatId).find((m) => m.id === messageId);
-    const isLocalOnly = !targetMsg?.telegramMessageId || targetMsg.deliveryStatus === 'failed' || targetMsg.deliveryStatus === 'pending';
+    const targetTgId = resolveClientTelegramMessageId(targetMsg);
+    const isLocalOnly = !targetTgId || targetMsg?.deliveryStatus === 'failed' || targetMsg?.deliveryStatus === 'pending';
 
     const delRes = await deleteMessageFromDb(
       messageId,
       targetAccountId,
       targetChatId,
-      targetMsg?.telegramMessageId,
+      targetTgId,
       { revoke: options?.revoke ?? true, localOnly: isLocalOnly }
     );
     if (isTelegramCloudChat(targetChatId) && !isLocalOnly && !delRes.ok) {
@@ -2215,7 +2275,7 @@ export default function App() {
     if (targetMsg) {
       scheduleRevokeBlobUrls([targetMsg.imageUrl, targetMsg.videoUrl, targetMsg.audioUrl, targetMsg.fileUrl]);
     }
-    recordDeletedMessageId(messageId, targetAccountId);
+    recordDeletedMessageId(messageId, targetAccountId, targetChatId);
     deleteLocalMessage(targetChatId, messageId, targetAccountId);
 
     setMessagesMap((prev) => {
@@ -2226,7 +2286,7 @@ export default function App() {
       // Synchronously update contact list summary if the deleted message was the last one
       if (updated.length > 0) {
         const last = updated[updated.length - 1];
-        const summary = last.isAudio ? '🎤 语音消息' : last.isImage ? '🖼️ 图片消息' : (last.text || '暂无消息');
+        const summary = formatChatMessageSummary(last);
         setChats((chatList) =>
           chatList.map((c) =>
             c.id === targetChatId && (!targetAccountId || c.accountId === targetAccountId)
@@ -2263,11 +2323,14 @@ export default function App() {
     const idSet = new Set(messageIds);
     const items = currentList
       .filter((m) => idSet.has(m.id))
-      .map((m) => ({
-        id: m.id,
-        telegramMessageId: m.telegramMessageId,
-        localOnly: !m.telegramMessageId || m.deliveryStatus === 'failed' || m.deliveryStatus === 'pending',
-      }));
+      .map((m) => {
+        const resolvedTgId = resolveClientTelegramMessageId(m);
+        return {
+          id: m.id,
+          telegramMessageId: resolvedTgId,
+          localOnly: !resolvedTgId || m.deliveryStatus === 'failed' || m.deliveryStatus === 'pending',
+        };
+      });
 
     if (items.length === 0) return { ok: false, error: '未找到要删除的消息' };
 
@@ -2286,7 +2349,7 @@ export default function App() {
 
     messageIds.forEach((id) => {
       pendingMediaFilesRef.current.delete(id);
-      recordDeletedMessageId(id, targetAccountId);
+      recordDeletedMessageId(id, targetAccountId, targetChatId);
     });
     const deletedBlobUrls: string[] = [];
     currentList.forEach((m) => {
@@ -2305,7 +2368,7 @@ export default function App() {
 
       if (updated.length > 0) {
         const last = updated[updated.length - 1];
-        const summary = last.isAudio ? '🎤 语音消息' : last.isImage ? '🖼️ 图片消息' : (last.text || '暂无消息');
+        const summary = formatChatMessageSummary(last);
         setChats((chatList) =>
           chatList.map((c) =>
             c.id === targetChatId && (!targetAccountId || c.accountId === targetAccountId)
@@ -2351,11 +2414,11 @@ export default function App() {
         showCloudError(errMsg);
         return { ok: false, error: errMsg };
       }
-      // Refresh target chat snippet if needed
+      // Update target chat list summary cleanly (including video & file messages)
       const srcMsgs = getBucketMessages(messagesMap, targetAccountId, fromChatId);
       const lastForwarded = srcMsgs.filter((m) => payload.messageIds.includes(m.id)).slice(-1)[0];
       if (lastForwarded) {
-        const summary = lastForwarded.isAudio ? '🎤 语音消息' : lastForwarded.isImage ? '🖼️ 图片消息' : (lastForwarded.text || '转发消息');
+        const summary = formatChatMessageSummary(lastForwarded, '转发消息');
         setChats((prev) =>
           prev.map((c) =>
             c.id === payload.toChatId && (!targetAccountId || c.accountId === targetAccountId)
@@ -2364,6 +2427,30 @@ export default function App() {
           )
         );
       }
+      // Immediately silently sync destination chat's latest cloud stream so target window stays up to date
+      const toBucketKey = msgBucketKey(targetAccountId, payload.toChatId);
+      fetchTelegramCloudMessagesApi(payload.toChatId, targetAccountId, { limit: 40 })
+        .then((syncRes) => {
+          if (!syncRes.ok) return;
+          setChatHasMoreMap((prev) => ({ ...prev, [toBucketKey]: syncRes.hasMore }));
+          const syncedMsgs = Array.isArray(syncRes.messages) ? syncRes.messages : [];
+          if (syncedMsgs.length === 0 && syncRes.fromLocalFallback) return;
+          setMessagesMap((prev) => {
+            const base = getBucketMessages(prev, targetAccountId, payload.toChatId);
+            const merged = mergeCloudMessagesWithLocal(
+              base.length > 0 ? base : getLocalMessages(payload.toChatId, targetAccountId),
+              syncedMsgs,
+              {
+                accountId: targetAccountId,
+                chatId: payload.toChatId,
+                allowEmptyCloudPrune: !syncRes.fromLocalFallback,
+              }
+            );
+            setLocalMessages(payload.toChatId, merged, targetAccountId);
+            return { ...prev, [toBucketKey]: merged };
+          });
+        })
+        .catch(() => {});
       return { ok: true };
     }
 
@@ -2389,6 +2476,17 @@ export default function App() {
       setLocalMessages(payload.toChatId, next, targetAccountId);
       return { ...prev, [toBucketKey]: next };
     });
+    const lastCloned = cloned[cloned.length - 1];
+    if (lastCloned) {
+      const summary = formatChatMessageSummary(lastCloned);
+      setChats((prev) =>
+        prev.map((c) =>
+          c.id === payload.toChatId && (!targetAccountId || c.accountId === targetAccountId)
+            ? { ...c, lastMessage: summary, lastTime: nowTime }
+            : c
+        )
+      );
+    }
     return { ok: true };
   };
 
@@ -2399,17 +2497,14 @@ export default function App() {
     const targetAccountId = activeAccountId;
     const bucketKey = msgBucketKey(targetAccountId, chatId);
     const currentMsgs = getBucketMessages(messagesMapRef.current, targetAccountId, chatId);
-    const res = await fetchTelegramCloudMessagesApi(chatId, targetAccountId, {
-      limit: 40,
-      offsetId,
-    });
-    if (!res.ok) {
-      const earliestCreatedAt = currentMsgs.reduce((min, m) => {
-        if (typeof m.createdAt === 'number' && Number.isFinite(m.createdAt)) {
-          return min === undefined ? m.createdAt : Math.min(min, m.createdAt);
-        }
-        return min;
-      }, undefined as number | undefined);
+    const earliestCreatedAt = currentMsgs.reduce((min, m) => {
+      if (typeof m.createdAt === 'number' && Number.isFinite(m.createdAt)) {
+        return min === undefined ? m.createdAt : Math.min(min, m.createdAt);
+      }
+      return min;
+    }, undefined as number | undefined);
+
+    const loadSqliteOlderFallback = async (): Promise<{ ok: boolean; count: number; hasMore: boolean }> => {
       const dbOlder = await fetchMessagesFromDb(chatId, targetAccountId, {
         limit: 40,
         beforeCreatedAt: earliestCreatedAt,
@@ -2424,38 +2519,54 @@ export default function App() {
         (m) =>
           m &&
           m.id &&
-          !isMessageDeleted(m.id, targetAccountId) &&
+          !isMessageDeleted(m.id, targetAccountId, m.chatId || chatId) &&
           !existingIds.has(m.id) &&
           !(typeof m.telegramMessageId === 'number' && existingTgIds.has(m.telegramMessageId))
       );
+      const hasMoreDb = dbOlder.length >= 40;
+      setChatHasMoreMap((prev) => ({ ...prev, [bucketKey]: hasMoreDb }));
       if (freshDbMsgs.length > 0) {
-        const hasMoreDb = dbOlder.length >= 40;
-        setChatHasMoreMap((prev) => ({ ...prev, [bucketKey]: hasMoreDb }));
         setMessagesMap((prev) => {
           const base = getBucketMessages(prev, targetAccountId, chatId);
           const merged = mergeCloudMessagesWithLocal(base, freshDbMsgs, {
             preserveAllLocal: true,
             accountId: targetAccountId,
+            chatId,
           });
           setLocalMessages(chatId, merged, targetAccountId);
           return { ...prev, [bucketKey]: merged };
         });
-        return { ok: true, count: freshDbMsgs.length, hasMore: hasMoreDb };
       }
+      return { ok: true, count: freshDbMsgs.length, hasMore: hasMoreDb };
+    };
+
+    if (!isTelegramCloudChat(chatId) || offsetId <= 0) {
+      return await loadSqliteOlderFallback();
+    }
+
+    const res = await fetchTelegramCloudMessagesApi(chatId, targetAccountId, {
+      limit: 40,
+      offsetId,
+    });
+    if (!res.ok) {
+      const sqliteRes = await loadSqliteOlderFallback();
+      if (sqliteRes.count > 0) return sqliteRes;
       return { ok: false, count: 0, hasMore: false, error: res.error };
     }
-    setChatHasMoreMap((prev) => ({ ...prev, [bucketKey]: res.hasMore }));
-    if (res.messages.length > 0) {
-      setMessagesMap((prev) => {
-        const base = getBucketMessages(prev, targetAccountId, chatId);
-        const merged = mergeCloudMessagesWithLocal(base, res.messages, {
-          preserveAllLocal: true,
-          accountId: targetAccountId,
-        });
-        setLocalMessages(chatId, merged, targetAccountId);
-        return { ...prev, [bucketKey]: merged };
-      });
+    if (res.messages.length === 0) {
+      return await loadSqliteOlderFallback();
     }
+    setChatHasMoreMap((prev) => ({ ...prev, [bucketKey]: res.hasMore }));
+    setMessagesMap((prev) => {
+      const base = getBucketMessages(prev, targetAccountId, chatId);
+      const merged = mergeCloudMessagesWithLocal(base, res.messages, {
+        preserveAllLocal: true,
+        accountId: targetAccountId,
+        chatId,
+      });
+      setLocalMessages(chatId, merged, targetAccountId);
+      return { ...prev, [bucketKey]: merged };
+    });
     return { ok: true, count: res.messages.length, hasMore: res.hasMore };
   };
 
@@ -2520,6 +2631,70 @@ export default function App() {
       setLocalMessages(targetChatId, updated, targetAccountId);
       return { ...prev, [bucketKey]: updated };
     });
+  };
+
+  const handleRefreshMediaUrls = async (
+    urls: string[],
+    accountIdOverride?: string
+  ): Promise<Record<string, string>> => {
+    const targetAccId = accountIdOverride || activeAccountIdRef.current || undefined;
+    const validUrls = Array.from(
+      new Set((Array.isArray(urls) ? urls : []).filter((u) => isSignedResourceUrl(u)))
+    );
+    if (validUrls.length === 0) return {};
+    const refreshed = await refreshSignedResourceUrlsApi(validUrls, targetAccId);
+    const entries = Object.entries(refreshed).filter(([, nextUrl]) => Boolean(nextUrl));
+    if (entries.length === 0) return {};
+
+    setChats((prev) => {
+      let anyChatChanged = false;
+      const updated = prev.map((c) => {
+        if (c.avatarUrl && refreshed[c.avatarUrl]) {
+          anyChatChanged = true;
+          return { ...c, avatarUrl: refreshed[c.avatarUrl] };
+        }
+        return c;
+      });
+      if (anyChatChanged && isHydrated) {
+        secureSetItemSync('tg_pro_chats', updated);
+      }
+      return anyChatChanged ? updated : prev;
+    });
+
+    setMessagesMap((prev) => {
+      let anyBucketChanged = false;
+      const nextMap: Record<string, Message[]> = { ...prev };
+      for (const [bKey, list] of Object.entries(prev)) {
+        if (!Array.isArray(list) || list.length === 0) continue;
+        let bucketChanged = false;
+        const updatedList = list.map((m) => {
+          const nextAudio = m.audioUrl && refreshed[m.audioUrl] ? refreshed[m.audioUrl] : undefined;
+          const nextImg = m.imageUrl && refreshed[m.imageUrl] ? refreshed[m.imageUrl] : undefined;
+          const nextVid = m.videoUrl && refreshed[m.videoUrl] ? refreshed[m.videoUrl] : undefined;
+          const nextFile = m.fileUrl && refreshed[m.fileUrl] ? refreshed[m.fileUrl] : undefined;
+          if (!nextAudio && !nextImg && !nextVid && !nextFile) return m;
+          bucketChanged = true;
+          return {
+            ...m,
+            ...(nextAudio ? { audioUrl: nextAudio } : {}),
+            ...(nextImg ? { imageUrl: nextImg } : {}),
+            ...(nextVid ? { videoUrl: nextVid } : {}),
+            ...(nextFile ? { fileUrl: nextFile } : {}),
+          };
+        });
+        if (bucketChanged) {
+          anyBucketChanged = true;
+          nextMap[bKey] = updatedList;
+          const sepIdx = bKey.indexOf('::');
+          const bAcc = sepIdx >= 0 ? bKey.slice(0, sepIdx) : targetAccId;
+          const bChat = sepIdx >= 0 ? bKey.slice(sepIdx + 2) : bKey;
+          setLocalMessages(bChat, updatedList, bAcc);
+        }
+      }
+      return anyBucketChanged ? nextMap : prev;
+    });
+
+    return refreshed;
   };
 
   const handleToggleReaction = async (messageId: string, emoji: string) => {
@@ -2818,20 +2993,48 @@ export default function App() {
     if (normalized.length > 0) {
       const contactById = new Map<string, TelegramContact>();
       normalized.forEach((ct) => contactById.set(ct.id, ct));
-      setChats((prev) =>
-        prev.map((c) => {
+      const selfTgChatId = acc?.startsWith('acc_tg_') ? `tg_${acc.replace(/^acc_tg_/, '')}` : '';
+      setChats((prev) => {
+        let changed = false;
+        const next = prev.map((c) => {
           if (acc && c.accountId !== acc) return c;
           const ct = contactById.get(c.id);
           if (!ct) return c;
-          return {
+          const nextName = typeof ct.name === 'string' ? ct.name.trim() : '';
+          const shouldUpdateTitle =
+            Boolean(nextName) &&
+            !c.isGroup &&
+            !c.isChannel &&
+            (!selfTgChatId || c.id !== selfTgChatId) &&
+            c.title !== 'Saved Messages' &&
+            c.title !== '我的收藏夹 (Saved Messages)' &&
+            c.title !== nextName;
+          const patched: Chat = {
             ...c,
+            ...(shouldUpdateTitle
+              ? { title: nextName, avatarInitial: nextName.slice(0, 2).toUpperCase() }
+              : {}),
             ...(ct.phone ? { phone: ct.phone } : {}),
             ...(typeof ct.isBlocked === 'boolean' ? { isBlocked: ct.isBlocked } : {}),
             ...(ct.status ? { isOnline: ct.status === 'online' } : {}),
             ...(ct.statusText ? { statusText: ct.statusText } : {}),
           };
-        })
-      );
+          if (
+            patched.title !== c.title ||
+            patched.phone !== c.phone ||
+            patched.isBlocked !== c.isBlocked ||
+            patched.isOnline !== c.isOnline ||
+            patched.statusText !== c.statusText
+          ) {
+            changed = true;
+          }
+          return patched;
+        });
+        if (changed && isHydrated) {
+          secureSetItemSync('tg_pro_chats', next);
+        }
+        return changed ? next : prev;
+      });
     }
   };
 
@@ -3066,6 +3269,7 @@ export default function App() {
             }
             setIsMultiAccountOpen(true);
           }}
+          onRefreshMediaUrls={handleRefreshMediaUrls}
         />
 
         {/* 3. Official Telegram Center Main Chat Workbench Pane (flex-1) */}
@@ -3093,10 +3297,12 @@ export default function App() {
           availableChats={currentAccountChats}
           hasMoreHistory={
             activeChatId
-              ? chatHasMoreMap[msgBucketKey(activeAccountId, activeChatId)] ?? Boolean(activeChatId.startsWith('tg_'))
+              ? chatHasMoreMap[msgBucketKey(activeAccountId, activeChatId)] ??
+                Boolean(activeChatId.startsWith('tg_') || currentMessages.length >= 40)
               : false
           }
           onLoadOlderMessages={handleLoadOlderMessages}
+          onRefreshMediaUrls={handleRefreshMediaUrls}
           onEditMessage={handleEditMessage}
           onUpdateMessage={handleUpdateMessage}
           onRetryMessage={handleRetryMessage}
@@ -3106,6 +3312,7 @@ export default function App() {
           onToggleMuteChat={handleToggleMuteChat}
           onTogglePinChat={handleTogglePinChat}
           onUpdateChatTitle={handleUpdateChatTitle}
+          onAddContact={handleAddContact}
           onRemoveContact={handleRemoveContact}
           onChatInfoUpdated={(chatId, patch) => {
             setChats((prev) =>
@@ -3170,13 +3377,17 @@ export default function App() {
                   )
                 );
               }
-              if (synced.length > 0) {
+              if (synced.length > 0 || !meta?.fromLocalFallback) {
                 setMessagesMap((prev) => {
                   const base = getBucketMessages(prev, activeAccountId, activeChatId);
                   const merged = mergeCloudMessagesWithLocal(
                     base.length > 0 ? base : getLocalMessages(activeChatId, activeAccountId),
                     synced,
-                    { accountId: activeAccountId }
+                    {
+                      accountId: activeAccountId,
+                      chatId: activeChatId,
+                      allowEmptyCloudPrune: !meta?.fromLocalFallback,
+                    }
                   );
                   setLocalMessages(activeChatId, merged, activeAccountId);
                   return {

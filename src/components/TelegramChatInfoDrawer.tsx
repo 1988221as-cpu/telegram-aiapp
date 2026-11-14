@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import {
   X,
   Bell,
@@ -19,13 +19,20 @@ import {
   ShieldCheck,
   Phone,
   UserMinus,
+  UserPlus,
+  Play,
 } from 'lucide-react';
-import { Chat, Message, TelegramChatFullInfo } from '../types';
+import { Chat, Message, TelegramChatFullInfo, TelegramContact } from '../types';
 import {
   fetchTelegramChatFullInfoApi,
+  addTelegramUserContactApi,
   blockTelegramUserContactApi,
   unblockTelegramUserContactApi,
   deleteTelegramUserContactApi,
+  isSignedResourceUrl,
+  isSignedResourceUrlExpiringSoon,
+  refreshSignedResourceUrlsApi,
+  ensureFreshSignedResourceUrl,
 } from '../services/apiService';
 
 interface TelegramChatInfoDrawerProps {
@@ -39,7 +46,9 @@ interface TelegramChatInfoDrawerProps {
   onTogglePin?: (chatId: string) => void | Promise<any>;
   onUpdateTitle?: (chatId: string, newTitle: string) => void | Promise<{ ok: boolean; error?: string } | void>;
   onChatInfoUpdated?: (chatId: string, patch: Partial<Chat>) => void;
+  onAddContact?: (contact: TelegramContact) => void;
   onRemoveContact?: (contactId: string) => void;
+  onRefreshMediaUrls?: (urls: string[]) => Promise<Record<string, string>>;
 }
 
 export const TelegramChatInfoDrawer: React.FC<TelegramChatInfoDrawerProps> = ({
@@ -53,7 +62,9 @@ export const TelegramChatInfoDrawer: React.FC<TelegramChatInfoDrawerProps> = ({
   onTogglePin,
   onUpdateTitle,
   onChatInfoUpdated,
+  onAddContact,
   onRemoveContact,
+  onRefreshMediaUrls,
 }) => {
   const [activeTab, setActiveTab] = useState<'media' | 'files' | 'voice' | 'links' | 'members'>('media');
   const [isEditingRemark, setIsEditingRemark] = useState(false);
@@ -70,6 +81,57 @@ export const TelegramChatInfoDrawer: React.FC<TelegramChatInfoDrawerProps> = ({
   const [isTogglingBlock, setIsTogglingBlock] = useState(false);
   const [confirmDeleteContact, setConfirmDeleteContact] = useState(false);
   const [isDeletingContact, setIsDeletingContact] = useState(false);
+  const [confirmAddContact, setConfirmAddContact] = useState(false);
+  const [addContactName, setAddContactName] = useState('');
+  const [isAddingContact, setIsAddingContact] = useState(false);
+  const [refreshedUrlsMap, setRefreshedUrlsMap] = useState<Record<string, string>>({});
+  const attemptedRefreshUrlsRef = useRef<Set<string>>(new Set());
+
+  const resolveDisplayUrl = useCallback(
+    (rawUrl?: string) => {
+      if (!rawUrl) return rawUrl;
+      return refreshedUrlsMap[rawUrl] || rawUrl;
+    },
+    [refreshedUrlsMap]
+  );
+
+  const triggerSilentUrlRefresh = useCallback(
+    async (rawUrl?: string, force = false): Promise<string | null> => {
+      if (!rawUrl || !isSignedResourceUrl(rawUrl)) return null;
+      const currentResolved = refreshedUrlsMap[rawUrl] || rawUrl;
+      if (attemptedRefreshUrlsRef.current.has(currentResolved)) {
+        return null;
+      }
+      if (!force && !isSignedResourceUrlExpiringSoon(currentResolved)) {
+        return currentResolved;
+      }
+      attemptedRefreshUrlsRef.current.add(rawUrl);
+      attemptedRefreshUrlsRef.current.add(currentResolved);
+      try {
+        let nextUrl = '';
+        if (onRefreshMediaUrls) {
+          const map = await onRefreshMediaUrls([currentResolved]);
+          nextUrl = map[currentResolved] || map[rawUrl] || '';
+        } else {
+          const refreshed = await ensureFreshSignedResourceUrl(currentResolved, accountId, { force: true });
+          if (refreshed && refreshed !== currentResolved) {
+            nextUrl = refreshed;
+          }
+        }
+        if (nextUrl && nextUrl !== currentResolved) {
+          attemptedRefreshUrlsRef.current.add(nextUrl);
+          setRefreshedUrlsMap((prev) => ({
+            ...prev,
+            [rawUrl]: nextUrl,
+            [currentResolved]: nextUrl,
+          }));
+          return nextUrl;
+        }
+      } catch {}
+      return null;
+    },
+    [accountId, onRefreshMediaUrls, refreshedUrlsMap]
+  );
 
   useEffect(() => {
     if (chat?.title) {
@@ -116,11 +178,65 @@ export const TelegramChatInfoDrawer: React.FC<TelegramChatInfoDrawerProps> = ({
     setFullInfoError(null);
     setConfirmBlockToggle(false);
     setConfirmDeleteContact(false);
+    setConfirmAddContact(false);
+    setAddContactName(chat.title || '');
     if (chat.id.startsWith('tg_')) {
       void loadFullInfo();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isOpen, chat?.id, accountId]);
+
+  useEffect(() => {
+    if (!isOpen || !chat) return;
+    const candidates: string[] = [];
+    const pushIfExpiring = (rawUrl?: string) => {
+      if (!rawUrl) return;
+      const effective = refreshedUrlsMap[rawUrl] || rawUrl;
+      if (
+        isSignedResourceUrlExpiringSoon(effective) &&
+        !attemptedRefreshUrlsRef.current.has(effective)
+      ) {
+        candidates.push(effective);
+      }
+    };
+    pushIfExpiring(chat.avatarUrl);
+    for (const m of messages) {
+      pushIfExpiring(m.imageUrl);
+      pushIfExpiring(m.videoUrl);
+      pushIfExpiring(m.fileUrl);
+      pushIfExpiring(m.audioUrl);
+    }
+    if (Array.isArray(fullInfo?.participants)) {
+      for (const p of fullInfo.participants) {
+        pushIfExpiring(p.avatarUrl);
+      }
+    }
+    const unique = Array.from(new Set(candidates)).slice(0, 40);
+    if (unique.length === 0) return;
+
+    unique.forEach((u) => attemptedRefreshUrlsRef.current.add(u));
+    let cancelled = false;
+    const run = async () => {
+      const refreshed = onRefreshMediaUrls
+        ? await onRefreshMediaUrls(unique)
+        : await refreshSignedResourceUrlsApi(unique, accountId);
+      if (cancelled || !refreshed || Object.keys(refreshed).length === 0) return;
+      setRefreshedUrlsMap((prev) => {
+        const next = { ...prev };
+        for (const [oldUrl, newUrl] of Object.entries(refreshed)) {
+          if (newUrl) {
+            attemptedRefreshUrlsRef.current.add(newUrl);
+            next[oldUrl] = newUrl;
+          }
+        }
+        return next;
+      });
+    };
+    void run();
+    return () => {
+      cancelled = true;
+    };
+  }, [isOpen, chat, messages, fullInfo, accountId, onRefreshMediaUrls, refreshedUrlsMap]);
 
   const handleSaveRemark = async () => {
     if (!chat) return;
@@ -142,7 +258,7 @@ export const TelegramChatInfoDrawer: React.FC<TelegramChatInfoDrawerProps> = ({
 
   if (!isOpen || !chat) return null;
 
-  const mediaMessages = messages.filter((m) => m.isImage || m.imageUrl);
+  const mediaMessages = messages.filter((m) => m.isImage || m.imageUrl || m.isVideo || m.videoUrl);
   const fileMessages = messages.filter((m) => m.isFile || m.fileName);
   const voiceMessages = messages.filter((m) => m.isAudio || m.audioUrl);
   const linkMessages = messages.filter((m) => m.text && (m.text.includes('http://') || m.text.includes('https://') || m.text.includes('t.me/')));
@@ -181,11 +297,20 @@ export const TelegramChatInfoDrawer: React.FC<TelegramChatInfoDrawerProps> = ({
               <span className="font-bold select-none">{chat.avatarInitial}</span>
               {chat.avatarUrl && (
                 <img
-                  src={chat.avatarUrl}
+                  src={resolveDisplayUrl(chat.avatarUrl)}
                   alt={chat.title}
                   className="w-full h-full object-cover absolute inset-0"
+                  onLoad={(e) => {
+                    e.currentTarget.style.display = '';
+                  }}
                   onError={(e) => {
-                    (e.currentTarget as HTMLElement).style.display = 'none';
+                    const imgEl = e.currentTarget;
+                    const original = chat.avatarUrl;
+                    void triggerSilentUrlRefresh(original, true).then((nextUrl) => {
+                      if (!nextUrl) {
+                        imgEl.style.display = 'none';
+                      }
+                    });
                   }}
                 />
               )}
@@ -438,8 +563,109 @@ export const TelegramChatInfoDrawer: React.FC<TelegramChatInfoDrawerProps> = ({
               );
             })()}
 
-            {chat.id.startsWith('tg_') && !chat.isGroup && !chat.isChannel && !chat.isBot && accountId !== 'acc_telegram_bot' && fullInfo?.isContact && (
-              confirmDeleteContact ? (
+            {chat.id.startsWith('tg_') && !chat.isGroup && !chat.isChannel && !chat.isBot && accountId !== 'acc_telegram_bot' && (() => {
+              const selfTgId = accountId?.startsWith('acc_tg_') ? `tg_${accountId.replace(/^acc_tg_/, '')}` : '';
+              const isSelfChat = Boolean(
+                fullInfo?.isSelf ||
+                (selfTgId && chat.id === selfTgId) ||
+                chat.title === 'Saved Messages' ||
+                chat.title === '我的收藏夹 (Saved Messages)'
+              );
+              if (isSelfChat || !fullInfo) return null;
+
+              if (!fullInfo.isContact) {
+                return confirmAddContact ? (
+                  <div className="p-2.5 rounded-xl bg-[#2481cc]/10 border border-[#2481cc]/25 space-y-2 text-xs">
+                    <div className="text-[#111827] dark:text-white font-medium">
+                      将该用户添加到 Telegram 云端通讯录
+                    </div>
+                    <input
+                      type="text"
+                      value={addContactName}
+                      onChange={(e) => setAddContactName(e.target.value)}
+                      placeholder="输入联系人备注名称"
+                      className="w-full px-2.5 py-1.5 rounded-lg bg-white dark:bg-[#17212b] border border-[#d6dde4] dark:border-[#2c3b4c] text-xs text-[#111827] dark:text-white outline-none focus:border-[#2481cc]"
+                    />
+                    <div className="flex items-center justify-end gap-1.5">
+                      <button
+                        type="button"
+                        disabled={isAddingContact}
+                        onClick={() => setConfirmAddContact(false)}
+                        className="px-2.5 py-1 rounded-lg text-[11px] bg-black/5 dark:bg-white/10 text-[#707579] dark:text-gray-300 cursor-pointer"
+                      >
+                        取消
+                      </button>
+                      <button
+                        type="button"
+                        disabled={isAddingContact}
+                        onClick={async () => {
+                          setActionError(null);
+                          setIsAddingContact(true);
+                          try {
+                            const contactName =
+                              addContactName.trim() || fullInfo.title || chat.title || 'Telegram';
+                            const res = await addTelegramUserContactApi({
+                              accountId,
+                              chatId: chat.id,
+                              name: contactName,
+                              phone: fullInfo.phone || chat.phone,
+                              username: fullInfo.username || chat.username,
+                            });
+                            if (!res.ok) {
+                              setActionError(res.error || '添加到通讯录失败');
+                              return;
+                            }
+                            const resolvedName = (res.contact?.name || contactName).trim();
+                            setFullInfo((prev) =>
+                              prev
+                                ? {
+                                    ...prev,
+                                    isContact: true,
+                                    ...(resolvedName ? { title: resolvedName } : {}),
+                                    ...(res.contact?.phone ? { phone: res.contact.phone } : {}),
+                                  }
+                                : prev
+                            );
+                            if (res.contact) {
+                              onAddContact?.(res.contact);
+                            }
+                            if (resolvedName) {
+                              onChatInfoUpdated?.(chat.id, {
+                                title: resolvedName,
+                                ...(res.contact?.phone ? { phone: res.contact.phone } : {}),
+                              });
+                            }
+                            setConfirmAddContact(false);
+                          } finally {
+                            setIsAddingContact(false);
+                          }
+                        }}
+                        className="px-2.5 py-1 rounded-lg text-[11px] font-medium text-white bg-[#2481cc] hover:bg-[#1b6cb0] cursor-pointer disabled:opacity-50"
+                      >
+                        {isAddingContact ? '添加中...' : '确认添加'}
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setActionError(null);
+                      setAddContactName(fullInfo.title || chat.title || '');
+                      setConfirmAddContact(true);
+                    }}
+                    className="w-full flex items-center justify-between p-2.5 rounded-xl hover:bg-black/5 dark:hover:bg-[#202b36] transition-colors cursor-pointer text-xs"
+                  >
+                    <div className="flex items-center gap-3">
+                      <UserPlus className="w-4 h-4 text-[#2481cc] dark:text-[#2ba0ff]" />
+                      <span className="text-[#2481cc] dark:text-[#2ba0ff] font-medium">添加到通讯录</span>
+                    </div>
+                    <span className="text-[11px] text-[#2481cc] dark:text-[#2ba0ff]">添加好友</span>
+                  </button>
+                );
+              }
+
+              return confirmDeleteContact ? (
                 <div className="p-2.5 rounded-xl bg-red-500/10 border border-red-500/25 flex items-center justify-between gap-2 text-xs">
                   <span className="text-[#111827] dark:text-white">
                     从 Telegram 云端通讯录删除该好友？
@@ -490,8 +716,8 @@ export const TelegramChatInfoDrawer: React.FC<TelegramChatInfoDrawerProps> = ({
                   </div>
                   <span className="text-[11px] text-red-400">删除</span>
                 </button>
-              )
-            )}
+              );
+            })()}
           </div>
 
           {/* Shared Media Tabs Header */}
@@ -560,11 +786,54 @@ export const TelegramChatInfoDrawer: React.FC<TelegramChatInfoDrawerProps> = ({
                   </div>
                 ) : (
                   <div className="grid grid-cols-3 gap-1.5">
-                    {mediaMessages.map((m) => (
-                      <div key={m.id} className="aspect-square rounded-lg overflow-hidden bg-black/10 dark:bg-white/10 relative group">
-                        <img src={m.imageUrl} alt="media" className="w-full h-full object-cover" />
-                      </div>
-                    ))}
+                    {mediaMessages.map((m) => {
+                      const isVid = Boolean((m.isVideo || m.videoUrl) && m.videoUrl);
+                      const resolvedVideoSrc = isVid ? resolveDisplayUrl(m.videoUrl) : undefined;
+                      const resolvedImageSrc = m.imageUrl ? resolveDisplayUrl(m.imageUrl) : undefined;
+                      return (
+                        <div key={m.id} className="aspect-square rounded-lg overflow-hidden bg-black/10 dark:bg-white/10 relative group">
+                          {isVid && resolvedVideoSrc ? (
+                            <>
+                              <video
+                                src={resolvedVideoSrc}
+                                preload="metadata"
+                                controls
+                                className="w-full h-full object-cover bg-black"
+                                onError={() => {
+                                  void triggerSilentUrlRefresh(m.videoUrl, true);
+                                }}
+                              />
+                              <div className="pointer-events-none absolute top-1 left-1 px-1.5 py-0.5 rounded bg-black/65 text-white text-[9px] font-medium flex items-center gap-0.5 tabular-nums">
+                                <Play className="w-2.5 h-2.5 fill-current" />
+                                <span>{m.videoDuration ? `${Math.max(1, Math.round(m.videoDuration))}"` : '视频'}</span>
+                              </div>
+                            </>
+                          ) : resolvedImageSrc ? (
+                            <img
+                              src={resolvedImageSrc}
+                              alt={m.imageCaption || 'media'}
+                              className="w-full h-full object-cover"
+                              onLoad={(e) => {
+                                e.currentTarget.style.display = '';
+                              }}
+                              onError={(e) => {
+                                const imgEl = e.currentTarget;
+                                void triggerSilentUrlRefresh(m.imageUrl, true).then((nextUrl) => {
+                                  if (!nextUrl) {
+                                    imgEl.style.display = 'none';
+                                  }
+                                });
+                              }}
+                            />
+                          ) : (
+                            <div className="w-full h-full flex flex-col items-center justify-center text-[10px] text-[#707579] dark:text-[#7f93a5] gap-1 p-1 text-center">
+                              <ImageIcon className="w-4 h-4 opacity-60" />
+                              <span>媒体未缓存</span>
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
                   </div>
                 )}
               </div>
@@ -577,20 +846,54 @@ export const TelegramChatInfoDrawer: React.FC<TelegramChatInfoDrawerProps> = ({
                     暂无共享文件文档
                   </div>
                 ) : (
-                  fileMessages.map((m) => (
-                    <div key={m.id} className="p-2.5 rounded-xl bg-gray-50 dark:bg-[#202b36] flex items-center justify-between text-xs">
-                      <div className="flex items-center gap-2 min-w-0">
-                        <FileText className="w-5 h-5 text-[#2481cc] shrink-0" />
-                        <div className="min-w-0">
-                          <div className="font-medium truncate">{m.fileName || '文档附件'}</div>
-                          <div className="text-[10px] text-[#707579] dark:text-[#7f93a5]">{m.fileSize || '128 KB'} · {m.timestamp}</div>
+                  fileMessages.map((m) => {
+                    const hasFileUrl = Boolean(m.fileUrl && m.fileUrl.trim() && m.fileUrl.trim() !== '#');
+                    const resolvedFileHref = hasFileUrl ? resolveDisplayUrl(m.fileUrl) || '' : '';
+                    return (
+                      <div key={m.id} className="p-2.5 rounded-xl bg-gray-50 dark:bg-[#202b36] flex items-center justify-between gap-2 text-xs">
+                        <div className="flex items-center gap-2 min-w-0">
+                          <FileText className="w-5 h-5 text-[#2481cc] shrink-0" />
+                          <div className="min-w-0">
+                            <div className="font-medium truncate">{m.fileName || '文档附件'}</div>
+                            <div className="text-[10px] text-[#707579] dark:text-[#7f93a5]">
+                              {m.fileSize || '未知大小'} · {m.timestamp}
+                              {!hasFileUrl ? ' · 链接暂不可用' : ''}
+                            </div>
+                          </div>
                         </div>
+                        {hasFileUrl ? (
+                          <a
+                            href={resolvedFileHref}
+                            download={m.fileName || true}
+                            onClick={(e) => {
+                              if (m.fileUrl && isSignedResourceUrlExpiringSoon(resolvedFileHref)) {
+                                e.preventDefault();
+                                void triggerSilentUrlRefresh(m.fileUrl, true).then((nextUrl) => {
+                                  const a = document.createElement('a');
+                                  a.href = nextUrl || resolvedFileHref;
+                                  if (m.fileName) a.download = m.fileName;
+                                  document.body.appendChild(a);
+                                  a.click();
+                                  document.body.removeChild(a);
+                                });
+                              }
+                            }}
+                            title="下载文件"
+                            className="p-1.5 text-[#2481cc] hover:bg-[#2481cc]/10 rounded-lg shrink-0"
+                          >
+                            <Download className="w-4 h-4" />
+                          </a>
+                        ) : (
+                          <span
+                            title="该文件尚未同步云端下载链接"
+                            className="px-2 py-1 rounded-md bg-black/5 dark:bg-white/5 text-[10px] text-[#707579] dark:text-[#7f93a5] shrink-0 select-none"
+                          >
+                            未缓存
+                          </span>
+                        )}
                       </div>
-                      <a href={m.fileUrl || '#'} download className="p-1.5 text-[#2481cc] hover:bg-[#2481cc]/10 rounded-lg">
-                        <Download className="w-4 h-4" />
-                      </a>
-                    </div>
-                  ))
+                    );
+                  })
                 )}
               </div>
             )}
@@ -677,11 +980,19 @@ export const TelegramChatInfoDrawer: React.FC<TelegramChatInfoDrawerProps> = ({
                           <span>{member.name.slice(0, 2).toUpperCase()}</span>
                           {member.avatarUrl && (
                             <img
-                              src={member.avatarUrl}
+                              src={resolveDisplayUrl(member.avatarUrl)}
                               alt={member.name}
                               className="w-full h-full object-cover absolute inset-0"
+                              onLoad={(e) => {
+                                e.currentTarget.style.display = '';
+                              }}
                               onError={(e) => {
-                                (e.currentTarget as HTMLElement).style.display = 'none';
+                                const imgEl = e.currentTarget;
+                                void triggerSilentUrlRefresh(member.avatarUrl, true).then((nextUrl) => {
+                                  if (!nextUrl) {
+                                    imgEl.style.display = 'none';
+                                  }
+                                });
                               }}
                             />
                           )}

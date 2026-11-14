@@ -71,6 +71,7 @@ export interface TelegramChatFullInfo {
   phone?: string;
   isBlocked?: boolean;
   isContact?: boolean;
+  isSelf?: boolean;
   memberCount?: number;
   onlineCount?: number;
   inviteLink?: string;

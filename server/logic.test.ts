@@ -3050,6 +3050,906 @@ test('Streaming multipart media upload & retry pipeline: busboy disk streaming, 
   assert.ok(OUTBOUND_MEDIA_DIR.endsWith('outbound_media'));
 });
 
+test('Telegram media & avatar OOM protection: BoundedByteLruCache, HTTP Range parser, and iterDownload streaming', async () => {
+  const expressMod = await import('express');
+  const http = await import('http');
+  const {
+    BoundedByteLruCache,
+    telegramAvatarCache,
+    telegramMediaCache,
+    TELEGRAM_MEDIA_CACHE_MAX_BYTES,
+    TELEGRAM_AVATAR_CACHE_MAX_ENTRIES,
+    TELEGRAM_AVATAR_CACHE_MAX_BYTES,
+    TELEGRAM_MEDIA_STREAM_THRESHOLD_BYTES,
+    parseHttpByteRange,
+    extractTelegramMediaMeta,
+    streamTelegramMediaViaIterDownload,
+  } = await import('../server.ts');
+
+  // 1. Production cache budget defaults
+  assert.ok(TELEGRAM_MEDIA_CACHE_MAX_BYTES <= 128 * 1024 * 1024);
+  assert.equal(telegramMediaCache.maxBytes, TELEGRAM_MEDIA_CACHE_MAX_BYTES);
+  assert.ok(TELEGRAM_AVATAR_CACHE_MAX_ENTRIES <= 500);
+  assert.equal(telegramAvatarCache.maxEntries, TELEGRAM_AVATAR_CACHE_MAX_ENTRIES);
+  assert.equal(telegramAvatarCache.maxBytes, TELEGRAM_AVATAR_CACHE_MAX_BYTES);
+  assert.ok(TELEGRAM_MEDIA_STREAM_THRESHOLD_BYTES >= 1024 * 1024);
+
+  // 2. BoundedByteLruCache: byte budget + LRU recency + TTL expiration + item threshold + prefix cleanup
+  const now = 1_700_000_000_000;
+  const cache = new BoundedByteLruCache<{ buffer: Buffer; expiresAt: number }>({
+    maxBytes: 100,
+    maxEntries: 3,
+    maxItemBytes: 60,
+  });
+
+  // Oversized item rejected cleanly
+  assert.equal(cache.set('too_big', { buffer: Buffer.alloc(61), expiresAt: now + 60_000 }, now), false);
+  assert.equal(cache.size, 0);
+  assert.equal(cache.totalBytes, 0);
+
+  // Insert 3 items (40 + 40 + 15 = 95 <= 100)
+  assert.equal(cache.set('acc1:k1', { buffer: Buffer.alloc(40, 1), expiresAt: now + 60_000 }, now), true);
+  assert.equal(cache.set('acc1:k2', { buffer: Buffer.alloc(40, 2), expiresAt: now + 60_000 }, now), true);
+  assert.equal(cache.set('acc2:k3', { buffer: Buffer.alloc(15, 3), expiresAt: now + 60_000 }, now), true);
+  assert.equal(cache.totalBytes, 95);
+
+  // Access acc1:k1 so acc1:k2 becomes the least recently used
+  assert.ok(cache.get('acc1:k1', now));
+
+  // Adding 20 bytes exceeds 100 -> must evict acc1:k2 (LRU), keeping acc1:k1 and acc2:k3
+  assert.equal(cache.set('acc2:k4', { buffer: Buffer.alloc(20, 4), expiresAt: now + 60_000 }, now), true);
+  assert.equal(cache.get('acc1:k2', now), undefined);
+  assert.ok(cache.get('acc1:k1', now));
+  assert.ok(cache.get('acc2:k3', now));
+  assert.ok(cache.get('acc2:k4', now));
+  assert.ok(cache.totalBytes <= 100);
+  assert.equal(cache.size, 3);
+
+  // Max entries eviction even when bytes fit
+  assert.equal(cache.set('acc2:k5', { buffer: Buffer.alloc(5, 5), expiresAt: now + 60_000 }, now), true);
+  assert.equal(cache.size, 3);
+
+  // Prefix deletion cleans up account entries accurately
+  const removedByPrefix = cache.deleteByPrefix('acc2:');
+  assert.ok(removedByPrefix >= 1);
+
+  // TTL expiration reclaims bytes on pruneExpired and lazy get
+  cache.clear();
+  cache.set('exp1', { buffer: Buffer.alloc(30), expiresAt: now + 1000 }, now);
+  cache.set('live1', { buffer: Buffer.alloc(30), expiresAt: now + 60_000 }, now);
+  assert.equal(cache.totalBytes, 60);
+  assert.equal(cache.get('exp1', now + 2000), undefined);
+  assert.equal(cache.totalBytes, 30);
+  cache.set('exp2', { buffer: Buffer.alloc(25), expiresAt: now + 1500 }, now);
+  assert.equal(cache.pruneExpired(now + 2000), 1);
+  assert.equal(cache.totalBytes, 30);
+
+  // 3. HTTP Range parser accuracy (open, bounded, suffix, unsatisfiable)
+  assert.deepEqual(parseHttpByteRange(undefined, 1000), { kind: 'none' });
+  assert.deepEqual(parseHttpByteRange('bytes=0-', 1000), { kind: 'range', start: 0, end: 999 });
+  assert.deepEqual(parseHttpByteRange('bytes=100-199', 1000), { kind: 'range', start: 100, end: 199 });
+  assert.deepEqual(parseHttpByteRange('bytes=900-5000', 1000), { kind: 'range', start: 900, end: 999 });
+  assert.deepEqual(parseHttpByteRange('bytes=-128', 1000), { kind: 'range', start: 872, end: 999 });
+  assert.deepEqual(parseHttpByteRange('bytes=-5000', 1000), { kind: 'range', start: 0, end: 999 });
+  assert.deepEqual(parseHttpByteRange('bytes=1000-', 1000), { kind: 'unsatisfiable' });
+  assert.deepEqual(parseHttpByteRange('bytes=500-400', 1000), { kind: 'unsatisfiable' });
+  assert.deepEqual(parseHttpByteRange('bytes=0-0', 0), { kind: 'unsatisfiable' });
+
+  // 4. Streaming iterDownload with true HTTP Range & offset alignment (no full-buffer RAM load)
+  const payloadSize = 200 * 1024; // 200 KB deterministic payload
+  const fullPayload = Buffer.alloc(payloadSize);
+  for (let i = 0; i < payloadSize; i++) {
+    fullPayload[i] = (i * 31 + 7) & 0xff;
+  }
+
+  const iterCalls: Array<{ offset: number; requestSize: number; limit?: number }> = [];
+  let downloadMediaCalled = 0;
+  const mockClient = {
+    downloadMedia: async () => {
+      downloadMediaCalled++;
+      throw new Error('downloadMedia must NOT be called for streaming large files');
+    },
+    iterDownload: ({ offset, requestSize, limit }: any) => {
+      const startOff = Number(offset?.toString?.() ?? offset ?? 0);
+      iterCalls.push({ offset: startOff, requestSize, limit });
+      let cursor = startOff;
+      let yielded = 0;
+      const maxChunks = typeof limit === 'number' ? limit : Number.MAX_SAFE_INTEGER;
+      return {
+        close: async () => {},
+        [Symbol.asyncIterator]() {
+          return {
+            async next() {
+              if (cursor >= fullPayload.length || yielded >= maxChunks) {
+                return { value: undefined, done: true };
+              }
+              const nextEnd = Math.min(cursor + requestSize, fullPayload.length);
+              const slice = fullPayload.subarray(cursor, nextEnd);
+              cursor = nextEnd;
+              yielded++;
+              return { value: slice, done: false };
+            },
+          };
+        },
+      };
+    },
+  };
+
+  // Verify extractTelegramMediaMeta extracts bigInt/numeric doc.size cleanly
+  const meta = extractTelegramMediaMeta(
+    {
+      media: {
+        document: {
+          size: BigInt(payloadSize),
+          mimeType: 'video/mp4',
+          dcId: 5,
+          attributes: [{ className: 'DocumentAttributeFilename', fileName: 'big_clip.mp4' }],
+        },
+      },
+    },
+    88,
+    false
+  );
+  assert.equal(meta.knownSize, payloadSize);
+  assert.equal(meta.mime, 'video/mp4');
+  assert.equal(meta.fileName, 'big_clip.mp4');
+
+  const streamApp = expressMod.default();
+  streamApp.get('/stream-test', async (req, res) => {
+    const mode = String(req.query.mode || 'known');
+    const smallResults: number[] = [];
+    const status = await streamTelegramMediaViaIterDownload({
+      client: mockClient,
+      fileTarget: { fakeDoc: true },
+      dcId: 5,
+      totalSize: mode === 'unknown' ? 0 : payloadSize,
+      mime: 'video/mp4',
+      fileName: 'big_clip.mp4',
+      forceDownload: false,
+      req,
+      res,
+      thresholdBytes: 32 * 1024, // 32 KB test threshold (< 200 KB payload)
+      onSmallComplete: (buf) => {
+        smallResults.push(buf.length);
+      },
+    });
+    if (status === 'empty' && !res.headersSent) {
+      res.status(404).end();
+    }
+  });
+
+  const streamSrv = http.createServer(streamApp);
+  await new Promise<void>((r) => streamSrv.listen(0, '127.0.0.1', () => r()));
+  const streamPort = (streamSrv.address() as any).port;
+  const streamUrl = `http://127.0.0.1:${streamPort}/stream-test`;
+
+  try {
+    // 4a. Full 200 OK stream
+    const fullRes = await fetch(streamUrl);
+    assert.equal(fullRes.status, 200);
+    assert.equal(fullRes.headers.get('accept-ranges'), 'bytes');
+    assert.equal(fullRes.headers.get('content-length'), String(payloadSize));
+    const fullBody = Buffer.from(await fullRes.arrayBuffer());
+    assert.deepEqual(fullBody, fullPayload);
+
+    // 4b. Mid-file range crossing 64KB chunk boundary (starts at 65500, ends at 70500 => 5001 bytes)
+    iterCalls.length = 0;
+    const midRes = await fetch(streamUrl, { headers: { Range: 'bytes=65500-70500' } });
+    assert.equal(midRes.status, 206);
+    assert.equal(midRes.headers.get('content-range'), `bytes 65500-70500/${payloadSize}`);
+    assert.equal(midRes.headers.get('content-length'), '5001');
+    const midBody = Buffer.from(await midRes.arrayBuffer());
+    assert.deepEqual(midBody, fullPayload.subarray(65500, 70501));
+    assert.equal(iterCalls.length, 1);
+    assert.equal(iterCalls[0].offset, 0); // aligned down to 64KB boundary (0), limit=2 chunks
+
+    // 4c. Deep seek range (starts at 140000 -> alignedOffset must NOT be 0!)
+    iterCalls.length = 0;
+    const seekRes = await fetch(streamUrl, { headers: { Range: 'bytes=140000-141023' } });
+    assert.equal(seekRes.status, 206);
+    assert.equal(seekRes.headers.get('content-range'), `bytes 140000-141023/${payloadSize}`);
+    const seekBody = Buffer.from(await seekRes.arrayBuffer());
+    assert.deepEqual(seekBody, fullPayload.subarray(140000, 141024));
+    assert.ok(iterCalls[0].offset > 0, `Expected non-zero aligned offset for deep seek, got ${iterCalls[0].offset}`);
+    assert.equal(iterCalls[0].offset % iterCalls[0].requestSize, 0);
+
+    // 4d. Suffix range (last 512 bytes)
+    const suffixRes = await fetch(streamUrl, { headers: { Range: 'bytes=-512' } });
+    assert.equal(suffixRes.status, 206);
+    assert.equal(suffixRes.headers.get('content-range'), `bytes ${payloadSize - 512}-${payloadSize - 1}/${payloadSize}`);
+    const suffixBody = Buffer.from(await suffixRes.arrayBuffer());
+    assert.deepEqual(suffixBody, fullPayload.subarray(payloadSize - 512));
+
+    // 4e. Unsatisfiable range returns 416
+    const badRangeRes = await fetch(streamUrl, { headers: { Range: `bytes=${payloadSize + 100}-` } });
+    assert.equal(badRangeRes.status, 416);
+    assert.equal(badRangeRes.headers.get('content-range'), `bytes */${payloadSize}`);
+
+    // 4f. HEAD request returns Content-Length without calling iterDownload
+    iterCalls.length = 0;
+    const headRes = await fetch(streamUrl, { method: 'HEAD', headers: { Range: 'bytes=0-999' } });
+    assert.equal(headRes.status, 206);
+    assert.equal(headRes.headers.get('content-length'), '1000');
+    assert.equal(iterCalls.length, 0);
+
+    // 4g. Unknown-size spillover streams cleanly once threshold (32KB) is exceeded
+    const unknownRes = await fetch(`${streamUrl}?mode=unknown`);
+    assert.equal(unknownRes.status, 200);
+    const unknownBody = Buffer.from(await unknownRes.arrayBuffer());
+    assert.deepEqual(unknownBody, fullPayload);
+
+    assert.equal(downloadMediaCalled, 0);
+  } finally {
+    await new Promise<void>((r) => streamSrv.close(() => r()));
+  }
+});
+
+test('P0 #3: chat-scoped msg_tg IDs, cross-chat/cross-account DELETE guards, and client deleted-ID isolation', async () => {
+  const crypto = await import('node:crypto');
+  const http = await import('node:http');
+  const { readFileSync } = await import('node:fs');
+  const { resolve } = await import('node:path');
+  const {
+    app,
+    buildTelegramRealtimeMessageId,
+    extractEmbeddedChatIdFromMessageId,
+    isSameCanonicalChatId,
+    resolveTelegramMessageNumericId,
+  } = await import('../server.ts');
+  const { db, initDatabase } = await import('./db.ts');
+  await initDatabase();
+
+  // 1. Distinct IDs across channels sharing the same numeric message.id
+  const chAId = buildTelegramRealtimeMessageId('1001', '-100111', 42);
+  const chBId = buildTelegramRealtimeMessageId('1001', 'tg_-100222', 42);
+  const dmId = buildTelegramRealtimeMessageId('1001', '9988', 42);
+  assert.equal(chAId, 'msg_tg_1001_tg_-100111_42');
+  assert.equal(chBId, 'msg_tg_1001_tg_-100222_42');
+  assert.equal(dmId, 'msg_tg_1001_tg_9988_42');
+  assert.notEqual(chAId, chBId);
+
+  assert.equal(extractEmbeddedChatIdFromMessageId(chAId), 'tg_-100111');
+  assert.equal(extractEmbeddedChatIdFromMessageId(chBId), 'tg_-100222');
+  assert.equal(extractEmbeddedChatIdFromMessageId(dmId), 'tg_9988');
+  assert.equal(extractEmbeddedChatIdFromMessageId('msg_tg_1001_42'), null);
+  assert.equal(extractEmbeddedChatIdFromMessageId('msg_tg_42'), null);
+
+  assert.equal(resolveTelegramMessageNumericId(chAId), 42);
+  assert.equal(resolveTelegramMessageNumericId(dmId), 42);
+  assert.equal(resolveTelegramMessageNumericId('msg_tg_1001_42'), 42);
+  assert.equal(resolveTelegramMessageNumericId('msg_tg_42'), 42);
+
+  assert.equal(isSameCanonicalChatId('-100111', 'tg_-100111'), true);
+  assert.equal(isSameCanonicalChatId('tg_-100111', 'tg_-100222'), false);
+
+  // 2. Real HTTP integration test against Express DELETE /api/messages/:id and batch-delete
+  const prevJwtSecret = process.env.JWT_SECRET;
+  const testSecret = `p0_3_test_secret_${Date.now()}`;
+  process.env.JWT_SECRET = testSecret;
+
+  const signTestJwt = (payload: object) => {
+    const h = Buffer.from(JSON.stringify({ alg: 'HS256', typ: 'JWT' })).toString('base64url');
+    const p = Buffer.from(JSON.stringify(payload)).toString('base64url');
+    const sig = crypto.createHmac('sha256', testSecret).update(`${h}.${p}`).digest('base64url');
+    return `${h}.${p}.${sig}`;
+  };
+  const futureExp = Math.floor(Date.now() / 1000) + 3600;
+  const jwt = signTestJwt({ sub: 'tester', username: 'tester', role: 'member', exp: futureExp });
+
+  const srv = http.createServer(app);
+  await new Promise<void>((r) => srv.listen(0, '127.0.0.1', () => r()));
+  const port = (srv.address() as any).port;
+  const baseUrl = `http://127.0.0.1:${port}`;
+
+  const msgLocalA = `msg_local_p03_${Date.now()}`;
+  const msgTgA = buildTelegramRealtimeMessageId('1001', 'tg_-100111', 42);
+  const msgTgB = buildTelegramRealtimeMessageId('1001', 'tg_-100222', 42);
+  const now = Date.now();
+
+  try {
+    await db
+      .prepare(
+        `INSERT INTO messages (id, chat_id, account_id, sender, text, timestamp, created_at, delivery_status, telegram_message_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      )
+      .run(msgLocalA, 'tg_-100111', 'acc_tg_1001', 'me', 'channel A draft', '12:00', now, 'failed', null);
+    await db
+      .prepare(
+        `INSERT INTO messages (id, chat_id, account_id, sender, text, timestamp, created_at, delivery_status, telegram_message_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      )
+      .run(msgTgA, 'tg_-100111', 'acc_tg_1001', 'peer', 'channel A msg #42', '12:01', now + 1, 'delivered', 42);
+    await db
+      .prepare(
+        `INSERT INTO messages (id, chat_id, account_id, sender, text, timestamp, created_at, delivery_status, telegram_message_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      )
+      .run(msgTgB, 'tg_-100222', 'acc_tg_1001', 'peer', 'channel B msg #42', '12:02', now + 2, 'delivered', 42);
+
+    const headers = {
+      Authorization: `Bearer ${jwt}`,
+      'Content-Type': 'application/json',
+    };
+
+    // 2a. Embedded chatId mismatch -> 403, Channel A untouched
+    const crossEmbedRes = await fetch(
+      `${baseUrl}/api/messages/${encodeURIComponent(msgTgA)}?chatId=tg_-100222&accountId=acc_tg_1001&localOnly=true`,
+      { method: 'DELETE', headers }
+    );
+    assert.equal(crossEmbedRes.status, 403);
+    const rowTgAAfter1 = await db.prepare('SELECT id FROM messages WHERE id = ?').get(msgTgA);
+    assert.ok(rowTgAAfter1, 'Channel A message must not be deleted on embedded chatId mismatch');
+
+    // 2b. DB chat_id mismatch on local draft -> 403, Channel A draft untouched
+    const crossDbChatRes = await fetch(
+      `${baseUrl}/api/messages/${encodeURIComponent(msgLocalA)}?chatId=tg_-100222&accountId=acc_tg_1001&localOnly=true`,
+      { method: 'DELETE', headers }
+    );
+    assert.equal(crossDbChatRes.status, 403);
+    const rowLocalAAfter1 = await db.prepare('SELECT id FROM messages WHERE id = ?').get(msgLocalA);
+    assert.ok(rowLocalAAfter1, 'Channel A draft must not be deleted on DB chat_id mismatch');
+
+    // 2c. Cross-account mismatch even under isMaster JWT -> 403, Account 1 draft untouched
+    const crossAccRes = await fetch(
+      `${baseUrl}/api/messages/${encodeURIComponent(msgLocalA)}?chatId=tg_-100111&accountId=acc_tg_2002&localOnly=true`,
+      { method: 'DELETE', headers }
+    );
+    assert.equal(crossAccRes.status, 403);
+    const rowLocalAAfter2 = await db.prepare('SELECT id FROM messages WHERE id = ?').get(msgLocalA);
+    assert.ok(rowLocalAAfter2, 'Account 1 message must not be deleted when claiming Account 2');
+
+    // 2d. Batch delete rejects cross-chat embedded ID -> 403, Channel A untouched
+    const crossBatchRes = await fetch(`${baseUrl}/api/telegram/user/messages/batch-delete`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        accountId: 'acc_tg_1001',
+        chatId: 'tg_-100222',
+        items: [{ id: msgTgA, telegramMessageId: 42, localOnly: true }],
+      }),
+    });
+    assert.equal(crossBatchRes.status, 403);
+    const rowTgAAfter2 = await db.prepare('SELECT id FROM messages WHERE id = ?').get(msgTgA);
+    assert.ok(rowTgAAfter2, 'Batch delete must reject cross-chat embedded ID');
+
+    // 2e. Matching (id, chatId, accountId) deletes ONLY target draft row; Channel A & B other rows stay intact
+    const validDelRes = await fetch(
+      `${baseUrl}/api/messages/${encodeURIComponent(msgLocalA)}?chatId=tg_-100111&accountId=acc_tg_1001&localOnly=true`,
+      { method: 'DELETE', headers }
+    );
+    assert.equal(validDelRes.status, 200);
+    const rowLocalAAfter3 = await db.prepare('SELECT id FROM messages WHERE id = ?').get(msgLocalA);
+    assert.equal(rowLocalAAfter3, undefined);
+    assert.ok(await db.prepare('SELECT id FROM messages WHERE id = ?').get(msgTgA));
+    assert.ok(await db.prepare('SELECT id FROM messages WHERE id = ?').get(msgTgB));
+  } finally {
+    await db.prepare('DELETE FROM messages WHERE id IN (?, ?, ?)').run(msgLocalA, msgTgA, msgTgB);
+    await new Promise<void>((r) => srv.close(() => r()));
+    if (prevJwtSecret === undefined) {
+      delete process.env.JWT_SECRET;
+    } else {
+      process.env.JWT_SECRET = prevJwtSecret;
+    }
+  }
+
+  // 3. Client-side tombstone scoping & ChatArea contract
+  const store = new Map<string, string>();
+  const prevLocalStorage = (globalThis as any).localStorage;
+  (globalThis as any).localStorage = {
+    get length() {
+      return store.size;
+    },
+    key(i: number) {
+      return Array.from(store.keys())[i] ?? null;
+    },
+    getItem(k: string) {
+      return store.get(k) ?? null;
+    },
+    setItem(k: string, v: string) {
+      store.set(k, String(v));
+    },
+    removeItem(k: string) {
+      store.delete(k);
+    },
+    clear() {
+      store.clear();
+    },
+  };
+  try {
+    const {
+      isMessageDeleted,
+      recordDeletedMessageId,
+      resolveClientTelegramMessageId,
+    } = await import('../src/services/apiService.ts');
+
+    assert.equal(resolveClientTelegramMessageId({ id: 'msg_tg_1001_tg_-100111_42' }), 42);
+    assert.equal(resolveClientTelegramMessageId({ id: 'msg_tg_1001_42' }), 42);
+
+    // Deleting legacy msg_tg_1001_42 in Channel B must NOT hide msg_tg_1001_42 in Channel A
+    recordDeletedMessageId('msg_tg_1001_42', 'acc_tg_1001', 'tg_-100222');
+    assert.equal(isMessageDeleted('msg_tg_1001_42', 'acc_tg_1001', 'tg_-100222'), true);
+    assert.equal(isMessageDeleted('msg_tg_1001_42', 'acc_tg_1001', 'tg_-100111'), false);
+
+    // Deleting new chat-scoped ID in Channel B does not affect Channel A or Account 2
+    recordDeletedMessageId('msg_tg_1001_tg_-100222_42', 'acc_tg_1001', 'tg_-100222');
+    assert.equal(isMessageDeleted('msg_tg_1001_tg_-100222_42', 'acc_tg_1001', 'tg_-100222'), true);
+    assert.equal(isMessageDeleted('msg_tg_1001_tg_-100111_42', 'acc_tg_1001', 'tg_-100111'), false);
+    assert.equal(isMessageDeleted('msg_tg_1001_tg_-100222_42', 'acc_tg_2002', 'tg_-100222'), false);
+  } finally {
+    if (prevLocalStorage === undefined) {
+      delete (globalThis as any).localStorage;
+    } else {
+      (globalThis as any).localStorage = prevLocalStorage;
+    }
+  }
+
+  const chatAreaSrc = readFileSync(resolve(process.cwd(), 'src/components/ChatArea.tsx'), 'utf8');
+  assert.equal(chatAreaSrc.includes('!isMessageDeleted(r.id, currentAccountId, chat?.id)'), true);
+});
+
+test('P1 #4: SQLite file/reaction columns, signed URL refresh endpoint, sticker persistence, outbound media echo prevention, and zero voice Base64', async () => {
+  const { readFileSync } = await import('node:fs');
+  const { resolve } = await import('node:path');
+  const http = await import('node:http');
+  const { createHmac } = await import('node:crypto');
+  const { db } = await import('../server/db.ts');
+  const {
+    app,
+    upsertSyncedMessageToDb,
+    signTelegramResourceUrl,
+    isSignedResourceUrlExpiring,
+    resignTelegramResourceUrl,
+    markOutboundMessageSent,
+    markOutboundTelegramMessageIdSent,
+    isRecentOutboundEcho,
+  } = await import('../server.ts');
+
+  // 1. Verify SQLite schema columns exist on messages table
+  const tableInfo = (await db.prepare('PRAGMA table_info(messages)').all()) as Array<{ name: string }>;
+  const colNames = new Set(tableInfo.map((c) => c.name));
+  for (const col of ['is_file', 'file_name', 'file_size', 'file_url', 'reactions_json']) {
+    assert.ok(colNames.has(col), `messages table must contain column ${col}`);
+  }
+
+  const now = Date.now();
+  const chatId = `tg_p14_test_${now}`;
+  const accId = 'acc_tg_8801';
+  const fileMsgId = `msg_file_${now}`;
+  const expiringUrl = `/api/telegram/user/media/${chatId}/501?accountId=${accId}&download=1&exp=${now - 60000}&sig=oldbad`;
+
+  const prevJwtSecret = process.env.JWT_SECRET;
+  process.env.JWT_SECRET = 'p14_p15_test_jwt_secret_hs256';
+  const headerB64 = Buffer.from(JSON.stringify({ alg: 'HS256', typ: 'JWT' })).toString('base64url');
+  const payloadB64 = Buffer.from(
+    JSON.stringify({ sub: 'p14_user', username: 'p14_user', role: 'admin', exp: Math.floor(Date.now() / 1000) + 3600 })
+  ).toString('base64url');
+  const sigB64 = createHmac('sha256', process.env.JWT_SECRET).update(`${headerB64}.${payloadB64}`).digest('base64url');
+  const jwt = `${headerB64}.${payloadB64}.${sigB64}`;
+
+  const srv = http.createServer(app);
+  await new Promise<void>((resolveListen) => srv.listen(0, '127.0.0.1', () => resolveListen()));
+  const addr = srv.address() as any;
+  const baseUrl = `http://127.0.0.1:${addr.port}`;
+
+  try {
+    // 2. Upsert message with file metadata + reactions
+    const saved = await upsertSyncedMessageToDb(
+      {
+        id: fileMsgId,
+        telegramMessageId: 501,
+        chatId,
+        accountId: accId,
+        sender: 'peer',
+        senderName: 'Client',
+        text: '[文件] contract.pdf',
+        isFile: true,
+        fileName: 'contract.pdf',
+        fileSize: '2.4 MB',
+        fileUrl: expiringUrl,
+        reactions: { '👍': 2, '🔥': 1 },
+        myReactions: ['👍'],
+        createdAt: now,
+        timestamp: '10:00',
+        deliveryStatus: 'delivered',
+      },
+      chatId,
+      accId
+    );
+    assert.equal(saved, true);
+
+    // Partial upsert without reaction fields must preserve existing DB reactions_json
+    await upsertSyncedMessageToDb(
+      {
+        id: fileMsgId,
+        telegramMessageId: 501,
+        chatId,
+        accountId: accId,
+        sender: 'peer',
+        senderName: 'Client',
+        text: '[文件] contract.pdf',
+        isFile: true,
+        fileName: 'contract.pdf',
+        fileSize: '2.4 MB',
+        fileUrl: expiringUrl,
+        createdAt: now,
+        timestamp: '10:00',
+        deliveryStatus: 'delivered',
+      },
+      chatId,
+      accId
+    );
+    const rowAfterPartial = (await db.prepare('SELECT is_file, file_name, file_size, file_url, reactions_json FROM messages WHERE id = ?').get(fileMsgId)) as any;
+    assert.equal(rowAfterPartial.is_file, 1);
+    assert.equal(rowAfterPartial.file_name, 'contract.pdf');
+    assert.equal(rowAfterPartial.file_size, '2.4 MB');
+    assert.equal(rowAfterPartial.file_url, expiringUrl);
+    assert.ok(rowAfterPartial.reactions_json && rowAfterPartial.reactions_json.includes('👍'));
+
+    // 3. GET /api/messages/:chatId reads file fields + reactions and auto-resigns expiring signed URL
+    const headers = { Authorization: `Bearer ${jwt}`, 'Content-Type': 'application/json' };
+    const msgRes = await fetch(`${baseUrl}/api/messages/${encodeURIComponent(chatId)}?accountId=${accId}`, { headers });
+    assert.equal(msgRes.status, 200);
+    const msgs = (await msgRes.json()) as any[];
+    assert.equal(msgs.length, 1);
+    assert.equal(msgs[0].isFile, true);
+    assert.equal(msgs[0].fileName, 'contract.pdf');
+    assert.equal(msgs[0].fileSize, '2.4 MB');
+    assert.deepEqual(msgs[0].reactions, { '👍': 2, '🔥': 1 });
+    assert.deepEqual(msgs[0].myReactions, ['👍']);
+    assert.ok(typeof msgs[0].fileUrl === 'string' && !msgs[0].fileUrl.includes('sig=oldbad'));
+    assert.equal(isSignedResourceUrlExpiring(msgs[0].fileUrl), false);
+
+    // Explicit clear reactions persists '{}'
+    await upsertSyncedMessageToDb(
+      {
+        id: fileMsgId,
+        telegramMessageId: 501,
+        chatId,
+        accountId: accId,
+        sender: 'peer',
+        text: '[文件] contract.pdf',
+        reactions: {},
+        myReactions: [],
+        createdAt: now,
+        deliveryStatus: 'delivered',
+      },
+      chatId,
+      accId
+    );
+    const rowCleared = (await db.prepare('SELECT reactions_json FROM messages WHERE id = ?').get(fileMsgId)) as any;
+    assert.equal(rowCleared.reactions_json, '{}');
+
+    // 4. Signed URL expiry & POST /api/telegram/resource/refresh-url
+    const freshMediaUrl = signTelegramResourceUrl(`/api/telegram/user/avatar/${chatId}`, accId);
+    assert.equal(isSignedResourceUrlExpiring(freshMediaUrl), false);
+    assert.equal(isSignedResourceUrlExpiring(expiringUrl), true);
+    assert.equal(resignTelegramResourceUrl('/api/telegram/user/media/../etc/passwd?exp=1&sig=a', accId), null);
+
+    const refreshRes = await fetch(`${baseUrl}/api/telegram/resource/refresh-url`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        accountId: accId,
+        urls: [expiringUrl, 'https://evil.example.com/phish.png', '/api/telegram/user/media/../secret?exp=1&sig=x'],
+      }),
+    });
+    assert.equal(refreshRes.status, 200);
+    const refreshJson = (await refreshRes.json()) as any;
+    assert.equal(refreshJson.ok, true);
+    assert.ok(refreshJson.refreshed[expiringUrl]);
+    assert.equal(isSignedResourceUrlExpiring(refreshJson.refreshed[expiringUrl]), false);
+    assert.equal(refreshJson.refreshed['https://evil.example.com/phish.png'], undefined);
+    assert.equal(refreshJson.refreshed['/api/telegram/user/media/../secret?exp=1&sig=x'], undefined);
+
+    // 5. Outbound echo suppression works by content AND telegramMessageId for media/stickers
+    const echoChat = `tg_echo_${now}`;
+    markOutboundMessageSent(echoChat, '🎤 语音消息', accId);
+    assert.equal(isRecentOutboundEcho(echoChat, '🎤 语音消息', accId), true);
+    markOutboundTelegramMessageIdSent(echoChat, 99123, accId);
+    assert.equal(isRecentOutboundEcho(echoChat, '[贴纸]', accId, 99123), true);
+    assert.equal(isRecentOutboundEcho(echoChat, '[贴纸]', accId, 99124), false);
+
+    // 6. Client signed-URL helpers
+    const { isSignedResourceUrl, parseSignedResourceExpiry, isSignedResourceUrlExpiringSoon } = await import(
+      '../src/services/apiService.ts'
+    );
+    assert.equal(isSignedResourceUrl(expiringUrl), true);
+    assert.equal(isSignedResourceUrl('data:audio/ogg;base64,abc'), false);
+    assert.equal(parseSignedResourceExpiry(expiringUrl), now - 60000);
+    assert.equal(isSignedResourceUrlExpiringSoon(expiringUrl), true);
+    assert.equal(isSignedResourceUrlExpiringSoon(freshMediaUrl), false);
+
+    // 7. Source contract checks: zero realtime voice Base64, /send-sticker DB + markOutboundMessageSent, silent refresh wired
+    const serverSrc = readFileSync(resolve(process.cwd(), 'server.ts'), 'utf8');
+    const apiSrc = readFileSync(resolve(process.cwd(), 'src/services/apiService.ts'), 'utf8');
+    assert.equal(serverSrc.includes('data:audio/ogg;base64,'), false);
+    assert.ok(serverSrc.includes("app.post('/api/telegram/user/send-sticker'") && serverSrc.includes('markOutboundTelegramMessageIdSent'));
+    assert.ok(apiSrc.includes('/api/telegram/resource/refresh-url'));
+  } finally {
+    await db.prepare('DELETE FROM messages WHERE id = ?').run(fileMsgId);
+    await new Promise<void>((r) => srv.close(() => r()));
+    if (prevJwtSecret === undefined) delete process.env.JWT_SECRET;
+    else process.env.JWT_SECRET = prevJwtSecret;
+  }
+});
+
+test('P1 #5: UpdateMessageReactions realtime handler, SQLite pagination fallback, independent chat lang, forward sync, Saved Messages merge, empty-cloud prune, and info drawer video/file UI', async () => {
+  const { readFileSync } = await import('node:fs');
+  const { resolve } = await import('node:path');
+  const http = await import('node:http');
+  const { createHmac } = await import('node:crypto');
+  const { Api } = await import('telegram');
+  const { db } = await import('../server/db.ts');
+  const {
+    app,
+    upsertSyncedMessageToDb,
+    querySqlitePaginatedMessagesFallback,
+    attachTelegramClientMessageListener,
+    pendingLocalUpdates,
+  } = await import('../server.ts');
+
+  const now = Date.now();
+  const chatId = `tg_p15_test_${now}`;
+  const accId = 'acc_tg_8802';
+  const idsToClean: string[] = [];
+
+  const prevJwtSecret = process.env.JWT_SECRET;
+  process.env.JWT_SECRET = 'p15_test_jwt_secret_hs256';
+  const headerB64 = Buffer.from(JSON.stringify({ alg: 'HS256', typ: 'JWT' })).toString('base64url');
+  const payloadB64 = Buffer.from(
+    JSON.stringify({ sub: 'p15_user', username: 'p15_user', role: 'admin', exp: Math.floor(Date.now() / 1000) + 3600 })
+  ).toString('base64url');
+  const sigB64 = createHmac('sha256', process.env.JWT_SECRET).update(`${headerB64}.${payloadB64}`).digest('base64url');
+  const jwt = `${headerB64}.${payloadB64}.${sigB64}`;
+
+  const srv = http.createServer(app);
+  await new Promise<void>((resolveListen) => srv.listen(0, '127.0.0.1', () => resolveListen()));
+  const addr = srv.address() as any;
+  const baseUrl = `http://127.0.0.1:${addr.port}`;
+
+  try {
+    // 1. Seed 5 SQLite messages and verify pagination fallback + GET route offline fallback
+    for (let i = 1; i <= 5; i++) {
+      const mId = `msg_p15_${now}_${i}`;
+      idsToClean.push(mId);
+      await upsertSyncedMessageToDb(
+        {
+          id: mId,
+          telegramMessageId: i * 10,
+          chatId,
+          accountId: accId,
+          sender: i % 2 === 0 ? 'me' : 'peer',
+          senderName: i % 2 === 0 ? 'Me' : 'Peer',
+          text: `History page msg #${i}`,
+          createdAt: now + i * 1000,
+          timestamp: '11:00',
+          deliveryStatus: 'delivered',
+        },
+        chatId,
+        accId
+      );
+    }
+
+    const page1 = await querySqlitePaginatedMessagesFallback(chatId, accId, { limit: 2, offsetId: 50 });
+    assert.equal(page1.messages.length, 2);
+    assert.equal(page1.messages[0].telegramMessageId, 30);
+    assert.equal(page1.messages[1].telegramMessageId, 40);
+    assert.equal(page1.hasMore, true);
+
+    const page2 = await querySqlitePaginatedMessagesFallback(chatId, accId, { limit: 2, offsetId: 30 });
+    assert.equal(page2.messages.length, 2);
+    assert.equal(page2.messages[0].telegramMessageId, 10);
+    assert.equal(page2.messages[1].telegramMessageId, 20);
+    assert.equal(page2.hasMore, false);
+
+    // Offline HTTP GET /api/telegram/user/messages/:chatId seamlessly falls back to SQLite pagination
+    const offlinePageRes = await fetch(
+      `${baseUrl}/api/telegram/user/messages/${encodeURIComponent(chatId)}?accountId=${accId}&limit=2&offsetId=50`,
+      { headers: { Authorization: `Bearer ${jwt}` } }
+    );
+    assert.equal(offlinePageRes.status, 200);
+    const offlinePageJson = (await offlinePageRes.json()) as any;
+    assert.equal(offlinePageJson.ok, true);
+    assert.equal(offlinePageJson.fromLocalFallback, true);
+    assert.equal(offlinePageJson.messages.length, 2);
+    assert.equal(offlinePageJson.messages[0].telegramMessageId, 30);
+    assert.equal(offlinePageJson.hasMore, true);
+
+    // 2. Verify Api.UpdateMessageReactions listener updates SQLite + pushes pendingLocalUpdates
+    const handlers: Array<(upd: any) => Promise<void> | void> = [];
+    const fakeClient: any = {
+      addEventHandler(fn: any) {
+        handlers.push(fn);
+      },
+    };
+    attachTelegramClientMessageListener(fakeClient, '+10000000000', '8802');
+    const rawUpdateHandler = handlers[1];
+    assert.ok(typeof rawUpdateHandler === 'function');
+
+    const numericChat = `tg_777001`;
+    const reactedMsgId = `msg_react_${now}`;
+    idsToClean.push(reactedMsgId);
+    await upsertSyncedMessageToDb(
+      {
+        id: reactedMsgId,
+        telegramMessageId: 404,
+        chatId: numericChat,
+        accountId: accId,
+        sender: 'peer',
+        text: 'react to me',
+        createdAt: now,
+        deliveryStatus: 'delivered',
+      },
+      numericChat,
+      accId
+    );
+
+    const prevPendingLen = pendingLocalUpdates.length;
+    await rawUpdateHandler(
+      new Api.UpdateMessageReactions({
+        peer: new Api.PeerUser({ userId: 777001 as any }),
+        msgId: 404,
+        reactions: new Api.MessageReactions({
+          results: [
+            new Api.ReactionCount({
+              reaction: new Api.ReactionEmoji({ emoticon: '🔥' }),
+              count: 3,
+              chosenOrder: 1,
+            }),
+          ],
+        }),
+      })
+    );
+    const pushedReact = pendingLocalUpdates
+      .slice(prevPendingLen)
+      .find((u) => u.type === 'reactions' && u.telegramMessageId === 404 && u.chatId === numericChat);
+    assert.ok(pushedReact, 'UpdateMessageReactions must push reactions update to pendingLocalUpdates');
+    assert.deepEqual(pushedReact.reactions, { '🔥': 3 });
+    assert.deepEqual(pushedReact.myReactions, ['🔥']);
+
+    const dbReactRow = (await db.prepare('SELECT reactions_json FROM messages WHERE id = ?').get(reactedMsgId)) as any;
+    assert.ok(dbReactRow?.reactions_json);
+    const parsedReactRow = JSON.parse(dbReactRow.reactions_json);
+    assert.deepEqual(parsedReactRow.reactions, { '🔥': 3 });
+    assert.deepEqual(parsedReactRow.myReactions, ['🔥']);
+
+    // Clear queued test update cleanly
+    for (let i = pendingLocalUpdates.length - 1; i >= prevPendingLen; i--) {
+      if (pendingLocalUpdates[i]?.telegramMessageId === 404 && pendingLocalUpdates[i]?.chatId === numericChat) {
+        pendingLocalUpdates.splice(i, 1);
+      }
+    }
+
+    // 3. Frontend & drawer structural verification for all 6 P1 #5 items
+    const appSrc = readFileSync(resolve(process.cwd(), 'src/App.tsx'), 'utf8');
+    const drawerSrc = readFileSync(resolve(process.cwd(), 'src/components/TelegramChatInfoDrawer.tsx'), 'utf8');
+    const serverSrc = readFileSync(resolve(process.cwd(), 'server.ts'), 'utf8');
+
+    // ① handleUpdateChatLanguage does not overwrite global defaultSourceLang/defaultTargetLang
+    const langHandlerSlice = appSrc.slice(
+      appSrc.indexOf('const handleUpdateChatLanguage'),
+      appSrc.indexOf('const handleSaveCustomLLMConfig')
+    );
+    assert.equal(langHandlerSlice.includes('setTranslationSettings'), false);
+
+    // ② handleForwardMessages uses formatChatMessageSummary (video/file) and fetches target chat messages
+    const fwdSlice = appSrc.slice(
+      appSrc.indexOf('const handleForwardMessages'),
+      appSrc.indexOf('const handleLoadOlderMessages')
+    );
+    assert.equal(fwdSlice.includes('formatChatMessageSummary'), true);
+    assert.equal(fwdSlice.includes('fetchTelegramCloudMessagesApi(payload.toChatId'), true);
+
+    // ③ chat_saved_messages uses mergeCloudMessagesWithLocal
+    const savedSlice = appSrc.slice(
+      appSrc.indexOf("if (chatId === 'chat_saved_messages')"),
+      appSrc.indexOf('setActiveChatId(chatId);')
+    );
+    assert.equal(savedSlice.includes('mergeCloudMessagesWithLocal'), true);
+
+    // ④ allowEmptyCloudPrune cleans delivered messages while keeping drafts
+    assert.equal(appSrc.includes('allowEmptyCloudPrune'), true);
+    assert.equal(serverSrc.includes("COALESCE(delivery_status, 'delivered') = 'delivered'"), true);
+
+    // ⑥ TelegramChatInfoDrawer includes video in mediaMessages + renders <video> + handles missing fileUrl without href="#"
+    assert.equal(drawerSrc.includes('m.isVideo || m.videoUrl'), true);
+    assert.equal(drawerSrc.includes('<video'), true);
+    assert.equal(drawerSrc.includes('链接暂不可用'), true);
+  } finally {
+    if (idsToClean.length > 0) {
+      const ph = idsToClean.map(() => '?').join(', ');
+      await db.prepare(`DELETE FROM messages WHERE id IN (${ph})`).run(...idsToClean);
+    }
+    await new Promise<void>((r) => srv.close(() => r()));
+    if (prevJwtSecret === undefined) delete process.env.JWT_SECRET;
+    else process.env.JWT_SECRET = prevJwtSecret;
+  }
+});
+
+test('P1/P2 #6: handleSyncContacts title sync, group read tooltip, drawer add-to-contacts, and unified delete video/file summaries', async () => {
+  const { readFileSync } = await import('node:fs');
+  const { resolve } = await import('node:path');
+  const http = await import('node:http');
+  const { app } = await import('../server.ts');
+
+  const appSrc = readFileSync(resolve(process.cwd(), 'src/App.tsx'), 'utf8');
+  const chatAreaSrc = readFileSync(resolve(process.cwd(), 'src/components/ChatArea.tsx'), 'utf8');
+  const drawerSrc = readFileSync(resolve(process.cwd(), 'src/components/TelegramChatInfoDrawer.tsx'), 'utf8');
+  const serverSrc = readFileSync(resolve(process.cwd(), 'server.ts'), 'utf8');
+
+  // ① handleSyncContacts updates private chat title & avatarInitial from ct.name
+  const syncSlice = appSrc.slice(
+    appSrc.indexOf('const handleSyncContacts ='),
+    appSrc.indexOf('const handleRemoveContact =')
+  );
+  assert.equal(syncSlice.includes('title: nextName'), true);
+  assert.equal(syncSlice.includes('!c.isGroup &&'), true);
+  assert.equal(syncSlice.includes('!c.isChannel'), true);
+
+  // ② Group read tooltip distinguishes private ('对方已读') vs group ('已有成员已读')
+  assert.equal(chatAreaSrc.includes("chat.isGroup ? '已有成员已读' : '对方已读'"), true);
+  assert.equal(chatAreaSrc.includes("chat.isGroup ? '已送达（暂未有成员已读）' : '已送达（对方未读）'"), true);
+
+  // ③ TelegramChatInfoDrawer renders '添加到通讯录' for non-friend private chats & passes chatId to backend
+  assert.equal(drawerSrc.includes('添加到通讯录'), true);
+  assert.equal(drawerSrc.includes('addTelegramUserContactApi'), true);
+  assert.equal(drawerSrc.includes('chatId: chat.id'), true);
+  assert.equal(drawerSrc.includes('!fullInfo.isContact'), true);
+  assert.equal(chatAreaSrc.includes('onAddContact={onAddContact}'), true);
+  assert.equal(appSrc.includes('onAddContact={handleAddContact}'), true);
+  assert.equal(serverSrc.includes('const { name, phone, username, chatId } = req.body || {};'), true);
+
+  // ④ Delete handlers & incoming updates uniformly use formatChatMessageSummary (covers [视频] / [文件])
+  const delSlice = appSrc.slice(
+    appSrc.indexOf('const handleDeleteMessage ='),
+    appSrc.indexOf('const handleBatchDeleteMessages =')
+  );
+  const batchDelSlice = appSrc.slice(
+    appSrc.indexOf('const handleBatchDeleteMessages ='),
+    appSrc.indexOf('const handleForwardMessages =')
+  );
+  assert.equal(delSlice.includes('formatChatMessageSummary(last)'), true);
+  assert.equal(batchDelSlice.includes('formatChatMessageSummary(last)'), true);
+  assert.equal(delSlice.includes("last.isAudio ? '🎤 语音消息' : last.isImage"), false);
+  assert.equal(batchDelSlice.includes("last.isAudio ? '🎤 语音消息' : last.isImage"), false);
+
+  // Also test /api/telegram/user/contacts/add validation when chatId is passed without phone/username on disconnected test env
+  const prevJwtSecret = process.env.JWT_SECRET;
+  process.env.JWT_SECRET = 'p1_p2_6_test_secret';
+  const srv = http.createServer(app);
+  await new Promise<void>((r) => srv.listen(0, '127.0.0.1', () => r()));
+  const port = (srv.address() as any).port;
+  try {
+    const { createHmac } = await import('node:crypto');
+    const headerB64 = Buffer.from(JSON.stringify({ alg: 'HS256', typ: 'JWT' })).toString('base64url');
+    const payloadB64 = Buffer.from(
+      JSON.stringify({ sub: 'p1_p2_6_tester', username: 'tester', role: 'admin', exp: Math.floor(Date.now() / 1000) + 3600 })
+    ).toString('base64url');
+    const sigB64 = createHmac('sha256', process.env.JWT_SECRET).update(`${headerB64}.${payloadB64}`).digest('base64url');
+    const token = `${headerB64}.${payloadB64}.${sigB64}`;
+    const res = await fetch(`http://127.0.0.1:${port}/api/telegram/user/contacts/add`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({
+        accountId: 'acc_tg_offline_test',
+        chatId: 'tg_123456',
+        name: 'Test Contact',
+      }),
+    });
+    const body: any = await res.json();
+    assert.equal(res.status, 400);
+    assert.equal(body.ok, false);
+    assert.match(String(body.error), /未在线连接/);
+  } finally {
+    await new Promise<void>((r) => srv.close(() => r()));
+    if (prevJwtSecret === undefined) delete process.env.JWT_SECRET;
+    else process.env.JWT_SECRET = prevJwtSecret;
+  }
+});
+
 process.on('beforeExit', () => {
   process.exit(0);
 });

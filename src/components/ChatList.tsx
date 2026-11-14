@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import {
   Search,
   Check,
@@ -23,6 +23,12 @@ import {
   RefreshCw
 } from 'lucide-react';
 import { Chat } from '../types';
+import {
+  isSignedResourceUrl,
+  isSignedResourceUrlExpiringSoon,
+  refreshSignedResourceUrlsApi,
+  ensureFreshSignedResourceUrl,
+} from '../services/apiService';
 
 interface ChatListProps {
   chats: Chat[];
@@ -42,6 +48,7 @@ interface ChatListProps {
   isReconnecting?: boolean;
   onReconnectAccount?: () => void;
   onReloginCurrentAccount?: () => void;
+  onRefreshMediaUrls?: (urls: string[]) => Promise<Record<string, string>>;
 }
 
 interface ContextMenuState {
@@ -68,6 +75,7 @@ export const ChatList: React.FC<ChatListProps> = ({
   isReconnecting,
   onReconnectAccount,
   onReloginCurrentAccount,
+  onRefreshMediaUrls,
 }) => {
   // 1. Resizable Width State with Persistence
   const [width, setWidth] = useState<number>(() => {
@@ -90,6 +98,82 @@ export const ChatList: React.FC<ChatListProps> = ({
   const [chatToDelete, setChatToDelete] = useState<Chat | null>(null);
   const [revokeDeleteChat, setRevokeDeleteChat] = useState(false);
   const [previewChat, setPreviewChat] = useState<Chat | null>(null);
+  const [refreshedAvatars, setRefreshedAvatars] = useState<Record<string, string>>({});
+  const attemptedAvatarRefreshRef = useRef<Set<string>>(new Set());
+
+  const resolveAvatarUrl = useCallback(
+    (rawUrl?: string) => {
+      if (!rawUrl) return rawUrl;
+      return refreshedAvatars[rawUrl] || rawUrl;
+    },
+    [refreshedAvatars]
+  );
+
+  const triggerAvatarRefresh = useCallback(
+    async (rawUrl?: string, force = false): Promise<string | null> => {
+      if (!rawUrl || !isSignedResourceUrl(rawUrl)) return null;
+      const current = refreshedAvatars[rawUrl] || rawUrl;
+      if (attemptedAvatarRefreshRef.current.has(current)) return null;
+      if (!force && !isSignedResourceUrlExpiringSoon(current)) return current;
+      attemptedAvatarRefreshRef.current.add(rawUrl);
+      attemptedAvatarRefreshRef.current.add(current);
+      try {
+        let nextUrl = '';
+        if (onRefreshMediaUrls) {
+          const map = await onRefreshMediaUrls([current]);
+          nextUrl = map[current] || map[rawUrl] || '';
+        } else {
+          const refreshed = await ensureFreshSignedResourceUrl(current, undefined, { force: true });
+          if (refreshed && refreshed !== current) nextUrl = refreshed;
+        }
+        if (nextUrl && nextUrl !== current) {
+          attemptedAvatarRefreshRef.current.add(nextUrl);
+          setRefreshedAvatars((prev) => ({
+            ...prev,
+            [rawUrl]: nextUrl,
+            [current]: nextUrl,
+          }));
+          return nextUrl;
+        }
+      } catch {}
+      return null;
+    },
+    [onRefreshMediaUrls, refreshedAvatars]
+  );
+
+  useEffect(() => {
+    const expiring: string[] = [];
+    for (const c of chats) {
+      if (!c.avatarUrl) continue;
+      const effective = refreshedAvatars[c.avatarUrl] || c.avatarUrl;
+      if (isSignedResourceUrlExpiringSoon(effective) && !attemptedAvatarRefreshRef.current.has(effective)) {
+        expiring.push(effective);
+      }
+    }
+    const unique = Array.from(new Set(expiring)).slice(0, 40);
+    if (unique.length === 0) return;
+    unique.forEach((u) => attemptedAvatarRefreshRef.current.add(u));
+    let cancelled = false;
+    (async () => {
+      const refreshed = onRefreshMediaUrls
+        ? await onRefreshMediaUrls(unique)
+        : await refreshSignedResourceUrlsApi(unique);
+      if (cancelled || !refreshed || Object.keys(refreshed).length === 0) return;
+      setRefreshedAvatars((prev) => {
+        const next = { ...prev };
+        for (const [oldUrl, newUrl] of Object.entries(refreshed)) {
+          if (newUrl) {
+            attemptedAvatarRefreshRef.current.add(newUrl);
+            next[oldUrl] = newUrl;
+          }
+        }
+        return next;
+      });
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [chats, onRefreshMediaUrls, refreshedAvatars]);
 
   // Drag-to-resize handlers
   const handleMouseDownResize = (e: React.MouseEvent) => {
@@ -461,12 +545,20 @@ export const ChatList: React.FC<ChatListProps> = ({
                         <span className="text-white text-xs font-semibold select-none">{chat.avatarInitial}</span>
                         {chat.avatarUrl && (
                           <img
-                            src={chat.avatarUrl}
+                            src={resolveAvatarUrl(chat.avatarUrl)}
                             alt={chat.title}
                             referrerPolicy="no-referrer"
                             className="w-full h-full object-cover absolute inset-0"
+                            onLoad={(e) => {
+                              e.currentTarget.style.display = '';
+                            }}
                             onError={(e) => {
-                              (e.currentTarget as HTMLElement).style.display = 'none';
+                              const imgEl = e.currentTarget;
+                              void triggerAvatarRefresh(chat.avatarUrl, true).then((nextUrl) => {
+                                if (!nextUrl) {
+                                  imgEl.style.display = 'none';
+                                }
+                              });
                             }}
                           />
                         )}
@@ -739,13 +831,27 @@ export const ChatList: React.FC<ChatListProps> = ({
             <div className="flex items-start justify-between mb-4">
               <div className="flex items-center gap-3">
                 <div
-                  className="w-12 h-12 rounded-full flex items-center justify-center font-bold text-white text-sm overflow-hidden shrink-0"
+                  className="w-12 h-12 rounded-full flex items-center justify-center font-bold text-white text-sm overflow-hidden shrink-0 relative"
                   style={{ backgroundColor: previewChat.avatarBg }}
                 >
-                  {previewChat.avatarUrl ? (
-                    <img src={previewChat.avatarUrl} alt={previewChat.title} className="w-full h-full object-cover" />
-                  ) : (
-                    <span>{previewChat.avatarInitial}</span>
+                  <span>{previewChat.avatarInitial}</span>
+                  {previewChat.avatarUrl && (
+                    <img
+                      src={resolveAvatarUrl(previewChat.avatarUrl)}
+                      alt={previewChat.title}
+                      className="w-full h-full object-cover absolute inset-0"
+                      onLoad={(e) => {
+                        e.currentTarget.style.display = '';
+                      }}
+                      onError={(e) => {
+                        const imgEl = e.currentTarget;
+                        void triggerAvatarRefresh(previewChat.avatarUrl, true).then((nextUrl) => {
+                          if (!nextUrl) {
+                            imgEl.style.display = 'none';
+                          }
+                        });
+                      }}
+                    />
                   )}
                 </div>
                 <div>

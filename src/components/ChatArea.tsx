@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import {
   Send,
   Mic,
@@ -36,7 +36,7 @@ import {
   History,
   ChevronUp,
 } from 'lucide-react';
-import { Chat, Message, TranslationSettings, MasterVoiceprint, TelegramStickerItem } from '../types';
+import { Chat, Message, TranslationSettings, MasterVoiceprint, TelegramStickerItem, TelegramContact } from '../types';
 import { VoiceCloneStudioModal } from './VoiceCloneStudioModal';
 import { TelegramEmojiPicker } from './TelegramEmojiPicker';
 import { TelegramChatInfoDrawer } from './TelegramChatInfoDrawer';
@@ -55,6 +55,10 @@ import {
   isMessageDeleted,
   fetchWithTimeout,
   TELEGRAM_MAX_MEDIA,
+  isSignedResourceUrl,
+  isSignedResourceUrlExpiringSoon,
+  refreshSignedResourceUrlsApi,
+  ensureFreshSignedResourceUrl,
 } from '../services/apiService';
 
 function formatMediaSizeLabel(bytes: number): string {
@@ -233,7 +237,7 @@ interface ChatAreaProps {
   availableChats?: Chat[];
   hasMoreHistory?: boolean;
   onLoadOlderMessages?: (chatId: string, offsetId: number) => Promise<{ ok: boolean; count: number; hasMore: boolean; error?: string }>;
-  onMessagesSynced?: (synced: Message[], meta?: { hasMore?: boolean; readOutboxMaxId?: number }) => void;
+  onMessagesSynced?: (synced: Message[], meta?: { hasMore?: boolean; readOutboxMaxId?: number; fromLocalFallback?: boolean }) => void;
   onOpenKnowledgeEvolution?: () => void;
   onDeleteMessage?: (messageId: string, options?: { revoke?: boolean }) => void | Promise<{ ok: boolean; error?: string } | void>;
   onBatchDeleteMessages?: (messageIds: string[], options?: { revoke?: boolean }) => void | Promise<{ ok: boolean; error?: string } | void>;
@@ -249,6 +253,7 @@ interface ChatAreaProps {
   onForwardMessage?: (message: Message) => void;
   onUpdateChatTitle?: (chatId: string, newTitle: string) => void | Promise<{ ok: boolean; error?: string } | void>;
   onChatInfoUpdated?: (chatId: string, patch: Partial<Chat>) => void;
+  onAddContact?: (contact: TelegramContact) => void;
   onRemoveContact?: (contactId: string) => void;
   onCloseChat?: () => void;
   onOpenVoiceCall?: () => void;
@@ -257,6 +262,7 @@ interface ChatAreaProps {
   isChatInfoOpenExternal?: boolean;
   onChatInfoOpenChange?: (open: boolean) => void;
   sendWithEnter?: boolean;
+  onRefreshMediaUrls?: (urls: string[]) => Promise<Record<string, string>>;
 }
 
 function getMessageDayKey(msg: Message): string {
@@ -330,6 +336,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
   onForwardMessage,
   onUpdateChatTitle,
   onChatInfoUpdated,
+  onAddContact,
   onRemoveContact,
   onCloseChat,
   onOpenVoiceCall,
@@ -338,6 +345,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
   isChatInfoOpenExternal,
   onChatInfoOpenChange,
   sendWithEnter = true,
+  onRefreshMediaUrls,
 }) => {
   const [inputText, setInputText] = useState('');
   const [translatedPreview, setTranslatedPreview] = useState('');
@@ -668,6 +676,96 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
   const recordTimerRef = useRef<any>(null);
+  const [refreshedUrlsMap, setRefreshedUrlsMap] = useState<Record<string, string>>({});
+  const attemptedRefreshUrlsRef = useRef<Set<string>>(new Set());
+
+  const resolveDisplayUrl = useCallback(
+    (rawUrl?: string) => {
+      if (!rawUrl) return rawUrl;
+      return refreshedUrlsMap[rawUrl] || rawUrl;
+    },
+    [refreshedUrlsMap]
+  );
+
+  const triggerSilentUrlRefresh = useCallback(
+    async (rawUrl?: string, force = false): Promise<string | null> => {
+      if (!rawUrl || !isSignedResourceUrl(rawUrl)) return null;
+      const currentResolved = refreshedUrlsMap[rawUrl] || rawUrl;
+      if (attemptedRefreshUrlsRef.current.has(currentResolved)) {
+        return null;
+      }
+      if (!force && !isSignedResourceUrlExpiringSoon(currentResolved)) {
+        return currentResolved;
+      }
+      attemptedRefreshUrlsRef.current.add(rawUrl);
+      attemptedRefreshUrlsRef.current.add(currentResolved);
+      try {
+        let nextUrl = '';
+        if (onRefreshMediaUrls) {
+          const map = await onRefreshMediaUrls([currentResolved]);
+          nextUrl = map[currentResolved] || map[rawUrl] || '';
+        } else {
+          const refreshed = await ensureFreshSignedResourceUrl(currentResolved, currentAccountId, { force: true });
+          if (refreshed && refreshed !== currentResolved) {
+            nextUrl = refreshed;
+          }
+        }
+        if (nextUrl && nextUrl !== currentResolved) {
+          attemptedRefreshUrlsRef.current.add(nextUrl);
+          setRefreshedUrlsMap((prev) => ({
+            ...prev,
+            [rawUrl]: nextUrl,
+            [currentResolved]: nextUrl,
+          }));
+          return nextUrl;
+        }
+      } catch {}
+      return null;
+    },
+    [currentAccountId, onRefreshMediaUrls, refreshedUrlsMap]
+  );
+
+  useEffect(() => {
+    const expiring: string[] = [];
+    const pushIfExpiring = (rawUrl?: string) => {
+      if (!rawUrl) return;
+      const effective = refreshedUrlsMap[rawUrl] || rawUrl;
+      if (isSignedResourceUrlExpiringSoon(effective) && !attemptedRefreshUrlsRef.current.has(effective)) {
+        expiring.push(effective);
+      }
+    };
+    pushIfExpiring(chat?.avatarUrl);
+    for (const m of messages) {
+      pushIfExpiring(m.audioUrl);
+      pushIfExpiring(m.imageUrl);
+      pushIfExpiring(m.videoUrl);
+      pushIfExpiring(m.fileUrl);
+    }
+    const unique = Array.from(new Set(expiring)).slice(0, 50);
+    if (unique.length === 0) return;
+
+    unique.forEach((u) => attemptedRefreshUrlsRef.current.add(u));
+    let cancelled = false;
+    (async () => {
+      const refreshed = onRefreshMediaUrls
+        ? await onRefreshMediaUrls(unique)
+        : await refreshSignedResourceUrlsApi(unique, currentAccountId);
+      if (cancelled || !refreshed || Object.keys(refreshed).length === 0) return;
+      setRefreshedUrlsMap((prev) => {
+        const next = { ...prev };
+        for (const [oldUrl, newUrl] of Object.entries(refreshed)) {
+          if (newUrl) {
+            attemptedRefreshUrlsRef.current.add(newUrl);
+            next[oldUrl] = newUrl;
+          }
+        }
+        return next;
+      });
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [chat?.avatarUrl, messages, currentAccountId, onRefreshMediaUrls, refreshedUrlsMap]);
 
   const outboundTargetLang = getOutboundTargetLanguage(chat, translationSettings, messages);
   const inboundTargetLang = getInboundTargetLanguage(chat, translationSettings);
@@ -679,12 +777,20 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
     try {
       const res = await fetchTelegramCloudMessagesApi(chat.id, currentAccountId, { limit: 40 });
       if (res.ok && res.messages.length > 0) {
-        onMessagesSynced?.(res.messages, { hasMore: res.hasMore, readOutboxMaxId: res.readOutboxMaxId });
+        onMessagesSynced?.(res.messages, {
+          hasMore: res.hasMore,
+          readOutboxMaxId: res.readOutboxMaxId,
+          fromLocalFallback: res.fromLocalFallback,
+        });
         setSyncNotice(`云端同步成功！已拉取 ${res.messages.length} 条真实聊天记录`);
       } else if (!res.ok) {
         setSyncNotice(res.error || '云端历史同步失败，请检查账号连接');
       } else {
-        onMessagesSynced?.([], { hasMore: false, readOutboxMaxId: res.readOutboxMaxId });
+        onMessagesSynced?.([], {
+          hasMore: false,
+          readOutboxMaxId: res.readOutboxMaxId,
+          fromLocalFallback: res.fromLocalFallback,
+        });
         setSyncNotice('云端已是最新记录或暂无更多历史');
       }
     } catch {
@@ -700,11 +806,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
     const tgIds = messages
       .map((m) => m.telegramMessageId)
       .filter((id): id is number => typeof id === 'number' && id > 0);
-    if (tgIds.length === 0) {
-      showSyncNotice('暂无可定位的云端消息 ID，请先点击右上角同步云端消息');
-      return;
-    }
-    const minTgId = Math.min(...tgIds);
+    const minTgId = tgIds.length > 0 ? Math.min(...tgIds) : 0;
     const viewport = scrollViewportRef.current;
     const prevHeight = viewport?.scrollHeight || 0;
     const prevTop = viewport?.scrollTop || 0;
@@ -1376,7 +1478,9 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
       accountId: currentAccountId,
       chatId: chat.id,
       sticker,
+      packTitle,
       replyToMsgId,
+      replyTo: replyPayload,
     });
     if (!res.ok) {
       showSyncNotice(res.error || '发送官方贴纸失败');
@@ -1385,12 +1489,17 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
     if (replyingTo) {
       setReplyingTo(null);
     }
+    const isVideoSticker = Boolean(res.videoUrl || res.isVideo || sticker.isVideo);
+    const fallbackText = res.text || `${sticker.emoji} [贴纸]`;
     onSendMessage({
+      ...(res.id ? { id: res.id } : {}),
       sender: 'me',
-      isImage: true,
-      imageUrl: sticker.thumbUrl,
-      imageCaption: packTitle ? `${sticker.emoji} · ${packTitle}` : `${sticker.emoji} [贴纸]`,
-      text: `${sticker.emoji} [贴纸]`,
+      isImage: res.isImage ?? !isVideoSticker,
+      imageUrl: res.imageUrl ?? (isVideoSticker ? undefined : sticker.thumbUrl),
+      isVideo: isVideoSticker,
+      videoUrl: res.videoUrl,
+      imageCaption: packTitle ? `${sticker.emoji} · ${packTitle}` : fallbackText,
+      text: fallbackText,
       replyTo: replyPayload,
       telegramMessageId: res.telegramMessageId,
       deliveryStatus: 'delivered',
@@ -1468,8 +1577,20 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
 
   const copyImageToClipboard = async (imageUrl: string, id: string) => {
     if (!imageUrl) return;
+    let effectiveImageUrl = resolveDisplayUrl(imageUrl) || imageUrl;
+    if (isSignedResourceUrlExpiringSoon(effectiveImageUrl)) {
+      const refreshed = await triggerSilentUrlRefresh(effectiveImageUrl, true);
+      if (refreshed) effectiveImageUrl = refreshed;
+    }
     try {
-      const res = await fetchWithTimeout(imageUrl, {}, 12000);
+      let res = await fetchWithTimeout(effectiveImageUrl, { credentials: 'include' }, 12000);
+      if ((res.status === 401 || res.status === 403) && isSignedResourceUrl(effectiveImageUrl)) {
+        const refreshed = await triggerSilentUrlRefresh(effectiveImageUrl, true);
+        if (refreshed && refreshed !== effectiveImageUrl) {
+          effectiveImageUrl = refreshed;
+          res = await fetchWithTimeout(effectiveImageUrl, { credentials: 'include' }, 12000);
+        }
+      }
       const blob = await res.blob();
       let pngBlob = blob;
       if (blob.type !== 'image/png') {
@@ -1486,7 +1607,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
             canvas.toBlob((b) => resolve(b || blob), 'image/png');
           };
           img.onerror = reject;
-          img.src = imageUrl;
+          img.src = effectiveImageUrl;
         });
       }
 
@@ -1636,7 +1757,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
     }
   };
 
-  const handlePlayAudio = (msgId: string, audioUrl?: string) => {
+  const handlePlayAudio = async (msgId: string, audioUrl?: string) => {
     if (playingAudioId === msgId) {
       audioRef.current?.pause();
       if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
@@ -1647,10 +1768,19 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
     }
 
     if (audioUrl) {
+      let effectiveUrl = resolveDisplayUrl(audioUrl) || audioUrl;
+      if (isSignedResourceUrlExpiringSoon(effectiveUrl)) {
+        const fresh = await triggerSilentUrlRefresh(effectiveUrl, true);
+        if (fresh) {
+          effectiveUrl = fresh;
+          onUpdateMessage?.(msgId, { audioUrl: fresh });
+        }
+      }
       if (!audioRef.current) {
         audioRef.current = new Audio();
       }
-      audioRef.current.src = audioUrl;
+      let retriedWithFreshUrl = false;
+      audioRef.current.src = effectiveUrl;
       audioRef.current.play().catch((err) => {
         setPlayingAudioId(null);
         setSyncNotice(`语音播放失败：${err?.message || '浏览器阻止或音频不可用'}`);
@@ -1670,7 +1800,23 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
         }
       };
 
-      audioRef.current.onerror = () => {
+      audioRef.current.onerror = async () => {
+        if (!retriedWithFreshUrl && isSignedResourceUrl(effectiveUrl)) {
+          retriedWithFreshUrl = true;
+          const nextUrl = await triggerSilentUrlRefresh(effectiveUrl, true);
+          if (nextUrl && nextUrl !== effectiveUrl && audioRef.current) {
+            effectiveUrl = nextUrl;
+            onUpdateMessage?.(msgId, { audioUrl: nextUrl });
+            audioRef.current.src = nextUrl;
+            audioRef.current.play().catch(() => {
+              setPlayingAudioId(null);
+              setAudioProgress((prev) => ({ ...prev, [msgId]: 0 }));
+              setSyncNotice('语音音频加载失败，请检查网络或重新生成');
+              setTimeout(() => setSyncNotice(null), 3000);
+            });
+            return;
+          }
+        }
         setPlayingAudioId(null);
         setAudioProgress((prev) => ({ ...prev, [msgId]: 0 }));
         setSyncNotice('语音音频加载失败，请检查网络或重新生成');
@@ -1801,7 +1947,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
 
   const displayedMessages = cloudSearchResults !== null
     ? cloudSearchResults
-        .filter((r) => !isMessageDeleted(r.id))
+        .filter((r) => !isMessageDeleted(r.id, currentAccountId, chat?.id))
         .map((r) => {
           const rTgId = resolveClientTelegramMessageId(r);
           const live = messages.find((m) => {
@@ -1863,12 +2009,20 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
             <span className="text-white text-xs font-semibold select-none">{chat.avatarInitial}</span>
             {chat.avatarUrl && (
               <img
-                src={chat.avatarUrl}
+                src={resolveDisplayUrl(chat.avatarUrl)}
                 alt={chat.title}
                 referrerPolicy="no-referrer"
                 className="w-full h-full object-cover absolute inset-0"
+                onLoad={(e) => {
+                  e.currentTarget.style.display = '';
+                }}
                 onError={(e) => {
-                  (e.currentTarget as HTMLElement).style.display = 'none';
+                  const imgEl = e.currentTarget;
+                  void triggerSilentUrlRefresh(chat.avatarUrl, true).then((nextUrl) => {
+                    if (!nextUrl) {
+                      imgEl.style.display = 'none';
+                    }
+                  });
                 }}
               />
             )}
@@ -2496,9 +2650,15 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                 {msg.isImage && msg.imageUrl && (
                   <div className="mb-1.5 rounded-xl overflow-hidden max-w-[280px] shadow-xs relative group/img">
                     <img
-                      src={msg.imageUrl}
+                      src={resolveDisplayUrl(msg.imageUrl)}
                       alt={msg.imageCaption || 'image'}
                       className="w-full h-auto object-cover max-h-72 cursor-pointer hover:opacity-95 transition-opacity rounded-xl"
+                      onLoad={(e) => {
+                        e.currentTarget.style.display = '';
+                      }}
+                      onError={() => {
+                        void triggerSilentUrlRefresh(msg.imageUrl, true);
+                      }}
                     />
                     {/* Hover actions for image: Copy Image and Download Image */}
                     <div className="absolute top-2 right-2 flex items-center gap-1 opacity-0 group-hover/img:opacity-100 transition-opacity bg-black/65 backdrop-blur-xs rounded-lg p-1 text-white shadow-md">
@@ -2506,7 +2666,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                         type="button"
                         onClick={(e) => {
                           e.stopPropagation();
-                          copyImageToClipboard(msg.imageUrl!, msg.id);
+                          copyImageToClipboard(resolveDisplayUrl(msg.imageUrl) || msg.imageUrl!, msg.id);
                         }}
                         title="复制照片到剪贴板"
                         className="p-1 hover:bg-white/20 rounded-md cursor-pointer transition-colors"
@@ -2518,9 +2678,23 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                         )}
                       </button>
                       <a
-                        href={msg.imageUrl}
+                        href={resolveDisplayUrl(msg.imageUrl)}
                         download={msg.imageCaption || `tg_photo_${Date.now()}.png`}
-                        onClick={(e) => e.stopPropagation()}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          const resolved = resolveDisplayUrl(msg.imageUrl);
+                          if (msg.imageUrl && isSignedResourceUrlExpiringSoon(resolved)) {
+                            e.preventDefault();
+                            void triggerSilentUrlRefresh(msg.imageUrl, true).then((nextUrl) => {
+                              const a = document.createElement('a');
+                              a.href = nextUrl || resolved || msg.imageUrl!;
+                              a.download = msg.imageCaption || `tg_photo_${Date.now()}.png`;
+                              document.body.appendChild(a);
+                              a.click();
+                              document.body.removeChild(a);
+                            });
+                          }
+                        }}
                         title="下载保存照片"
                         className="p-1 hover:bg-white/20 rounded-md cursor-pointer transition-colors"
                       >
@@ -2534,16 +2708,33 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                 {msg.isVideo && msg.videoUrl && (
                   <div className="mb-1.5 rounded-xl overflow-hidden max-w-[320px] shadow-sm relative group/vid bg-black/10 dark:bg-black/40">
                     <video
-                      src={msg.videoUrl}
+                      src={resolveDisplayUrl(msg.videoUrl)}
                       controls
                       preload="metadata"
                       className="w-full h-auto max-h-80 object-contain rounded-xl bg-black"
+                      onError={() => {
+                        void triggerSilentUrlRefresh(msg.videoUrl, true);
+                      }}
                     />
                     <div className="absolute top-2 right-2 flex items-center gap-1 opacity-0 group-hover/vid:opacity-100 transition-opacity bg-black/65 backdrop-blur-xs rounded-lg p-1 text-white shadow-md z-10">
                       <a
-                        href={msg.videoUrl}
+                        href={resolveDisplayUrl(msg.videoUrl)}
                         download={`tg_video_${Date.now()}.mp4`}
-                        onClick={(e) => e.stopPropagation()}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          const resolved = resolveDisplayUrl(msg.videoUrl);
+                          if (msg.videoUrl && isSignedResourceUrlExpiringSoon(resolved)) {
+                            e.preventDefault();
+                            void triggerSilentUrlRefresh(msg.videoUrl, true).then((nextUrl) => {
+                              const a = document.createElement('a');
+                              a.href = nextUrl || resolved || msg.videoUrl!;
+                              a.download = `tg_video_${Date.now()}.mp4`;
+                              document.body.appendChild(a);
+                              a.click();
+                              document.body.removeChild(a);
+                            });
+                          }
+                        }}
                         title="下载保存视频"
                         className="p-1 hover:bg-white/20 rounded-md cursor-pointer transition-colors"
                       >
@@ -2563,14 +2754,34 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                         <div className="text-[10px] opacity-70">{msg.fileSize || '128 KB'}</div>
                       </div>
                     </div>
-                    <a
-                      href={msg.fileUrl || '#'}
-                      download={msg.fileName || 'file'}
-                      className="p-1.5 text-[#2481cc] dark:text-[#2ba0ff] hover:bg-[#2481cc]/10 rounded-lg cursor-pointer"
-                      title="下载附件"
-                    >
-                      <Download className="w-4 h-4" />
-                    </a>
+                    {msg.fileUrl ? (
+                      <a
+                        href={resolveDisplayUrl(msg.fileUrl) || '#'}
+                        download={msg.fileName || 'file'}
+                        onClick={(e) => {
+                          const resolved = resolveDisplayUrl(msg.fileUrl);
+                          if (msg.fileUrl && isSignedResourceUrlExpiringSoon(resolved)) {
+                            e.preventDefault();
+                            void triggerSilentUrlRefresh(msg.fileUrl, true).then((nextUrl) => {
+                              const a = document.createElement('a');
+                              a.href = nextUrl || resolved || msg.fileUrl!;
+                              a.download = msg.fileName || 'file';
+                              document.body.appendChild(a);
+                              a.click();
+                              document.body.removeChild(a);
+                            });
+                          }
+                        }}
+                        className="p-1.5 text-[#2481cc] dark:text-[#2ba0ff] hover:bg-[#2481cc]/10 rounded-lg cursor-pointer"
+                        title="下载附件"
+                      >
+                        <Download className="w-4 h-4" />
+                      </a>
+                    ) : (
+                      <span className="text-[10px] opacity-60 px-1.5 py-0.5 rounded bg-black/5 dark:bg-white/10">
+                        未缓存
+                      </span>
+                    )}
                   </div>
                 )}
 
@@ -2579,7 +2790,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                   <div className="flex flex-col gap-2 min-w-[220px]">
                     <div className="flex items-center gap-3">
                       <button
-                        onClick={() => handlePlayAudio(msg.id, msg.audioUrl)}
+                        onClick={() => void handlePlayAudio(msg.id, msg.audioUrl)}
                         className={`w-9 h-9 rounded-full flex items-center justify-center cursor-pointer transition-transform hover:scale-105 shrink-0 ${
                           isMe
                             ? 'bg-[#2481cc] text-white'
@@ -2797,11 +3008,11 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                       </span>
                     ) : chat.id.startsWith('tg_') && currentAccountId !== 'acc_telegram_bot' && typeof msg.telegramMessageId === 'number' ? (
                       typeof chat.readOutboxMaxId === 'number' && msg.telegramMessageId <= chat.readOutboxMaxId ? (
-                        <span title="对方已读" className="inline-flex items-center">
+                        <span title={chat.isGroup ? '已有成员已读' : '对方已读'} className="inline-flex items-center">
                           <CheckCheck className="w-3.5 h-3.5 text-white/95 dark:text-[#2ba0ff]" />
                         </span>
                       ) : (
-                        <span title="已送达（对方未读）" className="inline-flex items-center">
+                        <span title={chat.isGroup ? '已送达（暂未有成员已读）' : '已送达（对方未读）'} className="inline-flex items-center">
                           <Check className="w-3.5 h-3.5 text-white/80 dark:text-[#7f95ab]" />
                         </span>
                       )
@@ -3417,7 +3628,9 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
         onTogglePin={onTogglePinChat}
         onUpdateTitle={onUpdateChatTitle}
         onChatInfoUpdated={onChatInfoUpdated}
+        onAddContact={onAddContact}
         onRemoveContact={onRemoveContact}
+        onRefreshMediaUrls={onRefreshMediaUrls}
       />
 
       {/* Voice Clone Studio Modal */}
@@ -3783,11 +3996,19 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                       <span>{targetChat.avatarInitial}</span>
                       {targetChat.avatarUrl && (
                         <img
-                          src={targetChat.avatarUrl}
+                          src={resolveDisplayUrl(targetChat.avatarUrl)}
                           alt={targetChat.title}
                           className="w-full h-full object-cover absolute inset-0"
+                          onLoad={(e) => {
+                            e.currentTarget.style.display = '';
+                          }}
                           onError={(e) => {
-                            (e.currentTarget as HTMLElement).style.display = 'none';
+                            const imgEl = e.currentTarget;
+                            void triggerSilentUrlRefresh(targetChat.avatarUrl, true).then((nextUrl) => {
+                              if (!nextUrl) {
+                                imgEl.style.display = 'none';
+                              }
+                            });
                           }}
                         />
                       )}

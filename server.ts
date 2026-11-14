@@ -88,7 +88,7 @@ function getArg(key: string): string | undefined {
 const PORT = parseInt(getArg('--port') || process.env.PORT || '3000', 10);
 const HOST = getArg('--host') || process.env.HOST || '0.0.0.0';
 
-const app = express();
+export const app = express();
 app.set('trust proxy', true);
 
 // Security Headers & Content Security Policy via Helmet
@@ -1716,6 +1716,122 @@ export function verifySignedTelegramResourceRequest(req: {
   return verifySecretToken(sig, expected);
 }
 
+const SIGNED_RESOURCE_PATH_PREFIXES = [
+  '/api/telegram/user/media/',
+  '/api/telegram/user/avatar/',
+  '/api/telegram/user/sticker/',
+  '/api/messages/local-media/',
+];
+
+export function isSignedResourceUrlExpiring(rawUrl?: string, bufferMs = 24 * 60 * 60 * 1000): boolean {
+  if (!rawUrl || typeof rawUrl !== 'string') return false;
+  let pathWithQuery = rawUrl.trim();
+  if (pathWithQuery.startsWith('http://') || pathWithQuery.startsWith('https://')) {
+    try {
+      const parsed = new URL(pathWithQuery);
+      pathWithQuery = `${parsed.pathname}${parsed.search}`;
+    } catch {
+      return false;
+    }
+  }
+  const [basePath, queryStr] = pathWithQuery.split('?');
+  if (!SIGNED_RESOURCE_PATH_PREFIXES.some((p) => basePath.startsWith(p))) return false;
+  const expRaw = new URLSearchParams(queryStr || '').get('exp');
+  const exp = Number(expRaw);
+  if (!Number.isFinite(exp) || exp <= 0) return true;
+  return exp - Date.now() <= bufferMs;
+}
+
+export function resignTelegramResourceUrl(
+  rawUrl: string,
+  fallbackAccountId = '',
+  options?: { allowedAccountVariants?: string[]; enforceAccountMatch?: boolean; ttlMs?: number }
+): string | null {
+  if (!rawUrl || typeof rawUrl !== 'string') return null;
+  let pathWithQuery = rawUrl.trim();
+  if (pathWithQuery.startsWith('http://') || pathWithQuery.startsWith('https://')) {
+    try {
+      const parsed = new URL(pathWithQuery);
+      pathWithQuery = `${parsed.pathname}${parsed.search}`;
+    } catch {
+      return null;
+    }
+  }
+  if (!pathWithQuery.startsWith('/')) return null;
+  const [rawBasePath, existingQuery] = pathWithQuery.split('?');
+  let decodedPath = rawBasePath;
+  try {
+    decodedPath = decodeURIComponent(rawBasePath);
+  } catch {
+    return null;
+  }
+  if (decodedPath.includes('..') || rawBasePath.includes('..')) return null;
+  if (!SIGNED_RESOURCE_PATH_PREFIXES.some((p) => rawBasePath.startsWith(p))) return null;
+
+  const params = new URLSearchParams(existingQuery || '');
+  params.delete('exp');
+  params.delete('sig');
+
+  const urlAcc = String(params.get('accountId') || '').trim();
+  if (
+    options?.enforceAccountMatch &&
+    urlAcc &&
+    Array.isArray(options.allowedAccountVariants) &&
+    options.allowedAccountVariants.length > 0 &&
+    !options.allowedAccountVariants.includes(urlAcc)
+  ) {
+    return null;
+  }
+  const effectiveAcc = urlAcc || String(fallbackAccountId || '').trim();
+  if (effectiveAcc) {
+    params.set('accountId', effectiveAcc);
+  }
+  const cleanQuery = params.toString();
+  return signTelegramResourceUrl(
+    cleanQuery ? `${rawBasePath}?${cleanQuery}` : rawBasePath,
+    effectiveAcc,
+    options?.ttlMs
+  );
+}
+
+app.post('/api/telegram/resource/refresh-url', requireTenantAuth, (req: Request, res: Response) => {
+  try {
+    const authContext = (req as any).auth;
+    const isMaster = Boolean(authContext?.session?.isMaster);
+    const requestedAcc = String((req.body?.accountId as string) || (req.headers['x-account-id'] as string) || '').trim();
+    const effectiveAccountId = requestedAcc || authContext?.effectiveAccountId || '';
+    const accVariants = effectiveAccountId ? getScopedAccountIdVariants(effectiveAccountId) : [];
+    const enforceAccountMatch = !isMaster || Boolean(requestedAcc);
+
+    const inputUrls: string[] = [];
+    if (typeof req.body?.url === 'string' && req.body.url.trim()) {
+      inputUrls.push(req.body.url.trim());
+    }
+    if (Array.isArray(req.body?.urls)) {
+      for (const u of req.body.urls.slice(0, 100)) {
+        if (typeof u === 'string' && u.trim()) {
+          inputUrls.push(u.trim());
+        }
+      }
+    }
+
+    const refreshed: Record<string, string> = {};
+    for (const rawUrl of inputUrls) {
+      const nextUrl = resignTelegramResourceUrl(rawUrl, effectiveAccountId, {
+        allowedAccountVariants: accVariants,
+        enforceAccountMatch,
+      });
+      if (nextUrl) {
+        refreshed[rawUrl] = nextUrl;
+      }
+    }
+
+    return res.json({ ok: true, refreshed });
+  } catch (err: any) {
+    return res.status(500).json({ ok: false, error: err?.message || '刷新签名地址失败' });
+  }
+});
+
 // Streaming Outbound Media Limit & Disk Storage (avoids multi-MB Base64 JSON & localStorage exhaustion)
 export const TELEGRAM_MAX_MEDIA = Math.max(
   50 * 1024 * 1024,
@@ -3326,9 +3442,69 @@ export interface UnifiedChatMessage {
   createdAt: number;
   deliveryStatus: string;
   replyTo?: { id: string; telegramMessageId?: number; senderName?: string; text: string };
+  reactions?: Record<string, number>;
+  myReactions?: string[];
   isEdited?: boolean;
   isPinned?: boolean;
   forwardFrom?: string;
+}
+
+export function parseStoredReactionsJson(raw: any): {
+  reactions?: Record<string, number>;
+  myReactions?: string[];
+} {
+  if (!raw) return {};
+  const obj = typeof raw === 'string' ? safeJsonParse<any>(raw, null) : raw;
+  if (!obj || typeof obj !== 'object') return {};
+
+  // Structured format: { reactions: Record<string, number>, myReactions?: string[] }
+  if ('reactions' in obj || 'myReactions' in obj) {
+    const rawMap = obj.reactions && typeof obj.reactions === 'object' ? obj.reactions : {};
+    const reactions: Record<string, number> = {};
+    for (const [emoji, cnt] of Object.entries(rawMap)) {
+      const n = Number(cnt);
+      if (emoji && Number.isFinite(n) && n > 0) reactions[emoji] = n;
+    }
+    const myReactions = Array.isArray(obj.myReactions)
+      ? obj.myReactions.filter((e: any) => typeof e === 'string' && e.length > 0)
+      : [];
+    return {
+      ...(Object.keys(reactions).length > 0 ? { reactions } : {}),
+      ...(myReactions.length > 0 ? { myReactions } : {}),
+    };
+  }
+
+  // Flat map fallback: { "👍": 2 }
+  const flatReactions: Record<string, number> = {};
+  for (const [emoji, cnt] of Object.entries(obj)) {
+    const n = Number(cnt);
+    if (emoji && Number.isFinite(n) && n > 0) flatReactions[emoji] = n;
+  }
+  return Object.keys(flatReactions).length > 0 ? { reactions: flatReactions } : {};
+}
+
+export function serializeStoredReactionsJson(raw: any): string | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const hasExplicit =
+    raw.reactions !== undefined ||
+    raw.myReactions !== undefined ||
+    raw.reactions_json !== undefined ||
+    raw.reactionsJson !== undefined;
+  if (!hasExplicit) return null;
+
+  const parsed =
+    raw.reactions !== undefined || raw.myReactions !== undefined
+      ? parseStoredReactionsJson({ reactions: raw.reactions, myReactions: raw.myReactions })
+      : parseStoredReactionsJson(raw.reactions_json ?? raw.reactionsJson);
+  const hasReactions = Boolean(parsed.reactions && Object.keys(parsed.reactions).length > 0);
+  const hasMine = Boolean(parsed.myReactions && parsed.myReactions.length > 0);
+  if (!hasReactions && !hasMine) {
+    return '{}';
+  }
+  return JSON.stringify({
+    ...(hasReactions ? { reactions: parsed.reactions } : {}),
+    ...(hasMine ? { myReactions: parsed.myReactions } : {}),
+  });
 }
 
 export function sanitizeDbMediaUrl(url: any): string {
@@ -3374,6 +3550,11 @@ export function normalizeStoredMessageRecord(
       ? safeJsonParse<{ id: string; telegramMessageId?: number; senderName?: string; text: string } | undefined>(raw.reply_to_json, undefined)
       : undefined;
 
+  const parsedReactions =
+    raw.reactions !== undefined || raw.myReactions !== undefined
+      ? parseStoredReactionsJson({ reactions: raw.reactions, myReactions: raw.myReactions })
+      : parseStoredReactionsJson(raw.reactions_json ?? raw.reactionsJson);
+
   return {
     id,
     telegramMessageId,
@@ -3405,6 +3586,8 @@ export function normalizeStoredMessageRecord(
     createdAt,
     deliveryStatus: String(raw.deliveryStatus ?? raw.delivery_status ?? 'delivered'),
     ...(parsedReplyTo ? { replyTo: parsedReplyTo } : {}),
+    ...(parsedReactions.reactions ? { reactions: parsedReactions.reactions } : {}),
+    ...(parsedReactions.myReactions ? { myReactions: parsedReactions.myReactions } : {}),
     isEdited: Boolean(raw.isEdited ?? raw.is_edited),
     isPinned: Boolean(raw.isPinned ?? raw.is_pinned),
     ...(raw.forwardFrom || raw.forward_from ? { forwardFrom: String(raw.forwardFrom ?? raw.forward_from) } : {}),
@@ -3567,6 +3750,7 @@ export async function upsertSyncedMessageToDb(
     const altChatId = msg.chatId.startsWith('tg_') ? msg.chatId.replace(/^tg_/, '') : `tg_${msg.chatId}`;
     const accVariants = getScopedAccountIdVariants(msg.accountId);
     const accPlaceholders = accVariants.map(() => '?').join(', ');
+    const reactionsJson = serializeStoredReactionsJson(rawMsg);
     if (msg.telegramMessageId) {
       const existingByTg = (await db
         .prepare(
@@ -3589,8 +3773,14 @@ export async function upsertSyncedMessageToDb(
                translated_text = CASE WHEN ? != '' THEN ? ELSE translated_text END,
                stt_text = CASE WHEN ? != '' THEN ? ELSE stt_text END,
                voice_tone = CASE WHEN ? != '' THEN ? ELSE voice_tone END,
+               is_audio = CASE WHEN ? = 1 THEN 1 ELSE is_audio END,
+               audio_duration = CASE WHEN ? > 0 THEN ? ELSE audio_duration END,
                audio_url = CASE WHEN ? != '' THEN ? ELSE audio_url END,
+               is_image = CASE WHEN ? = 1 THEN 1 ELSE is_image END,
+               image_caption = CASE WHEN ? != '' THEN ? ELSE image_caption END,
                image_url = CASE WHEN ? != '' THEN ? ELSE image_url END,
+               is_video = CASE WHEN ? = 1 THEN 1 ELSE is_video END,
+               video_duration = CASE WHEN ? > 0 THEN ? ELSE video_duration END,
                video_url = CASE WHEN ? != '' THEN ? ELSE video_url END,
                is_file = CASE WHEN ? = 1 THEN 1 ELSE is_file END,
                file_name = CASE WHEN ? != '' THEN ? ELSE file_name END,
@@ -3600,7 +3790,8 @@ export async function upsertSyncedMessageToDb(
                reply_to_json = COALESCE(?, reply_to_json),
                is_edited = CASE WHEN ? = 1 THEN 1 ELSE is_edited END,
                is_pinned = ?,
-               forward_from = COALESCE(?, forward_from)
+               forward_from = COALESCE(?, forward_from),
+               reactions_json = COALESCE(?, reactions_json)
              WHERE id = ?`
           )
           .run(
@@ -3612,10 +3803,19 @@ export async function upsertSyncedMessageToDb(
             msg.sttText,
             msg.voiceTone,
             msg.voiceTone,
+            msg.isAudio ? 1 : 0,
+            msg.audioDuration,
+            msg.audioDuration,
             safeAudioUrl,
             safeAudioUrl,
+            msg.isImage ? 1 : 0,
+            msg.imageCaption,
+            msg.imageCaption,
             safeImageUrl,
             safeImageUrl,
+            msg.isVideo ? 1 : 0,
+            msg.videoDuration,
+            msg.videoDuration,
             safeVideoUrl,
             safeVideoUrl,
             msg.isFile ? 1 : 0,
@@ -3631,6 +3831,7 @@ export async function upsertSyncedMessageToDb(
             msg.isEdited ? 1 : 0,
             msg.isPinned ? 1 : 0,
             msg.forwardFrom || null,
+            reactionsJson,
             existingByTg.id
           );
         return true;
@@ -3646,15 +3847,21 @@ export async function upsertSyncedMessageToDb(
           is_image, image_url, image_caption, is_video, video_url, video_duration,
           is_file, file_name, file_size, file_url,
           timestamp, created_at, delivery_status, telegram_message_id,
-          reply_to_json, is_edited, is_pinned, forward_from
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          reply_to_json, is_edited, is_pinned, forward_from, reactions_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
           text = CASE WHEN excluded.text != '' THEN excluded.text ELSE messages.text END,
           translated_text = CASE WHEN excluded.translated_text != '' THEN excluded.translated_text ELSE messages.translated_text END,
           stt_text = CASE WHEN excluded.stt_text != '' THEN excluded.stt_text ELSE messages.stt_text END,
           voice_tone = CASE WHEN excluded.voice_tone != '' THEN excluded.voice_tone ELSE messages.voice_tone END,
+          is_audio = CASE WHEN excluded.is_audio = 1 THEN 1 ELSE messages.is_audio END,
+          audio_duration = CASE WHEN excluded.audio_duration > 0 THEN excluded.audio_duration ELSE messages.audio_duration END,
           audio_url = CASE WHEN excluded.audio_url != '' THEN excluded.audio_url ELSE messages.audio_url END,
+          is_image = CASE WHEN excluded.is_image = 1 THEN 1 ELSE messages.is_image END,
+          image_caption = CASE WHEN excluded.image_caption != '' THEN excluded.image_caption ELSE messages.image_caption END,
           image_url = CASE WHEN excluded.image_url != '' THEN excluded.image_url ELSE messages.image_url END,
+          is_video = CASE WHEN excluded.is_video = 1 THEN 1 ELSE messages.is_video END,
+          video_duration = CASE WHEN excluded.video_duration > 0 THEN excluded.video_duration ELSE messages.video_duration END,
           video_url = CASE WHEN excluded.video_url != '' THEN excluded.video_url ELSE messages.video_url END,
           is_file = CASE WHEN excluded.is_file = 1 THEN 1 ELSE messages.is_file END,
           file_name = CASE WHEN excluded.file_name != '' THEN excluded.file_name ELSE messages.file_name END,
@@ -3665,7 +3872,8 @@ export async function upsertSyncedMessageToDb(
           reply_to_json = COALESCE(excluded.reply_to_json, messages.reply_to_json),
           is_edited = CASE WHEN excluded.is_edited = 1 THEN 1 ELSE messages.is_edited END,
           is_pinned = excluded.is_pinned,
-          forward_from = COALESCE(excluded.forward_from, messages.forward_from)`
+          forward_from = COALESCE(excluded.forward_from, messages.forward_from),
+          reactions_json = COALESCE(excluded.reactions_json, messages.reactions_json)`
       )
       .run(
         msg.id,
@@ -3697,7 +3905,8 @@ export async function upsertSyncedMessageToDb(
         replyToJson,
         msg.isEdited ? 1 : 0,
         msg.isPinned ? 1 : 0,
-        msg.forwardFrom || null
+        msg.forwardFrom || null,
+        reactionsJson
       );
     return true;
   } catch (err: any) {
@@ -3756,6 +3965,8 @@ export function mergeUnifiedConversationMessages(lists: Array<Array<any>>): Unif
           fileName: item.fileName || prev.fileName,
           fileSize: item.fileSize || prev.fileSize,
           fileUrl: item.fileUrl || prev.fileUrl,
+          reactions: item.reactions || prev.reactions,
+          myReactions: item.myReactions || prev.myReactions,
           deliveryStatus: item.deliveryStatus === 'delivered' || prev.deliveryStatus === 'delivered'
             ? 'delivered'
             : (item.deliveryStatus || prev.deliveryStatus),
@@ -3813,7 +4024,9 @@ export async function resolveUnifiedChatMessages(params: {
           is_video as isVideo, video_url as videoUrl, video_duration as videoDuration,
           is_file as isFile, file_name as fileName, file_size as fileSize, file_url as fileUrl,
           timestamp, created_at as createdAt, delivery_status as deliveryStatus,
-          telegram_message_id as telegramMessageId
+          telegram_message_id as telegramMessageId,
+          reply_to_json as replyToJson, is_edited as isEdited, is_pinned as isPinned,
+          forward_from as forwardFrom, reactions_json as reactionsJson
         FROM (
           SELECT * FROM messages
           WHERE (chat_id = ? OR chat_id = ?) AND account_id IN (${accPlaceholders})
@@ -4116,7 +4329,8 @@ app.get('/api/messages/:chatId', requireTenantAuth, async (req: Request, res: Re
           reply_to_json as replyToJson,
           is_edited as isEdited,
           is_pinned as isPinned,
-          forward_from as forwardFrom
+          forward_from as forwardFrom,
+          reactions_json as reactionsJson
         FROM messages
         WHERE (chat_id = ? OR chat_id = ?) AND account_id IN (${accPlaceholders}) ${beforeClause}
         ORDER BY created_at DESC
@@ -4137,31 +4351,35 @@ app.get('/api/messages/:chatId', requireTenantAuth, async (req: Request, res: Re
           reply_to_json as replyToJson,
           is_edited as isEdited,
           is_pinned as isPinned,
-          forward_from as forwardFrom
+          forward_from as forwardFrom,
+          reactions_json as reactionsJson
         FROM messages
         WHERE (chat_id = ? OR chat_id = ?) AND account_id IN (${accPlaceholders})
         ORDER BY created_at ASC
       `).all(chatId, altChatId, ...accVariants)) as any[];
     }
 
-    const resignLocalUrl = (rawUrl?: string, msgAcc?: string) => {
+    const resignStoredMediaUrl = (rawUrl?: string, msgAcc?: string) => {
       if (!rawUrl || typeof rawUrl !== 'string') return rawUrl;
       if (rawUrl.startsWith('/api/messages/local-media/')) {
-        const basePath = rawUrl.split('?')[0];
-        return signTelegramResourceUrl(basePath, msgAcc || effectiveAccountId);
+        return resignTelegramResourceUrl(rawUrl, msgAcc || effectiveAccountId) || rawUrl;
+      }
+      if (isSignedResourceUrlExpiring(rawUrl)) {
+        return resignTelegramResourceUrl(rawUrl, msgAcc || effectiveAccountId) || rawUrl;
       }
       return rawUrl;
     };
 
     const formatted = rows.map((r: any) => {
-      const { replyToJson, ...rest } = r;
+      const { replyToJson, reactionsJson, ...rest } = r;
       const replyTo = replyToJson ? safeJsonParse(replyToJson, undefined) : undefined;
+      const parsedReactions = parseStoredReactionsJson(reactionsJson);
       return {
         ...rest,
-        audioUrl: resignLocalUrl(r.audioUrl, r.accountId),
-        imageUrl: resignLocalUrl(r.imageUrl, r.accountId),
-        videoUrl: resignLocalUrl(r.videoUrl, r.accountId),
-        fileUrl: resignLocalUrl(r.fileUrl, r.accountId),
+        audioUrl: resignStoredMediaUrl(r.audioUrl, r.accountId),
+        imageUrl: resignStoredMediaUrl(r.imageUrl, r.accountId),
+        videoUrl: resignStoredMediaUrl(r.videoUrl, r.accountId),
+        fileUrl: resignStoredMediaUrl(r.fileUrl, r.accountId),
         isAudio: Boolean(r.isAudio),
         isImage: Boolean(r.isImage),
         isVideo: Boolean(r.isVideo),
@@ -4169,6 +4387,8 @@ app.get('/api/messages/:chatId', requireTenantAuth, async (req: Request, res: Re
         isEdited: Boolean(r.isEdited),
         isPinned: Boolean(r.isPinned),
         ...(replyTo ? { replyTo } : {}),
+        ...(parsedReactions.reactions ? { reactions: parsedReactions.reactions } : {}),
+        ...(parsedReactions.myReactions ? { myReactions: parsedReactions.myReactions } : {}),
         ...(r.forwardFrom ? { forwardFrom: r.forwardFrom } : {}),
         deliveryStatus: r.deliveryStatus || 'delivered',
       };
@@ -4503,14 +4723,18 @@ async function deliverOutboundTelegramMessage(
         const source = await resolveOutboundMediaSource(audioUrl, _localDiskPath, '语音');
         const oggBuffer = await convertAudioToOggOpus(source.diskPath || source.buffer!);
         const voiceFile = new CustomFile('voice.ogg', oggBuffer.length, '', oggBuffer);
+        const voiceEchoText = (sttText || text || '').trim() || '🎤 语音消息';
+        markOutboundMessageSent(chatId, voiceEchoText, effectiveAccountId);
         const sentVoice: any = await personalAccount.client.sendFile(rawPeer, {
           file: voiceFile,
           voiceNote: true,
           caption: sttText || text || undefined,
           ...(resolvedReplyToTgId ? { replyTo: resolvedReplyToTgId } : {}),
         });
+        const sentVoiceTgId = Number(sentVoice?.id) || undefined;
+        if (sentVoiceTgId) markOutboundTelegramMessageIdSent(chatId, sentVoiceTgId, effectiveAccountId);
         console.log(`[MTProto Outbound] Successfully delivered native OGG Opus voice note to ${rawTgId}`);
-        return { delivered: true, channel: 'mtproto', telegramMessageId: Number(sentVoice?.id) || undefined };
+        return { delivered: true, channel: 'mtproto', telegramMessageId: sentVoiceTgId };
       } catch (voiceErr: any) {
         const errMsg = formatTelegramError(voiceErr);
         console.error(`[MTProto Voice Send Error]:`, errMsg);
@@ -4549,13 +4773,17 @@ async function deliverOutboundTelegramMessage(
           (!isFileNameCaption(imageCaption) ? imageCaption : undefined) ||
           (!isFileNameCaption(translatedText) ? translatedText : undefined);
 
+        const photoEchoText = (explicitCaption || '').trim() || '🖼️ 图片消息';
+        markOutboundMessageSent(chatId, photoEchoText, effectiveAccountId);
         const sentPhoto: any = await personalAccount.client.sendFile(rawPeer, {
           file: photoFile,
           caption: explicitCaption || undefined,
           ...(resolvedReplyToTgId ? { replyTo: resolvedReplyToTgId } : {}),
         });
+        const sentPhotoTgId = Number(sentPhoto?.id) || undefined;
+        if (sentPhotoTgId) markOutboundTelegramMessageIdSent(chatId, sentPhotoTgId, effectiveAccountId);
         console.log(`[MTProto Outbound] Successfully delivered photo to ${rawTgId}`);
-        return { delivered: true, channel: 'mtproto', telegramMessageId: Number(sentPhoto?.id) || undefined };
+        return { delivered: true, channel: 'mtproto', telegramMessageId: sentPhotoTgId };
       } catch (photoErr: any) {
         const errMsg = formatTelegramError(photoErr);
         console.error(`[MTProto Photo Send Error]:`, errMsg);
@@ -4593,6 +4821,8 @@ async function deliverOutboundTelegramMessage(
         const explicitCaption = (!isFileNameCaption(text) ? text : undefined) ||
           (!isFileNameCaption(translatedText) ? translatedText : undefined);
 
+        const videoEchoText = (explicitCaption || '').trim() || '🎬 视频';
+        markOutboundMessageSent(chatId, videoEchoText, effectiveAccountId);
         const sentVideo: any = await personalAccount.client.sendFile(rawPeer, {
           file: videoFile,
           supportsStreaming: true,
@@ -4600,8 +4830,10 @@ async function deliverOutboundTelegramMessage(
           caption: explicitCaption || undefined,
           ...(resolvedReplyToTgId ? { replyTo: resolvedReplyToTgId } : {}),
         });
+        const sentVideoTgId = Number(sentVideo?.id) || undefined;
+        if (sentVideoTgId) markOutboundTelegramMessageIdSent(chatId, sentVideoTgId, effectiveAccountId);
         console.log(`[MTProto Outbound] Successfully delivered video to ${rawTgId}`);
-        return { delivered: true, channel: 'mtproto', telegramMessageId: Number(sentVideo?.id) || undefined };
+        return { delivered: true, channel: 'mtproto', telegramMessageId: sentVideoTgId };
       } catch (vidErr: any) {
         const errMsg = formatTelegramError(vidErr);
         console.error(`[MTProto Video Send Error]:`, errMsg);
@@ -4629,15 +4861,20 @@ async function deliverOutboundTelegramMessage(
         const docFile = source.diskPath
           ? new CustomFile(resolvedDocName, source.size, source.diskPath)
           : new CustomFile(resolvedDocName, source.buffer!.length, '', source.buffer);
+        const docCaption = text !== `[文件] ${fileName}` ? (text || undefined) : undefined;
+        const fileEchoText = (docCaption || '').trim() || `📎 ${resolvedDocName || '文件附件'}`;
+        markOutboundMessageSent(chatId, fileEchoText, effectiveAccountId);
         const sentDoc: any = await personalAccount.client.sendFile(rawPeer, {
           file: docFile,
-          caption: text !== `[文件] ${fileName}` ? (text || undefined) : undefined,
+          caption: docCaption,
           forceDocument: true,
           workers: source.size > 10 * 1024 * 1024 ? 4 : 1,
           ...(resolvedReplyToTgId ? { replyTo: resolvedReplyToTgId } : {}),
         });
+        const sentDocTgId = Number(sentDoc?.id) || undefined;
+        if (sentDocTgId) markOutboundTelegramMessageIdSent(chatId, sentDocTgId, effectiveAccountId);
         console.log(`[MTProto Outbound] Successfully delivered document to ${rawTgId}`);
-        return { delivered: true, channel: 'mtproto', telegramMessageId: Number(sentDoc?.id) || undefined };
+        return { delivered: true, channel: 'mtproto', telegramMessageId: sentDocTgId };
       } catch (fileErr: any) {
         const errMsg = formatTelegramError(fileErr);
         console.error(`[MTProto File Send Error]:`, errMsg);
@@ -4664,7 +4901,9 @@ async function deliverOutboundTelegramMessage(
       message: outText,
       ...(resolvedReplyToTgId ? { replyTo: resolvedReplyToTgId } : {}),
     });
-    return { delivered: true, channel: 'mtproto', telegramMessageId: Number(sentMsg?.id) || undefined };
+    const sentTextTgId = Number(sentMsg?.id) || undefined;
+    if (sentTextTgId) markOutboundTelegramMessageIdSent(chatId, sentTextTgId, effectiveAccountId);
+    return { delivered: true, channel: 'mtproto', telegramMessageId: sentTextTgId };
   } catch (tgSyncErr: any) {
     const errMsg = formatTelegramError(tgSyncErr);
     console.warn(`[Telegram Outbound Push Error]:`, errMsg);
@@ -4987,6 +5226,30 @@ app.post('/api/messages/:id/retry', requireTenantAuth, parseMultipartMessageUplo
   }
 });
 
+// Helper: Build chat-scoped realtime Telegram message ID (prevents channel/supergroup message.id collisions)
+export function buildTelegramRealtimeMessageId(userId: string, chatId: string, messageId: number | string): string {
+  const cleanUser = String(userId || 'user').trim() || 'user';
+  const rawChat = String(chatId || 'unknown').trim() || 'unknown';
+  const canonicalChat = rawChat.startsWith('tg_') || rawChat.startsWith('chat_') ? rawChat : `tg_${rawChat}`;
+  return `msg_tg_${cleanUser}_${canonicalChat}_${messageId}`;
+}
+
+export function extractEmbeddedChatIdFromMessageId(messageId?: string): string | null {
+  const raw = String(messageId || '').trim();
+  // Format: msg_tg_${userId}_${chatId}_${msgId} (supports chatId like tg_-100123, -100123, 12345, username)
+  const match = raw.match(/^msg_tg_[^_]+_(.+)_(\d+)$/);
+  if (!match) return null;
+  const candidateChat = match[1].trim();
+  if (!candidateChat) return null;
+  return candidateChat.startsWith('tg_') || candidateChat.startsWith('chat_') ? candidateChat : `tg_${candidateChat}`;
+}
+
+export function isSameCanonicalChatId(chatIdA?: string, chatIdB?: string): boolean {
+  const normA = String(chatIdA || '').trim().replace(/^tg_/, '');
+  const normB = String(chatIdB || '').trim().replace(/^tg_/, '');
+  return Boolean(normA && normB && normA === normB);
+}
+
 // Helper: Extract integer Telegram message ID from explicit field or known message ID formats
 export function resolveTelegramMessageNumericId(messageId?: string, explicitTelegramMessageId?: number | string): number | null {
   if (explicitTelegramMessageId !== undefined && explicitTelegramMessageId !== null && explicitTelegramMessageId !== '') {
@@ -4996,7 +5259,7 @@ export function resolveTelegramMessageNumericId(messageId?: string, explicitTele
   const raw = String(messageId || '').trim();
   const cloudMatch = raw.match(/^tg_cloud_(\d+)(?:_|$)/);
   if (cloudMatch) return Number(cloudMatch[1]);
-  const msgTgMatch = raw.match(/^msg_tg_(?:\d+_)?(\d+)$/);
+  const msgTgMatch = raw.match(/^msg_tg_(?:.+_)?(\d+)$/);
   if (msgTgMatch) return Number(msgTgMatch[1]);
   const tgNumericMatch = raw.match(/^tg_(\d+)_\d+$/);
   if (tgNumericMatch) return Number(tgNumericMatch[1]);
@@ -5025,20 +5288,46 @@ async function resolveTelegramInputPeer(
   }
 }
 
-// 3.2 Delete Message by ID (Real Telegram Cloud Revoke + DB Cleanup; never silently fake localOnly success for Telegram messages)
+// 3.2 Delete Message by ID (Real Telegram Cloud Revoke + Strict chatId/accountId DB Cleanup)
 app.delete('/api/messages/:id', requireTenantAuth, async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
     const authContext = (req as any).auth;
-    const effectiveAccountId = authContext?.effectiveAccountId || (req.query.accountId as string) || 'acc_1';
+    const claimedAccountId = String((req.query.accountId as string) || (req.headers['x-account-id'] as string) || '').trim();
+    const effectiveAccountId = authContext?.effectiveAccountId || claimedAccountId || 'acc_1';
     const isMaster = Boolean(authContext?.session?.isMaster);
+    const requestedChatId = String((req.query.chatId as string) || '').trim();
+    const accVariants = getScopedAccountIdVariants(effectiveAccountId);
+    const enforceAccountScope = !isMaster || Boolean(claimedAccountId);
 
-    const msg = (await db.prepare('SELECT * FROM messages WHERE id = ?').get(id)) as any;
-    if (msg && !isMaster && msg.account_id && msg.account_id !== effectiveAccountId) {
-      return res.status(403).json({ success: false, deleted: false, error: '无权删除不属于当前账号的消息记录' });
+    const embeddedChatId = extractEmbeddedChatIdFromMessageId(id);
+    if (requestedChatId && embeddedChatId && !isSameCanonicalChatId(requestedChatId, embeddedChatId)) {
+      return res.status(403).json({
+        success: false,
+        deleted: false,
+        error: '消息 ID 所属会话与当前请求 chatId 不一致，已阻止跨会话误删',
+      });
     }
 
-    const chatId = String((req.query.chatId as string) || msg?.chat_id || '').trim();
+    const msg = (await db.prepare('SELECT * FROM messages WHERE id = ?').get(id)) as any;
+    if (msg) {
+      if (enforceAccountScope && msg.account_id && !accVariants.includes(String(msg.account_id))) {
+        return res.status(403).json({
+          success: false,
+          deleted: false,
+          error: '无权删除不属于当前账号的消息记录',
+        });
+      }
+      if (requestedChatId && msg.chat_id && !isSameCanonicalChatId(requestedChatId, msg.chat_id)) {
+        return res.status(403).json({
+          success: false,
+          deleted: false,
+          error: '消息所属会话与当前请求 chatId 不一致，已阻止跨会话误删',
+        });
+      }
+    }
+
+    const chatId = requestedChatId || String(msg?.chat_id || embeddedChatId || '').trim();
     const explicitTgId = req.query.telegramMessageId as string | undefined;
     const tgMsgId = resolveTelegramMessageNumericId(id, explicitTgId ?? msg?.telegram_message_id);
     const revoke = req.query.revoke === 'false' || req.query.revoke === '0' ? false : true;
@@ -5056,6 +5345,13 @@ app.delete('/api/messages/:id', requireTenantAuth, async (req: Request, res: Res
           success: false,
           deleted: false,
           error: '该消息缺少 Telegram 云端消息 ID，无法从 Telegram 服务器撤回删除',
+        });
+      }
+      if (!chatId) {
+        return res.status(400).json({
+          success: false,
+          deleted: false,
+          error: '缺少有效的会话 chatId，无法确定要撤回的目标会话',
         });
       }
 
@@ -5091,17 +5387,33 @@ app.delete('/api/messages/:id', requireTenantAuth, async (req: Request, res: Res
     }
 
     let changes = 0;
+    const altChatId = chatId ? (chatId.startsWith('tg_') ? chatId.replace(/^tg_/, '') : `tg_${chatId}`) : '';
+    const accPlaceholders = accVariants.map(() => '?').join(', ');
+
     if (msg) {
-      const result = isMaster
-        ? await db.prepare('DELETE FROM messages WHERE id = ?').run(id)
-        : await db.prepare('DELETE FROM messages WHERE id = ? AND account_id = ?').run(id, effectiveAccountId);
-      changes = (result as any)?.changes ?? 1;
-    } else if (tgMsgId && chatId) {
-      const altChatId = chatId.startsWith('tg_') ? chatId.replace(/^tg_/, '') : `tg_${chatId}`;
-      const result = isMaster
-        ? await db.prepare('DELETE FROM messages WHERE (chat_id = ? OR chat_id = ?) AND telegram_message_id = ?').run(chatId, altChatId, tgMsgId)
-        : await db.prepare('DELETE FROM messages WHERE (chat_id = ? OR chat_id = ?) AND telegram_message_id = ? AND account_id = ?').run(chatId, altChatId, tgMsgId, effectiveAccountId);
+      const whereParts = ['id = ?'];
+      const params: any[] = [id];
+      if (chatId) {
+        whereParts.push('(chat_id = ? OR chat_id = ?)');
+        params.push(chatId, altChatId);
+      }
+      if (enforceAccountScope) {
+        whereParts.push(`account_id IN (${accPlaceholders})`);
+        params.push(...accVariants);
+      }
+      const result = await db.prepare(`DELETE FROM messages WHERE ${whereParts.join(' AND ')}`).run(...params);
       changes = (result as any)?.changes ?? 0;
+    }
+
+    if (tgMsgId && chatId) {
+      const whereParts = ['(chat_id = ? OR chat_id = ?)', 'telegram_message_id = ?'];
+      const params: any[] = [chatId, altChatId, tgMsgId];
+      if (enforceAccountScope) {
+        whereParts.push(`account_id IN (${accPlaceholders})`);
+        params.push(...accVariants);
+      }
+      const result = await db.prepare(`DELETE FROM messages WHERE ${whereParts.join(' AND ')}`).run(...params);
+      changes += (result as any)?.changes ?? 0;
     }
 
     res.json({ success: true, deleted: true, cloudSynced, revoke, id, changes });
@@ -14011,8 +14323,173 @@ app.get('/api/telegram/user/dialogs', requireTenantAuth, async (req: Request, re
   }
 });
 
-// 20.1.1 In-Memory Telegram Contact Avatar Cache (TTL: 1 hour)
-const telegramAvatarCache = new Map<string, { buffer: Buffer; mime: string; expiresAt: number }>();
+// 20.1.1 Bounded LRU + TTL Cache for Telegram Avatars & Media (prevents memory OOM)
+export const TELEGRAM_AVATAR_CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour
+export const TELEGRAM_AVATAR_CACHE_MAX_ENTRIES = 500;
+export const TELEGRAM_AVATAR_CACHE_MAX_BYTES = 24 * 1024 * 1024; // 24 MB
+export const TELEGRAM_AVATAR_CACHE_ITEM_MAX_BYTES = 2 * 1024 * 1024; // 2 MB
+
+export const TELEGRAM_MEDIA_CACHE_TTL_MS = 30 * 60 * 1000; // 30 minutes
+export const TELEGRAM_MEDIA_CACHE_MAX_BYTES = 128 * 1024 * 1024; // 128 MB budget
+export const TELEGRAM_MEDIA_CACHE_MAX_ENTRIES = 256;
+export const TELEGRAM_MEDIA_STREAM_THRESHOLD_BYTES = Math.max(
+  1024 * 1024,
+  Number(process.env.TELEGRAM_MEDIA_STREAM_THRESHOLD_BYTES) || 8 * 1024 * 1024
+); // 8 MB single-file RAM threshold; larger files stream via iterDownload
+export const TELEGRAM_MEDIA_STREAM_CHUNK_BYTES = 256 * 1024; // 256 KB (multiple of 4096 & 1MB divisor)
+
+export class BoundedByteLruCache<T extends { buffer: Buffer; expiresAt: number }> {
+  private map = new Map<string, T>();
+  private _totalBytes = 0;
+  readonly maxBytes: number;
+  readonly maxEntries: number;
+  readonly maxItemBytes: number;
+
+  constructor(options: { maxBytes: number; maxEntries: number; maxItemBytes?: number }) {
+    this.maxBytes = Math.max(1, options.maxBytes);
+    this.maxEntries = Math.max(1, options.maxEntries);
+    this.maxItemBytes = Math.max(1, options.maxItemBytes ?? options.maxBytes);
+  }
+
+  get size(): number {
+    return this.map.size;
+  }
+
+  get totalBytes(): number {
+    return this._totalBytes;
+  }
+
+  keys(): IterableIterator<string> {
+    return this.map.keys();
+  }
+
+  pruneExpired(now = Date.now()): number {
+    let removed = 0;
+    for (const [k, v] of this.map.entries()) {
+      if (v.expiresAt <= now) {
+        this.map.delete(k);
+        this._totalBytes = Math.max(0, this._totalBytes - v.buffer.length);
+        removed++;
+      }
+    }
+    return removed;
+  }
+
+  get(key: string, now = Date.now()): T | undefined {
+    const entry = this.map.get(key);
+    if (!entry) return undefined;
+    if (entry.expiresAt <= now) {
+      this.map.delete(key);
+      this._totalBytes = Math.max(0, this._totalBytes - entry.buffer.length);
+      return undefined;
+    }
+    // Refresh LRU recency (move to tail)
+    this.map.delete(key);
+    this.map.set(key, entry);
+    return entry;
+  }
+
+  set(key: string, entry: T, now = Date.now()): boolean {
+    this.pruneExpired(now);
+    const itemBytes = Buffer.isBuffer(entry?.buffer) ? entry.buffer.length : 0;
+    if (itemBytes <= 0 || itemBytes > this.maxItemBytes || itemBytes > this.maxBytes || entry.expiresAt <= now) {
+      this.delete(key);
+      return false;
+    }
+
+    const existing = this.map.get(key);
+    if (existing) {
+      this._totalBytes = Math.max(0, this._totalBytes - existing.buffer.length);
+      this.map.delete(key);
+    }
+
+    while ((this._totalBytes + itemBytes > this.maxBytes || this.map.size >= this.maxEntries) && this.map.size > 0) {
+      const oldestKey = this.map.keys().next().value;
+      if (oldestKey === undefined) break;
+      const oldest = this.map.get(oldestKey)!;
+      this.map.delete(oldestKey);
+      this._totalBytes = Math.max(0, this._totalBytes - oldest.buffer.length);
+    }
+
+    this.map.set(key, entry);
+    this._totalBytes += itemBytes;
+    return true;
+  }
+
+  delete(key: string): boolean {
+    const existing = this.map.get(key);
+    if (!existing) return false;
+    this._totalBytes = Math.max(0, this._totalBytes - existing.buffer.length);
+    return this.map.delete(key);
+  }
+
+  deleteByPrefix(prefix: string): number {
+    if (!prefix) return 0;
+    let removed = 0;
+    for (const [k, v] of this.map.entries()) {
+      if (k.startsWith(prefix)) {
+        this.map.delete(k);
+        this._totalBytes = Math.max(0, this._totalBytes - v.buffer.length);
+        removed++;
+      }
+    }
+    return removed;
+  }
+
+  clear(): void {
+    this.map.clear();
+    this._totalBytes = 0;
+  }
+
+  stats() {
+    return {
+      entries: this.map.size,
+      totalBytes: this._totalBytes,
+      maxBytes: this.maxBytes,
+      maxEntries: this.maxEntries,
+      maxItemBytes: this.maxItemBytes,
+    };
+  }
+}
+
+export const telegramAvatarCache = new BoundedByteLruCache<{
+  buffer: Buffer;
+  mime: string;
+  expiresAt: number;
+}>({
+  maxBytes: TELEGRAM_AVATAR_CACHE_MAX_BYTES,
+  maxEntries: TELEGRAM_AVATAR_CACHE_MAX_ENTRIES,
+  maxItemBytes: TELEGRAM_AVATAR_CACHE_ITEM_MAX_BYTES,
+});
+
+export const telegramMediaCache = new BoundedByteLruCache<{
+  buffer: Buffer;
+  mime: string;
+  fileName: string;
+  expiresAt: number;
+}>({
+  maxBytes: TELEGRAM_MEDIA_CACHE_MAX_BYTES,
+  maxEntries: TELEGRAM_MEDIA_CACHE_MAX_ENTRIES,
+  maxItemBytes: TELEGRAM_MEDIA_STREAM_THRESHOLD_BYTES,
+});
+
+let telegramCacheCleanupInterval: NodeJS.Timeout | null = null;
+function startTelegramCacheCleanupTimer(): void {
+  if (telegramCacheCleanupInterval) return;
+  telegramCacheCleanupInterval = setInterval(() => {
+    const now = Date.now();
+    telegramAvatarCache.pruneExpired(now);
+    telegramMediaCache.pruneExpired(now);
+  }, 5 * 60 * 1000);
+  telegramCacheCleanupInterval.unref?.();
+}
+
+function stopTelegramCacheCleanupTimer(): void {
+  if (telegramCacheCleanupInterval) {
+    clearInterval(telegramCacheCleanupInterval);
+    telegramCacheCleanupInterval = null;
+  }
+}
 
 app.get('/api/telegram/user/avatar/:chatId', async (req: Request, res: Response) => {
   try {
@@ -14052,9 +14529,9 @@ app.get('/api/telegram/user/avatar/:chatId', async (req: Request, res: Response)
     const cacheKey = `${cacheAccountScope}:${cleanId}`;
     const now = Date.now();
 
-    // 2. Check in-memory avatar cache strictly scoped by account
-    const cached = telegramAvatarCache.get(cacheKey);
-    if (cached && cached.expiresAt > now) {
+    // 2. Check bounded LRU avatar cache strictly scoped by account
+    const cached = telegramAvatarCache.get(cacheKey, now);
+    if (cached) {
       res.setHeader('Content-Type', cached.mime);
       res.setHeader('Cache-Control', 'private, max-age=3600');
       return res.send(cached.buffer);
@@ -14065,11 +14542,15 @@ app.get('/api/telegram/user/avatar/:chatId', async (req: Request, res: Response)
         try {
           const photo = await connected.client.downloadProfilePhoto(peer, { isBig: false });
           if (photo && Buffer.isBuffer(photo) && photo.length > 0) {
-            telegramAvatarCache.set(cacheKey, {
-              buffer: photo,
-              mime: 'image/jpeg',
-              expiresAt: now + 3600 * 1000,
-            });
+            telegramAvatarCache.set(
+              cacheKey,
+              {
+                buffer: photo,
+                mime: 'image/jpeg',
+                expiresAt: now + TELEGRAM_AVATAR_CACHE_TTL_MS,
+              },
+              now
+            );
             res.setHeader('Content-Type', 'image/jpeg');
             res.setHeader('Cache-Control', 'private, max-age=3600');
             return res.send(photo);
@@ -14087,17 +14568,48 @@ app.get('/api/telegram/user/avatar/:chatId', async (req: Request, res: Response)
   }
 });
 
-// 20.1.2 Real Telegram Message Media Proxy Route (Photos, Videos, Voice/Audio, Stickers, Documents with HTTP Range)
-const telegramMediaCache = new Map<string, { buffer: Buffer; mime: string; fileName: string; expiresAt: number }>();
+// 20.1.2 Real Telegram Message Media Proxy Route (Photos, Videos, Voice/Audio, Stickers, Documents with Streaming HTTP Range)
+export type ParsedHttpByteRange =
+  | { kind: 'none' }
+  | { kind: 'range'; start: number; end: number }
+  | { kind: 'unsatisfiable' };
 
-function sendMediaBufferResponse(
-  req: Request,
-  res: Response,
-  entry: { buffer: Buffer; mime: string; fileName: string },
-  forceDownload: boolean
-) {
-  const { buffer, mime, fileName } = entry;
-  const total = buffer.length;
+export function parseHttpByteRange(rangeHeader: string | undefined, totalSize: number): ParsedHttpByteRange {
+  if (!rangeHeader || typeof rangeHeader !== 'string') return { kind: 'none' };
+  const trimmed = rangeHeader.trim();
+  if (!/^bytes=/i.test(trimmed)) return { kind: 'none' };
+  const spec = trimmed.replace(/^bytes=/i, '').trim();
+  if (!spec || spec.includes(',')) return { kind: 'none' };
+
+  const match = /^(\d*)-(\d*)$/.exec(spec);
+  if (!match) return { kind: 'unsatisfiable' };
+
+  const [, startStr, endStr] = match;
+  if (!startStr && !endStr) return { kind: 'unsatisfiable' };
+  if (!Number.isFinite(totalSize) || totalSize <= 0) return { kind: 'unsatisfiable' };
+
+  if (!startStr) {
+    // Suffix byte range: bytes=-N (last N bytes)
+    const suffixLen = Number(endStr);
+    if (!Number.isFinite(suffixLen) || suffixLen <= 0) return { kind: 'unsatisfiable' };
+    const start = Math.max(0, totalSize - suffixLen);
+    return { kind: 'range', start, end: totalSize - 1 };
+  }
+
+  const start = Number(startStr);
+  if (!Number.isFinite(start) || start < 0 || start >= totalSize) {
+    return { kind: 'unsatisfiable' };
+  }
+
+  const end = endStr ? Math.min(Number(endStr), totalSize - 1) : totalSize - 1;
+  if (!Number.isFinite(end) || end < start) {
+    return { kind: 'unsatisfiable' };
+  }
+
+  return { kind: 'range', start, end };
+}
+
+function applyMediaDownloadHeaders(res: Response, mime: string, fileName: string, forceDownload: boolean) {
   res.setHeader('Content-Type', mime);
   res.setHeader('Accept-Ranges', 'bytes');
   res.setHeader('Cache-Control', 'private, max-age=1800');
@@ -14105,22 +14617,356 @@ function sendMediaBufferResponse(
     const safeName = encodeURIComponent(fileName || 'telegram_file');
     res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${safeName}`);
   }
+}
 
-  const rangeHeader = req.headers.range;
-  if (rangeHeader && /^bytes=/i.test(rangeHeader)) {
-    const match = rangeHeader.replace(/bytes=/i, '').split('-');
-    const start = match[0] ? parseInt(match[0], 10) : 0;
-    const end = match[1] ? Math.min(parseInt(match[1], 10), total - 1) : total - 1;
-    if (!Number.isNaN(start) && !Number.isNaN(end) && start <= end && start < total) {
-      res.status(206);
-      res.setHeader('Content-Range', `bytes ${start}-${end}/${total}`);
-      res.setHeader('Content-Length', String(end - start + 1));
-      return res.send(buffer.subarray(start, end + 1));
-    }
+export function sendMediaBufferResponse(
+  req: Request,
+  res: Response,
+  entry: { buffer: Buffer; mime: string; fileName: string },
+  forceDownload: boolean
+) {
+  const { buffer, mime, fileName } = entry;
+  const total = buffer.length;
+  applyMediaDownloadHeaders(res, mime, fileName, forceDownload);
+
+  const rangeResult = parseHttpByteRange(req.headers.range, total);
+  if (rangeResult.kind === 'unsatisfiable') {
+    res.status(416);
+    res.setHeader('Content-Range', `bytes */${total}`);
+    return res.end();
+  }
+  if (rangeResult.kind === 'range') {
+    const { start, end } = rangeResult;
+    res.status(206);
+    res.setHeader('Content-Range', `bytes ${start}-${end}/${total}`);
+    res.setHeader('Content-Length', String(end - start + 1));
+    if (req.method === 'HEAD') return res.end();
+    return res.send(buffer.subarray(start, end + 1));
   }
 
   res.setHeader('Content-Length', String(total));
+  if (req.method === 'HEAD') return res.end();
   return res.send(buffer);
+}
+
+function extractPhotoSizeBytes(sizeObj: any): number {
+  if (!sizeObj) return 0;
+  if (typeof sizeObj.size === 'number' && sizeObj.size > 0) return sizeObj.size;
+  if (Array.isArray(sizeObj.sizes) && sizeObj.sizes.length > 0) {
+    const maxS = Math.max(...sizeObj.sizes.map((n: any) => Number(n) || 0));
+    if (maxS > 0) return maxS;
+  }
+  if (sizeObj.bytes && typeof sizeObj.bytes.length === 'number') {
+    return sizeObj.bytes.length;
+  }
+  return 0;
+}
+
+export function extractTelegramMediaMeta(msg: any, tgMsgId: number, wantThumb: boolean) {
+  const media = msg?.media;
+  const doc: any = media?.document || media?.webpage?.document || null;
+  const photo: any = media?.photo || media?.webpage?.photo || null;
+  const attrs: any[] = Array.isArray(doc?.attributes) ? doc.attributes : [];
+  const filenameAttr = attrs.find((a) => a.className === 'DocumentAttributeFilename');
+  const audioAttr = attrs.find((a) => a.className === 'DocumentAttributeAudio');
+  const videoAttr = attrs.find((a) => a.className === 'DocumentAttributeVideo');
+  const stickerAttr = attrs.find((a) => a.className === 'DocumentAttributeSticker');
+
+  let bestThumb: any = null;
+  if (wantThumb && doc && Array.isArray(doc.thumbs) && doc.thumbs.length > 0) {
+    const validThumbs = doc.thumbs.filter((t: any) => t && t.className !== 'PhotoPathSize');
+    bestThumb = validThumbs[validThumbs.length - 1] || null;
+  }
+
+  let mime = bestThumb ? 'image/webp' : String(doc?.mimeType || '').trim();
+  let fileName = String(filenameAttr?.fileName || '').trim();
+
+  if (!mime) {
+    if (msg?.photo || media?.className === 'MessageMediaPhoto' || photo) {
+      mime = 'image/jpeg';
+    } else if (audioAttr) {
+      mime = 'audio/ogg';
+    } else if (videoAttr) {
+      mime = 'video/mp4';
+    } else if (stickerAttr) {
+      mime = 'image/webp';
+    } else {
+      mime = 'application/octet-stream';
+    }
+  }
+
+  if (!fileName) {
+    if (mime === 'image/jpeg') fileName = `tg_photo_${tgMsgId}.jpg`;
+    else if (mime === 'image/webp') fileName = `tg_sticker_${tgMsgId}.webp`;
+    else if (mime.startsWith('video/')) fileName = `tg_video_${tgMsgId}.mp4`;
+    else if (mime.startsWith('audio/')) fileName = `tg_audio_${tgMsgId}.ogg`;
+    else fileName = `tg_file_${tgMsgId}`;
+  }
+
+  let knownSize = 0;
+  if (bestThumb) {
+    knownSize = extractPhotoSizeBytes(bestThumb);
+  } else if (doc && doc.size !== undefined && doc.size !== null) {
+    const parsedSize = typeof doc.size?.toJSNumber === 'function'
+      ? doc.size.toJSNumber()
+      : Number(doc.size?.toString?.() ?? doc.size);
+    if (Number.isFinite(parsedSize) && parsedSize > 0) {
+      knownSize = parsedSize;
+    }
+  } else if (photo && Array.isArray(photo.sizes)) {
+    const sizes = [...photo.sizes, ...(Array.isArray(photo.videoSizes) ? photo.videoSizes : [])].filter(
+      (s: any) => s && s.className !== 'PhotoPathSize' && s.className !== 'PhotoSizeEmpty'
+    );
+    if (sizes.length > 0) {
+      knownSize = Math.max(...sizes.map(extractPhotoSizeBytes));
+    }
+  }
+
+  return { doc, photo, bestThumb, mime, fileName, knownSize };
+}
+
+function waitForResponseDrainOrClose(res: Response): Promise<void> {
+  if (res.destroyed || res.writableEnded) return Promise.resolve();
+  return new Promise<void>((resolve) => {
+    const done = () => {
+      res.off('drain', done);
+      res.off('close', done);
+      res.off('error', done);
+      resolve();
+    };
+    res.once('drain', done);
+    res.once('close', done);
+    res.once('error', done);
+  });
+}
+
+export async function streamTelegramMediaViaIterDownload(params: {
+  client: any;
+  fileTarget: any;
+  dcId?: number;
+  msgData?: [any, number];
+  totalSize: number;
+  mime: string;
+  fileName: string;
+  forceDownload: boolean;
+  req: Request;
+  res: Response;
+  thresholdBytes?: number;
+  onSmallComplete?: (buffer: Buffer) => void;
+}): Promise<'sent' | 'unsatisfiable' | 'empty'> {
+  const {
+    client,
+    fileTarget,
+    dcId,
+    msgData,
+    totalSize,
+    mime,
+    fileName,
+    forceDownload,
+    req,
+    res,
+    thresholdBytes = TELEGRAM_MEDIA_STREAM_THRESHOLD_BYTES,
+    onSmallComplete,
+  } = params;
+
+  let clientAborted = Boolean(req.destroyed || res.destroyed);
+  const onAbort = () => {
+    clientAborted = true;
+  };
+  req.on('close', onAbort);
+  res.on('close', onAbort);
+
+  let iter: any = null;
+  let headersCommitted = false;
+
+  try {
+    // Unknown-size fallback: buffer only up to thresholdBytes, then spill directly to streaming HTTP response
+    if (totalSize <= 0) {
+      const requestSize = TELEGRAM_MEDIA_STREAM_CHUNK_BYTES;
+      iter = client.iterDownload({
+        file: fileTarget,
+        offset: returnBigInt(0),
+        requestSize,
+        chunkSize: requestSize,
+        ...(dcId !== undefined ? { dcId } : {}),
+        ...(msgData ? { msgData } : {}),
+      });
+
+      const smallChunks: Buffer[] = [];
+      let bufferedBytes = 0;
+      let spilledToStream = false;
+
+      for await (const rawChunk of iter) {
+        if (clientAborted || res.destroyed || res.writableEnded) break;
+        const chunk = Buffer.isBuffer(rawChunk) ? rawChunk : Buffer.from(rawChunk);
+        if (chunk.length === 0) continue;
+
+        if (!spilledToStream) {
+          if (bufferedBytes + chunk.length <= thresholdBytes) {
+            smallChunks.push(chunk);
+            bufferedBytes += chunk.length;
+            continue;
+          }
+          // Threshold exceeded: flush accumulated chunks and stream remaining chunks without buffering
+          spilledToStream = true;
+          applyMediaDownloadHeaders(res, mime, fileName, forceDownload);
+          res.setHeader('Accept-Ranges', 'none');
+          res.status(200);
+          headersCommitted = true;
+
+          for (const prevChunk of smallChunks) {
+            if (clientAborted || res.destroyed || res.writableEnded) break;
+            const ok = res.write(prevChunk);
+            if (!ok && !clientAborted && !res.destroyed) {
+              await waitForResponseDrainOrClose(res);
+            }
+          }
+          smallChunks.length = 0;
+          bufferedBytes = 0;
+        }
+
+        if (clientAborted || res.destroyed || res.writableEnded) break;
+        const ok = res.write(chunk);
+        if (!ok && !clientAborted && !res.destroyed) {
+          await waitForResponseDrainOrClose(res);
+        }
+      }
+
+      if (clientAborted) return 'sent';
+
+      if (!spilledToStream) {
+        if (bufferedBytes === 0) return 'empty';
+        const fullBuf = Buffer.concat(smallChunks, bufferedBytes);
+        smallChunks.length = 0;
+        if (onSmallComplete) onSmallComplete(fullBuf);
+        sendMediaBufferResponse(req, res, { buffer: fullBuf, mime, fileName }, forceDownload);
+        headersCommitted = true;
+        return 'sent';
+      }
+
+      if (!res.writableEnded && !res.destroyed) {
+        res.end();
+      }
+      return 'sent';
+    }
+
+    // Known-size path: true HTTP Range + offset-aligned GramJS iterDownload streaming
+    const rangeResult = parseHttpByteRange(req.headers.range, totalSize);
+    if (rangeResult.kind === 'unsatisfiable') {
+      res.status(416);
+      res.setHeader('Content-Range', `bytes */${totalSize}`);
+      res.end();
+      return 'unsatisfiable';
+    }
+
+    const isRange = rangeResult.kind === 'range';
+    const start = isRange ? rangeResult.start : 0;
+    const end = isRange ? rangeResult.end : totalSize - 1;
+    const bytesToSend = end - start + 1;
+
+    if (req.method === 'HEAD') {
+      applyMediaDownloadHeaders(res, mime, fileName, forceDownload);
+      if (isRange) {
+        res.status(206);
+        res.setHeader('Content-Range', `bytes ${start}-${end}/${totalSize}`);
+      } else {
+        res.status(200);
+      }
+      res.setHeader('Content-Length', String(bytesToSend));
+      res.end();
+      return 'sent';
+    }
+
+    // Pick power-of-2 MTProto chunk size (64KB for small probe ranges, 256KB for large streams)
+    const requestSize = bytesToSend <= 64 * 1024 ? 64 * 1024 : TELEGRAM_MEDIA_STREAM_CHUNK_BYTES;
+    const alignedOffset = Math.floor(start / requestSize) * requestSize;
+    const skipFromFirstChunk = start - alignedOffset;
+    const totalNeededFromAligned = end - alignedOffset + 1;
+    const chunkLimit = Math.ceil(totalNeededFromAligned / requestSize);
+
+    iter = client.iterDownload({
+      file: fileTarget,
+      offset: returnBigInt(alignedOffset),
+      requestSize,
+      chunkSize: requestSize,
+      limit: chunkLimit,
+      fileSize: returnBigInt(totalSize),
+      ...(dcId !== undefined ? { dcId } : {}),
+      ...(msgData ? { msgData } : {}),
+    });
+
+    let skip = skipFromFirstChunk;
+    let remaining = bytesToSend;
+
+    for await (const rawChunk of iter) {
+      if (clientAborted || res.destroyed || res.writableEnded) break;
+      const chunk = Buffer.isBuffer(rawChunk) ? rawChunk : Buffer.from(rawChunk);
+      if (chunk.length === 0) continue;
+
+      let sliceStart = 0;
+      if (skip > 0) {
+        if (skip >= chunk.length) {
+          skip -= chunk.length;
+          continue;
+        }
+        sliceStart = skip;
+        skip = 0;
+      }
+
+      const available = chunk.length - sliceStart;
+      const take = Math.min(available, remaining);
+      if (take <= 0) break;
+
+      const outSlice =
+        sliceStart === 0 && take === chunk.length
+          ? chunk
+          : chunk.subarray(sliceStart, sliceStart + take);
+
+      if (!headersCommitted) {
+        applyMediaDownloadHeaders(res, mime, fileName, forceDownload);
+        if (isRange) {
+          res.status(206);
+          res.setHeader('Content-Range', `bytes ${start}-${end}/${totalSize}`);
+        } else {
+          res.status(200);
+        }
+        res.setHeader('Content-Length', String(bytesToSend));
+        headersCommitted = true;
+      }
+
+      const canContinue = res.write(outSlice);
+      remaining -= outSlice.length;
+
+      if (!canContinue && remaining > 0 && !clientAborted && !res.destroyed) {
+        await waitForResponseDrainOrClose(res);
+      }
+      if (remaining <= 0) break;
+    }
+
+    if (!headersCommitted) {
+      return clientAborted ? 'sent' : 'empty';
+    }
+
+    if (remaining > 0 && !res.destroyed) {
+      // Upstream ended before declared Content-Length: destroy cleanly so client detects truncation
+      res.destroy();
+    } else if (!res.writableEnded && !res.destroyed) {
+      res.end();
+    }
+    return 'sent';
+  } catch (err) {
+    if (headersCommitted) {
+      if (!res.destroyed) res.destroy();
+      return 'sent';
+    }
+    throw err;
+  } finally {
+    req.off('close', onAbort);
+    res.off('close', onAbort);
+    if (iter && typeof iter.close === 'function') {
+      await iter.close().catch(() => {});
+    }
+  }
 }
 
 app.get('/api/telegram/user/media/:chatId/:msgId', async (req: Request, res: Response) => {
@@ -14167,8 +15013,8 @@ app.get('/api/telegram/user/media/:chatId/:msgId', async (req: Request, res: Res
     const cacheKey = `${cacheAccountScope}:${cleanChatId}:${tgMsgId}${wantThumb ? ':thumb' : ''}`;
     const now = Date.now();
 
-    const cached = telegramMediaCache.get(cacheKey);
-    if (cached && cached.expiresAt > now) {
+    const cached = telegramMediaCache.get(cacheKey, now);
+    if (cached) {
       return sendMediaBufferResponse(req, res, cached, forceDownload);
     }
 
@@ -14180,72 +15026,91 @@ app.get('/api/telegram/user/media/:chatId/:msgId', async (req: Request, res: Res
         const msg: any = msgs?.[0];
         if (!msg || !msg.media) continue;
 
-        const doc: any = msg.media.document;
-        const attrs: any[] = Array.isArray(doc?.attributes) ? doc.attributes : [];
-        const filenameAttr = attrs.find((a) => a.className === 'DocumentAttributeFilename');
-        const audioAttr = attrs.find((a) => a.className === 'DocumentAttributeAudio');
-        const videoAttr = attrs.find((a) => a.className === 'DocumentAttributeVideo');
-        const stickerAttr = attrs.find((a) => a.className === 'DocumentAttributeSticker');
+        const { doc, bestThumb, mime, fileName, knownSize } = extractTelegramMediaMeta(msg, tgMsgId, wantThumb);
 
-        let downloaded: Buffer | undefined;
-        let mime = String(doc?.mimeType || '').trim();
-        let fileName = String(filenameAttr?.fileName || '').trim();
+        // Large files (> threshold) or unknown-size documents stream via iterDownload with true HTTP Range (never buffer whole file in RAM)
+        const shouldStreamMedia =
+          !wantThumb &&
+          ((Boolean(doc) && (knownSize > TELEGRAM_MEDIA_STREAM_THRESHOLD_BYTES || knownSize === 0)) ||
+            knownSize > TELEGRAM_MEDIA_STREAM_THRESHOLD_BYTES);
 
-        if (wantThumb && doc && Array.isArray(doc.thumbs) && doc.thumbs.length > 0) {
-          const validThumbs = doc.thumbs.filter((t: any) => t && t.className !== 'PhotoPathSize');
-          const bestThumb = validThumbs[validThumbs.length - 1];
-          if (bestThumb) {
-            downloaded = (await candidate.client.downloadMedia(doc, { thumb: bestThumb })) as Buffer;
-            mime = 'image/webp';
+        if (shouldStreamMedia) {
+          const streamStatus = await streamTelegramMediaViaIterDownload({
+            client: candidate.client,
+            fileTarget: doc || msg.media,
+            dcId: doc?.dcId ?? msg.media?.photo?.dcId,
+            msgData: [inputPeer, tgMsgId],
+            totalSize: knownSize,
+            mime,
+            fileName,
+            forceDownload,
+            req,
+            res,
+            thresholdBytes: TELEGRAM_MEDIA_STREAM_THRESHOLD_BYTES,
+            onSmallComplete: (fullBuf) => {
+              telegramMediaCache.set(
+                cacheKey,
+                {
+                  buffer: fullBuf,
+                  mime,
+                  fileName,
+                  expiresAt: Date.now() + TELEGRAM_MEDIA_CACHE_TTL_MS,
+                },
+                Date.now()
+              );
+            },
+          });
+          if (streamStatus === 'sent' || streamStatus === 'unsatisfiable') {
+            return;
           }
+          continue;
+        }
+
+        const docByteSize = doc?.size != null
+          ? Number(typeof doc.size?.toJSNumber === 'function' ? doc.size.toJSNumber() : doc.size)
+          : 0;
+        if (wantThumb && doc && !bestThumb && docByteSize > TELEGRAM_MEDIA_STREAM_THRESHOLD_BYTES) {
+          continue;
+        }
+
+        // Small files (<= threshold), photos, and thumbnails: download into buffer & store in budgeted LRU cache
+        let downloaded: Buffer | undefined;
+        if (wantThumb && doc && bestThumb) {
+          downloaded = (await candidate.client.downloadMedia(doc, { thumb: bestThumb })) as Buffer;
         }
         if (!downloaded || !Buffer.isBuffer(downloaded) || downloaded.length === 0) {
           downloaded = (await candidate.client.downloadMedia(msg.media, {})) as Buffer;
         }
         if (!downloaded || !Buffer.isBuffer(downloaded) || downloaded.length === 0) continue;
 
-        if (!mime) {
-          if (msg.photo || msg.media.className === 'MessageMediaPhoto') {
-            mime = 'image/jpeg';
-          } else if (audioAttr) {
-            mime = 'audio/ogg';
-          } else if (videoAttr) {
-            mime = 'video/mp4';
-          } else if (stickerAttr) {
-            mime = 'image/webp';
-          } else {
-            mime = 'application/octet-stream';
-          }
-        }
-        if (!fileName) {
-          if (mime === 'image/jpeg') fileName = `tg_photo_${tgMsgId}.jpg`;
-          else if (mime === 'image/webp') fileName = `tg_sticker_${tgMsgId}.webp`;
-          else if (mime.startsWith('video/')) fileName = `tg_video_${tgMsgId}.mp4`;
-          else if (mime.startsWith('audio/')) fileName = `tg_audio_${tgMsgId}.ogg`;
-          else fileName = `tg_file_${tgMsgId}`;
-        }
-
         const entry = {
           buffer: downloaded,
           mime,
           fileName,
-          expiresAt: now + 30 * 60 * 1000,
+          expiresAt: Date.now() + TELEGRAM_MEDIA_CACHE_TTL_MS,
         };
-        telegramMediaCache.set(cacheKey, entry);
-        if (telegramMediaCache.size > 60) {
-          const oldestKey = telegramMediaCache.keys().next().value;
-          if (oldestKey) telegramMediaCache.delete(oldestKey);
-        }
+        // BoundedByteLruCache automatically skips caching if downloaded.length > TELEGRAM_MEDIA_STREAM_THRESHOLD_BYTES
+        telegramMediaCache.set(cacheKey, entry, Date.now());
 
         return sendMediaBufferResponse(req, res, entry, forceDownload);
       } catch {
+        if (res.headersSent) {
+          if (!res.destroyed) res.destroy();
+          return;
+        }
         // Try next candidate client if peer doesn't belong to this session
       }
     }
 
-    return res.status(404).send('Media not found');
+    if (!res.headersSent) {
+      return res.status(404).send('Media not found');
+    }
   } catch {
-    return res.status(404).send('Media not found');
+    if (!res.headersSent) {
+      return res.status(404).send('Media not found');
+    } else if (!res.destroyed) {
+      res.destroy();
+    }
   }
 });
 
@@ -14320,6 +15185,8 @@ app.post('/api/telegram/user/disconnect', requireTenantAuth, async (req: Request
       connectedUserClients.delete(targetClient.phone);
       connectedUserClients.delete(normalizePhoneNumber(targetClient.phone));
       connectedUserClients.delete(`acc_tg_${targetClient.userId}`);
+      telegramAvatarCache.deleteByPrefix(`acc_tg_${targetClient.userId}:`);
+      telegramMediaCache.deleteByPrefix(`acc_tg_${targetClient.userId}:`);
     } else if (p || uid) {
       // Account not in RAM — check if DB still holds an active encrypted session and revoke it on Telegram Cloud
       try {
@@ -14539,7 +15406,9 @@ app.post('/api/telegram/user/upload-avatar', requireTenantAuth, async (req: Requ
     telegramAvatarCache.delete(`${connected.userId}:${connected.userId}`);
     telegramAvatarCache.delete(`shared:${connected.userId}`);
     if (connected.username) {
-      telegramAvatarCache.delete(connected.username.replace(/^@/, ''));
+      const cleanUname = connected.username.replace(/^@/, '');
+      telegramAvatarCache.delete(cleanUname);
+      telegramAvatarCache.delete(`acc_tg_${connected.userId}:${cleanUname}`);
     }
 
     return res.json({
@@ -15821,6 +16690,53 @@ app.post('/api/telegram/user/messages/react', requireTenantAuth, async (req: Req
       })
     );
 
+    try {
+      const cleanEmoji = String(emoji || '').trim();
+      const canonicalChatId = String(chatId).startsWith('tg_') ? String(chatId) : `tg_${chatId}`;
+      const altChatId = canonicalChatId.replace(/^tg_/, '');
+      const scopedAcc = accountId || `acc_tg_${connected.userId}`;
+      const accVariants = getScopedAccountIdVariants(scopedAcc);
+      const accPlaceholders = accVariants.map(() => '?').join(', ');
+      const existingRow = (await db
+        .prepare(
+          `SELECT id, reactions_json FROM messages
+           WHERE (id = ? OR ((chat_id = ? OR chat_id = ?) AND telegram_message_id = ?))
+             AND account_id IN (${accPlaceholders})
+           LIMIT 1`
+        )
+        .get(messageId || '', canonicalChatId, altChatId, tgMsgId, ...accVariants)) as any;
+
+      if (existingRow?.id) {
+        const parsed = parseStoredReactionsJson(existingRow.reactions_json);
+        const reactions: Record<string, number> = { ...(parsed.reactions || {}) };
+        let myReactions: string[] = [...(parsed.myReactions || [])];
+        if (cleanEmoji) {
+          if (remove) {
+            if (myReactions.includes(cleanEmoji) || reactions[cleanEmoji]) {
+              const nextCnt = Math.max(0, (reactions[cleanEmoji] || 1) - 1);
+              if (nextCnt === 0) delete reactions[cleanEmoji];
+              else reactions[cleanEmoji] = nextCnt;
+            }
+            myReactions = myReactions.filter((e) => e !== cleanEmoji);
+          } else {
+            if (!myReactions.includes(cleanEmoji)) {
+              reactions[cleanEmoji] = (reactions[cleanEmoji] || 0) + 1;
+              myReactions.push(cleanEmoji);
+            }
+          }
+        } else if (remove) {
+          for (const prevMine of myReactions) {
+            const nextCnt = Math.max(0, (reactions[prevMine] || 1) - 1);
+            if (nextCnt === 0) delete reactions[prevMine];
+            else reactions[prevMine] = nextCnt;
+          }
+          myReactions = [];
+        }
+        const serialized = serializeStoredReactionsJson({ reactions, myReactions });
+        await db.prepare('UPDATE messages SET reactions_json = ? WHERE id = ?').run(serialized, existingRow.id);
+      }
+    } catch {}
+
     return res.json({ ok: true, cloudSynced: true, telegramMessageId: tgMsgId });
   } catch (err: any) {
     return await handleMtprotoRouteError(res, err, {
@@ -16156,17 +17072,26 @@ app.post('/api/telegram/user/messages/batch-delete', requireTenantAuth, async (r
       return res.status(400).json({ ok: false, error: '目标会话与待删除消息列表不能为空' });
     }
 
-    const normalizedItems = items
-      .filter((item: any) => item && item.id)
-      .map((item: any) => {
-        const id = String(item.id);
-        const tgId = resolveTelegramMessageNumericId(id, item.telegramMessageId);
-        return {
-          id,
-          tgId,
-          isLocalOnly: Boolean(item.localOnly) || !tgId,
-        };
-      });
+    const rawItems = items.filter((item: any) => item && item.id);
+    for (const item of rawItems) {
+      const embeddedChat = extractEmbeddedChatIdFromMessageId(String(item.id));
+      if (embeddedChat && !isSameCanonicalChatId(String(chatId), embeddedChat)) {
+        return res.status(403).json({
+          ok: false,
+          error: '消息 ID 所属会话与当前请求 chatId 不一致，已阻止跨会话误删',
+        });
+      }
+    }
+
+    const normalizedItems = rawItems.map((item: any) => {
+      const id = String(item.id);
+      const tgId = resolveTelegramMessageNumericId(id, item.telegramMessageId);
+      return {
+        id,
+        tgId,
+        isLocalOnly: Boolean(item.localOnly) || !tgId,
+      };
+    });
 
     const tgIds = Array.from(
       new Set(normalizedItems.filter((i) => !i.isLocalOnly && i.tgId).map((i) => Number(i.tgId)))
@@ -16212,17 +17137,30 @@ app.post('/api/telegram/user/messages/batch-delete', requireTenantAuth, async (r
     try {
       const altChatId = String(chatId).startsWith('tg_') ? String(chatId).replace(/^tg_/, '') : `tg_${chatId}`;
       const accVariants = accountId ? getScopedAccountIdVariants(accountId) : [];
+      const enforceAcc = accVariants.length > 0 && (!isMaster || Boolean(req.body?.accountId || req.headers['x-account-id']));
+      const accPlaceholders = accVariants.map(() => '?').join(', ');
       for (const item of normalizedItems) {
-        if (isMaster || accVariants.length === 0) {
-          await db.prepare('DELETE FROM messages WHERE id = ?').run(item.id);
+        const embeddedChat = extractEmbeddedChatIdFromMessageId(item.id);
+        if (embeddedChat && !isSameCanonicalChatId(String(chatId), embeddedChat)) {
+          continue;
+        }
+        if (enforceAcc) {
+          await db
+            .prepare(`DELETE FROM messages WHERE id = ? AND (chat_id = ? OR chat_id = ?) AND account_id IN (${accPlaceholders})`)
+            .run(item.id, String(chatId), altChatId, ...accVariants);
           if (item.tgId) {
-            await db.prepare('DELETE FROM messages WHERE (chat_id = ? OR chat_id = ?) AND telegram_message_id = ?').run(String(chatId), altChatId, item.tgId);
+            await db
+              .prepare(`DELETE FROM messages WHERE (chat_id = ? OR chat_id = ?) AND telegram_message_id = ? AND account_id IN (${accPlaceholders})`)
+              .run(String(chatId), altChatId, item.tgId, ...accVariants);
           }
         } else {
-          const accPlaceholders = accVariants.map(() => '?').join(', ');
-          await db.prepare(`DELETE FROM messages WHERE id = ? AND account_id IN (${accPlaceholders})`).run(item.id, ...accVariants);
+          await db
+            .prepare('DELETE FROM messages WHERE id = ? AND (chat_id = ? OR chat_id = ?)')
+            .run(item.id, String(chatId), altChatId);
           if (item.tgId) {
-            await db.prepare(`DELETE FROM messages WHERE (chat_id = ? OR chat_id = ?) AND telegram_message_id = ? AND account_id IN (${accPlaceholders})`).run(String(chatId), altChatId, item.tgId, ...accVariants);
+            await db
+              .prepare('DELETE FROM messages WHERE (chat_id = ? OR chat_id = ?) AND telegram_message_id = ?')
+              .run(String(chatId), altChatId, item.tgId);
           }
         }
       }
@@ -16602,6 +17540,7 @@ app.get('/api/telegram/user/chat-info/:chatId', requireTenantAuth, async (req: R
       statusText: uStatus.statusText,
       isBlocked: Boolean(fullUserRes?.fullUser?.blocked),
       isContact: Boolean(targetUser.contact),
+      isSelf: Boolean(targetUser.self),
     });
   } catch (err: any) {
     if (isTelegramSessionExpiredError(err)) {
@@ -16831,6 +17770,12 @@ app.post('/api/telegram/user/send-sticker', requireTenantAuth, async (req: Reque
       setId,
       setAccessHash,
       replyToMsgId,
+      emoji,
+      packTitle,
+      thumbUrl,
+      isVideo: reqIsVideo,
+      replyTo,
+      id: clientMsgId,
     } = req.body || {};
 
     if (!chatId || !docId || !accessHash) {
@@ -16846,6 +17791,16 @@ app.post('/api/telegram/user/send-sticker', requireTenantAuth, async (req: Reque
     }
 
     const client = connected.client;
+    const effectiveAccountId = `acc_tg_${connected.userId}`;
+    const canonicalChatId =
+      String(chatId).startsWith('tg_') || String(chatId).startsWith('chat_') ? String(chatId) : `tg_${chatId}`;
+    const cleanEmoji = String(emoji || '').trim();
+    const stickerFallbackText = cleanEmoji ? `${cleanEmoji} [贴纸]` : '🖼️ 贴纸';
+    markOutboundMessageSent(canonicalChatId, stickerFallbackText, effectiveAccountId);
+    if (stickerFallbackText !== '🖼️ 贴纸') {
+      markOutboundMessageSent(canonicalChatId, '🖼️ 贴纸', effectiveAccountId);
+    }
+
     const { inputPeer } = await resolveTelegramInputPeer(client, chatId, connected.userId);
 
     const invokeSendSticker = async (fileRefBuf: Buffer) => {
@@ -16896,26 +17851,81 @@ app.post('/api/telegram/user/send-sticker', requireTenantAuth, async (req: Reque
     }
 
     let telegramMessageId: number | undefined;
+    let sentMessageObj: any = null;
     if (typeof updates?.id === 'number') {
       telegramMessageId = updates.id;
     } else if (Array.isArray(updates?.updates)) {
       for (const u of updates.updates) {
         if (typeof u?.id === 'number' && u.className === 'UpdateMessageID') {
           telegramMessageId = u.id;
-          break;
         }
         if (typeof u?.message?.id === 'number') {
           telegramMessageId = u.message.id;
+          sentMessageObj = u.message;
           break;
         }
       }
     }
 
+    if (telegramMessageId) {
+      markOutboundTelegramMessageIdSent(canonicalChatId, telegramMessageId, effectiveAccountId);
+    }
+
+    const now = Date.now();
+    const savedMsgId =
+      typeof clientMsgId === 'string' && clientMsgId.trim()
+        ? clientMsgId.trim()
+        : telegramMessageId
+          ? buildTelegramRealtimeMessageId(connected.userId, canonicalChatId, telegramMessageId)
+          : `msg_sticker_${now}_${Math.random().toString(36).slice(2, 6)}`;
+
+    const signedMediaUrl = telegramMessageId
+      ? signTelegramResourceUrl(
+          `/api/telegram/user/media/${encodeURIComponent(canonicalChatId)}/${telegramMessageId}?accountId=${encodeURIComponent(effectiveAccountId)}`
+        )
+      : '';
+    const extracted = sentMessageObj ? extractTelegramMediaFields(sentMessageObj, canonicalChatId, effectiveAccountId) : null;
+    const isVideoSticker = extracted ? extracted.isVideo : Boolean(reqIsVideo);
+    const isImageSticker = extracted ? extracted.isImage : !isVideoSticker;
+    const resolvedText = extracted?.text || stickerFallbackText;
+    const resolvedImageUrl = extracted?.imageUrl || (isImageSticker ? (String(thumbUrl || '').trim() || signedMediaUrl) : '');
+    const resolvedVideoUrl = extracted?.videoUrl || (isVideoSticker ? signedMediaUrl : '');
+    const resolvedCaption = packTitle && cleanEmoji ? `${cleanEmoji} · ${packTitle}` : resolvedText;
+
+    await upsertSyncedMessageToDb(
+      {
+        id: savedMsgId,
+        telegramMessageId,
+        chatId: canonicalChatId,
+        accountId: effectiveAccountId,
+        sender: 'me',
+        senderName: '我方',
+        text: resolvedText,
+        isImage: isImageSticker,
+        imageUrl: resolvedImageUrl,
+        imageCaption: resolvedCaption,
+        isVideo: isVideoSticker,
+        videoUrl: resolvedVideoUrl,
+        replyTo: replyTo || undefined,
+        timestamp: new Date(now).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false }),
+        createdAt: now,
+        deliveryStatus: 'delivered',
+      },
+      canonicalChatId,
+      effectiveAccountId
+    );
+
     return res.json({
       ok: true,
       cloudSynced: true,
       deliveryStatus: 'delivered',
+      id: savedMsgId,
       telegramMessageId,
+      text: resolvedText,
+      imageUrl: resolvedImageUrl || undefined,
+      videoUrl: resolvedVideoUrl || undefined,
+      isImage: isImageSticker,
+      isVideo: isVideoSticker,
     });
   } catch (err: any) {
     return await handleMtprotoRouteError(res, err, {
@@ -17276,7 +18286,7 @@ app.get('/api/telegram/user/contacts/blocked', requireTenantAuth, async (req: Re
 app.post('/api/telegram/user/contacts/add', requireTenantAuth, async (req: Request, res: Response) => {
   try {
     const accountId = (req.body?.accountId as string) || (req.headers['x-account-id'] as string) || '';
-    const { name, phone, username } = req.body || {};
+    const { name, phone, username, chatId } = req.body || {};
     const connected = resolveConnectedTelegramUser(accountId);
     if (!connected || !connected.client) {
       return res.status(400).json({
@@ -17292,12 +18302,13 @@ app.post('/api/telegram/user/contacts/add', requireTenantAuth, async (req: Reque
     const lastName = nameParts.slice(1).join(' ');
     const cleanPhone = typeof phone === 'string' ? phone.trim() : '';
     const cleanUsername = typeof username === 'string' ? username.trim().replace(/^@/, '') : '';
+    const cleanChatId = typeof chatId === 'string' ? chatId.trim() : '';
 
-    if (!cleanPhone && !cleanUsername) {
+    if (!cleanPhone && !cleanUsername && !cleanChatId) {
       return res.status(400).json({
         ok: false,
         cloudSynced: false,
-        error: '同步至 Telegram 云端通讯录需要填写对方的手机号或 @用户名',
+        error: '同步至 Telegram 云端通讯录需要提供目标会话 ID、手机号或 @用户名',
       });
     }
 
@@ -17353,10 +18364,40 @@ app.post('/api/telegram/user/contacts/add', requireTenantAuth, async (req: Reque
           }
         }
       } catch (uErr: any) {
+        if (!cleanChatId) {
+          return res.status(400).json({
+            ok: false,
+            cloudSynced: false,
+            error: `无法通过用户名 @${cleanUsername} 添加联系人: ${uErr?.message || '用户不存在'}`,
+          });
+        }
+      }
+    }
+
+    if (!resolvedUser && cleanChatId) {
+      try {
+        const inputUser = await resolveTelegramInputUser(connected.client, cleanChatId);
+        if (inputUser) {
+          const addRes: any = await connected.client.invoke(
+            new Api.contacts.AddContact({
+              id: inputUser,
+              firstName,
+              lastName,
+              phone: cleanPhone || '',
+              addPhonePrivacyException: false,
+            })
+          );
+          if (Array.isArray(addRes?.users) && addRes.users.length > 0) {
+            resolvedUser = addRes.users[0];
+          } else {
+            resolvedUser = await connected.client.getEntity(inputUser);
+          }
+        }
+      } catch (cErr: any) {
         return res.status(400).json({
           ok: false,
           cloudSynced: false,
-          error: `无法通过用户名 @${cleanUsername} 添加联系人: ${uErr?.message || '用户不存在'}`,
+          error: `无法添加该会话用户至云端通讯录: ${formatTelegramError(cErr)}`,
         });
       }
     }
@@ -17365,7 +18406,9 @@ app.post('/api/telegram/user/contacts/add', requireTenantAuth, async (req: Reque
       return res.status(404).json({
         ok: false,
         cloudSynced: false,
-        error: '该手机号尚未注册 Telegram，或对方隐私设置禁止通过手机号匹配添加（可尝试填写对方 @用户名）',
+        error: cleanChatId
+          ? '无法定位该 Telegram 用户，暂未能添加至云端通讯录'
+          : '该手机号尚未注册 Telegram，或对方隐私设置禁止通过手机号匹配添加（可尝试填写对方 @用户名）',
       });
     }
 
@@ -17980,7 +19023,7 @@ export async function syncTelegramUserChatMessages(
   rawChatId: string,
   limit = 40,
   explicitUserId?: string,
-  options?: { offsetId?: number; search?: string }
+  options?: { offsetId?: number; search?: string; throwOnError?: boolean }
 ) {
   try {
     const rawId = rawChatId.startsWith('tg_') ? rawChatId.replace('tg_', '') : rawChatId;
@@ -18031,7 +19074,24 @@ export async function syncTelegramUserChatMessages(
       } catch {}
     }
 
-    if (allFetched.length === 0) return [];
+    if (allFetched.length === 0) {
+      if (!options?.offsetId && !options?.search) {
+        try {
+          const altChatId = canonicalId.startsWith('tg_') ? canonicalId.replace(/^tg_/, '') : `tg_${canonicalId}`;
+          const accVariants = getScopedAccountIdVariants(accountId);
+          const accPlaceholders = accVariants.map(() => '?').join(', ');
+          await db
+            .prepare(
+              `DELETE FROM messages
+               WHERE (chat_id = ? OR chat_id = ?)
+                 AND account_id IN (${accPlaceholders})
+                 AND COALESCE(delivery_status, 'delivered') = 'delivered'`
+            )
+            .run(canonicalId, altChatId, ...accVariants);
+        } catch {}
+      }
+      return [];
+    }
 
     const msgById = new Map<number, any>();
     const missingReplyIds = new Set<number>();
@@ -18080,7 +19140,7 @@ export async function syncTelegramUserChatMessages(
         replyTo = {
           id: targetReply
             ? `tg_cloud_${targetReply.id}_${(targetReply.date || 0) * 1000}_${accountId}`
-            : `msg_tg_${explicitUserId || (client as any)._selfId || 'user'}_${replyToId}`,
+            : buildTelegramRealtimeMessageId(String(explicitUserId || (client as any)._selfId || 'user'), canonicalId, replyToId),
           telegramMessageId: replyToId,
           senderName: replySenderName,
           text: replySummary,
@@ -18138,7 +19198,7 @@ export async function syncTelegramUserChatMessages(
 
     return synced.sort((a, b) => a.createdAt - b.createdAt);
   } catch (err: any) {
-    if (isTelegramSessionExpiredError(err)) {
+    if (isTelegramSessionExpiredError(err) || options?.throwOnError) {
       throw err;
     }
     console.warn(`[Sync Telegram Cloud Messages Warning] for ${rawChatId}:`, err.message);
@@ -18146,16 +19206,129 @@ export async function syncTelegramUserChatMessages(
   }
 }
 
-// 20.4 Fetch real cloud messages from Telegram for a specific conversation (supports offsetId pagination, search & readOutboxMaxId)
+export async function querySqlitePaginatedMessagesFallback(
+  chatId: string,
+  accountId: string | undefined,
+  options?: { limit?: number; offsetId?: number; beforeCreatedAt?: number; search?: string }
+): Promise<{ messages: UnifiedChatMessage[]; hasMore: boolean }> {
+  const safeLimit = Math.min(Math.max(Number(options?.limit) || 30, 1), 100);
+  const altChatId = chatId.startsWith('tg_') ? chatId.replace(/^tg_/, '') : `tg_${chatId}`;
+  const effectiveAcc = String(accountId || '').trim();
+  const accVariants = effectiveAcc ? getScopedAccountIdVariants(effectiveAcc) : [''];
+  const accPlaceholders = accVariants.map(() => '?').join(', ');
+
+  const conditions = [
+    '(chat_id = ? OR chat_id = ?)',
+    effectiveAcc ? `account_id IN (${accPlaceholders})` : '1=1',
+  ];
+  const args: any[] = [chatId, altChatId, ...(effectiveAcc ? accVariants : [])];
+
+  if (options?.offsetId && Number.isInteger(options.offsetId) && options.offsetId > 0) {
+    conditions.push('telegram_message_id IS NOT NULL AND telegram_message_id > 0 AND telegram_message_id < ?');
+    args.push(options.offsetId);
+  }
+  if (options?.beforeCreatedAt && Number.isFinite(options.beforeCreatedAt) && options.beforeCreatedAt > 0) {
+    conditions.push('created_at < ?');
+    args.push(Math.floor(options.beforeCreatedAt));
+  }
+  if (options?.search && options.search.trim()) {
+    const likePattern = `%${options.search.trim()}%`;
+    conditions.push('(text LIKE ? OR translated_text LIKE ? OR stt_text LIKE ? OR file_name LIKE ?)');
+    args.push(likePattern, likePattern, likePattern, likePattern);
+  }
+
+  args.push(safeLimit + 1);
+  const descRows = (await db
+    .prepare(
+      `SELECT
+        id, chat_id as chatId, account_id as accountId, sender, sender_name as senderName,
+        text, translated_text as translatedText, is_audio as isAudio, audio_duration as audioDuration,
+        audio_url as audioUrl, stt_text as sttText, voice_tone as voiceTone,
+        is_image as isImage, image_url as imageUrl, image_caption as imageCaption,
+        is_video as isVideo, video_url as videoUrl, video_duration as videoDuration,
+        is_file as isFile, file_name as fileName, file_size as fileSize, file_url as fileUrl,
+        timestamp, created_at as createdAt, delivery_status as deliveryStatus,
+        telegram_message_id as telegramMessageId,
+        reply_to_json as replyToJson,
+        is_edited as isEdited,
+        is_pinned as isPinned,
+        forward_from as forwardFrom,
+        reactions_json as reactionsJson
+      FROM messages
+      WHERE ${conditions.join(' AND ')}
+      ORDER BY COALESCE(telegram_message_id, 0) DESC, created_at DESC
+      LIMIT ?`
+    )
+    .all(...args)) as any[];
+
+  const hasMore = descRows.length > safeLimit;
+  const pageRows = (hasMore ? descRows.slice(0, safeLimit) : descRows).reverse();
+
+  const resignUrlIfNeeded = (rawUrl?: string, msgAcc?: string) => {
+    if (!rawUrl || typeof rawUrl !== 'string') return rawUrl;
+    if (rawUrl.startsWith('/api/messages/local-media/') || isSignedResourceUrlExpiring(rawUrl)) {
+      return resignTelegramResourceUrl(rawUrl, msgAcc || effectiveAcc) || rawUrl;
+    }
+    return rawUrl;
+  };
+
+  const messages: UnifiedChatMessage[] = pageRows.map((r: any) => {
+    const replyTo = r.replyToJson ? safeJsonParse(r.replyToJson, undefined) : undefined;
+    const parsedReactions = parseStoredReactionsJson(r.reactionsJson);
+    return {
+      id: r.id,
+      chatId: r.chatId,
+      accountId: r.accountId,
+      sender: r.sender === 'me' ? 'me' : r.sender === 'system' ? 'system' : 'peer',
+      senderName: r.senderName || '',
+      text: r.text || '',
+      translatedText: r.translatedText || '',
+      isAudio: Boolean(r.isAudio),
+      audioDuration: Number(r.audioDuration || 0),
+      audioUrl: resignUrlIfNeeded(r.audioUrl, r.accountId) || '',
+      sttText: r.sttText || '',
+      voiceTone: r.voiceTone || '',
+      isImage: Boolean(r.isImage),
+      imageUrl: resignUrlIfNeeded(r.imageUrl, r.accountId) || '',
+      imageCaption: r.imageCaption || '',
+      isVideo: Boolean(r.isVideo),
+      videoUrl: resignUrlIfNeeded(r.videoUrl, r.accountId) || '',
+      videoDuration: Number(r.videoDuration || 0),
+      isFile: Boolean(r.isFile),
+      fileName: r.fileName || '',
+      fileSize: r.fileSize || '',
+      fileUrl: resignUrlIfNeeded(r.fileUrl, r.accountId) || '',
+      timestamp: r.timestamp || '',
+      createdAt: Number(r.createdAt || Date.now()),
+      deliveryStatus: r.deliveryStatus || 'delivered',
+      telegramMessageId: r.telegramMessageId ? Number(r.telegramMessageId) : undefined,
+      ...(replyTo ? { replyTo } : {}),
+      isEdited: Boolean(r.isEdited),
+      isPinned: Boolean(r.isPinned),
+      ...(r.forwardFrom ? { forwardFrom: r.forwardFrom } : {}),
+      ...(parsedReactions.reactions ? { reactions: parsedReactions.reactions } : {}),
+      ...(parsedReactions.myReactions ? { myReactions: parsedReactions.myReactions } : {}),
+    };
+  });
+
+  return { messages, hasMore };
+}
+
+// 20.4 Fetch real cloud messages from Telegram for a specific conversation (supports offsetId pagination, search, readOutboxMaxId & SQLite fallback)
 app.get('/api/telegram/user/messages/:chatId', requireTenantAuth, async (req: Request, res: Response) => {
   const { chatId } = req.params;
-  const accountId = (req.query.accountId as string) || (req.headers['x-account-id'] as string);
+  const accountId =
+    (req.query.accountId as string) ||
+    (req.headers['x-account-id'] as string) ||
+    (req as any).auth?.effectiveAccountId ||
+    '';
   let connected: ConnectedTelegramUser | undefined;
-  try {
-    const limit = Math.min(Math.max(Number(req.query.limit) || 30, 1), 100);
-    const offsetId = req.query.offsetId ? Number(req.query.offsetId) : undefined;
-    const search = typeof req.query.search === 'string' ? req.query.search.trim() : undefined;
+  const limit = Math.min(Math.max(Number(req.query.limit) || 30, 1), 100);
+  const rawOffsetId = req.query.offsetId ? Number(req.query.offsetId) : undefined;
+  const offsetId = rawOffsetId && Number.isInteger(rawOffsetId) && rawOffsetId > 0 ? rawOffsetId : undefined;
+  const search = typeof req.query.search === 'string' ? req.query.search.trim() : undefined;
 
+  try {
     connected = accountId
       ? connectedUserClients.get(accountId) ||
         Array.from(connectedUserClients.values()).find(
@@ -18164,13 +19337,43 @@ app.get('/api/telegram/user/messages/:chatId', requireTenantAuth, async (req: Re
       : undefined;
 
     if (!connected || !connected.client) {
-      return res.json({ ok: false, messages: [], hasMore: false, message: '未找到在线的 Telegram 客户端会话' });
+      const localFallback = await querySqlitePaginatedMessagesFallback(chatId, accountId, {
+        limit,
+        offsetId,
+        search,
+      });
+      if (localFallback.messages.length > 0 || offsetId) {
+        return res.json({
+          ok: true,
+          fromLocalFallback: true,
+          messages: localFallback.messages,
+          hasMore: localFallback.hasMore,
+        });
+      }
+      return res.json({ ok: false, fromLocalFallback: true, messages: [], hasMore: false, message: '未找到在线的 Telegram 客户端会话' });
     }
 
     const messages = await syncTelegramUserChatMessages(connected.client, chatId, limit, connected.userId, {
-      offsetId: offsetId && Number.isInteger(offsetId) && offsetId > 0 ? offsetId : undefined,
+      offsetId,
       search,
+      throwOnError: true,
     });
+
+    if (offsetId && messages.length === 0) {
+      const localOlder = await querySqlitePaginatedMessagesFallback(
+        chatId,
+        accountId || `acc_tg_${connected.userId}`,
+        { limit, offsetId, search }
+      );
+      if (localOlder.messages.length > 0) {
+        return res.json({
+          ok: true,
+          fromLocalFallback: true,
+          messages: localOlder.messages,
+          hasMore: localOlder.hasMore,
+        });
+      }
+    }
 
     let readOutboxMaxId: number | undefined;
     if (!offsetId && !search) {
@@ -18207,6 +19410,21 @@ app.get('/api/telegram/user/messages/:chatId', requireTenantAuth, async (req: Re
         messages: [],
       });
     }
+    try {
+      const localFallback = await querySqlitePaginatedMessagesFallback(
+        chatId,
+        accountId || (connected?.userId ? `acc_tg_${connected.userId}` : ''),
+        { limit, offsetId, search }
+      );
+      if (localFallback.messages.length > 0) {
+        return res.json({
+          ok: true,
+          fromLocalFallback: true,
+          messages: localFallback.messages,
+          hasMore: localFallback.hasMore,
+        });
+      }
+    } catch {}
     res.status(500).json({ ok: false, error: err.message, messages: [] });
   }
 });
@@ -18291,7 +19509,7 @@ app.post('/api/telegram/autopilot/toggle', requireTenantAuth, (req: Request, res
 // Real-time MTProto NewMessage event listener for personal Telegram account
 export interface LocalIncomingUpdate {
   id: string;
-  type?: 'message' | 'edit' | 'delete' | 'read_outbox' | 'pin' | 'user_status' | 'peer_blocked';
+  type?: 'message' | 'edit' | 'delete' | 'read_outbox' | 'pin' | 'user_status' | 'peer_blocked' | 'reactions';
   telegramMessageId?: number;
   deletedMessageIds?: number[];
   readOutboxMaxId?: number;
@@ -18300,6 +19518,8 @@ export interface LocalIncomingUpdate {
   isOnline?: boolean;
   statusText?: string;
   isBlocked?: boolean;
+  reactions?: Record<string, number>;
+  myReactions?: string[];
   chatId: string;
   rawChatId?: string;
   accountId: string;
@@ -18390,11 +19610,28 @@ app.post('/api/telegram/user/ack-updates', (req: Request, res: Response) => {
 
 // In-memory cache of recently sent outbound messages and processed MTProto message IDs to prevent echo duplicates
 const recentlySentOutboundCache = new Map<string, { count: number; expiresAt: number }>();
+const recentlySentOutboundIds = new Map<string, number>();
 const processedMtprotoMsgIds = new Map<string, number>();
 
 function buildOutboundEchoKey(chatId: string, text: string, accountId?: string): string {
   const scope = accountId ? normalizeAutopilotAccountScope(accountId) : 'shared';
   return `${scope}:${chatId.replace(/^tg_/, '')}:${text.trim()}`;
+}
+
+function buildOutboundEchoIdKey(chatId: string, telegramMessageId: number, accountId?: string): string {
+  const scope = accountId ? normalizeAutopilotAccountScope(accountId) : 'shared';
+  return `${scope}:${chatId.replace(/^tg_/, '')}:${telegramMessageId}`;
+}
+
+export function markOutboundTelegramMessageIdSent(chatId: string, telegramMessageId?: number, accountId?: string) {
+  if (!telegramMessageId || !Number.isInteger(telegramMessageId) || telegramMessageId <= 0) return;
+  const now = Date.now();
+  recentlySentOutboundIds.set(buildOutboundEchoIdKey(chatId, telegramMessageId, accountId), now + 30000);
+  if (recentlySentOutboundIds.size > 300) {
+    for (const [k, exp] of recentlySentOutboundIds.entries()) {
+      if (now >= exp) recentlySentOutboundIds.delete(k);
+    }
+  }
 }
 
 export function markOutboundMessageSent(chatId: string, text: string, accountId?: string) {
@@ -18411,12 +19648,26 @@ export function markOutboundMessageSent(chatId: string, text: string, accountId?
   }
 }
 
-export function isRecentOutboundEcho(chatId: string, text: string, accountId?: string): boolean {
+export function isRecentOutboundEcho(
+  chatId: string,
+  text: string,
+  accountId?: string,
+  telegramMessageId?: number
+): boolean {
+  const now = Date.now();
+  if (telegramMessageId && Number.isInteger(telegramMessageId) && telegramMessageId > 0) {
+    const idKey = buildOutboundEchoIdKey(chatId, telegramMessageId, accountId);
+    const idExp = recentlySentOutboundIds.get(idKey);
+    if (idExp !== undefined) {
+      recentlySentOutboundIds.delete(idKey);
+      if (now < idExp) return true;
+    }
+  }
   if (!text) return false;
   const key = buildOutboundEchoKey(chatId, text, accountId);
   const entry = recentlySentOutboundCache.get(key);
   if (!entry) return false;
-  if (Date.now() < entry.expiresAt && entry.count > 0) {
+  if (now < entry.expiresAt && entry.count > 0) {
     if (entry.count <= 1) {
       recentlySentOutboundCache.delete(key);
     } else {
@@ -18460,14 +19711,15 @@ export function attachTelegramClientMessageListener(client: TelegramClient, phon
         const canonicalChatId = rawChatId.startsWith('tg_') ? rawChatId : `tg_${rawChatId}`;
         const isOut = Boolean(message.out);
         const createdAt = message.date ? message.date * 1000 : Date.now();
-        const messageId = `msg_tg_${userId}_${message.id}`;
+        const messageId = buildTelegramRealtimeMessageId(userId, canonicalChatId, message.id);
         const accountId = `acc_tg_${userId}`;
         const timestamp = new Date(createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false });
 
         const parsedMedia = extractTelegramMediaFields(message, canonicalChatId, accountId);
         const isAudio = parsedMedia.isAudio;
         const audioDuration = parsedMedia.audioDuration;
-        let audioUrl: string | undefined = parsedMedia.audioUrl || undefined;
+        // Always use signed /api/telegram/user/media/... URL for real-time voice notes (never write multi-MB Base64 into localStorage)
+        const audioUrl: string | undefined = parsedMedia.audioUrl || undefined;
         const isVideo = parsedMedia.isVideo;
         const videoDuration = parsedMedia.videoDuration;
         const videoUrl: string | undefined = parsedMedia.videoUrl || undefined;
@@ -18476,22 +19728,10 @@ export function attachTelegramClientMessageListener(client: TelegramClient, phon
         const isFile = parsedMedia.isFile;
         const fileUrl: string | undefined = parsedMedia.fileUrl || undefined;
 
-        // If audio voice note, keep compact data URL when small so auto-STT works immediately
-        if (isAudio && message.media) {
-          try {
-            const buffer = (await client.downloadMedia(message.media, {})) as Buffer;
-            if (buffer && buffer.length > 0 && buffer.length <= 1500 * 1024) {
-              audioUrl = `data:audio/ogg;base64,${buffer.toString('base64')}`;
-            }
-          } catch (dlErr: any) {
-            console.warn('[MTProto Audio Download Non-Fatal]:', dlErr.message);
-          }
-        }
-
         const text = parsedMedia.text || '';
 
         // Filter out echo duplicates for outbound messages already sent by this applet (scoped per account)
-        if (isOut && isRecentOutboundEcho(canonicalChatId, text, accountId)) {
+        if (isOut && isRecentOutboundEcho(canonicalChatId, text, accountId, Number(message.id))) {
           return;
         }
 
@@ -18508,7 +19748,7 @@ export function attachTelegramClientMessageListener(client: TelegramClient, phon
         if (replyToId > 0) {
           const quoteText = String((message as any).replyTo?.quoteText || '').trim();
           replyTo = {
-            id: `msg_tg_${userId}_${replyToId}`,
+            id: buildTelegramRealtimeMessageId(userId, canonicalChatId, replyToId),
             senderName: '回复消息',
             text: quoteText || `消息 #${replyToId}`,
           };
@@ -18912,6 +20152,44 @@ ${kbContext}${langConstraint}
           return;
         }
 
+        if (update instanceof Api.UpdateMessageReactions) {
+          const peerChatId = resolveRawPeerChatId(update.peer);
+          const tgMsgId = Number(update.msgId || 0);
+          if (!peerChatId || !tgMsgId) return;
+          const parsed = parseTelegramReactions({ reactions: update.reactions });
+          const nextReactions = parsed.reactions || {};
+          const nextMyReactions = parsed.myReactions || [];
+          pushPendingLocalUpdate({
+            id: `react_${userId}_${peerChatId}_${tgMsgId}_${Date.now()}`,
+            type: 'reactions',
+            telegramMessageId: tgMsgId,
+            chatId: peerChatId,
+            accountId,
+            reactions: nextReactions,
+            myReactions: nextMyReactions,
+            sender: 'peer',
+            senderName: '',
+            text: '',
+            timestamp: '',
+            createdAt: Date.now(),
+          });
+          try {
+            const alt = peerChatId.replace(/^tg_/, '');
+            const accVariants = getScopedAccountIdVariants(accountId);
+            const accPlaceholders = accVariants.map(() => '?').join(', ');
+            const serialized = serializeStoredReactionsJson({
+              reactions: nextReactions,
+              myReactions: nextMyReactions,
+            });
+            await db
+              .prepare(
+                `UPDATE messages SET reactions_json = ? WHERE account_id IN (${accPlaceholders}) AND (chat_id = ? OR chat_id = ?) AND telegram_message_id = ?`
+              )
+              .run(serialized, ...accVariants, peerChatId, alt, tgMsgId);
+          } catch {}
+          return;
+        }
+
         if (update instanceof Api.UpdateUserStatus) {
           const targetUid = update.userId !== undefined ? String(update.userId) : '';
           if (!targetUid) return;
@@ -19266,6 +20544,7 @@ let activeHttpServer: http.Server | null = null;
 export async function gracefulShutdownServer(reason = 'shutdown'): Promise<void> {
   console.log(`[Server Shutdown] Initiating graceful cleanup (${reason})...`);
   stopTelegramConnectionWatchdog();
+  stopTelegramCacheCleanupTimer();
   try {
     for (const qrSession of activeQrSessions.values()) {
       try {
@@ -19427,6 +20706,7 @@ async function startServer() {
     // Run Telegram MTProto session recovery asynchronously AFTER HTTP port is bound so /api/health responds immediately
     void restoreTelegramUserSessionsOnStartup();
     startTelegramConnectionWatchdog();
+    startTelegramCacheCleanupTimer();
   });
 }
 

@@ -178,6 +178,129 @@ export function getAuthHeaders(accountId?: string, options?: { omitContentType?:
   return headers;
 }
 
+const SIGNED_RESOURCE_PATH_PREFIXES = [
+  '/api/telegram/user/media/',
+  '/api/telegram/user/avatar/',
+  '/api/telegram/user/sticker/',
+  '/api/messages/local-media/',
+];
+
+const signedResourceRefreshInFlight = new Map<string, Promise<string>>();
+const signedResourceRefreshCooldown = new Map<string, number>();
+const SIGNED_RESOURCE_REFRESH_COOLDOWN_MS = 60 * 1000;
+
+export function isSignedResourceUrl(rawUrl?: string): boolean {
+  if (!rawUrl || typeof rawUrl !== 'string') return false;
+  const trimmed = rawUrl.trim();
+  if (!trimmed || trimmed.startsWith('data:') || trimmed.startsWith('blob:')) return false;
+  try {
+    const parsed = new URL(trimmed, 'http://localhost');
+    return SIGNED_RESOURCE_PATH_PREFIXES.some((prefix) => parsed.pathname.startsWith(prefix));
+  } catch {
+    return SIGNED_RESOURCE_PATH_PREFIXES.some((prefix) => trimmed.startsWith(prefix));
+  }
+}
+
+export function parseSignedResourceExpiry(rawUrl?: string): number | null {
+  if (!isSignedResourceUrl(rawUrl) || !rawUrl) return null;
+  try {
+    const parsed = new URL(rawUrl, 'http://localhost');
+    const expStr = parsed.searchParams.get('exp');
+    if (!expStr) return 0;
+    const expMs = Number(expStr);
+    return Number.isFinite(expMs) && expMs > 0 ? expMs : 0;
+  } catch {
+    return null;
+  }
+}
+
+export function isSignedResourceUrlExpiringSoon(
+  rawUrl?: string,
+  bufferMs: number = 24 * 60 * 60 * 1000
+): boolean {
+  const expMs = parseSignedResourceExpiry(rawUrl);
+  if (expMs === null) return false;
+  return expMs <= Date.now() + bufferMs;
+}
+
+export async function refreshSignedResourceUrlsApi(
+  urls: string[],
+  accountId?: string
+): Promise<Record<string, string>> {
+  const uniqueUrls = Array.from(
+    new Set(
+      (Array.isArray(urls) ? urls : [])
+        .map((u) => (typeof u === 'string' ? u.trim() : ''))
+        .filter((u) => isSignedResourceUrl(u))
+    )
+  ).slice(0, 60);
+
+  if (uniqueUrls.length === 0) return {};
+
+  try {
+    const effectiveAccountId = accountId || currentActiveAccountId || undefined;
+    const res = await fetchWithTimeout(
+      '/api/telegram/resource/refresh-url',
+      {
+        method: 'POST',
+        headers: getAuthHeaders(effectiveAccountId),
+        credentials: 'include',
+        body: JSON.stringify({
+          urls: uniqueUrls,
+          accountId: effectiveAccountId,
+        }),
+      },
+      10000
+    );
+    const data = await res.json().catch(() => null);
+    if (res.ok && data?.ok && data.refreshed && typeof data.refreshed === 'object') {
+      return data.refreshed as Record<string, string>;
+    }
+  } catch (err) {
+    console.warn('Silent signed URL refresh failed:', err);
+  }
+  return {};
+}
+
+export async function ensureFreshSignedResourceUrl(
+  rawUrl: string,
+  accountId?: string,
+  options?: { force?: boolean; bufferMs?: number }
+): Promise<string> {
+  if (!rawUrl || !isSignedResourceUrl(rawUrl)) return rawUrl;
+  const force = Boolean(options?.force);
+  if (!force && !isSignedResourceUrlExpiringSoon(rawUrl, options?.bufferMs)) {
+    return rawUrl;
+  }
+
+  const lastAttempt = signedResourceRefreshCooldown.get(rawUrl) || 0;
+  if (Date.now() - lastAttempt < SIGNED_RESOURCE_REFRESH_COOLDOWN_MS) {
+    return rawUrl;
+  }
+
+  const cacheKey = `${accountId || currentActiveAccountId || ''}::${rawUrl}`;
+  const existingPromise = signedResourceRefreshInFlight.get(cacheKey);
+  if (existingPromise) {
+    return existingPromise;
+  }
+
+  const promise = (async () => {
+    signedResourceRefreshCooldown.set(rawUrl, Date.now());
+    const refreshedMap = await refreshSignedResourceUrlsApi([rawUrl], accountId);
+    const nextUrl = refreshedMap[rawUrl];
+    if (nextUrl && typeof nextUrl === 'string') {
+      signedResourceRefreshCooldown.set(nextUrl, Date.now());
+      return nextUrl;
+    }
+    return rawUrl;
+  })().finally(() => {
+    signedResourceRefreshInFlight.delete(cacheKey);
+  });
+
+  signedResourceRefreshInFlight.set(cacheKey, promise);
+  return promise;
+}
+
 export interface AuthStatusResponse {
   authenticated: boolean;
   status: string;
@@ -703,9 +826,39 @@ export async function translateText(
 export async function transcribeAudio(audioBase64: string, mimeType: string = 'audio/webm', customConfig?: CustomLLMConfig): Promise<string> {
   let payloadAudio = audioBase64;
   let effectiveMime = mimeType;
-  if (typeof audioBase64 === 'string' && audioBase64.startsWith('blob:')) {
-    const blobRes = await fetch(audioBase64);
-    const blob = await blobRes.blob();
+  if (
+    typeof audioBase64 === 'string' &&
+    (audioBase64.startsWith('blob:') ||
+      audioBase64.startsWith('/') ||
+      audioBase64.startsWith('http://') ||
+      audioBase64.startsWith('https://'))
+  ) {
+    let targetAudioUrl = audioBase64;
+    if (isSignedResourceUrlExpiringSoon(targetAudioUrl)) {
+      targetAudioUrl = await ensureFreshSignedResourceUrl(targetAudioUrl);
+    }
+    const fetchMediaRes = (targetUrl: string) =>
+      fetchWithTimeout(
+        targetUrl,
+        targetUrl.startsWith('/')
+          ? {
+              headers: getAuthHeaders(undefined, { omitContentType: true }),
+              credentials: 'include',
+            }
+          : { credentials: 'include' },
+        20000
+      );
+    let mediaRes = await fetchMediaRes(targetAudioUrl);
+    if ((mediaRes.status === 401 || mediaRes.status === 403) && isSignedResourceUrl(targetAudioUrl)) {
+      const refreshedUrl = await ensureFreshSignedResourceUrl(targetAudioUrl, undefined, { force: true });
+      if (refreshedUrl && refreshedUrl !== targetAudioUrl) {
+        mediaRes = await fetchMediaRes(refreshedUrl);
+      }
+    }
+    if (!mediaRes.ok) {
+      throw new Error(`读取语音音频失败 (HTTP ${mediaRes.status})`);
+    }
+    const blob = await mediaRes.blob();
     effectiveMime = blob.type || mimeType;
     payloadAudio = await new Promise<string>((resolve, reject) => {
       const reader = new FileReader();
@@ -1797,13 +1950,32 @@ export function getDeletedMessageStorageKey(accountId?: string): string {
   return acc ? `tg_deleted_message_ids_${acc}` : 'tg_deleted_message_ids';
 }
 
-export function isMessageDeleted(messageId: string, accountId?: string): boolean {
+function isLegacyAmbiguousTelegramMessageId(messageId: string): boolean {
+  return /^msg_tg_\d+(?:_\d+)?$/.test(String(messageId || '').trim());
+}
+
+function buildDeletedIdEntryKey(messageId: string, chatId?: string): string {
+  const cleanId = String(messageId || '').trim();
+  const cleanChat = String(chatId || '').trim();
+  if (cleanChat && isLegacyAmbiguousTelegramMessageId(cleanId)) {
+    const canonicalChat = cleanChat.startsWith('tg_') || cleanChat.startsWith('chat_') ? cleanChat : `tg_${cleanChat}`;
+    return `${canonicalChat}::${cleanId}`;
+  }
+  return cleanId;
+}
+
+export function isMessageDeleted(messageId: string, accountId?: string, chatId?: string): boolean {
   try {
     const scopedKey = getDeletedMessageStorageKey(accountId);
     const raw = localStorage.getItem(scopedKey);
     if (!raw) return false;
     const list: string[] = JSON.parse(raw);
-    return Array.isArray(list) && list.includes(messageId);
+    if (!Array.isArray(list)) return false;
+    const cleanId = String(messageId || '').trim();
+    if (chatId && isLegacyAmbiguousTelegramMessageId(cleanId)) {
+      return list.includes(buildDeletedIdEntryKey(cleanId, chatId));
+    }
+    return list.includes(cleanId);
   } catch {
     return false;
   }
@@ -1811,14 +1983,14 @@ export function isMessageDeleted(messageId: string, accountId?: string): boolean
 
 const MAX_DELETED_MESSAGE_IDS = 5000;
 
-export function recordDeletedMessageIds(messageIds: string[], accountId?: string): void {
+export function recordDeletedMessageIds(messageIds: string[], accountId?: string, chatId?: string): void {
   if (!Array.isArray(messageIds) || messageIds.length === 0) return;
   try {
     const scopedKey = getDeletedMessageStorageKey(accountId);
     const raw = localStorage.getItem(scopedKey);
     const set = new Set<string>(raw ? JSON.parse(raw) : []);
     for (const id of messageIds) {
-      if (id) set.add(id);
+      if (id) set.add(buildDeletedIdEntryKey(id, chatId));
     }
     const arr = Array.from(set);
     const trimmed = arr.length > MAX_DELETED_MESSAGE_IDS ? arr.slice(-MAX_DELETED_MESSAGE_IDS) : arr;
@@ -1826,9 +1998,9 @@ export function recordDeletedMessageIds(messageIds: string[], accountId?: string
   } catch {}
 }
 
-export function recordDeletedMessageId(messageId: string, accountId?: string): void {
+export function recordDeletedMessageId(messageId: string, accountId?: string, chatId?: string): void {
   if (!messageId) return;
-  recordDeletedMessageIds([messageId], accountId);
+  recordDeletedMessageIds([messageId], accountId, chatId);
 }
 
 const APP_BOOT_TIMESTAMP = Date.now();
@@ -1841,7 +2013,7 @@ export function resolveClientTelegramMessageId(msg?: Partial<Message> | null): n
   const rawId = String(msg.id || '').trim();
   const cloudMatch = rawId.match(/^tg_cloud_(\d+)(?:_|$)/);
   if (cloudMatch) return Number(cloudMatch[1]);
-  const msgTgMatch = rawId.match(/^msg_tg_(?:\d+_)?(\d+)$/);
+  const msgTgMatch = rawId.match(/^msg_tg_(?:.+_)?(\d+)$/);
   if (msgTgMatch) return Number(msgTgMatch[1]);
   const tgNumericMatch = rawId.match(/^tg_(\d+)_\d+$/);
   if (tgNumericMatch) return Number(tgNumericMatch[1]);
@@ -1900,7 +2072,7 @@ export function getLocalMessages(chatId: string, accountId?: string): Message[] 
       return normalizeStalePendingMessages(
         list.filter(
           (m) =>
-            !isMessageDeleted(m.id, acc) &&
+            !isMessageDeleted(m.id, acc, m.chatId || chatId) &&
             (!acc || m.accountId === acc || (!m.accountId && !acc))
         )
       );
@@ -1914,7 +2086,7 @@ export function getLocalMessages(chatId: string, accountId?: string): Message[] 
 export function deleteLocalMessage(chatId: string, messageId: string, accountId?: string): void {
   try {
     const acc = accountId || currentActiveAccountId;
-    recordDeletedMessageId(messageId, acc);
+    recordDeletedMessageId(messageId, acc, chatId);
     const scopedKey = acc ? `tg_desktop_msgs_${acc}_${chatId}` : `tg_desktop_msgs_${chatId}`;
     const existing = getLocalMessages(chatId, acc);
     const updated = existing.filter((m) => m.id !== messageId);
@@ -1928,7 +2100,9 @@ export function setLocalMessages(chatId: string, messages: Message[], accountId?
   try {
     const acc = accountId || currentActiveAccountId;
     const scopedKey = acc ? `tg_desktop_msgs_${acc}_${chatId}` : `tg_desktop_msgs_${chatId}`;
-    const filtered = Array.isArray(messages) ? messages.filter((m) => !isMessageDeleted(m.id, acc)) : [];
+    const filtered = Array.isArray(messages)
+      ? messages.filter((m) => !isMessageDeleted(m.id, acc, m.chatId || chatId))
+      : [];
     secureSetItemSync(scopedKey, capMessagesForLocalCache(filtered));
   } catch (e) {
     console.error('Failed to persist encrypted messages to local storage', e);
@@ -1943,7 +2117,8 @@ export function clearLocalMessages(chatId: string, existingMessages: Message[] =
     if (allToRecord.length > 0) {
       recordDeletedMessageIds(
         allToRecord.map((m) => m?.id).filter((id): id is string => Boolean(id)),
-        acc
+        acc,
+        chatId
       );
     }
     if (acc) {
@@ -1997,7 +2172,7 @@ export async function deleteMessageFromDb(
 
 export function saveLocalMessage(chatId: string, message: Message, accountId?: string): void {
   const acc = accountId || message.accountId || currentActiveAccountId;
-  if (isMessageDeleted(message.id, acc)) return;
+  if (isMessageDeleted(message.id, acc, message.chatId || chatId)) return;
   try {
     const scopedKey = acc ? `tg_desktop_msgs_${acc}_${chatId}` : `tg_desktop_msgs_${chatId}`;
     const existing = getLocalMessages(chatId, acc);
@@ -2163,6 +2338,7 @@ export async function fetchTelegramCloudMessagesApi(
   messages: Message[];
   hasMore: boolean;
   readOutboxMaxId?: number;
+  fromLocalFallback?: boolean;
   error?: string;
   code?: string;
 }> {
@@ -2188,6 +2364,7 @@ export async function fetchTelegramCloudMessagesApi(
         ok: true,
         messages: data.messages,
         hasMore: Boolean(data.hasMore),
+        fromLocalFallback: Boolean(data.fromLocalFallback),
         readOutboxMaxId: typeof data.readOutboxMaxId === 'number' ? data.readOutboxMaxId : undefined,
       };
     }
@@ -2195,6 +2372,7 @@ export async function fetchTelegramCloudMessagesApi(
       ok: false,
       messages: [],
       hasMore: false,
+      fromLocalFallback: Boolean(data?.fromLocalFallback),
       code: data?.code,
       error: data?.error || data?.message || `拉取云端消息失败 (HTTP ${res.status})`,
     };
@@ -2930,6 +3108,7 @@ export async function fetchTelegramUserContactsApi(accountId?: string): Promise<
 
 export async function addTelegramUserContactApi(payload: {
   accountId?: string;
+  chatId?: string;
   name: string;
   phone?: string;
   username?: string;
@@ -3329,8 +3508,15 @@ export function collectLocalSyncedMessages(
       if (!key.startsWith(prefix)) continue;
       const list = secureGetItemSync<Message[]>(key);
       if (!Array.isArray(list) || list.length === 0) continue;
+      const keyChatId = key.slice(prefix.length);
       const visible = list
-        .filter((m) => m && m.id && !isMessageDeleted(m.id, targetAcc || m.accountId) && (!targetAcc || !m.accountId || m.accountId === targetAcc))
+        .filter(
+          (m) =>
+            m &&
+            m.id &&
+            !isMessageDeleted(m.id, targetAcc || m.accountId, m.chatId || keyChatId) &&
+            (!targetAcc || !m.accountId || m.accountId === targetAcc)
+        )
         .slice(-limitPerChat);
       for (const m of visible) {
         collected.push({
@@ -3695,8 +3881,22 @@ export async function sendTelegramStickerApi(params: {
   accountId?: string;
   chatId: string;
   sticker: TelegramStickerItem;
+  packTitle?: string;
   replyToMsgId?: number;
-}): Promise<{ ok: boolean; telegramMessageId?: number; deliveryStatus: 'delivered' | 'failed'; error?: string }> {
+  replyTo?: Message['replyTo'];
+  id?: string;
+}): Promise<{
+  ok: boolean;
+  id?: string;
+  telegramMessageId?: number;
+  deliveryStatus: 'delivered' | 'failed';
+  text?: string;
+  imageUrl?: string;
+  videoUrl?: string;
+  isImage?: boolean;
+  isVideo?: boolean;
+  error?: string;
+}> {
   try {
     const res = await fetchWithTimeout('/api/telegram/user/send-sticker', {
       method: 'POST',
@@ -3711,14 +3911,26 @@ export async function sendTelegramStickerApi(params: {
         setId: params.sticker.setId,
         setAccessHash: params.sticker.setAccessHash,
         replyToMsgId: params.replyToMsgId,
+        emoji: params.sticker.emoji,
+        packTitle: params.packTitle,
+        thumbUrl: params.sticker.thumbUrl,
+        isVideo: params.sticker.isVideo,
+        replyTo: params.replyTo,
+        id: params.id,
       }),
     }, 25000);
     const data = await res.json().catch(() => null);
     if (res.ok && data?.ok) {
       return {
         ok: true,
+        id: typeof data.id === 'string' ? data.id : undefined,
         telegramMessageId: data.telegramMessageId,
         deliveryStatus: 'delivered',
+        text: typeof data.text === 'string' ? data.text : undefined,
+        imageUrl: typeof data.imageUrl === 'string' ? data.imageUrl : undefined,
+        videoUrl: typeof data.videoUrl === 'string' ? data.videoUrl : undefined,
+        isImage: typeof data.isImage === 'boolean' ? data.isImage : undefined,
+        isVideo: typeof data.isVideo === 'boolean' ? data.isVideo : undefined,
       };
     }
     return {
