@@ -53,22 +53,16 @@ import {
   fetchGlobalPersonaApi,
   resolveClientTelegramMessageId,
   isMessageDeleted,
+  fetchWithTimeout,
+  TELEGRAM_MAX_MEDIA,
 } from '../services/apiService';
 
-function blobToDataUrl(blob: Blob): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => {
-      if (typeof reader.result === 'string') {
-        resolve(reader.result);
-      } else {
-        reject(new Error('文件读取结果无效'));
-      }
-    };
-    reader.onerror = () => reject(reader.error || new Error('文件读取失败'));
-    reader.onabort = () => reject(new Error('文件读取已中止'));
-    reader.readAsDataURL(blob);
-  });
+function formatMediaSizeLabel(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes <= 0) return '0 KB';
+  if (bytes >= 1024 * 1024) {
+    return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
+  }
+  return `${Math.max(0.1, bytes / 1024).toFixed(1)} KB`;
 }
 
 export function getLanguageDisplayName(code: string): string {
@@ -231,7 +225,7 @@ interface ChatAreaProps {
   chat: Chat | null;
   messages: Message[];
   translationSettings: TranslationSettings;
-  onSendMessage: (message: Partial<Message> & { skipCloudRelay?: boolean }) => void;
+  onSendMessage: (message: Partial<Message> & { skipCloudRelay?: boolean; mediaFile?: File | Blob }) => void;
   onUpdateChatLanguage?: (chatId: string, sourceLang: string, targetLang: string) => void;
   onOpenTranslation?: () => void;
   customLLMConfig?: any;
@@ -408,6 +402,29 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
     file: File;
     caption?: string;
   } | null>(null);
+  const pastedImageRef = useRef<{ dataUrl: string; file: File; caption?: string } | null>(null);
+  pastedImageRef.current = pastedImage;
+
+  const clearPastedImage = (revokePreview = true) => {
+    const prev = pastedImageRef.current;
+    if (revokePreview && prev?.dataUrl?.startsWith('blob:')) {
+      try {
+        URL.revokeObjectURL(prev.dataUrl);
+      } catch {}
+    }
+    setPastedImage(null);
+  };
+
+  useEffect(() => {
+    return () => {
+      const pending = pastedImageRef.current;
+      if (pending?.dataUrl?.startsWith('blob:')) {
+        try {
+          URL.revokeObjectURL(pending.dataUrl);
+        } catch {}
+      }
+    };
+  }, []);
 
   // Multi-select, Forward & Delete Confirmation State
   const [isMultiSelectMode, setIsMultiSelectMode] = useState(false);
@@ -833,7 +850,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
         // 1. Close in-chat overlays / temporary interactive states
         if (pastedImage) {
           e.preventDefault();
-          setPastedImage(null);
+          clearPastedImage(true);
           return;
         }
         if (editingMessage) {
@@ -1110,14 +1127,20 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
     const file = e.target.files?.[0];
     if (!file) return;
     try {
-      const dataUrl = await blobToDataUrl(file);
+      if (file.size > TELEGRAM_MAX_MEDIA) {
+        const maxMb = Math.round(TELEGRAM_MAX_MEDIA / (1024 * 1024));
+        showSyncNotice(`图片超过最大发送限制 (${maxMb} MB)`);
+        return;
+      }
+      const previewUrl = URL.createObjectURL(file);
       const userCaption = inputText.trim();
       onSendMessage({
         sender: 'me',
         isImage: true,
-        imageUrl: dataUrl,
+        imageUrl: previewUrl,
         imageCaption: userCaption || undefined,
         text: userCaption || '',
+        mediaFile: file,
         replyTo: replyingTo ? buildReplyPayload(replyingTo, chat?.title) : undefined,
         timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false }),
       });
@@ -1130,23 +1153,29 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
     } catch (err: any) {
       console.warn('Failed to upload image', err);
       showSyncNotice(`图片读取失败：${err?.message || '请检查图片文件是否损坏或有读取权限'}`);
+    } finally {
+      setIsAttachmentMenuOpen(false);
+      if (e.target) e.target.value = '';
     }
-    setIsAttachmentMenuOpen(false);
-    if (e.target) e.target.value = '';
   };
 
   const handleVideoSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
     try {
-      const dataUrl = await blobToDataUrl(file);
+      if (file.size > TELEGRAM_MAX_MEDIA) {
+        const maxMb = Math.round(TELEGRAM_MAX_MEDIA / (1024 * 1024));
+        showSyncNotice(`视频超过最大发送限制 (${maxMb} MB)`);
+        return;
+      }
+      const previewUrl = URL.createObjectURL(file);
       const userCaption = inputText.trim();
 
       let duration = 0;
       try {
         const tempVideo = document.createElement('video');
         tempVideo.preload = 'metadata';
-        tempVideo.src = dataUrl;
+        tempVideo.src = previewUrl;
         await new Promise((resolve) => {
           tempVideo.onloadedmetadata = () => {
             duration = Math.round(tempVideo.duration) || 0;
@@ -1160,9 +1189,10 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
       onSendMessage({
         sender: 'me',
         isVideo: true,
-        videoUrl: dataUrl,
+        videoUrl: previewUrl,
         videoDuration: duration,
         text: userCaption || `[视频] ${file.name}`,
+        mediaFile: file,
         replyTo: replyingTo ? buildReplyPayload(replyingTo, chat?.title) : undefined,
         timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false }),
       });
@@ -1175,19 +1205,25 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
     } catch (err: any) {
       console.warn('Failed to upload video', err);
       showSyncNotice(`视频读取失败：${err?.message || '请检查视频文件是否损坏或有读取权限'}`);
+    } finally {
+      setIsAttachmentMenuOpen(false);
+      if (e.target) e.target.value = '';
     }
-    setIsAttachmentMenuOpen(false);
-    if (e.target) e.target.value = '';
   };
 
   const handleAudioSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
     try {
-      const dataUrl = await blobToDataUrl(file);
+      if (file.size > TELEGRAM_MAX_MEDIA) {
+        const maxMb = Math.round(TELEGRAM_MAX_MEDIA / (1024 * 1024));
+        showSyncNotice(`音频超过最大发送限制 (${maxMb} MB)`);
+        return;
+      }
+      const previewUrl = URL.createObjectURL(file);
       let duration = 0;
       try {
-        const tempAudio = new Audio(dataUrl);
+        const tempAudio = new Audio(previewUrl);
         await new Promise((resolve) => {
           tempAudio.onloadedmetadata = () => {
             duration = Math.round(tempAudio.duration) || 0;
@@ -1201,9 +1237,10 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
       onSendMessage({
         sender: 'me',
         isAudio: true,
-        audioUrl: dataUrl,
+        audioUrl: previewUrl,
         audioDuration: duration || 5,
         text: '🎤 语音消息',
+        mediaFile: file,
         replyTo: replyingTo ? buildReplyPayload(replyingTo, chat?.title) : undefined,
         timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false }),
       });
@@ -1211,19 +1248,25 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
     } catch (err: any) {
       console.warn('Failed to upload audio', err);
       showSyncNotice(`音频读取失败：${err?.message || '请检查音频文件是否损坏或有读取权限'}`);
+    } finally {
+      setIsAttachmentMenuOpen(false);
+      if (e.target) e.target.value = '';
     }
-    setIsAttachmentMenuOpen(false);
-    if (e.target) e.target.value = '';
   };
 
   const handleFileSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
     try {
+      if (file.size > TELEGRAM_MAX_MEDIA) {
+        const maxMb = Math.round(TELEGRAM_MAX_MEDIA / (1024 * 1024));
+        showSyncNotice(`文件超过最大发送限制 (${maxMb} MB)`);
+        return;
+      }
       const isImg = file.type.startsWith('image/') || /\.(jpg|jpeg|png|gif|webp|bmp)$/i.test(file.name);
       const isVid = file.type.startsWith('video/') || /\.(mp4|mov|webm|mkv|avi|m4v)$/i.test(file.name);
       const isAud = file.type.startsWith('audio/') || /\.(mp3|ogg|wav|m4a|aac|flac)$/i.test(file.name);
-      const dataUrl = await blobToDataUrl(file);
+      const previewUrl = URL.createObjectURL(file);
       const replyPayload = replyingTo ? buildReplyPayload(replyingTo, chat?.title) : undefined;
 
       if (isImg) {
@@ -1231,9 +1274,10 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
         onSendMessage({
           sender: 'me',
           isImage: true,
-          imageUrl: dataUrl,
+          imageUrl: previewUrl,
           imageCaption: userCaption || undefined,
           text: userCaption || '',
+          mediaFile: file,
           replyTo: replyPayload,
           timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false }),
         });
@@ -1244,11 +1288,27 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
         }
       } else if (isVid) {
         const userCaption = inputText.trim();
+        let duration = 0;
+        try {
+          const tempVideo = document.createElement('video');
+          tempVideo.preload = 'metadata';
+          tempVideo.src = previewUrl;
+          await new Promise((resolve) => {
+            tempVideo.onloadedmetadata = () => {
+              duration = Math.round(tempVideo.duration) || 0;
+              resolve(null);
+            };
+            tempVideo.onerror = () => resolve(null);
+            setTimeout(resolve, 800);
+          });
+        } catch {}
         onSendMessage({
           sender: 'me',
           isVideo: true,
-          videoUrl: dataUrl,
+          videoUrl: previewUrl,
+          videoDuration: duration,
           text: userCaption || `[视频] ${file.name}`,
+          mediaFile: file,
           replyTo: replyPayload,
           timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false }),
         });
@@ -1258,24 +1318,37 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
           setTranslatedPreviewSource('');
         }
       } else if (isAud) {
+        let duration = 0;
+        try {
+          const tempAudio = new Audio(previewUrl);
+          await new Promise((resolve) => {
+            tempAudio.onloadedmetadata = () => {
+              duration = Math.round(tempAudio.duration) || 0;
+              resolve(null);
+            };
+            tempAudio.onerror = () => resolve(null);
+            setTimeout(resolve, 800);
+          });
+        } catch {}
         onSendMessage({
           sender: 'me',
           isAudio: true,
-          audioUrl: dataUrl,
-          audioDuration: 5,
+          audioUrl: previewUrl,
+          audioDuration: duration || 5,
           text: '🎤 语音消息',
+          mediaFile: file,
           replyTo: replyPayload,
           timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false }),
         });
       } else {
-        const sizeKb = (file.size / 1024).toFixed(1);
         onSendMessage({
           sender: 'me',
           isFile: true,
           fileName: file.name,
-          fileSize: `${sizeKb} KB`,
-          fileUrl: dataUrl,
+          fileSize: formatMediaSizeLabel(file.size),
+          fileUrl: previewUrl,
           text: `[文件] ${file.name}`,
+          mediaFile: file,
           replyTo: replyPayload,
           timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false }),
         });
@@ -1284,9 +1357,10 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
     } catch (err: any) {
       console.warn('Failed to upload file', err);
       showSyncNotice(`文件读取失败：${err?.message || '请检查文件是否损坏或有读取权限'}`);
+    } finally {
+      setIsAttachmentMenuOpen(false);
+      if (e.target) e.target.value = '';
     }
-    setIsAttachmentMenuOpen(false);
-    if (e.target) e.target.value = '';
   };
 
   const handleSendSticker = async (sticker: TelegramStickerItem, packTitle?: string) => {
@@ -1340,7 +1414,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
     } else if (e.key === 'Escape') {
       e.preventDefault();
       if (pastedImage) {
-        setPastedImage(null);
+        clearPastedImage(true);
       } else if (editingMessage) {
         setEditingMessage(null);
         setInputText('');
@@ -1395,7 +1469,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
   const copyImageToClipboard = async (imageUrl: string, id: string) => {
     if (!imageUrl) return;
     try {
-      const res = await fetch(imageUrl);
+      const res = await fetchWithTimeout(imageUrl, {}, 12000);
       const blob = await res.blob();
       let pngBlob = blob;
       if (blob.type !== 'image/png') {
@@ -1459,9 +1533,19 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
         if (file) {
           e.preventDefault();
           try {
-            const dataUrl = await blobToDataUrl(file);
+            if (file.size > TELEGRAM_MAX_MEDIA) {
+              const maxMb = Math.round(TELEGRAM_MAX_MEDIA / (1024 * 1024));
+              showSyncNotice(`剪贴板图片超过最大发送限制 (${maxMb} MB)`);
+              return;
+            }
+            const previewUrl = URL.createObjectURL(file);
+            if (pastedImageRef.current?.dataUrl?.startsWith('blob:')) {
+              try {
+                URL.revokeObjectURL(pastedImageRef.current.dataUrl);
+              } catch {}
+            }
             setPastedImage({
-              dataUrl,
+              dataUrl: previewUrl,
               file,
               caption: inputText.trim() || undefined,
             });
@@ -1487,11 +1571,12 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
       imageUrl: pastedImage.dataUrl,
       imageCaption: userCaption || undefined,
       text: userCaption || '',
+      mediaFile: pastedImage.file,
       replyTo: replyingTo ? buildReplyPayload(replyingTo, chat.title) : undefined,
       timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false }),
     });
     if (replyingTo) setReplyingTo(null);
-    setPastedImage(null);
+    clearPastedImage(false);
     setInputText('');
     setTranslatedPreview('');
     setTranslatedPreviewSource('');
@@ -1621,25 +1706,23 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
 
         mediaRecorderRef.current.onstop = async () => {
           const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
-          let audioUrl = '';
-          try {
-            audioUrl = await blobToDataUrl(audioBlob);
-          } catch {
-            audioUrl = URL.createObjectURL(audioBlob);
-          }
-
-          if (!audioUrl) {
+          if (!audioBlob || audioBlob.size === 0) {
             setSyncNotice('麦克风录音数据为空，已取消发送');
             setTimeout(() => setSyncNotice(null), 3000);
             stream.getTracks().forEach((track) => track.stop());
             return;
           }
+          const audioFile = new File([audioBlob], `voice_${Date.now()}.webm`, {
+            type: audioBlob.type || 'audio/webm',
+          });
+          const audioUrl = URL.createObjectURL(audioFile);
 
           onSendMessage({
             sender: 'me',
             isAudio: true,
             audioDuration: recordDurationRef.current || 1,
             audioUrl,
+            mediaFile: audioFile,
             text: '🎤 语音消息',
             replyTo: replyingTo ? buildReplyPayload(replyingTo, chat?.title) : undefined,
             timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false }),
@@ -3132,7 +3215,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
             <div className="flex items-center gap-1.5 shrink-0">
               <button
                 type="button"
-                onClick={() => setPastedImage(null)}
+                onClick={() => clearPastedImage(true)}
                 className="p-1.5 text-gray-400 hover:text-gray-600 dark:hover:text-white rounded-lg hover:bg-black/5 dark:hover:bg-white/10 cursor-pointer"
                 title="取消发送此图片 (Esc)"
               >

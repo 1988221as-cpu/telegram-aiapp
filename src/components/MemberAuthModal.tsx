@@ -10,14 +10,18 @@ import {
   Sparkles,
   Ticket,
   RefreshCw,
+  Wifi,
+  ChevronDown,
 } from 'lucide-react';
 import {
   memberLogin,
   memberRegister,
   memberRedeemCardKey,
   fetchAuthStatus,
+  getPreLoginProxyApi,
+  savePreLoginProxyApi,
 } from '../services/apiService';
-import { MemberUser } from '../types';
+import { MemberUser, SystemProxyConfig } from '../types';
 
 interface MemberAuthModalProps {
   isOpen: boolean;
@@ -26,6 +30,16 @@ interface MemberAuthModalProps {
   initialTab?: 'login' | 'register' | 'redeem';
   initialError?: string | null;
 }
+
+const DEFAULT_PRELOGIN_PROXY: SystemProxyConfig = {
+  enabled: false,
+  type: 'socks5',
+  host: '127.0.0.1',
+  port: 1080,
+  username: '',
+  password: '',
+  hasPassword: false,
+};
 
 export const MemberAuthModal: React.FC<MemberAuthModalProps> = ({
   isOpen,
@@ -41,17 +55,75 @@ export const MemberAuthModal: React.FC<MemberAuthModalProps> = ({
   const [cardKey, setCardKey] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(initialError || null);
+  const [errorCode, setErrorCode] = useState<string | null>(null);
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
+
+  const [isProxyOpen, setIsProxyOpen] = useState(false);
+  const [proxyConfig, setProxyConfig] = useState<SystemProxyConfig>(DEFAULT_PRELOGIN_PROXY);
+  const [isSavingProxy, setIsSavingProxy] = useState(false);
+  const [proxyNotice, setProxyNotice] = useState<{ ok: boolean; text: string } | null>(null);
 
   useEffect(() => {
     if (isOpen) {
       if (initialTab) setActiveTab(initialTab);
       if (initialError) setErrorMsg(initialError);
+      setErrorCode(null);
       setSuccessMsg(null);
+      setProxyNotice(null);
+      getPreLoginProxyApi()
+        .then((res) => {
+          if (res.ok && res.config) {
+            setProxyConfig({
+              enabled: Boolean(res.config.enabled),
+              type: res.config.type === 'socks4' ? 'socks4' : 'socks5',
+              host: res.config.host || '127.0.0.1',
+              port: Number(res.config.port) || 1080,
+              username: res.config.username || '',
+              password: '',
+              hasPassword: Boolean(res.config.hasPassword),
+            });
+          }
+        })
+        .catch(() => {});
     }
   }, [isOpen, initialTab, initialError]);
 
   if (!isOpen) return null;
+
+  const handleSaveProxy = async () => {
+    setProxyNotice(null);
+    setIsSavingProxy(true);
+    try {
+      const res = await savePreLoginProxyApi({
+        enabled: proxyConfig.enabled,
+        type: proxyConfig.type,
+        host: proxyConfig.host.trim() || '127.0.0.1',
+        port: Number(proxyConfig.port) || 1080,
+        username: proxyConfig.username?.trim() || '',
+        password: proxyConfig.password || '',
+        preservePassword: !proxyConfig.password && Boolean(proxyConfig.hasPassword),
+      });
+      if (res.ok && res.config) {
+        setProxyConfig({
+          enabled: Boolean(res.config.enabled),
+          type: res.config.type === 'socks4' ? 'socks4' : 'socks5',
+          host: res.config.host || '127.0.0.1',
+          port: Number(res.config.port) || 1080,
+          username: res.config.username || '',
+          password: '',
+          hasPassword: Boolean(res.config.hasPassword),
+        });
+        setProxyNotice({
+          ok: true,
+          text: res.message || (res.config.enabled ? 'SOCKS 代理已启用，请重新点击上方登录/激活' : '已关闭代理，将直连云端授权中心'),
+        });
+      } else {
+        setProxyNotice({ ok: false, text: res.error || '保存代理设置失败' });
+      }
+    } finally {
+      setIsSavingProxy(false);
+    }
+  };
 
   const verifyLocalJwtAndUnlock = async (user: MemberUser, defaultSuccessMsg: string) => {
     const localStatus = await fetchAuthStatus();
@@ -85,6 +157,7 @@ export const MemberAuthModal: React.FC<MemberAuthModalProps> = ({
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setErrorMsg(null);
+    setErrorCode(null);
     setSuccessMsg(null);
 
     const cleanUser = username.trim();
@@ -116,7 +189,11 @@ export const MemberAuthModal: React.FC<MemberAuthModalProps> = ({
       if (res.ok && res.user) {
         await verifyLocalJwtAndUnlock(res.user, res.message || '卡密激活并注册成功！正在进入工作台...');
       } else {
+        setErrorCode(res.code || null);
         setErrorMsg(res.error || '注册失败，请检查卡密是否有效或已被使用');
+        if (res.code === 'CLOUD_AUTH_UNREACHABLE' || res.code === 'CLOUD_AUTH_TIMEOUT') {
+          setIsProxyOpen(true);
+        }
       }
       setIsLoading(false);
     } else if (activeTab === 'redeem') {
@@ -129,7 +206,11 @@ export const MemberAuthModal: React.FC<MemberAuthModalProps> = ({
       if (res.ok && res.user) {
         await verifyLocalJwtAndUnlock(res.user, res.message || '卡密续费成功！正在进入工作台...');
       } else {
+        setErrorCode(res.code || null);
         setErrorMsg(res.error || '卡密续费失败，请核对卡密状态或账号密码');
+        if (res.code === 'CLOUD_AUTH_UNREACHABLE' || res.code === 'CLOUD_AUTH_TIMEOUT') {
+          setIsProxyOpen(true);
+        }
       }
       setIsLoading(false);
     } else {
@@ -146,11 +227,20 @@ export const MemberAuthModal: React.FC<MemberAuthModalProps> = ({
         if (res.code === 'VIP_EXPIRED') {
           setActiveTab('redeem');
         }
+        setErrorCode(res.code || null);
         setErrorMsg(res.error || '账号或密码错误，请核对后重试');
+        if (res.code === 'CLOUD_AUTH_UNREACHABLE' || res.code === 'CLOUD_AUTH_TIMEOUT') {
+          setIsProxyOpen(true);
+        }
       }
       setIsLoading(false);
     }
   };
+
+  const isNetworkFailure =
+    errorCode === 'CLOUD_AUTH_UNREACHABLE' ||
+    errorCode === 'CLOUD_AUTH_TIMEOUT' ||
+    (errorMsg ? /无法连接|超时|代理|network|fetch/i.test(errorMsg) : false);
 
   return (
     <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/85 backdrop-blur-md select-none animate-in fade-in duration-200">
@@ -184,6 +274,7 @@ export const MemberAuthModal: React.FC<MemberAuthModalProps> = ({
             onClick={() => {
               setActiveTab('login');
               setErrorMsg(null);
+              setErrorCode(null);
             }}
             className={`flex-1 py-3 text-xs font-semibold flex items-center justify-center gap-1.5 transition-colors cursor-pointer border-b-2 ${
               activeTab === 'login'
@@ -199,6 +290,7 @@ export const MemberAuthModal: React.FC<MemberAuthModalProps> = ({
             onClick={() => {
               setActiveTab('register');
               setErrorMsg(null);
+              setErrorCode(null);
             }}
             className={`flex-1 py-3 text-xs font-semibold flex items-center justify-center gap-1.5 transition-colors cursor-pointer border-b-2 ${
               activeTab === 'register'
@@ -214,6 +306,7 @@ export const MemberAuthModal: React.FC<MemberAuthModalProps> = ({
             onClick={() => {
               setActiveTab('redeem');
               setErrorMsg(null);
+              setErrorCode(null);
             }}
             className={`flex-1 py-3 text-xs font-semibold flex items-center justify-center gap-1.5 transition-colors cursor-pointer border-b-2 ${
               activeTab === 'redeem'
@@ -227,11 +320,23 @@ export const MemberAuthModal: React.FC<MemberAuthModalProps> = ({
         </div>
 
         {/* Form Body */}
-        <form onSubmit={handleSubmit} className="p-6 space-y-3.5 max-h-[68vh] overflow-y-auto">
+        <form onSubmit={handleSubmit} className="p-6 space-y-3.5 max-h-[72vh] overflow-y-auto">
           {errorMsg && (
-            <div className="p-3 rounded-xl bg-rose-500/15 border border-rose-500/30 text-rose-400 text-xs flex items-center gap-2 animate-in fade-in">
-              <AlertCircle className="w-4 h-4 shrink-0" />
-              <span>{errorMsg}</span>
+            <div className="p-3 rounded-xl bg-rose-500/15 border border-rose-500/30 text-rose-400 text-xs flex flex-col gap-2 animate-in fade-in">
+              <div className="flex items-start gap-2">
+                <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+                <span>{errorMsg}</span>
+              </div>
+              {isNetworkFailure && !isProxyOpen && (
+                <button
+                  type="button"
+                  onClick={() => setIsProxyOpen(true)}
+                  className="self-start inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-rose-500/20 hover:bg-rose-500/30 text-rose-200 text-[11px] font-medium cursor-pointer transition-colors"
+                >
+                  <Wifi className="w-3 h-3" />
+                  <span>展开配置 SOCKS5 代理以连接云端授权</span>
+                </button>
+              )}
             </div>
           )}
 
@@ -340,6 +445,128 @@ export const MemberAuthModal: React.FC<MemberAuthModalProps> = ({
               </>
             )}
           </button>
+
+          {/* Pre-login Proxy Configuration Accordion */}
+          <div className="pt-2 border-t border-[#1a2b3c]">
+            <button
+              type="button"
+              onClick={() => setIsProxyOpen((prev) => !prev)}
+              className="w-full flex items-center justify-between py-1.5 text-[11px] text-[#7e95ab] hover:text-white transition-colors cursor-pointer"
+            >
+              <span className="flex items-center gap-1.5">
+                <Wifi className={`w-3.5 h-3.5 ${proxyConfig.enabled ? 'text-emerald-400' : 'text-[#2ba0ff]'}`} />
+                <span>网络代理设置 (SOCKS5 / SOCKS4)</span>
+                {proxyConfig.enabled && (
+                  <span className="px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-400 text-[10px]">
+                    已启用 {proxyConfig.host}:{proxyConfig.port}
+                  </span>
+                )}
+              </span>
+              <ChevronDown className={`w-3.5 h-3.5 transition-transform ${isProxyOpen ? 'rotate-180' : ''}`} />
+            </button>
+
+            {isProxyOpen && (
+              <div className="mt-2 p-3 rounded-2xl bg-[#0a121b] border border-[#1e3145] space-y-2.5 text-xs animate-in fade-in duration-150">
+                <div className="flex items-center justify-between">
+                  <span className="text-[11px] text-[#a3b8cc]">启用本地/远程 SOCKS 代理转发授权与 Telegram</span>
+                  <button
+                    type="button"
+                    onClick={() => setProxyConfig((prev) => ({ ...prev, enabled: !prev.enabled }))}
+                    className={`w-9 h-5 rounded-full transition-colors cursor-pointer flex items-center px-0.5 ${
+                      proxyConfig.enabled ? 'bg-emerald-500 justify-end' : 'bg-[#23374d] justify-start'
+                    }`}
+                  >
+                    <span className="w-4 h-4 rounded-full bg-white shadow-sm" />
+                  </button>
+                </div>
+
+                <div className="grid grid-cols-3 gap-2">
+                  <div>
+                    <label className="block text-[10px] text-[#7e95ab] mb-1">协议类型</label>
+                    <select
+                      value={proxyConfig.type}
+                      onChange={(e) =>
+                        setProxyConfig((prev) => ({
+                          ...prev,
+                          type: e.target.value === 'socks4' ? 'socks4' : 'socks5',
+                        }))
+                      }
+                      className="w-full bg-[#111c28] border border-[#1e3145] rounded-lg px-2 py-1.5 text-[11px] text-white focus:outline-none focus:border-[#2ba0ff]"
+                    >
+                      <option value="socks5">SOCKS5</option>
+                      <option value="socks4">SOCKS4</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-[10px] text-[#7e95ab] mb-1">代理主机</label>
+                    <input
+                      type="text"
+                      value={proxyConfig.host}
+                      onChange={(e) => setProxyConfig((prev) => ({ ...prev, host: e.target.value }))}
+                      placeholder="127.0.0.1"
+                      className="w-full bg-[#111c28] border border-[#1e3145] rounded-lg px-2.5 py-1.5 text-[11px] text-white font-mono focus:outline-none focus:border-[#2ba0ff]"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[10px] text-[#7e95ab] mb-1">端口</label>
+                    <input
+                      type="number"
+                      min={1}
+                      max={65535}
+                      value={proxyConfig.port}
+                      onChange={(e) => setProxyConfig((prev) => ({ ...prev, port: Number(e.target.value) || 0 }))}
+                      placeholder="1080"
+                      className="w-full bg-[#111c28] border border-[#1e3145] rounded-lg px-2.5 py-1.5 text-[11px] text-white font-mono focus:outline-none focus:border-[#2ba0ff]"
+                    />
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-2 gap-2">
+                  <div>
+                    <label className="block text-[10px] text-[#7e95ab] mb-1">用户名 (可选)</label>
+                    <input
+                      type="text"
+                      value={proxyConfig.username || ''}
+                      onChange={(e) => setProxyConfig((prev) => ({ ...prev, username: e.target.value }))}
+                      placeholder="无认证可留空"
+                      className="w-full bg-[#111c28] border border-[#1e3145] rounded-lg px-2.5 py-1.5 text-[11px] text-white focus:outline-none focus:border-[#2ba0ff]"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[10px] text-[#7e95ab] mb-1">密码 (可选)</label>
+                    <input
+                      type="password"
+                      value={proxyConfig.password || ''}
+                      onChange={(e) => setProxyConfig((prev) => ({ ...prev, password: e.target.value }))}
+                      placeholder={proxyConfig.hasPassword ? '已保存（留空保留原密码）' : '无认证可留空'}
+                      className="w-full bg-[#111c28] border border-[#1e3145] rounded-lg px-2.5 py-1.5 text-[11px] text-white focus:outline-none focus:border-[#2ba0ff]"
+                    />
+                  </div>
+                </div>
+
+                {proxyNotice && (
+                  <div
+                    className={`px-2.5 py-1.5 rounded-lg text-[11px] ${
+                      proxyNotice.ok
+                        ? 'bg-emerald-500/15 text-emerald-300 border border-emerald-500/30'
+                        : 'bg-rose-500/15 text-rose-300 border border-rose-500/30'
+                    }`}
+                  >
+                    {proxyNotice.text}
+                  </div>
+                )}
+
+                <button
+                  type="button"
+                  disabled={isSavingProxy}
+                  onClick={handleSaveProxy}
+                  className="w-full py-1.5 rounded-lg bg-[#1a2c40] hover:bg-[#223952] border border-[#2a4563] text-[#8bc9ff] text-[11px] font-medium transition-colors cursor-pointer disabled:opacity-50"
+                >
+                  {isSavingProxy ? '正在保存并应用代理...' : '保存代理设置'}
+                </button>
+              </div>
+            )}
+          </div>
         </form>
       </div>
     </div>

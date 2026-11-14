@@ -31,6 +31,7 @@ function shouldBackupLocalKey(key: string): boolean {
   return (
     key.startsWith('tg_desktop_') ||
     key.startsWith('tg_pro_') ||
+    key.startsWith('tg_deleted_message_ids') ||
     EXACT_BACKUP_KEYS.has(key)
   );
 }

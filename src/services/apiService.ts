@@ -90,7 +90,7 @@ export async function fetchLocalDeviceId(): Promise<{ deviceId: string; maxTeleg
     return { deviceId: cachedDeviceId, maxTelegramAccounts: 20 };
   }
   try {
-    const res = await fetch('/api/auth/device-id', { credentials: 'include' });
+    const res = await fetchWithTimeout('/api/auth/device-id', { credentials: 'include' }, 8000);
     if (res.ok) {
       const data = await res.json();
       if (data?.deviceId) {
@@ -137,11 +137,15 @@ export async function initSessionHandshake(): Promise<{
     return { authenticated: false };
   }
   try {
-    const res = await fetch('/api/auth/session-init', {
-      method: 'POST',
-      headers: getAuthHeaders(),
-      credentials: 'include',
-    });
+    const res = await fetchWithTimeout(
+      '/api/auth/session-init',
+      {
+        method: 'POST',
+        headers: getAuthHeaders(),
+        credentials: 'include',
+      },
+      10000
+    );
     const data = await res.json().catch(() => ({}));
     if (res.ok && data.authenticated && data.user) {
       return { authenticated: true, token: currentSessionToken, user: data.user };
@@ -157,11 +161,14 @@ export async function initSessionHandshake(): Promise<{
   return { authenticated: false };
 }
 
-export function getAuthHeaders(accountId?: string): Record<string, string> {
+export const TELEGRAM_MAX_MEDIA = 512 * 1024 * 1024;
+
+export function getAuthHeaders(accountId?: string, options?: { omitContentType?: boolean }): Record<string, string> {
   const effectiveAcc = accountId || currentActiveAccountId;
-  const headers: Record<string, string> = {
-    'Content-Type': 'application/json',
-  };
+  const headers: Record<string, string> = {};
+  if (!options?.omitContentType) {
+    headers['Content-Type'] = 'application/json';
+  }
   if (effectiveAcc) {
     headers['X-Account-Id'] = effectiveAcc;
   }
@@ -189,10 +196,14 @@ export interface AuthStatusResponse {
 export async function fetchAuthStatus(): Promise<AuthStatusResponse> {
   clearLegacyLocalTelegramCredentials();
   try {
-    const res = await fetch('/api/auth/status', {
-      headers: getAuthHeaders(),
-      credentials: 'include',
-    });
+    const res = await fetchWithTimeout(
+      '/api/auth/status',
+      {
+        headers: getAuthHeaders(),
+        credentials: 'include',
+      },
+      10000
+    );
     if (res.ok) {
       return await res.json();
     }
@@ -232,23 +243,73 @@ function normalizeCloudUser(data: any, fallbackUsername: string): MemberUser {
   };
 }
 
+export async function getPreLoginProxyApi(): Promise<{
+  ok: boolean;
+  config?: SystemProxyConfig;
+  error?: string;
+}> {
+  try {
+    const res = await fetchWithTimeout('/api/auth/proxy', { credentials: 'include' }, 8000);
+    const data = await res.json().catch(() => ({}));
+    if (res.ok && data?.ok && data.config) {
+      return { ok: true, config: data.config };
+    }
+    return { ok: false, error: data?.error || `读取代理配置失败 (HTTP ${res.status})` };
+  } catch (err: any) {
+    return { ok: false, error: err?.message || '读取代理配置失败' };
+  }
+}
+
+export async function savePreLoginProxyApi(payload: SystemProxyConfig & { preservePassword?: boolean }): Promise<{
+  ok: boolean;
+  config?: SystemProxyConfig;
+  message?: string;
+  error?: string;
+}> {
+  try {
+    const res = await fetchWithTimeout(
+      '/api/auth/proxy',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify(payload),
+      },
+      10000
+    );
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || !data?.ok) {
+      return { ok: false, error: data?.error || `保存代理设置失败 (HTTP ${res.status})` };
+    }
+    return data;
+  } catch (err: any) {
+    return { ok: false, error: err?.message || '保存代理设置失败' };
+  }
+}
+
 export async function memberRegister(
   username: string,
   password: string,
   cardKey: string
-): Promise<{ ok: boolean; message?: string; error?: string; code?: string; token?: string; user?: MemberUser }> {
+): Promise<{ ok: boolean; message?: string; error?: string; code?: string; proxyEnabled?: boolean; token?: string; user?: MemberUser }> {
   try {
     const { deviceId } = await fetchLocalDeviceId();
-    const res = await fetch(`${CLOUD_AUTH_BASE_URL}/api/auth/register`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ username, password, cardKey: cardKey.trim(), deviceId }),
-    });
+    const res = await fetchWithTimeout(
+      '/api/auth/cloud-register',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({ username, password, cardKey: cardKey.trim(), deviceId }),
+      },
+      16000
+    );
     const data = await res.json().catch(() => ({}));
     if (!res.ok || !data?.token) {
       return {
         ok: false,
         code: data?.code,
+        proxyEnabled: typeof data?.proxyEnabled === 'boolean' ? data.proxyEnabled : undefined,
         error: data?.error || data?.message || `注册失败 (HTTP ${res.status})`,
       };
     }
@@ -265,29 +326,35 @@ export async function memberRegister(
     };
   } catch (err: any) {
     const rawMsg = String(err?.message || '');
-    const friendly = /failed to fetch|network/i.test(rawMsg)
-      ? '无法连接云端会员授权中心，请检查本机网络或系统代理设置后重试'
+    const friendly = /failed to fetch|network|超时/i.test(rawMsg)
+      ? '无法连接云端会员授权中心，请检查网络或在下方配置 SOCKS5 代理后重试'
       : rawMsg || '云端认证服务连接异常';
-    return { ok: false, error: friendly };
+    return { ok: false, code: 'CLOUD_AUTH_UNREACHABLE', error: friendly };
   }
 }
 
 export async function memberLogin(
   username: string,
   password: string
-): Promise<{ ok: boolean; message?: string; error?: string; code?: string; token?: string; user?: MemberUser }> {
+): Promise<{ ok: boolean; message?: string; error?: string; code?: string; proxyEnabled?: boolean; token?: string; user?: MemberUser }> {
   try {
     const { deviceId } = await fetchLocalDeviceId();
-    const res = await fetch(`${CLOUD_AUTH_BASE_URL}/api/auth/login`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ username, password, deviceId }),
-    });
+    const res = await fetchWithTimeout(
+      '/api/auth/cloud-login',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({ username, password, deviceId }),
+      },
+      16000
+    );
     const data = await res.json().catch(() => ({}));
     if (!res.ok || !data?.token) {
       return {
         ok: false,
         code: data?.code,
+        proxyEnabled: typeof data?.proxyEnabled === 'boolean' ? data.proxyEnabled : undefined,
         error: data?.error || data?.message || `登录失败 (HTTP ${res.status})`,
       };
     }
@@ -304,10 +371,10 @@ export async function memberLogin(
     };
   } catch (err: any) {
     const rawMsg = String(err?.message || '');
-    const friendly = /failed to fetch|network/i.test(rawMsg)
-      ? '无法连接云端会员授权中心，请检查本机网络或系统代理设置后重试'
+    const friendly = /failed to fetch|network|超时/i.test(rawMsg)
+      ? '无法连接云端会员授权中心，请检查网络或在下方配置 SOCKS5 代理后重试'
       : rawMsg || '云端认证服务连接异常';
-    return { ok: false, error: friendly };
+    return { ok: false, code: 'CLOUD_AUTH_UNREACHABLE', error: friendly };
   }
 }
 
@@ -315,28 +382,34 @@ export async function memberRedeemCardKey(
   username: string,
   cardKey: string,
   password?: string
-): Promise<{ ok: boolean; message?: string; error?: string; code?: string; token?: string; user?: MemberUser }> {
+): Promise<{ ok: boolean; message?: string; error?: string; code?: string; proxyEnabled?: boolean; token?: string; user?: MemberUser }> {
   try {
     const { deviceId } = await fetchLocalDeviceId();
     const headers: Record<string, string> = { 'Content-Type': 'application/json' };
     if (currentSessionToken) {
       headers['Authorization'] = `Bearer ${currentSessionToken}`;
     }
-    const res = await fetch(`${CLOUD_AUTH_BASE_URL}/api/auth/redeem`, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify({
-        username: username.trim(),
-        cardKey: cardKey.trim(),
-        ...(password ? { password } : {}),
-        deviceId,
-      }),
-    });
+    const res = await fetchWithTimeout(
+      '/api/auth/cloud-redeem',
+      {
+        method: 'POST',
+        headers,
+        credentials: 'include',
+        body: JSON.stringify({
+          username: username.trim(),
+          cardKey: cardKey.trim(),
+          ...(password ? { password } : {}),
+          deviceId,
+        }),
+      },
+      16000
+    );
     const data = await res.json().catch(() => ({}));
     if (!res.ok || !data?.token) {
       return {
         ok: false,
         code: data?.code,
+        proxyEnabled: typeof data?.proxyEnabled === 'boolean' ? data.proxyEnabled : undefined,
         error: data?.error || data?.message || `卡密续费失败 (HTTP ${res.status})`,
       };
     }
@@ -353,10 +426,10 @@ export async function memberRedeemCardKey(
     };
   } catch (err: any) {
     const rawMsg = String(err?.message || '');
-    const friendly = /failed to fetch|network/i.test(rawMsg)
-      ? '无法连接云端会员授权中心，请检查本机网络或系统代理设置后重试'
+    const friendly = /failed to fetch|network|超时/i.test(rawMsg)
+      ? '无法连接云端会员授权中心，请检查网络或在下方配置 SOCKS5 代理后重试'
       : rawMsg || '云端认证服务连接异常';
-    return { ok: false, error: friendly };
+    return { ok: false, code: 'CLOUD_AUTH_UNREACHABLE', error: friendly };
   }
 }
 
@@ -402,7 +475,12 @@ export async function fetchWithTimeout(
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const res = await fetch(input, { ...init, signal: controller.signal });
-    if ((res.status === 401 || res.status === 403) && typeof input === 'string' && input.startsWith('/api/')) {
+    const urlStr = typeof input === 'string' ? input : '';
+    const isPreAuthRoute =
+      urlStr.startsWith('/api/auth/cloud-') ||
+      urlStr === '/api/auth/status' ||
+      urlStr === '/api/auth/session-init';
+    if ((res.status === 401 || res.status === 403) && urlStr.startsWith('/api/') && !isPreAuthRoute) {
       try {
         const cloned = res.clone();
         const errData = await cloned.json().catch(() => ({}));
@@ -458,10 +536,14 @@ export async function adminLogout(options?: { revokeTelegramSessions?: boolean }
 
 export async function fetchRegisteredUsersStats(): Promise<{ ok: boolean; totalMembers: number; users: any[] }> {
   try {
-    const res = await fetch('/api/admin/users/stats', {
-      headers: getAuthHeaders(),
-      credentials: 'include',
-    });
+    const res = await fetchWithTimeout(
+      '/api/admin/users/stats',
+      {
+        headers: getAuthHeaders(),
+        credentials: 'include',
+      },
+      10000
+    );
     if (res.ok) {
       return await res.json();
     }
@@ -586,22 +668,26 @@ export async function translateText(
         }
       : undefined;
 
-  const res = await fetch('/api/translate', {
-    method: 'POST',
-    headers: getAuthHeaders(),
-    body: JSON.stringify({
-      text,
-      sourceLang,
-      targetLang,
-      engine: strictEngine,
-      googleApiKey,
-      geminiModel: strictEngine === 'gemini' ? geminiModel : undefined,
-      geminiApiKey: strictEngine === 'gemini' ? geminiApiKey : undefined,
-      customModelName: strictEngine === 'custom_llm' ? effectiveCustomModel : undefined,
-      engineLicenseKey: strictEngine === 'gemini' ? customConfig?.engineLicenseKey : undefined,
-      customConfig: safeCustomConfigForTranslation,
-    }),
-  });
+  const res = await fetchWithTimeout(
+    '/api/translate',
+    {
+      method: 'POST',
+      headers: getAuthHeaders(),
+      body: JSON.stringify({
+        text,
+        sourceLang,
+        targetLang,
+        engine: strictEngine,
+        googleApiKey,
+        geminiModel: strictEngine === 'gemini' ? geminiModel : undefined,
+        geminiApiKey: strictEngine === 'gemini' ? geminiApiKey : undefined,
+        customModelName: strictEngine === 'custom_llm' ? effectiveCustomModel : undefined,
+        engineLicenseKey: strictEngine === 'gemini' ? customConfig?.engineLicenseKey : undefined,
+        customConfig: safeCustomConfigForTranslation,
+      }),
+    },
+    30000
+  );
 
   if (!res.ok) {
     const errData = await res.json().catch(() => null);
@@ -615,15 +701,32 @@ export async function translateText(
 }
 
 export async function transcribeAudio(audioBase64: string, mimeType: string = 'audio/webm', customConfig?: CustomLLMConfig): Promise<string> {
-  const res = await fetch('/api/audio/transcribe', {
-    method: 'POST',
-    headers: getAuthHeaders(),
-    body: JSON.stringify({
-      audioBase64,
-      mimeType,
-      customConfig: customConfig?.enabled ? customConfig : undefined,
-    }),
-  });
+  let payloadAudio = audioBase64;
+  let effectiveMime = mimeType;
+  if (typeof audioBase64 === 'string' && audioBase64.startsWith('blob:')) {
+    const blobRes = await fetch(audioBase64);
+    const blob = await blobRes.blob();
+    effectiveMime = blob.type || mimeType;
+    payloadAudio = await new Promise<string>((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onloadend = () => resolve(typeof reader.result === 'string' ? reader.result : '');
+      reader.onerror = () => reject(new Error('读取本地语音缓存失败'));
+      reader.readAsDataURL(blob);
+    });
+  }
+  const res = await fetchWithTimeout(
+    '/api/audio/transcribe',
+    {
+      method: 'POST',
+      headers: getAuthHeaders(),
+      body: JSON.stringify({
+        audioBase64: payloadAudio,
+        mimeType: effectiveMime,
+        customConfig: customConfig?.enabled ? customConfig : undefined,
+      }),
+    },
+    45000
+  );
 
   if (!res.ok) {
     const errData = await res.json().catch(() => null);
@@ -640,11 +743,15 @@ export async function transcribeAudio(audioBase64: string, mimeType: string = 'a
 
 export async function syncCustomLLMConfigApi(config: CustomLLMConfig): Promise<boolean> {
   try {
-    const res = await fetch('/api/llm/config', {
-      method: 'POST',
-      headers: getAuthHeaders(),
-      body: JSON.stringify(config),
-    });
+    const res = await fetchWithTimeout(
+      '/api/llm/config',
+      {
+        method: 'POST',
+        headers: getAuthHeaders(),
+        body: JSON.stringify(config),
+      },
+      10000
+    );
     return res.ok;
   } catch (err) {
     console.warn('Failed to sync custom LLM config to server:', err);
@@ -654,11 +761,15 @@ export async function syncCustomLLMConfigApi(config: CustomLLMConfig): Promise<b
 
 export async function syncTranslationSettingsApi(settings: TranslationSettings): Promise<boolean> {
   try {
-    const res = await fetch('/api/translate/settings', {
-      method: 'POST',
-      headers: getAuthHeaders(),
-      body: JSON.stringify(settings),
-    });
+    const res = await fetchWithTimeout(
+      '/api/translate/settings',
+      {
+        method: 'POST',
+        headers: getAuthHeaders(),
+        body: JSON.stringify(settings),
+      },
+      10000
+    );
     return res.ok;
   } catch (err) {
     console.warn('Failed to sync translation settings to server:', err);
@@ -688,19 +799,23 @@ export async function generateTTSVoice(
           }
         : undefined;
 
-    const res = await fetch('/api/audio/tts-clone', {
-      method: 'POST',
-      headers: getAuthHeaders(),
-      body: JSON.stringify({
-        text,
-        voiceName,
-        toneStyle,
-        importance,
-        emotion,
-        model,
-        customConfig: ttsGatewayConfig,
-      }),
-    });
+    const res = await fetchWithTimeout(
+      '/api/audio/tts-clone',
+      {
+        method: 'POST',
+        headers: getAuthHeaders(),
+        body: JSON.stringify({
+          text,
+          voiceName,
+          toneStyle,
+          importance,
+          emotion,
+          model,
+          customConfig: ttsGatewayConfig,
+        }),
+      },
+      45000
+    );
 
     if (!res.ok) {
       const errData = await res.json().catch(() => null);
@@ -731,11 +846,15 @@ export async function pollIncomingTelegramUpdates(accountId?: string): Promise<a
 export async function ackIncomingTelegramUpdates(ids: string[], accountId?: string): Promise<boolean> {
   if (!Array.isArray(ids) || ids.length === 0) return true;
   try {
-    const res = await fetch('/api/telegram/user/ack-updates', {
-      method: 'POST',
-      headers: getAuthHeaders(accountId),
-      body: JSON.stringify({ ids, accountId }),
-    });
+    const res = await fetchWithTimeout(
+      '/api/telegram/user/ack-updates',
+      {
+        method: 'POST',
+        headers: getAuthHeaders(accountId),
+        body: JSON.stringify({ ids, accountId }),
+      },
+      10000
+    );
     return res.ok;
   } catch {
     return false;
@@ -776,19 +895,23 @@ export async function sendAutonomousChat(
     hasHolographicProfile: boolean;
   };
 }> {
-  const res = await fetch('/api/llm/chat', {
-    method: 'POST',
-    headers: getAuthHeaders(accountId),
-    body: JSON.stringify({
-      chatId,
-      accountId: accountId || currentActiveAccountId,
-      messages,
-      customConfig,
-      personaPrompt,
-      datingMode,
-      targetLanguage,
-    }),
-  });
+  const res = await fetchWithTimeout(
+    '/api/llm/chat',
+    {
+      method: 'POST',
+      headers: getAuthHeaders(accountId),
+      body: JSON.stringify({
+        chatId,
+        accountId: accountId || currentActiveAccountId,
+        messages,
+        customConfig,
+        personaPrompt,
+        datingMode,
+        targetLanguage,
+      }),
+    },
+    45000
+  );
 
   if (!res.ok) {
     const errorData = await res.json().catch(() => null);
@@ -823,19 +946,23 @@ export async function pingCustomLLM(
   currentModelUsage?: ModelUsageDetail;
 }> {
   try {
-    const res = await fetch('/api/llm/ping', {
-      method: 'POST',
-      headers: getAuthHeaders(),
-      body: JSON.stringify({
-        baseUrl,
-        apiKey,
-        modelName,
-        customHeaders,
-        protocol,
-        engineMode,
-        engineLicenseKey,
-      }),
-    });
+    const res = await fetchWithTimeout(
+      '/api/llm/ping',
+      {
+        method: 'POST',
+        headers: getAuthHeaders(),
+        body: JSON.stringify({
+          baseUrl,
+          apiKey,
+          modelName,
+          customHeaders,
+          protocol,
+          engineMode,
+          engineLicenseKey,
+        }),
+      },
+      20000
+    );
 
     return await res.json();
   } catch (err: any) {
@@ -851,15 +978,19 @@ export async function fetchCustomLlmUsageStats(
   const cleanModel = (modelName || '').trim();
   if (!cleanModel) return null;
   try {
-    const res = await fetch('/api/llm/usage-stats', {
-      method: 'POST',
-      headers: getAuthHeaders(),
-      body: JSON.stringify({
-        baseUrl: (baseUrl || '').trim(),
-        apiKey: (apiKey || '').trim(),
-        modelName: cleanModel,
-      }),
-    });
+    const res = await fetchWithTimeout(
+      '/api/llm/usage-stats',
+      {
+        method: 'POST',
+        headers: getAuthHeaders(),
+        body: JSON.stringify({
+          baseUrl: (baseUrl || '').trim(),
+          apiKey: (apiKey || '').trim(),
+          modelName: cleanModel,
+        }),
+      },
+      15000
+    );
     if (!res.ok) return null;
     const data = await res.json().catch(() => null);
     return data?.usage || null;
@@ -881,17 +1012,21 @@ export async function fetchKnowledgeBase(
   statusCode?: number;
 }> {
   try {
-    const res = await fetch('/api/knowledge/remote-search', {
-      method: 'POST',
-      headers: getAuthHeaders(),
-      body: JSON.stringify({
-        query,
-        customConfig,
-        apiUrl: customConfig?.knowledgeBaseApiUrl || '',
-        apiKey: customConfig?.knowledgeBaseApiKey || customConfig?.apiKey || '',
-        engineLicenseKey: customConfig?.engineLicenseKey || '',
-      }),
-    });
+    const res = await fetchWithTimeout(
+      '/api/knowledge/remote-search',
+      {
+        method: 'POST',
+        headers: getAuthHeaders(),
+        body: JSON.stringify({
+          query,
+          customConfig,
+          apiUrl: customConfig?.knowledgeBaseApiUrl || '',
+          apiKey: customConfig?.knowledgeBaseApiKey || customConfig?.apiKey || '',
+          engineLicenseKey: customConfig?.engineLicenseKey || '',
+        }),
+      },
+      20000
+    );
 
     const data = await res.json().catch(() => null);
     if (res.ok && data && data.ok !== false) {
@@ -934,11 +1069,15 @@ export async function submitTrainingFeedbackApi(payload: {
   engineLicenseKey?: string;
 }): Promise<{ ok: boolean; syncedToCloud?: boolean }> {
   try {
-    const res = await fetch('/api/training/feedback', {
-      method: 'POST',
-      headers: getAuthHeaders(),
-      body: JSON.stringify(payload),
-    });
+    const res = await fetchWithTimeout(
+      '/api/training/feedback',
+      {
+        method: 'POST',
+        headers: getAuthHeaders(),
+        body: JSON.stringify(payload),
+      },
+      12000
+    );
     if (res.ok) return await res.json();
   } catch {}
   return { ok: false };
@@ -960,9 +1099,19 @@ export async function fetchChatsFromDb(accountId?: string): Promise<any[]> {
   return [];
 }
 
-export async function fetchMessagesFromDb(chatId: string, accountId?: string): Promise<Message[]> {
+export async function fetchMessagesFromDb(
+  chatId: string,
+  accountId?: string,
+  options?: { limit?: number; beforeCreatedAt?: number }
+): Promise<Message[]> {
   try {
-    const res = await fetchWithTimeout(`/api/messages/${chatId}`, {
+    const query = new URLSearchParams();
+    if (options?.limit && options.limit > 0) query.set('limit', String(options.limit));
+    if (options?.beforeCreatedAt && options.beforeCreatedAt > 0) {
+      query.set('beforeCreatedAt', String(options.beforeCreatedAt));
+    }
+    const qs = query.toString() ? `?${query.toString()}` : '';
+    const res = await fetchWithTimeout(`/api/messages/${encodeURIComponent(chatId)}${qs}`, {
       headers: getAuthHeaders(accountId),
     }, 10000);
     if (res.ok) {
@@ -974,23 +1123,191 @@ export async function fetchMessagesFromDb(chatId: string, accountId?: string): P
   return [];
 }
 
-export async function saveMessageToDb(
-  message: Partial<Message>
-): Promise<{ ok: boolean; deliveryStatus: 'delivered' | 'failed'; telegramMessageId?: number; error?: string; code?: string }> {
+function dataUrlToBlob(dataUrl: string): Blob | null {
   try {
-    const res = await fetch('/api/messages', {
-      method: 'POST',
-      headers: getAuthHeaders(message.accountId),
-      body: JSON.stringify({
-        ...message,
-        accountId: message.accountId || currentActiveAccountId,
-      }),
-    });
+    const commaIdx = dataUrl.indexOf(',');
+    if (commaIdx < 0) return null;
+    const header = dataUrl.slice(0, commaIdx);
+    const base64 = dataUrl.slice(commaIdx + 1);
+    const mimeMatch = header.match(/^data:([^;]+);base64/i);
+    const mime = mimeMatch ? mimeMatch[1] : 'application/octet-stream';
+    const binStr = atob(base64);
+    const bytes = new Uint8Array(binStr.length);
+    for (let i = 0; i < binStr.length; i++) {
+      bytes[i] = binStr.charCodeAt(i);
+    }
+    return new Blob([bytes], { type: mime });
+  } catch {
+    return null;
+  }
+}
+
+function stripTransientMediaUrl(url?: string): string | undefined {
+  if (!url || typeof url !== 'string') return undefined;
+  if (url.startsWith('blob:')) return undefined;
+  if (url.startsWith('data:') && url.length > 64 * 1024) return undefined;
+  return url;
+}
+
+function buildCompactOutboundJsonPayload(
+  message: Partial<Message>,
+  effectiveAccountId?: string
+): Record<string, any> {
+  const clean: Record<string, any> = {
+    id: message.id,
+    chatId: message.chatId,
+    accountId: message.accountId || effectiveAccountId || currentActiveAccountId,
+    sender: message.sender || 'me',
+    text: message.text ?? '',
+    timestamp: message.timestamp,
+    createdAt: message.createdAt,
+  };
+  if (message.senderName) clean.senderName = message.senderName;
+  if (message.translatedText) clean.translatedText = message.translatedText;
+  if (message.replyTo) clean.replyTo = message.replyTo;
+  if (message.telegramMessageId !== undefined) clean.telegramMessageId = message.telegramMessageId;
+
+  if (message.isAudio) {
+    clean.isAudio = true;
+    clean.audioDuration = message.audioDuration;
+    const safeAudio = stripTransientMediaUrl(message.audioUrl);
+    if (safeAudio) clean.audioUrl = safeAudio;
+    if (message.sttText) clean.sttText = message.sttText;
+    if (message.voiceName) clean.voiceName = message.voiceName;
+    if (message.voiceTone) clean.voiceTone = message.voiceTone;
+    if (message.isMasterVoice !== undefined) clean.isMasterVoice = message.isMasterVoice;
+  }
+  if (message.isImage) {
+    clean.isImage = true;
+    const safeImg = stripTransientMediaUrl(message.imageUrl);
+    if (safeImg) clean.imageUrl = safeImg;
+    if (message.imageCaption) clean.imageCaption = message.imageCaption;
+  }
+  if (message.isVideo) {
+    clean.isVideo = true;
+    clean.videoDuration = message.videoDuration;
+    const safeVid = stripTransientMediaUrl(message.videoUrl);
+    if (safeVid) clean.videoUrl = safeVid;
+  }
+  if (message.isFile) {
+    clean.isFile = true;
+    if (message.fileName) clean.fileName = message.fileName;
+    if (message.fileSize) clean.fileSize = message.fileSize;
+    const safeFile = stripTransientMediaUrl(message.fileUrl);
+    if (safeFile) clean.fileUrl = safeFile;
+  }
+  return clean;
+}
+
+function resolveUploadBlobForMessage(
+  message?: Partial<Message>,
+  explicitMediaFile?: File | Blob
+): { file?: File | Blob; fileName: string } {
+  if (explicitMediaFile) {
+    const named = (explicitMediaFile as File).name;
+    const fallbackName =
+      named ||
+      message?.fileName ||
+      (message?.isVideo
+        ? 'video.mp4'
+        : message?.isImage
+        ? 'photo.jpg'
+        : message?.isAudio
+        ? 'voice.webm'
+        : 'file.bin');
+    return { file: explicitMediaFile, fileName: fallbackName };
+  }
+  if (!message) return { fileName: 'file.bin' };
+  const candidateUrl =
+    (message.isVideo ? message.videoUrl : undefined) ||
+    (message.isImage ? message.imageUrl : undefined) ||
+    (message.isAudio ? message.audioUrl : undefined) ||
+    (message.isFile ? message.fileUrl : undefined) ||
+    '';
+  if (candidateUrl.startsWith('data:') && candidateUrl.length > 64 * 1024) {
+    const blob = dataUrlToBlob(candidateUrl);
+    if (blob) {
+      const fallbackName =
+        message.fileName ||
+        (message.isVideo
+          ? 'video.mp4'
+          : message.isImage
+          ? 'photo.jpg'
+          : message.isAudio
+          ? 'voice.webm'
+          : 'file.bin');
+      return { file: blob, fileName: fallbackName };
+    }
+  }
+  return { fileName: message.fileName || 'file.bin' };
+}
+
+export interface OutboundDeliveryResponse {
+  ok: boolean;
+  deliveryStatus: 'delivered' | 'failed';
+  telegramMessageId?: number;
+  mediaUrl?: string;
+  imageUrl?: string;
+  videoUrl?: string;
+  audioUrl?: string;
+  fileUrl?: string;
+  error?: string;
+  code?: string;
+}
+
+export async function saveMessageToDb(
+  message: Partial<Message>,
+  options?: { mediaFile?: File | Blob }
+): Promise<OutboundDeliveryResponse> {
+  try {
+    const effectiveAcc = message.accountId || currentActiveAccountId;
+    const { file: uploadBlob, fileName } = resolveUploadBlobForMessage(message, options?.mediaFile);
+
+    if (uploadBlob && uploadBlob.size > TELEGRAM_MAX_MEDIA) {
+      const maxMb = Math.round(TELEGRAM_MAX_MEDIA / (1024 * 1024));
+      return {
+        ok: false,
+        deliveryStatus: 'failed',
+        error: `媒体文件超过最大发送限制 (${maxMb} MB)`,
+      };
+    }
+
+    const compactPayload = buildCompactOutboundJsonPayload(message, effectiveAcc);
+    let fetchInit: RequestInit;
+    let timeoutMs = 25000;
+
+    if (uploadBlob) {
+      const formData = new FormData();
+      formData.append('payload', JSON.stringify(compactPayload));
+      formData.append('file', uploadBlob, fileName);
+      fetchInit = {
+        method: 'POST',
+        headers: getAuthHeaders(effectiveAcc, { omitContentType: true }),
+        body: formData,
+      };
+      timeoutMs = Math.max(30000, Math.min(600000, 30000 + Math.ceil(uploadBlob.size / (512 * 1024)) * 1000));
+    } else {
+      fetchInit = {
+        method: 'POST',
+        headers: getAuthHeaders(effectiveAcc),
+        body: JSON.stringify(compactPayload),
+      };
+    }
+
+    const res = await fetchWithTimeout('/api/messages', fetchInit, timeoutMs);
     const data = await res.json().catch(() => ({}));
+    const returnedMedia = {
+      mediaUrl: typeof data?.mediaUrl === 'string' ? data.mediaUrl : undefined,
+      imageUrl: typeof data?.imageUrl === 'string' ? data.imageUrl : undefined,
+      videoUrl: typeof data?.videoUrl === 'string' ? data.videoUrl : undefined,
+      audioUrl: typeof data?.audioUrl === 'string' ? data.audioUrl : undefined,
+      fileUrl: typeof data?.fileUrl === 'string' ? data.fileUrl : undefined,
+    };
     if (!res.ok || data?.delivered === false || data?.deliveryStatus === 'failed') {
       return {
         ok: false,
         deliveryStatus: 'failed',
+        ...returnedMedia,
         code: data?.code,
         error: data?.error || `投递失败 (${res.status})`,
       };
@@ -999,6 +1316,7 @@ export async function saveMessageToDb(
       ok: true,
       deliveryStatus: 'delivered',
       telegramMessageId: typeof data?.telegramMessageId === 'number' ? data.telegramMessageId : undefined,
+      ...returnedMedia,
     };
   } catch (err: any) {
     console.warn('Failed to save message to DB:', err);
@@ -1013,26 +1331,63 @@ export async function saveMessageToDb(
 export async function retryMessageDelivery(
   messageId: string,
   accountId?: string,
-  messagePayload?: Partial<Message>
-): Promise<{ ok: boolean; deliveryStatus: 'delivered' | 'failed'; telegramMessageId?: number; error?: string; code?: string }> {
+  messagePayload?: Partial<Message>,
+  options?: { mediaFile?: File | Blob }
+): Promise<OutboundDeliveryResponse> {
   try {
-    const res = await fetch(`/api/messages/${encodeURIComponent(messageId)}/retry`, {
-      method: 'POST',
-      headers: getAuthHeaders(accountId),
-      body: JSON.stringify(
-        messagePayload
-          ? {
-              ...messagePayload,
-              accountId: messagePayload.accountId || accountId || currentActiveAccountId,
-            }
-          : {}
-      ),
-    });
+    const effectiveAcc = messagePayload?.accountId || accountId || currentActiveAccountId;
+    const { file: uploadBlob, fileName } = resolveUploadBlobForMessage(messagePayload, options?.mediaFile);
+
+    if (uploadBlob && uploadBlob.size > TELEGRAM_MAX_MEDIA) {
+      const maxMb = Math.round(TELEGRAM_MAX_MEDIA / (1024 * 1024));
+      return {
+        ok: false,
+        deliveryStatus: 'failed',
+        error: `媒体文件超过最大发送限制 (${maxMb} MB)`,
+      };
+    }
+
+    let fetchInit: RequestInit;
+    let timeoutMs = 25000;
+
+    if (uploadBlob && messagePayload) {
+      const formData = new FormData();
+      formData.append('payload', JSON.stringify(buildCompactOutboundJsonPayload(messagePayload, effectiveAcc)));
+      formData.append('file', uploadBlob, fileName);
+      fetchInit = {
+        method: 'POST',
+        headers: getAuthHeaders(effectiveAcc, { omitContentType: true }),
+        body: formData,
+      };
+      timeoutMs = Math.max(30000, Math.min(600000, 30000 + Math.ceil(uploadBlob.size / (512 * 1024)) * 1000));
+    } else {
+      fetchInit = {
+        method: 'POST',
+        headers: getAuthHeaders(effectiveAcc),
+        body: JSON.stringify(
+          messagePayload ? buildCompactOutboundJsonPayload(messagePayload, effectiveAcc) : {}
+        ),
+      };
+    }
+
+    const res = await fetchWithTimeout(
+      `/api/messages/${encodeURIComponent(messageId)}/retry`,
+      fetchInit,
+      timeoutMs
+    );
     const data = await res.json().catch(() => ({}));
+    const returnedMedia = {
+      mediaUrl: typeof data?.mediaUrl === 'string' ? data.mediaUrl : undefined,
+      imageUrl: typeof data?.imageUrl === 'string' ? data.imageUrl : undefined,
+      videoUrl: typeof data?.videoUrl === 'string' ? data.videoUrl : undefined,
+      audioUrl: typeof data?.audioUrl === 'string' ? data.audioUrl : undefined,
+      fileUrl: typeof data?.fileUrl === 'string' ? data.fileUrl : undefined,
+    };
     if (!res.ok || data?.success === false || data?.delivered === false || data?.deliveryStatus === 'failed') {
       return {
         ok: false,
         deliveryStatus: 'failed',
+        ...returnedMedia,
         code: data?.code,
         error: data?.error || `重发失败 (${res.status})`,
       };
@@ -1041,6 +1396,7 @@ export async function retryMessageDelivery(
       ok: true,
       deliveryStatus: 'delivered',
       telegramMessageId: typeof data?.telegramMessageId === 'number' ? data.telegramMessageId : undefined,
+      ...returnedMedia,
     };
   } catch (err: any) {
     console.error('Failed to retry message delivery:', err);
@@ -1054,9 +1410,13 @@ export async function retryMessageDelivery(
 
 export async function fetchCustomerProfile(chatId: string, accountId?: string): Promise<CustomerProfile | null> {
   try {
-    const res = await fetch(`/api/customer/profile/${chatId}`, {
-      headers: getAuthHeaders(accountId),
-    });
+    const res = await fetchWithTimeout(
+      `/api/customer/profile/${chatId}`,
+      {
+        headers: getAuthHeaders(accountId),
+      },
+      10000
+    );
     if (res.ok) {
       return await res.json();
     }
@@ -1074,14 +1434,18 @@ export async function saveCustomerProfile(chatId: string, profile: Partial<Custo
       const cleanProfile = Object.fromEntries(Object.entries(profile).filter(([_, v]) => v !== undefined));
       saveLocalCustomerProfile(chatId, { ...existing, ...cleanProfile, chatId, accountId: effectiveAccountId } as CustomerProfile, effectiveAccountId);
     } catch {}
-    const res = await fetch(`/api/customer/profile/${chatId}`, {
-      method: 'POST',
-      headers: getAuthHeaders(effectiveAccountId),
-      body: JSON.stringify({
-        ...profile,
-        accountId: effectiveAccountId,
-      }),
-    });
+    const res = await fetchWithTimeout(
+      `/api/customer/profile/${chatId}`,
+      {
+        method: 'POST',
+        headers: getAuthHeaders(effectiveAccountId),
+        body: JSON.stringify({
+          ...profile,
+          accountId: effectiveAccountId,
+        }),
+      },
+      10000
+    );
     return res.ok;
   } catch (err) {
     console.error('Failed to save customer profile:', err);
@@ -1097,16 +1461,20 @@ export async function analyzeCustomerMemory(
   chatTitle?: string
 ): Promise<CustomerProfile | null> {
   try {
-    const res = await fetch(`/api/customer/analyze/${chatId}`, {
-      method: 'POST',
-      headers: getAuthHeaders(accountId),
-      body: JSON.stringify({
-        customConfig,
-        accountId: accountId || currentActiveAccountId,
-        messages: Array.isArray(messages) ? messages.slice(-50) : undefined,
-        chatTitle,
-      }),
-    });
+    const res = await fetchWithTimeout(
+      `/api/customer/analyze/${chatId}`,
+      {
+        method: 'POST',
+        headers: getAuthHeaders(accountId),
+        body: JSON.stringify({
+          customConfig,
+          accountId: accountId || currentActiveAccountId,
+          messages: Array.isArray(messages) ? messages.slice(-50) : undefined,
+          chatTitle,
+        }),
+      },
+      35000
+    );
     if (res.ok) {
       const data = await res.json();
       return data.profile;
@@ -1121,9 +1489,13 @@ export async function analyzeCustomerMemory(
 
 export async function fetchDatabaseStatus(): Promise<any> {
   try {
-    const res = await fetch('/api/database/status', {
-      headers: getAuthHeaders(),
-    });
+    const res = await fetchWithTimeout(
+      '/api/database/status',
+      {
+        headers: getAuthHeaders(),
+      },
+      10000
+    );
     if (res.ok) {
       return await res.json();
     }
@@ -1362,10 +1734,14 @@ export async function saveSystemProxyApi(payload: SystemProxyConfig & { preserve
 
 export async function downloadDatabaseBackup(): Promise<any> {
   try {
-    const res = await fetch('/api/database/backup', {
-      headers: getAuthHeaders(),
-      credentials: 'include',
-    });
+    const res = await fetchWithTimeout(
+      '/api/database/backup',
+      {
+        headers: getAuthHeaders(),
+        credentials: 'include',
+      },
+      30000
+    );
     if (!res.ok) {
       const errData = await res.json().catch(() => ({}));
       throw new Error(errData.error || `备份导出失败 (HTTP ${res.status})`);
@@ -1379,12 +1755,16 @@ export async function downloadDatabaseBackup(): Promise<any> {
 
 export async function uploadDatabaseRestore(snapshot: any): Promise<{ success: boolean; message: string; restoredCounts?: any }> {
   try {
-    const res = await fetch('/api/database/restore?confirm=true', {
-      method: 'POST',
-      headers: getAuthHeaders(),
-      credentials: 'include',
-      body: JSON.stringify({ snapshot, confirm: true }),
-    });
+    const res = await fetchWithTimeout(
+      '/api/database/restore?confirm=true',
+      {
+        method: 'POST',
+        headers: getAuthHeaders(),
+        credentials: 'include',
+        body: JSON.stringify({ snapshot, confirm: true }),
+      },
+      30000
+    );
     const data = await res.json();
     if (!res.ok) {
       return { success: false, message: data.error || '恢复失败' };
@@ -1407,12 +1787,20 @@ import {
 
 // ==================== ZERO-DB ENCRYPTED LOCAL STORAGE REPOSITORY ====================
 // In accordance with user security specification: Chat messages, transcripts, accounts, and customer notes
-// are NEVER sent to or stored in any database; they exist exclusively in the client's local browser memory,
-// encrypted with Web Crypto API (AES-256-GCM) to prevent plain-text inspection in browser DevTools.
+// exist locally encrypted with Web Crypto API (AES-256-GCM) to prevent plain-text inspection in DevTools,
+// capped at MAX_LOCAL_MESSAGES_PER_CHAT per chat so Chromium localStorage never hits 5MB limits.
 
-export function isMessageDeleted(messageId: string): boolean {
+export const MAX_LOCAL_MESSAGES_PER_CHAT = 100;
+
+export function getDeletedMessageStorageKey(accountId?: string): string {
+  const acc = (accountId ?? currentActiveAccountId ?? '').trim();
+  return acc ? `tg_deleted_message_ids_${acc}` : 'tg_deleted_message_ids';
+}
+
+export function isMessageDeleted(messageId: string, accountId?: string): boolean {
   try {
-    const raw = localStorage.getItem('tg_deleted_message_ids');
+    const scopedKey = getDeletedMessageStorageKey(accountId);
+    const raw = localStorage.getItem(scopedKey);
     if (!raw) return false;
     const list: string[] = JSON.parse(raw);
     return Array.isArray(list) && list.includes(messageId);
@@ -1423,15 +1811,24 @@ export function isMessageDeleted(messageId: string): boolean {
 
 const MAX_DELETED_MESSAGE_IDS = 5000;
 
-export function recordDeletedMessageId(messageId: string): void {
+export function recordDeletedMessageIds(messageIds: string[], accountId?: string): void {
+  if (!Array.isArray(messageIds) || messageIds.length === 0) return;
   try {
-    const raw = localStorage.getItem('tg_deleted_message_ids');
+    const scopedKey = getDeletedMessageStorageKey(accountId);
+    const raw = localStorage.getItem(scopedKey);
     const set = new Set<string>(raw ? JSON.parse(raw) : []);
-    set.add(messageId);
+    for (const id of messageIds) {
+      if (id) set.add(id);
+    }
     const arr = Array.from(set);
     const trimmed = arr.length > MAX_DELETED_MESSAGE_IDS ? arr.slice(-MAX_DELETED_MESSAGE_IDS) : arr;
-    localStorage.setItem('tg_deleted_message_ids', JSON.stringify(trimmed));
+    localStorage.setItem(scopedKey, JSON.stringify(trimmed));
   } catch {}
+}
+
+export function recordDeletedMessageId(messageId: string, accountId?: string): void {
+  if (!messageId) return;
+  recordDeletedMessageIds([messageId], accountId);
 }
 
 const APP_BOOT_TIMESTAMP = Date.now();
@@ -1465,6 +1862,28 @@ export function normalizeStalePendingMessages(list: Message[]): Message[] {
   });
 }
 
+export function sanitizeMessageForLocalStorage(msg: Message): Message {
+  const cleanUrl = (u?: string) => {
+    if (!u || typeof u !== 'string') return u;
+    if (u.startsWith('blob:')) return '';
+    if (u.startsWith('data:') && u.length > 64 * 1024) return '';
+    return u;
+  };
+  return {
+    ...msg,
+    ...(msg.audioUrl !== undefined ? { audioUrl: cleanUrl(msg.audioUrl) } : {}),
+    ...(msg.imageUrl !== undefined ? { imageUrl: cleanUrl(msg.imageUrl) } : {}),
+    ...(msg.videoUrl !== undefined ? { videoUrl: cleanUrl(msg.videoUrl) } : {}),
+    ...(msg.fileUrl !== undefined ? { fileUrl: cleanUrl(msg.fileUrl) } : {}),
+  };
+}
+
+function capMessagesForLocalCache(list: Message[]): Message[] {
+  if (!Array.isArray(list)) return [];
+  const sliced = list.length <= MAX_LOCAL_MESSAGES_PER_CHAT ? list : list.slice(-MAX_LOCAL_MESSAGES_PER_CHAT);
+  return sliced.map(sanitizeMessageForLocalStorage);
+}
+
 export function getLocalMessages(chatId: string, accountId?: string): Message[] {
   try {
     const acc = accountId || currentActiveAccountId;
@@ -1481,7 +1900,7 @@ export function getLocalMessages(chatId: string, accountId?: string): Message[] 
       return normalizeStalePendingMessages(
         list.filter(
           (m) =>
-            !isMessageDeleted(m.id) &&
+            !isMessageDeleted(m.id, acc) &&
             (!acc || m.accountId === acc || (!m.accountId && !acc))
         )
       );
@@ -1494,12 +1913,12 @@ export function getLocalMessages(chatId: string, accountId?: string): Message[] 
 
 export function deleteLocalMessage(chatId: string, messageId: string, accountId?: string): void {
   try {
-    recordDeletedMessageId(messageId);
     const acc = accountId || currentActiveAccountId;
+    recordDeletedMessageId(messageId, acc);
     const scopedKey = acc ? `tg_desktop_msgs_${acc}_${chatId}` : `tg_desktop_msgs_${chatId}`;
     const existing = getLocalMessages(chatId, acc);
     const updated = existing.filter((m) => m.id !== messageId);
-    secureSetItemSync(scopedKey, updated);
+    secureSetItemSync(scopedKey, capMessagesForLocalCache(updated));
   } catch (e) {
     console.error('Failed to delete encrypted message from local storage', e);
   }
@@ -1509,8 +1928,8 @@ export function setLocalMessages(chatId: string, messages: Message[], accountId?
   try {
     const acc = accountId || currentActiveAccountId;
     const scopedKey = acc ? `tg_desktop_msgs_${acc}_${chatId}` : `tg_desktop_msgs_${chatId}`;
-    const filtered = Array.isArray(messages) ? messages.filter((m) => !isMessageDeleted(m.id)) : [];
-    secureSetItemSync(scopedKey, filtered);
+    const filtered = Array.isArray(messages) ? messages.filter((m) => !isMessageDeleted(m.id, acc)) : [];
+    secureSetItemSync(scopedKey, capMessagesForLocalCache(filtered));
   } catch (e) {
     console.error('Failed to persist encrypted messages to local storage', e);
   }
@@ -1522,14 +1941,10 @@ export function clearLocalMessages(chatId: string, existingMessages: Message[] =
     const currentStored = getLocalMessages(chatId, acc);
     const allToRecord = [...existingMessages, ...currentStored];
     if (allToRecord.length > 0) {
-      const raw = localStorage.getItem('tg_deleted_message_ids');
-      const set = new Set<string>(raw ? JSON.parse(raw) : []);
-      allToRecord.forEach((m) => {
-        if (m?.id) set.add(m.id);
-      });
-      const arr = Array.from(set);
-      const trimmed = arr.length > MAX_DELETED_MESSAGE_IDS ? arr.slice(-MAX_DELETED_MESSAGE_IDS) : arr;
-      localStorage.setItem('tg_deleted_message_ids', JSON.stringify(trimmed));
+      recordDeletedMessageIds(
+        allToRecord.map((m) => m?.id).filter((id): id is string => Boolean(id)),
+        acc
+      );
     }
     if (acc) {
       localStorage.removeItem(`tg_desktop_msgs_${acc}_${chatId}`);
@@ -1562,10 +1977,14 @@ export async function deleteMessageFromDb(
       query.set('localOnly', 'true');
     }
     const qs = query.toString() ? `?${query.toString()}` : '';
-    const res = await fetch(`/api/messages/${encodeURIComponent(messageId)}${qs}`, {
-      method: 'DELETE',
-      headers: getAuthHeaders(accountId),
-    });
+    const res = await fetchWithTimeout(
+      `/api/messages/${encodeURIComponent(messageId)}${qs}`,
+      {
+        method: 'DELETE',
+        headers: getAuthHeaders(accountId),
+      },
+      15000
+    );
     const data = await res.json().catch(() => ({}));
     if (!res.ok || data?.deleted === false || data?.success === false) {
       return { ok: false, error: data?.error || `删除撤回消息失败 (HTTP ${res.status})` };
@@ -1577,9 +1996,9 @@ export async function deleteMessageFromDb(
 }
 
 export function saveLocalMessage(chatId: string, message: Message, accountId?: string): void {
-  if (isMessageDeleted(message.id)) return;
+  const acc = accountId || message.accountId || currentActiveAccountId;
+  if (isMessageDeleted(message.id, acc)) return;
   try {
-    const acc = accountId || message.accountId || currentActiveAccountId;
     const scopedKey = acc ? `tg_desktop_msgs_${acc}_${chatId}` : `tg_desktop_msgs_${chatId}`;
     const existing = getLocalMessages(chatId, acc);
     const incomingTgId = resolveClientTelegramMessageId(message);
@@ -1608,7 +2027,7 @@ export function saveLocalMessage(chatId: string, message: Message, accountId?: s
 
     if (existingIdx === -1) {
       existing.push(message);
-      secureSetItemSync(scopedKey, existing);
+      secureSetItemSync(scopedKey, capMessagesForLocalCache(existing));
     } else {
       let changed = false;
       if (message.translatedText && !existing[existingIdx].translatedText) {
@@ -1620,7 +2039,7 @@ export function saveLocalMessage(chatId: string, message: Message, accountId?: s
         changed = true;
       }
       if (changed) {
-        secureSetItemSync(scopedKey, existing);
+        secureSetItemSync(scopedKey, capMessagesForLocalCache(existing));
       }
     }
   } catch (e) {
@@ -1681,7 +2100,7 @@ export function clearAccountLocalCache(accountId: string, unsharedChatIds: strin
   try {
     const msgsPrefix = `tg_desktop_msgs_${accountId}_`;
     const profilePrefix = `tg_desktop_profile_${accountId}_`;
-    const keysToRemove: string[] = [];
+    const keysToRemove: string[] = [`tg_deleted_message_ids_${accountId}`];
 
     for (let i = 0; i < localStorage.length; i++) {
       const key = localStorage.key(i) || '';
@@ -1720,7 +2139,7 @@ export function purgeAllLocalChatData(): void {
         key.startsWith('tg_desktop_profile_') ||
         key.startsWith('tg_local_msgs_') ||
         key.startsWith('tg_pro_') ||
-        key === 'tg_deleted_message_ids' ||
+        key.startsWith('tg_deleted_message_ids') ||
         key === 'tg_master_voiceprint'
       ) {
         keysToRemove.push(key);
@@ -1756,9 +2175,13 @@ export async function fetchTelegramCloudMessagesApi(
     if (options?.search && options.search.trim()) {
       query.set('search', options.search.trim());
     }
-    const res = await fetch(`/api/telegram/user/messages/${encodeURIComponent(chatId)}?${query.toString()}`, {
-      headers: getAuthHeaders(accountId),
-    });
+    const res = await fetchWithTimeout(
+      `/api/telegram/user/messages/${encodeURIComponent(chatId)}?${query.toString()}`,
+      {
+        headers: getAuthHeaders(accountId),
+      },
+      20000
+    );
     const data = await res.json().catch(() => ({}));
     if (res.ok && data?.ok && Array.isArray(data.messages)) {
       return {
@@ -1955,11 +2378,11 @@ export async function updateTelegramUserProfileApi(payload: {
   profile?: { name: string; username: string; bio: string; phone?: string };
 }> {
   try {
-    const res = await fetch('/api/telegram/user/update-profile', {
+    const res = await fetchWithTimeout('/api/telegram/user/update-profile', {
       method: 'POST',
       headers: getAuthHeaders(payload.accountId),
       body: JSON.stringify(payload),
-    });
+    }, 15000);
     return await res.json();
   } catch (err: any) {
     return { ok: false, cloudSynced: false, error: err.message || '网络连接异常' };
@@ -1972,9 +2395,9 @@ export async function fetchTelegramUserSettingsApi(accountId?: string, phone?: s
     if (accountId) params.set('accountId', accountId);
     if (phone) params.set('phone', phone);
     const qs = params.toString() ? `?${params.toString()}` : '';
-    const res = await fetch(`/api/telegram/user/settings${qs}`, {
+    const res = await fetchWithTimeout(`/api/telegram/user/settings${qs}`, {
       headers: getAuthHeaders(accountId),
-    });
+    }, 20000);
     return await res.json();
   } catch (err: any) {
     return { ok: false, error: err.message || '拉取 Telegram 官方设置失败' };
@@ -1987,11 +2410,11 @@ export async function uploadTelegramUserAvatarApi(payload: {
   imageDataUrl: string;
 }): Promise<{ ok: boolean; cloudSynced?: boolean; avatarUrl?: string; message?: string; error?: string }> {
   try {
-    const res = await fetch('/api/telegram/user/upload-avatar', {
+    const res = await fetchWithTimeout('/api/telegram/user/upload-avatar', {
       method: 'POST',
       headers: getAuthHeaders(payload.accountId),
       body: JSON.stringify(payload),
-    });
+    }, 25000);
     return await res.json();
   } catch (err: any) {
     return { ok: false, error: err.message || '上传官方头像失败' };
@@ -2004,11 +2427,11 @@ export async function sendTelegramChangePhoneCodeApi(payload: {
   newPhone: string;
 }): Promise<{ ok: boolean; newPhone?: string; phoneCodeHash?: string; message?: string; error?: string }> {
   try {
-    const res = await fetch('/api/telegram/user/change-phone/send-code', {
+    const res = await fetchWithTimeout('/api/telegram/user/change-phone/send-code', {
       method: 'POST',
       headers: getAuthHeaders(payload.accountId),
       body: JSON.stringify(payload),
-    });
+    }, 15000);
     return await res.json();
   } catch (err: any) {
     return { ok: false, error: err.message || '发送换绑验证码失败' };
@@ -2023,11 +2446,11 @@ export async function confirmTelegramChangePhoneApi(payload: {
   code: string;
 }): Promise<{ ok: boolean; cloudSynced?: boolean; phone?: string; message?: string; error?: string }> {
   try {
-    const res = await fetch('/api/telegram/user/change-phone/confirm', {
+    const res = await fetchWithTimeout('/api/telegram/user/change-phone/confirm', {
       method: 'POST',
       headers: getAuthHeaders(payload.accountId),
       body: JSON.stringify(payload),
-    });
+    }, 15000);
     return await res.json();
   } catch (err: any) {
     return { ok: false, error: err.message || '确认换绑手机号失败' };
@@ -2055,11 +2478,11 @@ export async function updateTelegramTwoFactorApi(payload: {
   error?: string;
 }> {
   try {
-    const res = await fetch('/api/telegram/user/settings/two-factor', {
+    const res = await fetchWithTimeout('/api/telegram/user/settings/two-factor', {
       method: 'POST',
       headers: getAuthHeaders(payload.accountId),
       body: JSON.stringify(payload),
-    });
+    }, 20000);
     const data = await res.json();
     if (!data?.ok) {
       return { ...data, error: data?.message || data?.error || '修改两步验证设置失败' };
@@ -2088,11 +2511,11 @@ export async function updateTelegramPrivacyApi(payload: {
   error?: string;
 }> {
   try {
-    const res = await fetch('/api/telegram/user/settings/privacy', {
+    const res = await fetchWithTimeout('/api/telegram/user/settings/privacy', {
       method: 'POST',
       headers: getAuthHeaders(payload.accountId),
       body: JSON.stringify(payload),
-    });
+    }, 15000);
     return await res.json();
   } catch (err: any) {
     return { ok: false, error: err.message || '修改隐私设置失败' };
@@ -2114,11 +2537,11 @@ export async function updateTelegramGlobalPrivacyApi(payload: {
   error?: string;
 }> {
   try {
-    const res = await fetch('/api/telegram/user/settings/global-privacy', {
+    const res = await fetchWithTimeout('/api/telegram/user/settings/global-privacy', {
       method: 'POST',
       headers: getAuthHeaders(payload.accountId),
       body: JSON.stringify(payload),
-    });
+    }, 15000);
     return await res.json();
   } catch (err: any) {
     return { ok: false, error: err.message || '更新全局隐私设置失败' };
@@ -2136,11 +2559,11 @@ export async function updateTelegramAccountTtlApi(payload: {
   error?: string;
 }> {
   try {
-    const res = await fetch('/api/telegram/user/settings/account-ttl', {
+    const res = await fetchWithTimeout('/api/telegram/user/settings/account-ttl', {
       method: 'POST',
       headers: getAuthHeaders(payload.accountId),
       body: JSON.stringify(payload),
-    });
+    }, 15000);
     return await res.json();
   } catch (err: any) {
     return { ok: false, error: err.message || '更新账号自毁期限失败' };
@@ -2154,11 +2577,11 @@ export async function terminateTelegramSessionApi(payload: {
   terminateAllOthers?: boolean;
 }): Promise<{ ok: boolean; cloudSynced?: boolean; sessions?: TelegramOfficialSession[]; error?: string }> {
   try {
-    const res = await fetch('/api/telegram/user/settings/sessions/terminate', {
+    const res = await fetchWithTimeout('/api/telegram/user/settings/sessions/terminate', {
       method: 'POST',
       headers: getAuthHeaders(payload.accountId),
       body: JSON.stringify(payload),
-    });
+    }, 15000);
     return await res.json();
   } catch (err: any) {
     return { ok: false, error: err.message || '注销设备会话失败' };
@@ -2178,11 +2601,11 @@ export async function updateTelegramNotificationsApi(payload: {
   error?: string;
 }> {
   try {
-    const res = await fetch('/api/telegram/user/settings/notifications', {
+    const res = await fetchWithTimeout('/api/telegram/user/settings/notifications', {
       method: 'POST',
       headers: getAuthHeaders(payload.accountId),
       body: JSON.stringify(payload),
-    });
+    }, 15000);
     return await res.json();
   } catch (err: any) {
     return { ok: false, error: err.message || '更新通知设置失败' };
@@ -2206,11 +2629,11 @@ export async function saveTelegramDialogFilterApi(payload: {
   };
 }): Promise<{ ok: boolean; cloudSynced?: boolean; folders?: TelegramOfficialDialogFilter[]; error?: string }> {
   try {
-    const res = await fetch('/api/telegram/user/settings/folders', {
+    const res = await fetchWithTimeout('/api/telegram/user/settings/folders', {
       method: 'POST',
       headers: getAuthHeaders(payload.accountId),
       body: JSON.stringify(payload),
-    });
+    }, 15000);
     return await res.json();
   } catch (err: any) {
     return { ok: false, error: err.message || '保存云端文件夹失败' };
@@ -2227,10 +2650,10 @@ export async function deleteTelegramDialogFilterApi(payload: {
     if (payload.accountId) params.set('accountId', payload.accountId);
     if (payload.phone) params.set('phone', payload.phone);
     const qs = params.toString() ? `?${params.toString()}` : '';
-    const res = await fetch(`/api/telegram/user/settings/folders/${payload.filterId}${qs}`, {
+    const res = await fetchWithTimeout(`/api/telegram/user/settings/folders/${payload.filterId}${qs}`, {
       method: 'DELETE',
       headers: getAuthHeaders(payload.accountId),
-    });
+    }, 15000);
     return await res.json();
   } catch (err: any) {
     return { ok: false, error: err.message || '删除云端文件夹失败' };
@@ -2246,9 +2669,9 @@ export async function fetchTelegramSavedMessagesApi(accountId?: string): Promise
 }> {
   try {
     const query = accountId ? `?accountId=${encodeURIComponent(accountId)}` : '';
-    const res = await fetch(`/api/telegram/user/saved-messages${query}`, {
+    const res = await fetchWithTimeout(`/api/telegram/user/saved-messages${query}`, {
       headers: getAuthHeaders(accountId),
-    });
+    }, 20000);
     return await res.json();
   } catch (err: any) {
     return { ok: false, error: err?.message || '打开 Telegram 官方收藏夹失败' };
@@ -2264,11 +2687,11 @@ export async function editTelegramMessageApi(payload: {
   translatedText?: string;
 }): Promise<{ ok: boolean; cloudSynced?: boolean; telegramMessageId?: number; error?: string }> {
   try {
-    const res = await fetch('/api/telegram/user/messages/edit', {
+    const res = await fetchWithTimeout('/api/telegram/user/messages/edit', {
       method: 'POST',
       headers: getAuthHeaders(payload.accountId),
       body: JSON.stringify(payload),
-    });
+    }, 15000);
     return await res.json();
   } catch (err: any) {
     return { ok: false, error: err?.message || '同步编辑消息失败' };
@@ -2284,11 +2707,11 @@ export async function reactTelegramMessageApi(payload: {
   remove?: boolean;
 }): Promise<{ ok: boolean; cloudSynced?: boolean; telegramMessageId?: number; error?: string }> {
   try {
-    const res = await fetch('/api/telegram/user/messages/react', {
+    const res = await fetchWithTimeout('/api/telegram/user/messages/react', {
       method: 'POST',
       headers: getAuthHeaders(payload.accountId),
       body: JSON.stringify(payload),
-    });
+    }, 15000);
     return await res.json();
   } catch (err: any) {
     return { ok: false, error: err?.message || '发送云端表情回应失败' };
@@ -2303,11 +2726,11 @@ export async function pinTelegramMessageApi(payload: {
   pin: boolean;
 }): Promise<{ ok: boolean; cloudSynced?: boolean; pinned?: boolean; telegramMessageId?: number; error?: string }> {
   try {
-    const res = await fetch('/api/telegram/user/messages/pin', {
+    const res = await fetchWithTimeout('/api/telegram/user/messages/pin', {
       method: 'POST',
       headers: getAuthHeaders(payload.accountId),
       body: JSON.stringify(payload),
-    });
+    }, 15000);
     return await res.json();
   } catch (err: any) {
     return { ok: false, error: err?.message || '同步云端消息置顶失败' };
@@ -2320,11 +2743,11 @@ export async function toggleTelegramDialogPinApi(payload: {
   pinned: boolean;
 }): Promise<{ ok: boolean; cloudSynced?: boolean; pinned?: boolean; error?: string }> {
   try {
-    const res = await fetch('/api/telegram/user/dialogs/pin', {
+    const res = await fetchWithTimeout('/api/telegram/user/dialogs/pin', {
       method: 'POST',
       headers: getAuthHeaders(payload.accountId),
       body: JSON.stringify(payload),
-    });
+    }, 15000);
     return await res.json();
   } catch (err: any) {
     return { ok: false, error: err?.message || '同步云端置顶对话失败' };
@@ -2337,11 +2760,11 @@ export async function toggleTelegramDialogMuteApi(payload: {
   muted: boolean;
 }): Promise<{ ok: boolean; cloudSynced?: boolean; muted?: boolean; error?: string }> {
   try {
-    const res = await fetch('/api/telegram/user/dialogs/mute', {
+    const res = await fetchWithTimeout('/api/telegram/user/dialogs/mute', {
       method: 'POST',
       headers: getAuthHeaders(payload.accountId),
       body: JSON.stringify(payload),
-    });
+    }, 15000);
     return await res.json();
   } catch (err: any) {
     return { ok: false, error: err?.message || '同步云端静音设置失败' };
@@ -2354,11 +2777,11 @@ export async function toggleTelegramDialogArchiveApi(payload: {
   archived: boolean;
 }): Promise<{ ok: boolean; cloudSynced?: boolean; archived?: boolean; error?: string }> {
   try {
-    const res = await fetch('/api/telegram/user/dialogs/archive', {
+    const res = await fetchWithTimeout('/api/telegram/user/dialogs/archive', {
       method: 'POST',
       headers: getAuthHeaders(payload.accountId),
       body: JSON.stringify(payload),
-    });
+    }, 15000);
     return await res.json();
   } catch (err: any) {
     return { ok: false, error: err?.message || '同步云端归档失败' };
@@ -2371,11 +2794,11 @@ export async function toggleTelegramDialogUnreadApi(payload: {
   unread: boolean;
 }): Promise<{ ok: boolean; cloudSynced?: boolean; unread?: boolean; error?: string }> {
   try {
-    const res = await fetch('/api/telegram/user/dialogs/unread', {
+    const res = await fetchWithTimeout('/api/telegram/user/dialogs/unread', {
       method: 'POST',
       headers: getAuthHeaders(payload.accountId),
       body: JSON.stringify(payload),
-    });
+    }, 15000);
     return await res.json();
   } catch (err: any) {
     return { ok: false, error: err?.message || '同步云端已读/未读状态失败' };
@@ -2388,11 +2811,11 @@ export async function clearTelegramDialogHistoryApi(payload: {
   revoke?: boolean;
 }): Promise<{ ok: boolean; cloudSynced?: boolean; error?: string }> {
   try {
-    const res = await fetch('/api/telegram/user/dialogs/clear-history', {
+    const res = await fetchWithTimeout('/api/telegram/user/dialogs/clear-history', {
       method: 'POST',
       headers: getAuthHeaders(payload.accountId),
       body: JSON.stringify(payload),
-    });
+    }, 20000);
     return await res.json();
   } catch (err: any) {
     return { ok: false, error: err?.message || '清空云端聊天记录失败' };
@@ -2405,11 +2828,11 @@ export async function deleteTelegramDialogApi(payload: {
   revoke?: boolean;
 }): Promise<{ ok: boolean; cloudSynced?: boolean; error?: string }> {
   try {
-    const res = await fetch('/api/telegram/user/dialogs/delete', {
+    const res = await fetchWithTimeout('/api/telegram/user/dialogs/delete', {
       method: 'POST',
       headers: getAuthHeaders(payload.accountId),
       body: JSON.stringify(payload),
-    });
+    }, 20000);
     return await res.json();
   } catch (err: any) {
     return { ok: false, error: err?.message || '删除/退出云端对话失败' };
@@ -2422,11 +2845,11 @@ export async function markTelegramDialogReadApi(payload: {
   maxId?: number;
 }): Promise<{ ok: boolean; cloudSynced?: boolean; error?: string }> {
   try {
-    const res = await fetch('/api/telegram/user/dialogs/read', {
+    const res = await fetchWithTimeout('/api/telegram/user/dialogs/read', {
       method: 'POST',
       headers: getAuthHeaders(payload.accountId),
       body: JSON.stringify(payload),
-    });
+    }, 12000);
     return await res.json();
   } catch (err: any) {
     return { ok: false, error: err?.message || '同步云端已读状态失败' };
@@ -2440,11 +2863,11 @@ export async function batchDeleteTelegramMessagesApi(payload: {
   revoke?: boolean;
 }): Promise<{ ok: boolean; cloudSynced?: boolean; deletedCount?: number; deletedIds?: string[]; error?: string }> {
   try {
-    const res = await fetch('/api/telegram/user/messages/batch-delete', {
+    const res = await fetchWithTimeout('/api/telegram/user/messages/batch-delete', {
       method: 'POST',
       headers: getAuthHeaders(payload.accountId),
       body: JSON.stringify(payload),
-    });
+    }, 20000);
     return await res.json();
   } catch (err: any) {
     return { ok: false, error: err?.message || '批量删除消息失败' };
@@ -2460,11 +2883,11 @@ export async function forwardTelegramMessagesApi(payload: {
   dropAuthor?: boolean;
 }): Promise<{ ok: boolean; cloudSynced?: boolean; forwardedCount?: number; error?: string }> {
   try {
-    const res = await fetch('/api/telegram/user/messages/forward', {
+    const res = await fetchWithTimeout('/api/telegram/user/messages/forward', {
       method: 'POST',
       headers: getAuthHeaders(payload.accountId),
       body: JSON.stringify(payload),
-    });
+    }, 20000);
     return await res.json();
   } catch (err: any) {
     return { ok: false, error: err?.message || '转发消息失败' };
@@ -2477,11 +2900,11 @@ export async function renameTelegramContactApi(payload: {
   newTitle: string;
 }): Promise<{ ok: boolean; cloudSynced?: boolean; newTitle?: string; error?: string }> {
   try {
-    const res = await fetch('/api/telegram/user/contacts/rename', {
+    const res = await fetchWithTimeout('/api/telegram/user/contacts/rename', {
       method: 'POST',
       headers: getAuthHeaders(payload.accountId),
       body: JSON.stringify(payload),
-    });
+    }, 15000);
     return await res.json();
   } catch (err: any) {
     return { ok: false, error: err?.message || '同步云端联系人备注失败' };
@@ -2496,9 +2919,9 @@ export async function fetchTelegramUserContactsApi(accountId?: string): Promise<
 }> {
   try {
     const query = accountId ? `?accountId=${encodeURIComponent(accountId)}` : '';
-    const res = await fetch(`/api/telegram/user/contacts${query}`, {
+    const res = await fetchWithTimeout(`/api/telegram/user/contacts${query}`, {
       headers: getAuthHeaders(accountId),
-    });
+    }, 15000);
     return await res.json();
   } catch (err: any) {
     return { ok: false, contacts: [], error: err?.message || '网络连接异常' };
@@ -2517,11 +2940,11 @@ export async function addTelegramUserContactApi(payload: {
   error?: string;
 }> {
   try {
-    const res = await fetch('/api/telegram/user/contacts/add', {
+    const res = await fetchWithTimeout('/api/telegram/user/contacts/add', {
       method: 'POST',
       headers: getAuthHeaders(payload.accountId),
       body: JSON.stringify(payload),
-    });
+    }, 15000);
     return await res.json();
   } catch (err: any) {
     return { ok: false, error: err?.message || '网络连接异常' };
@@ -2533,11 +2956,11 @@ export async function deleteTelegramUserContactApi(payload: {
   chatId: string;
 }): Promise<{ ok: boolean; cloudSynced?: boolean; error?: string }> {
   try {
-    const res = await fetch('/api/telegram/user/contacts/delete', {
+    const res = await fetchWithTimeout('/api/telegram/user/contacts/delete', {
       method: 'POST',
       headers: getAuthHeaders(payload.accountId),
       body: JSON.stringify(payload),
-    });
+    }, 15000);
     return await res.json();
   } catch (err: any) {
     return { ok: false, error: err?.message || '网络连接异常' };
@@ -2549,11 +2972,11 @@ export async function blockTelegramUserContactApi(payload: {
   chatId: string;
 }): Promise<{ ok: boolean; cloudSynced?: boolean; error?: string }> {
   try {
-    const res = await fetch('/api/telegram/user/contacts/block', {
+    const res = await fetchWithTimeout('/api/telegram/user/contacts/block', {
       method: 'POST',
       headers: getAuthHeaders(payload.accountId),
       body: JSON.stringify(payload),
-    });
+    }, 15000);
     return await res.json();
   } catch (err: any) {
     return { ok: false, error: err?.message || '网络连接异常' };
@@ -2565,11 +2988,11 @@ export async function unblockTelegramUserContactApi(payload: {
   chatId: string;
 }): Promise<{ ok: boolean; cloudSynced?: boolean; error?: string }> {
   try {
-    const res = await fetch('/api/telegram/user/contacts/unblock', {
+    const res = await fetchWithTimeout('/api/telegram/user/contacts/unblock', {
       method: 'POST',
       headers: getAuthHeaders(payload.accountId),
       body: JSON.stringify(payload),
-    });
+    }, 15000);
     return await res.json();
   } catch (err: any) {
     return { ok: false, error: err?.message || '网络连接异常' };
@@ -2590,9 +3013,9 @@ export async function searchTelegramGlobalContactsApi(
     if (!clean) return { ok: true, contacts: [] };
     const params = new URLSearchParams({ q: clean });
     if (accountId) params.set('accountId', accountId);
-    const res = await fetch(`/api/telegram/user/contacts/search?${params.toString()}`, {
+    const res = await fetchWithTimeout(`/api/telegram/user/contacts/search?${params.toString()}`, {
       headers: getAuthHeaders(accountId),
-    });
+    }, 15000);
     return await res.json();
   } catch (err: any) {
     return { ok: false, contacts: [], error: err?.message || '网络连接异常' };
@@ -2607,9 +3030,9 @@ export async function fetchTelegramBlockedContactsApi(accountId?: string): Promi
 }> {
   try {
     const query = accountId ? `?accountId=${encodeURIComponent(accountId)}` : '';
-    const res = await fetch(`/api/telegram/user/contacts/blocked${query}`, {
+    const res = await fetchWithTimeout(`/api/telegram/user/contacts/blocked${query}`, {
       headers: getAuthHeaders(accountId),
-    });
+    }, 15000);
     return await res.json();
   } catch (err: any) {
     return { ok: false, blocked: [], error: err?.message || '网络连接异常' };
@@ -2657,11 +3080,11 @@ export async function createTelegramGroupApi(payload: {
   error?: string;
 }> {
   try {
-    const res = await fetch('/api/telegram/user/create-group', {
+    const res = await fetchWithTimeout('/api/telegram/user/create-group', {
       method: 'POST',
       headers: getAuthHeaders(payload.accountId),
       body: JSON.stringify(payload),
-    });
+    }, 20000);
     return await res.json();
   } catch (err: any) {
     return { ok: false, error: err?.message || '网络连接异常' };
@@ -2682,11 +3105,11 @@ export async function createTelegramChannelApi(payload: {
   error?: string;
 }> {
   try {
-    const res = await fetch('/api/telegram/user/create-channel', {
+    const res = await fetchWithTimeout('/api/telegram/user/create-channel', {
       method: 'POST',
       headers: getAuthHeaders(payload.accountId),
       body: JSON.stringify(payload),
-    });
+    }, 20000);
     return await res.json();
   } catch (err: any) {
     return { ok: false, error: err?.message || '网络连接异常' };
@@ -2707,11 +3130,11 @@ export async function startTelegramVoiceCallApi(payload: {
   error?: string;
 }> {
   try {
-    const res = await fetch('/api/telegram/user/call/start', {
+    const res = await fetchWithTimeout('/api/telegram/user/call/start', {
       method: 'POST',
       headers: getAuthHeaders(payload.accountId),
       body: JSON.stringify(payload),
-    });
+    }, 20000);
     return await res.json();
   } catch (err: any) {
     return { ok: false, error: err?.message || '网络连接异常' };
@@ -2728,9 +3151,9 @@ export async function getTelegramVoiceCallStatusApi(
   elapsedSeconds?: number;
 }> {
   try {
-    const res = await fetch(`/api/telegram/user/call/status/${encodeURIComponent(callId)}`, {
+    const res = await fetchWithTimeout(`/api/telegram/user/call/status/${encodeURIComponent(callId)}`, {
       headers: getAuthHeaders(accountId),
-    });
+    }, 10000);
     return await res.json();
   } catch {
     return { ok: false };
@@ -2743,11 +3166,11 @@ export async function endTelegramVoiceCallApi(
   accountId?: string
 ): Promise<{ ok: boolean; cloudSynced?: boolean }> {
   try {
-    const res = await fetch('/api/telegram/user/call/end', {
+    const res = await fetchWithTimeout('/api/telegram/user/call/end', {
       method: 'POST',
       headers: getAuthHeaders(accountId),
       body: JSON.stringify({ callId, duration }),
-    });
+    }, 12000);
     return await res.json();
   } catch {
     return { ok: false };
@@ -2763,9 +3186,9 @@ export async function fetchAutopilotStatus(
     if (chatId) query.set('chatId', chatId);
     if (accountId) query.set('accountId', accountId);
     const qs = query.toString() ? `?${query.toString()}` : '';
-    const res = await fetch(`/api/telegram/autopilot/status${qs}`, {
+    const res = await fetchWithTimeout(`/api/telegram/autopilot/status${qs}`, {
       headers: getAuthHeaders(accountId),
-    });
+    }, 10000);
     return await res.json();
   } catch {
     return { ok: false, activeChats: [], isChatEnabled: false };
@@ -2778,11 +3201,11 @@ export async function toggleAutopilot(
   accountId?: string
 ): Promise<{ ok: boolean; enabled: boolean; activeCount: number }> {
   try {
-    const res = await fetch('/api/telegram/autopilot/toggle', {
+    const res = await fetchWithTimeout('/api/telegram/autopilot/toggle', {
       method: 'POST',
       headers: getAuthHeaders(accountId),
       body: JSON.stringify({ chatId, enabled, accountId: accountId || currentActiveAccountId || undefined }),
-    });
+    }, 12000);
     return await res.json();
   } catch {
     return { ok: false, enabled: false, activeCount: 0 };
@@ -2793,10 +3216,10 @@ export async function toggleAutopilot(
 
 export async function fetchGlobalPersonaApi(): Promise<{ success: boolean; persona?: GlobalPersonaConfig; error?: string }> {
   try {
-    const res = await fetch('/api/persona/config', {
+    const res = await fetchWithTimeout('/api/persona/config', {
       headers: getAuthHeaders(),
       credentials: 'include',
-    });
+    }, 12000);
     return await res.json();
   } catch (err: any) {
     return { success: false, error: err.message };
@@ -2805,12 +3228,12 @@ export async function fetchGlobalPersonaApi(): Promise<{ success: boolean; perso
 
 export async function saveGlobalPersonaApi(persona: GlobalPersonaConfig): Promise<{ success: boolean; persona?: GlobalPersonaConfig; error?: string }> {
   try {
-    const res = await fetch('/api/persona/config', {
+    const res = await fetchWithTimeout('/api/persona/config', {
       method: 'POST',
       headers: getAuthHeaders(),
       body: JSON.stringify(persona),
       credentials: 'include',
-    });
+    }, 15000);
     return await res.json();
   } catch (err: any) {
     return { success: false, error: err.message };
@@ -2819,11 +3242,11 @@ export async function saveGlobalPersonaApi(persona: GlobalPersonaConfig): Promis
 
 export async function resetGlobalPersonaApi(): Promise<{ success: boolean; persona?: GlobalPersonaConfig; error?: string }> {
   try {
-    const res = await fetch('/api/persona/reset', {
+    const res = await fetchWithTimeout('/api/persona/reset', {
       method: 'POST',
       headers: getAuthHeaders(),
       credentials: 'include',
-    });
+    }, 12000);
     return await res.json();
   } catch (err: any) {
     return { success: false, error: err.message };
@@ -2832,11 +3255,11 @@ export async function resetGlobalPersonaApi(): Promise<{ success: boolean; perso
 
 export async function importPersonaTemplateApi(): Promise<{ success: boolean; persona?: GlobalPersonaConfig; error?: string }> {
   try {
-    const res = await fetch('/api/persona/import-template', {
+    const res = await fetchWithTimeout('/api/persona/import-template', {
       method: 'POST',
       headers: getAuthHeaders(),
       credentials: 'include',
-    });
+    }, 15000);
     return await res.json();
   } catch (err: any) {
     return { success: false, error: err.message };
@@ -2860,12 +3283,12 @@ export async function testPersonaReplyApi(params: {
   error?: string;
 }> {
   try {
-    const res = await fetch('/api/persona/test-reply', {
+    const res = await fetchWithTimeout('/api/persona/test-reply', {
       method: 'POST',
       headers: getAuthHeaders(),
       body: JSON.stringify(params),
       credentials: 'include',
-    });
+    }, 30000);
     return await res.json();
   } catch (err: any) {
     return { success: false, error: err.message };
@@ -2881,34 +3304,40 @@ export async function fetchEvolutionStatusApi(): Promise<{
   error?: string;
 }> {
   try {
-    const res = await fetch('/api/evolution/status', {
+    const res = await fetchWithTimeout('/api/evolution/status', {
       headers: getAuthHeaders(),
       credentials: 'include',
-    });
+    }, 12000);
     return await res.json();
   } catch (err: any) {
     return { success: false, error: err.message };
   }
 }
 
-export function collectLocalSyncedMessages(limitPerChat = 20, maxTotal = 50): Partial<Message>[] {
+export function collectLocalSyncedMessages(
+  limitPerChat = 20,
+  maxTotal = 50,
+  accountId?: string
+): Partial<Message>[] {
   try {
     if (typeof localStorage === 'undefined') return [];
+    const targetAcc = (accountId ?? currentActiveAccountId ?? '').trim();
+    const prefix = targetAcc ? `tg_desktop_msgs_${targetAcc}_` : 'tg_desktop_msgs_';
     const collected: Partial<Message>[] = [];
     for (let i = 0; i < localStorage.length; i++) {
       const key = localStorage.key(i) || '';
-      if (!key.startsWith('tg_desktop_msgs_')) continue;
+      if (!key.startsWith(prefix)) continue;
       const list = secureGetItemSync<Message[]>(key);
       if (!Array.isArray(list) || list.length === 0) continue;
       const visible = list
-        .filter((m) => m && m.id && !isMessageDeleted(m.id))
+        .filter((m) => m && m.id && !isMessageDeleted(m.id, targetAcc || m.accountId) && (!targetAcc || !m.accountId || m.accountId === targetAcc))
         .slice(-limitPerChat);
       for (const m of visible) {
         collected.push({
           id: m.id,
           telegramMessageId: m.telegramMessageId,
           chatId: m.chatId,
-          accountId: m.accountId,
+          accountId: m.accountId || targetAcc || undefined,
           sender: m.sender,
           senderName: m.senderName,
           text: m.text,
@@ -2939,8 +3368,10 @@ export async function triggerEvolutionLearnApi(
   error?: string;
 }> {
   try {
-    const syncedMessages = Array.isArray(messages) ? messages : collectLocalSyncedMessages();
-    const res = await fetch('/api/evolution/learn', {
+    const syncedMessages = Array.isArray(messages)
+      ? messages
+      : collectLocalSyncedMessages(20, 50, currentActiveAccountId);
+    const res = await fetchWithTimeout('/api/evolution/learn', {
       method: 'POST',
       headers: getAuthHeaders(),
       body: JSON.stringify({
@@ -2949,7 +3380,7 @@ export async function triggerEvolutionLearnApi(
         customConfig: customConfig?.enabled ? customConfig : undefined,
       }),
       credentials: 'include',
-    });
+    }, 35000);
     const data = await res.json();
     if (!res.ok) {
       return { success: false, error: data?.error || `进化学习失败 (HTTP ${res.status})` };
@@ -2966,12 +3397,12 @@ export async function toggleEvolutionHabitApi(habitId: string): Promise<{
   error?: string;
 }> {
   try {
-    const res = await fetch('/api/evolution/toggle-habit', {
+    const res = await fetchWithTimeout('/api/evolution/toggle-habit', {
       method: 'POST',
       headers: getAuthHeaders(),
       body: JSON.stringify({ habitId }),
       credentials: 'include',
-    });
+    }, 12000);
     return await res.json();
   } catch (err: any) {
     return { success: false, error: err.message };
@@ -2993,10 +3424,10 @@ export async function fetchKnowledgeItemsApi(): Promise<{
   error?: string;
 }> {
   try {
-    const res = await fetch('/api/knowledge', {
+    const res = await fetchWithTimeout('/api/knowledge', {
       headers: getAuthHeaders(),
       credentials: 'include',
-    });
+    }, 15000);
     const data = await res.json();
     return {
       items: data.items || [],
@@ -3015,12 +3446,12 @@ export async function createKnowledgeItemApi(item: {
   keywords: string[];
 }): Promise<{ success: boolean; id?: string; error?: string }> {
   try {
-    const res = await fetch('/api/knowledge', {
+    const res = await fetchWithTimeout('/api/knowledge', {
       method: 'POST',
       headers: getAuthHeaders(),
       body: JSON.stringify(item),
       credentials: 'include',
-    });
+    }, 15000);
     return await res.json();
   } catch (err: any) {
     return { success: false, error: err.message };
@@ -3034,7 +3465,7 @@ export async function uploadKnowledgeDocApi(params: {
   customConfig?: CustomLLMConfig;
 }): Promise<{ success: boolean; itemsLearned?: number; error?: string }> {
   try {
-    const res = await fetch('/api/knowledge/upload', {
+    const res = await fetchWithTimeout('/api/knowledge/upload', {
       method: 'POST',
       headers: getAuthHeaders(),
       body: JSON.stringify({
@@ -3042,7 +3473,7 @@ export async function uploadKnowledgeDocApi(params: {
         customConfig: params.customConfig?.enabled ? params.customConfig : undefined,
       }),
       credentials: 'include',
-    });
+    }, 30000);
     const data = await res.json();
     if (!res.ok) {
       return { success: false, error: data?.error || `文档分类上传失败 (HTTP ${res.status})` };
@@ -3055,11 +3486,11 @@ export async function uploadKnowledgeDocApi(params: {
 
 export async function toggleKnowledgeItemApi(id: string): Promise<{ success: boolean; error?: string }> {
   try {
-    const res = await fetch(`/api/knowledge/${encodeURIComponent(id)}/toggle`, {
+    const res = await fetchWithTimeout(`/api/knowledge/${encodeURIComponent(id)}/toggle`, {
       method: 'PATCH',
       headers: getAuthHeaders(),
       credentials: 'include',
-    });
+    }, 12000);
     return await res.json();
   } catch (err: any) {
     return { success: false, error: err.message };
@@ -3077,12 +3508,12 @@ export async function updateKnowledgeItemApi(
   }
 ): Promise<{ success: boolean; error?: string }> {
   try {
-    const res = await fetch(`/api/knowledge/${encodeURIComponent(id)}`, {
+    const res = await fetchWithTimeout(`/api/knowledge/${encodeURIComponent(id)}`, {
       method: 'PUT',
       headers: getAuthHeaders(),
       body: JSON.stringify(item),
       credentials: 'include',
-    });
+    }, 15000);
     return await res.json();
   } catch (err: any) {
     return { success: false, error: err.message };
@@ -3091,11 +3522,11 @@ export async function updateKnowledgeItemApi(
 
 export async function deleteKnowledgeItemApi(id: string): Promise<{ success: boolean; error?: string }> {
   try {
-    const res = await fetch(`/api/knowledge/${encodeURIComponent(id)}`, {
+    const res = await fetchWithTimeout(`/api/knowledge/${encodeURIComponent(id)}`, {
       method: 'DELETE',
       headers: getAuthHeaders(),
       credentials: 'include',
-    });
+    }, 12000);
     return await res.json();
   } catch (err: any) {
     return { success: false, error: err.message };
@@ -3107,11 +3538,11 @@ export async function clearAllKnowledgeApi(category?: string): Promise<{ success
     const url = category && category !== 'all'
       ? `/api/knowledge/clear-all?category=${encodeURIComponent(category)}`
       : '/api/knowledge/clear-all';
-    const res = await fetch(url, {
+    const res = await fetchWithTimeout(url, {
       method: 'DELETE',
       headers: getAuthHeaders(),
       credentials: 'include',
-    });
+    }, 15000);
     return await res.json();
   } catch (err: any) {
     return { success: false, error: err.message };
@@ -3120,11 +3551,11 @@ export async function clearAllKnowledgeApi(category?: string): Promise<{ success
 
 export async function seedDefaultKnowledgeApi(): Promise<{ success: boolean; count?: number; error?: string }> {
   try {
-    const res = await fetch('/api/knowledge/seed-defaults', {
+    const res = await fetchWithTimeout('/api/knowledge/seed-defaults', {
       method: 'POST',
       headers: getAuthHeaders(),
       credentials: 'include',
-    });
+    }, 15000);
     return await res.json();
   } catch (err: any) {
     return { success: false, error: err.message };
@@ -3135,10 +3566,10 @@ export async function seedDefaultKnowledgeApi(): Promise<{ success: boolean; cou
 
 export async function fetchTranscriptsApi(): Promise<{ success: boolean; transcripts?: ChatTranscriptItem[]; error?: string }> {
   try {
-    const res = await fetch('/api/transcripts', {
+    const res = await fetchWithTimeout('/api/transcripts', {
       headers: getAuthHeaders(),
       credentials: 'include',
-    });
+    }, 12000);
     const data = await res.json();
     return { success: true, transcripts: Array.isArray(data) ? data : [] };
   } catch (err: any) {
@@ -3154,7 +3585,7 @@ export async function createTranscriptApi(payload: {
   customConfig?: CustomLLMConfig;
 }): Promise<{ success: boolean; id?: string; learnedStyle?: string; syncedToBackendLlm?: boolean; error?: string }> {
   try {
-    const res = await fetch('/api/transcripts', {
+    const res = await fetchWithTimeout('/api/transcripts', {
       method: 'POST',
       headers: getAuthHeaders(),
       body: JSON.stringify({
@@ -3162,7 +3593,7 @@ export async function createTranscriptApi(payload: {
         customConfig: payload.customConfig?.enabled ? payload.customConfig : undefined,
       }),
       credentials: 'include',
-    });
+    }, 30000);
     const data = await res.json();
     if (!res.ok) {
       return { success: false, error: data?.error || `整文风格提炼失败 (HTTP ${res.status})` };
@@ -3175,11 +3606,11 @@ export async function createTranscriptApi(payload: {
 
 export async function deleteTranscriptApi(id: string): Promise<{ success: boolean; error?: string }> {
   try {
-    const res = await fetch(`/api/transcripts/${encodeURIComponent(id)}`, {
+    const res = await fetchWithTimeout(`/api/transcripts/${encodeURIComponent(id)}`, {
       method: 'DELETE',
       headers: getAuthHeaders(),
       credentials: 'include',
-    });
+    }, 12000);
     return await res.json();
   } catch (err: any) {
     return { success: false, error: err.message };
@@ -3188,11 +3619,11 @@ export async function deleteTranscriptApi(id: string): Promise<{ success: boolea
 
 export async function toggleTranscriptApi(id: string): Promise<{ success: boolean; error?: string }> {
   try {
-    const res = await fetch(`/api/transcripts/${encodeURIComponent(id)}/toggle`, {
+    const res = await fetchWithTimeout(`/api/transcripts/${encodeURIComponent(id)}/toggle`, {
       method: 'PATCH',
       headers: getAuthHeaders(),
       credentials: 'include',
-    });
+    }, 12000);
     return await res.json();
   } catch (err: any) {
     return { success: false, error: err.message };
@@ -3206,10 +3637,10 @@ export async function fetchTelegramChatFullInfoApi(
   try {
     const query = new URLSearchParams();
     if (accountId) query.set('accountId', accountId);
-    const res = await fetch(`/api/telegram/user/chat-info/${encodeURIComponent(chatId)}?${query.toString()}`, {
+    const res = await fetchWithTimeout(`/api/telegram/user/chat-info/${encodeURIComponent(chatId)}?${query.toString()}`, {
       headers: getAuthHeaders(accountId),
       credentials: 'include',
-    });
+    }, 15000);
     const data = await res.json().catch(() => null);
     if (res.ok && data?.ok) {
       return data;
@@ -3235,10 +3666,10 @@ export async function fetchTelegramStickersApi(
   try {
     const query = new URLSearchParams();
     if (accountId) query.set('accountId', accountId);
-    const res = await fetch(`/api/telegram/user/stickers?${query.toString()}`, {
+    const res = await fetchWithTimeout(`/api/telegram/user/stickers?${query.toString()}`, {
       headers: getAuthHeaders(accountId),
       credentials: 'include',
-    });
+    }, 20000);
     const data = await res.json().catch(() => null);
     if (res.ok && data?.ok) {
       return {
@@ -3267,7 +3698,7 @@ export async function sendTelegramStickerApi(params: {
   replyToMsgId?: number;
 }): Promise<{ ok: boolean; telegramMessageId?: number; deliveryStatus: 'delivered' | 'failed'; error?: string }> {
   try {
-    const res = await fetch('/api/telegram/user/send-sticker', {
+    const res = await fetchWithTimeout('/api/telegram/user/send-sticker', {
       method: 'POST',
       headers: getAuthHeaders(params.accountId),
       credentials: 'include',
@@ -3281,7 +3712,7 @@ export async function sendTelegramStickerApi(params: {
         setAccessHash: params.sticker.setAccessHash,
         replyToMsgId: params.replyToMsgId,
       }),
-    });
+    }, 25000);
     const data = await res.json().catch(() => null);
     if (res.ok && data?.ok) {
       return {

@@ -52,6 +52,8 @@
   "dependencies": {
     "@google/genai": "^2.32.0",
     "@libsql/client": "^0.18.0",
+    "@types/busboy": "^1.5.5",
+    "busboy": "^1.6.0",
     "cookie-parser": "^1.4.7",
     "dotenv": "^17.2.3",
     "express": "^4.21.2",
@@ -63,6 +65,7 @@
     "qrcode": "^1.5.4",
     "react": "^19.0.1",
     "react-dom": "^19.0.1",
+    "socks": "2.8.10",
     "telegram": "^2.26.22"
   },
   "devDependencies": {

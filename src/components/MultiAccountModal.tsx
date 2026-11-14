@@ -249,14 +249,14 @@ export const MultiAccountModal: React.FC<MultiAccountModalProps> = ({
     }
     const previousSessionId = qrSessionId;
     if (previousSessionId) {
-      fetch('/api/telegram/user/cancel-qr', {
+      fetchWithTimeout('/api/telegram/user/cancel-qr', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
           ...getAuthHeaders(),
         },
         body: JSON.stringify({ sessionId: previousSessionId }),
-      }).catch(() => {});
+      }, 5000).catch(() => {});
     }
 
     const activeNonExpiredCount = accounts.filter((a) => a.status !== 'expired').length;
@@ -650,24 +650,24 @@ export const MultiAccountModal: React.FC<MultiAccountModalProps> = ({
   const resetState = () => {
     const fullPhone = getCombinedPhone();
     if (fullPhone && codeSent) {
-      fetch('/api/telegram/user/cancel-auth', {
+      fetchWithTimeout('/api/telegram/user/cancel-auth', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
           ...getAuthHeaders(),
         },
         body: JSON.stringify({ phone: fullPhone }),
-      }).catch(() => {});
+      }, 5000).catch(() => {});
     }
     if (qrSessionId) {
-      fetch('/api/telegram/user/cancel-qr', {
+      fetchWithTimeout('/api/telegram/user/cancel-qr', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
           ...getAuthHeaders(),
         },
         body: JSON.stringify({ sessionId: qrSessionId }),
-      }).catch(() => {});
+      }, 5000).catch(() => {});
     }
     qrPollFailCountRef.current = 0;
     setCodeSent(false);
@@ -693,14 +693,14 @@ export const MultiAccountModal: React.FC<MultiAccountModalProps> = ({
 
   const handleSwitchLoginMethod = (method: 'phone' | 'qr') => {
     if (loginMethod === 'qr' && method === 'phone' && qrSessionId) {
-      fetch('/api/telegram/user/cancel-qr', {
+      fetchWithTimeout('/api/telegram/user/cancel-qr', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
           ...getAuthHeaders(),
         },
         body: JSON.stringify({ sessionId: qrSessionId }),
-      }).catch(() => {});
+      }, 5000).catch(() => {});
       setQrSessionId(null);
       setQrUrl(null);
     }
@@ -714,14 +714,14 @@ export const MultiAccountModal: React.FC<MultiAccountModalProps> = ({
   useEffect(() => {
     return () => {
       if (qrSessionId) {
-        fetch('/api/telegram/user/cancel-qr', {
+        fetchWithTimeout('/api/telegram/user/cancel-qr', {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
             ...getAuthHeaders(),
           },
           body: JSON.stringify({ sessionId: qrSessionId }),
-        }).catch(() => {});
+        }, 5000).catch(() => {});
       }
     };
   }, [qrSessionId]);
@@ -732,14 +732,14 @@ export const MultiAccountModal: React.FC<MultiAccountModalProps> = ({
     if (loginMethod === 'phone' && codeSent) {
       const fullPhone = getCombinedPhone();
       if (fullPhone) {
-        fetch('/api/telegram/user/cancel-auth', {
+        fetchWithTimeout('/api/telegram/user/cancel-auth', {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
             ...getAuthHeaders(),
           },
           body: JSON.stringify({ phone: fullPhone }),
-        }).catch(() => {});
+        }, 5000).catch(() => {});
       }
       setCodeSent(false);
       setNeeds2FA(false);
@@ -1257,14 +1257,14 @@ export const MultiAccountModal: React.FC<MultiAccountModalProps> = ({
                     onClick={() => {
                       const fullPhone = getCombinedPhone();
                       if (fullPhone) {
-                        fetch('/api/telegram/user/cancel-auth', {
+                        fetchWithTimeout('/api/telegram/user/cancel-auth', {
                           method: 'POST',
                           headers: {
                             'Content-Type': 'application/json',
                             ...getAuthHeaders(),
                           },
                           body: JSON.stringify({ phone: fullPhone }),
-                        }).catch(() => {});
+                        }, 5000).catch(() => {});
                       }
                       setCodeSent(false);
                       setNeeds2FA(false);

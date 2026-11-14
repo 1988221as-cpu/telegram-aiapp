@@ -238,6 +238,10 @@ export async function initDatabase() {
       is_video INTEGER DEFAULT 0,
       video_url TEXT,
       video_duration INTEGER DEFAULT 0,
+      is_file INTEGER DEFAULT 0,
+      file_name TEXT,
+      file_size TEXT,
+      file_url TEXT,
       timestamp TEXT NOT NULL,
       created_at INTEGER NOT NULL,
       delivery_status TEXT DEFAULT 'delivered',
@@ -400,6 +404,18 @@ export async function initDatabase() {
   } catch {}
   try {
     await db.exec(`ALTER TABLE messages ADD COLUMN forward_from TEXT`);
+  } catch {}
+  try {
+    await db.exec(`ALTER TABLE messages ADD COLUMN is_file INTEGER DEFAULT 0`);
+  } catch {}
+  try {
+    await db.exec(`ALTER TABLE messages ADD COLUMN file_name TEXT`);
+  } catch {}
+  try {
+    await db.exec(`ALTER TABLE messages ADD COLUMN file_size TEXT`);
+  } catch {}
+  try {
+    await db.exec(`ALTER TABLE messages ADD COLUMN file_url TEXT`);
   } catch {}
 
   // Ensure telegram_user_sessions exists and has api_id/api_hash columns
@@ -681,12 +697,14 @@ export async function restoreDatabaseSnapshot(snapshot: any): Promise<{ success:
           id, chat_id, account_id, sender, sender_name, text, translated_text,
           is_audio, audio_duration, audio_url, stt_text, voice_tone,
           is_image, image_url, image_caption, is_video, video_url, video_duration,
+          is_file, file_name, file_size, file_url,
           timestamp, created_at, delivery_status, telegram_message_id
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
         m.id, m.chat_id, m.account_id, m.sender, m.sender_name, m.text, m.translated_text,
         m.is_audio, m.audio_duration, m.audio_url, m.stt_text, m.voice_tone,
         m.is_image, m.image_url, m.image_caption, m.is_video ?? 0, m.video_url || '', m.video_duration ?? 0,
+        m.is_file ?? 0, m.file_name || '', m.file_size || '', m.file_url || '',
         m.timestamp, m.created_at,
         m.delivery_status || 'delivered',
         m.telegram_message_id ?? null

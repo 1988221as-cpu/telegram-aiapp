@@ -11,6 +11,7 @@ import {
   hasReachedTelegramAccountLimit,
   getLocalMachineDeviceId,
   verifyJwtTokenWithReason,
+  isAllowedClientOrigin,
 } from '../server.ts';
 
 before(async () => {
@@ -2675,6 +2676,378 @@ test('Module 1 Desktop Foundation: LibSQL Windows file URL formatting, DB health
   const apiServiceSrc = readFileSync(resolve(process.cwd(), 'src/services/apiService.ts'), 'utf8');
   assert.equal(apiServiceSrc.includes('notifyIfMemberAuthExpired'), true);
   assert.equal(apiServiceSrc.includes('MAX_DELETED_MESSAGE_IDS = 5000'), true);
+});
+
+test('Commercialization Audit P0/P1 Fixes: socks dependency, proxy-forwarded pre-login auth & encrypted offline grace cache, watchdog/autoReconnect, localStorage cap & account isolation, evolution corpus isolation, and workspace recovery UI', async () => {
+  const { readFileSync } = await import('node:fs');
+  const { resolve } = await import('node:path');
+  const crypto = await import('node:crypto');
+  const { db, initDatabase } = await import('./db.ts');
+  const {
+    writeOfflineGraceTelegramCredentials,
+    readOfflineGraceTelegramCredentials,
+    clearOfflineGraceTelegramCredentials,
+    resolveTelegramApiCredentials,
+    clearInMemoryTelegramApiCredentials,
+    getInMemoryTelegramApiCredentials,
+    resolveUnifiedEvolutionCorpus,
+    runTelegramConnectionWatchdogCycle,
+    stopTelegramConnectionWatchdog,
+  } = await import('../server.ts');
+
+  await initDatabase();
+
+  // P0-1: "socks" MUST be formally declared in package.json dependencies
+  const pkg = JSON.parse(readFileSync(resolve(process.cwd(), 'package.json'), 'utf8'));
+  assert.ok(pkg.dependencies && typeof pkg.dependencies.socks === 'string' && pkg.dependencies.socks.length > 0);
+
+  // P0-2: Encrypted hardware-bound + verified-JWT offline grace cache (zero SQLite persistence)
+  const rsa = crypto.generateKeyPairSync('rsa', {
+    modulusLength: 2048,
+    publicKeyEncoding: { type: 'spki', format: 'pem' },
+    privateKeyEncoding: { type: 'pkcs8', format: 'pem' },
+  });
+  const signRs256 = (payload: object) => {
+    const h = Buffer.from(JSON.stringify({ alg: 'RS256', typ: 'JWT' })).toString('base64url');
+    const p = Buffer.from(JSON.stringify(payload)).toString('base64url');
+    const sig = crypto.sign('RSA-SHA256', Buffer.from(`${h}.${p}`), rsa.privateKey).toString('base64url');
+    return `${h}.${p}.${sig}`;
+  };
+
+  const prevPubKey = process.env.JWT_PUBLIC_KEY;
+  const prevAuthUrl = process.env.CLOUD_AUTH_URL;
+  const prevApiId = process.env.TELEGRAM_API_ID;
+  const prevApiHash = process.env.TELEGRAM_API_HASH;
+  const prevFetch = globalThis.fetch;
+  process.env.JWT_PUBLIC_KEY = rsa.publicKey;
+  process.env.CLOUD_AUTH_URL = 'https://auth.unreachable-test.invalid';
+  delete process.env.TELEGRAM_API_ID;
+  delete process.env.TELEGRAM_API_HASH;
+
+  try {
+    const localDeviceId = getLocalMachineDeviceId();
+    const nowSec = Math.floor(Date.now() / 1000);
+    const validUserToken = signRs256({
+      sub: 'usr_grace_1',
+      username: 'grace_member',
+      role: 'member',
+      deviceId: localDeviceId,
+      vipExpiresAt: Date.now() + 86_400_000,
+      exp: nowSec + 3600,
+    });
+    const otherUserToken = signRs256({
+      sub: 'usr_grace_other',
+      username: 'other_member',
+      role: 'member',
+      deviceId: localDeviceId,
+      vipExpiresAt: Date.now() + 86_400_000,
+      exp: nowSec + 3600,
+    });
+
+    clearOfflineGraceTelegramCredentials();
+    clearInMemoryTelegramApiCredentials();
+
+    writeOfflineGraceTelegramCredentials({
+      bearerToken: validUserToken,
+      apiId: 9876543,
+      apiHash: 'abc123def4567890abc123def4567890',
+      poolLabel: 'test_pool',
+    });
+
+    // Valid token reads encrypted grace cache
+    const readBack = readOfflineGraceTelegramCredentials(validUserToken);
+    assert.ok(readBack);
+    assert.equal(readBack?.apiId, 9876543);
+    assert.equal(readBack?.apiHash, 'abc123def4567890abc123def4567890');
+
+    // Different member token MUST NOT reuse someone else's cached credentials
+    assert.equal(readOfflineGraceTelegramCredentials(otherUserToken), null);
+
+    // Offline resolveTelegramApiCredentials falls back to cloud_offline_grace when cloud auth is unreachable
+    globalThis.fetch = (async () => {
+      throw new Error('network down');
+    }) as any;
+    const offlineResolved = await resolveTelegramApiCredentials({ bearerToken: validUserToken });
+    assert.equal(offlineResolved.ok, true);
+    assert.equal(offlineResolved.source, 'cloud_offline_grace');
+    assert.equal(offlineResolved.isOfflineGrace, true);
+    assert.equal(offlineResolved.apiId, 9876543);
+
+    // Verify zero SQLite persistence (Mode B invariant preserved)
+    const sysCredRow = await db.prepare("SELECT value FROM system_config WHERE key = 'telegram_api_credentials'").get();
+    assert.equal(sysCredRow, undefined);
+
+    // Logout wipe clears both memory and grace file
+    clearInMemoryTelegramApiCredentials();
+    assert.equal(getInMemoryTelegramApiCredentials(), null);
+    assert.equal(readOfflineGraceTelegramCredentials(validUserToken), null);
+  } finally {
+    globalThis.fetch = prevFetch;
+    clearOfflineGraceTelegramCredentials();
+    clearInMemoryTelegramApiCredentials();
+    if (prevPubKey !== undefined) process.env.JWT_PUBLIC_KEY = prevPubKey;
+    else delete process.env.JWT_PUBLIC_KEY;
+    if (prevAuthUrl !== undefined) process.env.CLOUD_AUTH_URL = prevAuthUrl;
+    else delete process.env.CLOUD_AUTH_URL;
+    if (prevApiId !== undefined) process.env.TELEGRAM_API_ID = prevApiId;
+    if (prevApiHash !== undefined) process.env.TELEGRAM_API_HASH = prevApiHash;
+  }
+
+  // P0-3: Connection watchdog cycle runs cleanly with zero active sessions & stop cleans timer
+  const watchdogReconnected = await runTelegramConnectionWatchdogCycle();
+  assert.equal(typeof watchdogReconnected, 'number');
+  stopTelegramConnectionWatchdog();
+
+  // P1-5①: resolveUnifiedEvolutionCorpus strictly isolates DB & client messages by accountId
+  const ts = Date.now();
+  const idA = `evo_msg_a_${ts}`;
+  const idB = `evo_msg_b_${ts}`;
+  await db.prepare(`
+    INSERT INTO messages (id, chat_id, account_id, sender, sender_name, text, timestamp, created_at, delivery_status)
+    VALUES (?, 'tg_chat_a', 'acc_tg_alpha', 'peer', 'AlphaClient', 'AlphaSecretCorpusXYZ', '12:00', ?, 'delivered')
+  `).run(idA, ts);
+  await db.prepare(`
+    INSERT INTO messages (id, chat_id, account_id, sender, sender_name, text, timestamp, created_at, delivery_status)
+    VALUES (?, 'tg_chat_b', 'acc_tg_beta', 'peer', 'BetaClient', 'BetaSecretCorpusXYZ', '12:00', ?, 'delivered')
+  `).run(idB, ts + 1);
+  try {
+    const corpusA = await resolveUnifiedEvolutionCorpus({
+      accountId: 'acc_tg_alpha',
+      clientMessages: [
+        { id: 'c_a', chatId: 'tg_chat_a', accountId: 'acc_tg_alpha', sender: 'me', text: 'ClientAlphaMsg' },
+        { id: 'c_b', chatId: 'tg_chat_b', accountId: 'acc_tg_beta', sender: 'me', text: 'ClientBetaLeakMsg' },
+      ],
+    });
+    assert.equal(corpusA.corpusText.includes('AlphaSecretCorpusXYZ'), true);
+    assert.equal(corpusA.corpusText.includes('ClientAlphaMsg'), true);
+    assert.equal(corpusA.corpusText.includes('BetaSecretCorpusXYZ'), false);
+    assert.equal(corpusA.corpusText.includes('ClientBetaLeakMsg'), false);
+  } finally {
+    await db.prepare('DELETE FROM messages WHERE id IN (?, ?)').run(idA, idB);
+  }
+
+  // Source contracts for P0-2, P0-3, P0-4, P1-5, P1-6
+  const serverSrc = readFileSync(resolve(process.cwd(), 'server.ts'), 'utf8');
+  assert.equal(serverSrc.includes("app.post('/api/auth/cloud-login'"), true);
+  assert.equal(serverSrc.includes("app.post('/api/auth/cloud-register'"), true);
+  assert.equal(serverSrc.includes("app.post('/api/auth/cloud-redeem'"), true);
+  assert.equal(serverSrc.includes("app.get('/api/auth/proxy'"), true);
+  assert.equal(serverSrc.includes("app.post('/api/auth/proxy'"), true);
+  assert.equal(serverSrc.includes('autoReconnect: true'), true);
+  assert.equal(serverSrc.includes('startTelegramConnectionWatchdog'), true);
+  assert.equal(serverSrc.includes('isElectronMainProcess'), true);
+  assert.equal(serverSrc.includes('activeRestoreMeta'), true);
+
+  const apiServiceSrc = readFileSync(resolve(process.cwd(), 'src/services/apiService.ts'), 'utf8');
+  assert.equal(apiServiceSrc.includes('MAX_LOCAL_MESSAGES_PER_CHAT = 100'), true);
+  assert.equal(apiServiceSrc.includes('getPreLoginProxyApi'), true);
+  assert.equal(apiServiceSrc.includes('savePreLoginProxyApi'), true);
+  assert.equal(apiServiceSrc.includes("'/api/auth/cloud-login'"), true);
+  assert.equal(apiServiceSrc.includes('tg_deleted_message_ids_${acc}'), true);
+
+  const authModalSrc = readFileSync(resolve(process.cwd(), 'src/components/MemberAuthModal.tsx'), 'utf8');
+  assert.equal(authModalSrc.includes('savePreLoginProxyApi'), true);
+  assert.equal(authModalSrc.includes('网络代理设置'), true);
+
+  const appSrc = readFileSync(resolve(process.cwd(), 'src/App.tsx'), 'utf8');
+  assert.equal(appSrc.includes("secureSetItemSync('tg_pro_messages'"), false);
+  assert.equal(appSrc.includes("localStorage.getItem('tg_pro_active_account_id')"), true);
+  assert.equal(appSrc.includes('normalizeStalePendingMessages(localList)'), true);
+  assert.equal(appSrc.includes('重新扫码登录'), true);
+
+  const dbModalSrc = readFileSync(resolve(process.cwd(), 'src/components/DatabaseModal.tsx'), 'utf8');
+  assert.equal(dbModalSrc.includes("key.startsWith('tg_deleted_message_ids')"), true);
+});
+
+test('isAllowedClientOrigin blocks cross-site evil Origin even when Host is 127.0.0.1/localhost', () => {
+  const makeReq = (origin: string | undefined, host = '127.0.0.1:3000') =>
+    ({
+      headers: origin ? { origin } : {},
+      get: (name: string) => (name.toLowerCase() === 'host' ? host : undefined),
+    }) as any;
+
+  assert.equal(isAllowedClientOrigin(makeReq('https://evil.example', '127.0.0.1:3000')), false);
+  assert.equal(isAllowedClientOrigin(makeReq('https://evil.example', 'localhost:3000')), false);
+  assert.equal(isAllowedClientOrigin(makeReq('http://127.0.0.1:3000', '127.0.0.1:3000')), true);
+  assert.equal(isAllowedClientOrigin(makeReq('http://localhost:3000', '127.0.0.1:3000')), true);
+  assert.equal(isAllowedClientOrigin(makeReq('file://', '127.0.0.1:3000')), true);
+  assert.equal(isAllowedClientOrigin(makeReq(undefined, '127.0.0.1:3000')), true);
+});
+
+test('Streaming multipart media upload & retry pipeline: busboy disk streaming, traversal safety, sanitizeDbMediaUrl, file persistence, and frontend zero-base64 contracts', async () => {
+  const fs = await import('node:fs');
+  const http = await import('node:http');
+  const expressMod = await import('express');
+  const { resolve } = await import('node:path');
+  const { db, initDatabase } = await import('./db.ts');
+  const {
+    TELEGRAM_MAX_MEDIA,
+    OUTBOUND_MEDIA_DIR,
+    parseMultipartMessageUpload,
+    buildOutboundLocalMediaUrl,
+    resolveLocalMediaDiskPath,
+    sanitizeDbMediaUrl,
+    upsertSyncedMessageToDb,
+    mergeUnifiedConversationMessages,
+  } = await import('../server.ts');
+
+  await initDatabase();
+
+  assert.ok(TELEGRAM_MAX_MEDIA >= 50 * 1024 * 1024);
+
+  // 1. sanitizeDbMediaUrl strips blob: and >512KB data URLs, preserves local-media and https URLs
+  assert.equal(sanitizeDbMediaUrl('blob:http://localhost:3000/1234-5678'), '');
+  assert.equal(sanitizeDbMediaUrl(`data:video/mp4;base64,${'A'.repeat(600 * 1024)}`), '');
+  const localUrl = buildOutboundLocalMediaUrl('sample_test_media.mp4', 'acc_tg_1001');
+  assert.ok(localUrl.startsWith('/api/messages/local-media/sample_test_media.mp4?'));
+  assert.equal(sanitizeDbMediaUrl(localUrl), localUrl);
+
+  // 2. resolveLocalMediaDiskPath blocks path traversal and missing files
+  assert.equal(resolveLocalMediaDiskPath('/api/messages/local-media/..%2F..%2Fetc%2Fpasswd'), null);
+  assert.equal(resolveLocalMediaDiskPath('/api/messages/local-media/../secret.txt'), null);
+  assert.equal(resolveLocalMediaDiskPath('/api/messages/local-media/non_existent_999.mp4'), null);
+
+  // 3. Real streaming multipart/form-data upload through Express + busboy middleware
+  const app = expressMod.default();
+  app.post('/test-upload', parseMultipartMessageUpload, (req, res) => {
+    const uploaded = (req as any).uploadedMedia;
+    res.json({
+      ok: true,
+      body: req.body,
+      uploaded,
+    });
+  });
+
+  const server = http.createServer(app);
+  await new Promise<void>((resolveListen) => server.listen(0, '127.0.0.1', () => resolveListen()));
+  const address = server.address() as any;
+  const baseUrl = `http://127.0.0.1:${address.port}`;
+
+  let createdDiskPath = '';
+  try {
+    const binaryPayload = Buffer.from('FAKE_MP4_STREAM_HEADER_0123456789_VIDEO_BYTES');
+    const fd = new FormData();
+    fd.append(
+      'payload',
+      JSON.stringify({
+        id: 'msg_stream_test_1',
+        chatId: 'tg_999999',
+        accountId: 'acc_tg_1001',
+        sender: 'me',
+        isVideo: true,
+        videoDuration: 14,
+        text: 'Streamed clip',
+      })
+    );
+    fd.append('file', new Blob([binaryPayload], { type: 'video/mp4' }), 'demo_clip.mp4');
+
+    const uploadRes = await fetch(`${baseUrl}/test-upload`, {
+      method: 'POST',
+      body: fd,
+    });
+    assert.equal(uploadRes.status, 200);
+    const json = (await uploadRes.json()) as any;
+    assert.equal(json.ok, true);
+    assert.equal(json.body.id, 'msg_stream_test_1');
+    assert.equal(json.body.isVideo, true);
+    assert.equal(json.body.videoDuration, 14);
+    assert.ok(json.uploaded && typeof json.uploaded.diskPath === 'string');
+    assert.equal(json.uploaded.size, binaryPayload.length);
+    createdDiskPath = json.uploaded.diskPath;
+    assert.equal(fs.existsSync(createdDiskPath), true);
+    assert.deepEqual(fs.readFileSync(createdDiskPath), binaryPayload);
+
+    // Valid disk file resolves cleanly via local-media URL
+    const validMediaUrl = buildOutboundLocalMediaUrl(json.uploaded.diskFileName, 'acc_tg_1001');
+    assert.equal(resolveLocalMediaDiskPath(validMediaUrl), createdDiskPath);
+
+    // JSON-only fast path bypasses busboy cleanly
+    const jsonApp = expressMod.default();
+    jsonApp.use(expressMod.default.json({ limit: '1mb' }));
+    jsonApp.post('/test-json', parseMultipartMessageUpload, (req, res) => {
+      res.json({ ok: true, text: req.body?.text, hasUpload: Boolean((req as any).uploadedMedia) });
+    });
+    const jsonServer = http.createServer(jsonApp);
+    await new Promise<void>((r) => jsonServer.listen(0, '127.0.0.1', () => r()));
+    try {
+      const jsonPort = (jsonServer.address() as any).port;
+      const textRes = await fetch(`http://127.0.0.1:${jsonPort}/test-json`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text: 'plain fast text' }),
+      });
+      const textData = (await textRes.json()) as any;
+      assert.equal(textData.ok, true);
+      assert.equal(textData.text, 'plain fast text');
+      assert.equal(textData.hasUpload, false);
+    } finally {
+      await new Promise<void>((r) => jsonServer.close(() => r()));
+    }
+  } finally {
+    await new Promise<void>((r) => server.close(() => r()));
+    if (createdDiskPath && fs.existsSync(createdDiskPath)) {
+      fs.unlinkSync(createdDiskPath);
+    }
+  }
+
+  // 4. SQLite persistence + merger preserves file attachment fields & strips blob: URLs
+  const fileMsgId = `msg_file_stream_${Date.now()}`;
+  const persistedMediaUrl = buildOutboundLocalMediaUrl('persisted_doc.pdf', 'acc_tg_1001');
+  try {
+    const okUpsert = await upsertSyncedMessageToDb(
+      {
+        id: fileMsgId,
+        chatId: 'tg_55555',
+        accountId: 'acc_tg_1001',
+        sender: 'me',
+        text: '[文件] report.pdf',
+        isFile: true,
+        fileName: 'report.pdf',
+        fileSize: '2.40 MB',
+        fileUrl: persistedMediaUrl,
+        deliveryStatus: 'delivered',
+        createdAt: Date.now(),
+      },
+      'tg_55555',
+      'acc_tg_1001'
+    );
+    assert.equal(okUpsert, true);
+
+    const stored = (await db.prepare('SELECT * FROM messages WHERE id = ?').get(fileMsgId)) as any;
+    assert.ok(stored);
+    assert.equal(stored.is_file, 1);
+    assert.equal(stored.file_name, 'report.pdf');
+    assert.equal(stored.file_size, '2.40 MB');
+    assert.equal(stored.file_url, persistedMediaUrl);
+
+    const merged = mergeUnifiedConversationMessages([
+      [{ id: fileMsgId, chatId: 'tg_55555', sender: 'me', text: '[文件] report.pdf', isFile: true, fileName: 'report.pdf', fileSize: '2.40 MB', fileUrl: persistedMediaUrl }],
+      [{ id: fileMsgId, chatId: 'tg_55555', sender: 'me', text: '[文件] report.pdf' }],
+    ]);
+    assert.equal(merged.length, 1);
+    assert.equal(merged[0].isFile, true);
+    assert.equal(merged[0].fileName, 'report.pdf');
+    assert.equal(merged[0].fileUrl, persistedMediaUrl);
+  } finally {
+    await db.prepare('DELETE FROM messages WHERE id = ?').run(fileMsgId);
+  }
+
+  // 5. Frontend streaming & zero-localStorage-bloat source contracts
+  const chatAreaSrc = fs.readFileSync(resolve(process.cwd(), 'src/components/ChatArea.tsx'), 'utf8');
+  assert.equal(chatAreaSrc.includes('blobToDataUrl'), false);
+  assert.equal(chatAreaSrc.includes('URL.createObjectURL'), true);
+  assert.equal(chatAreaSrc.includes('mediaFile:'), true);
+  assert.equal(chatAreaSrc.includes('TELEGRAM_MAX_MEDIA'), true);
+
+  const apiSrc = fs.readFileSync(resolve(process.cwd(), 'src/services/apiService.ts'), 'utf8');
+  assert.equal(apiSrc.includes('new FormData()'), true);
+  assert.equal(apiSrc.includes('sanitizeMessageForLocalStorage'), true);
+  assert.equal(apiSrc.includes('buildCompactOutboundJsonPayload'), true);
+
+  const appSrc = fs.readFileSync(resolve(process.cwd(), 'src/App.tsx'), 'utf8');
+  assert.equal(appSrc.includes('pendingMediaFilesRef'), true);
+  assert.equal(appSrc.includes('scheduleRevokeBlobUrls'), true);
+  assert.ok(OUTBOUND_MEDIA_DIR.endsWith('outbound_media'));
 });
 
 process.on('beforeExit', () => {
