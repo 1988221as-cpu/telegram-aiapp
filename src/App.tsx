@@ -75,6 +75,7 @@ import {
   fetchTranslationSettingsApi,
   saveChatLanguagePrefApi,
   updateMessageTranslationInDb,
+  updateMessageSttInDb,
   isBuiltInCloudGatewayUrl,
   initSessionHandshake,
   fetchAuthStatus,
@@ -102,6 +103,16 @@ import {
 
 
 import { secureGetItemSync, secureSetItemSync, secureGetItemAsync } from './services/cryptoStorage';
+import {
+  savePendingMediaBlob,
+  getPendingMediaBlob,
+  listChatPendingMediaBlobs,
+  deletePendingMediaBlob,
+  clearChatPendingMediaBlobs,
+  clearAccountPendingMediaBlobs,
+  purgeAllPendingMediaBlobs,
+  type PendingMediaField,
+} from './services/pendingMediaStorage';
 
 // Helper to purge only explicitly marked legacy dummy accounts from local storage
 function sanitizeAccounts(accs: Account[]): Account[] {
@@ -191,6 +202,12 @@ function enforceTranslationEngineForLlm(
     return { ...trans, preferredEngine: 'gemini' };
   }
   return trans;
+}
+
+function engineToLiveErrorChannel(engine?: string): Message['translationErrorChannel'] {
+  if (engine === 'custom_llm') return 'live_custom_llm';
+  if (engine === 'google') return 'live_google';
+  return 'live_gemini';
 }
 
 function formatChatMessageSummary(msg: Partial<Message>, emptyFallback = '暂无消息'): string {
@@ -471,6 +488,9 @@ export default function App() {
   const [voiceCallTargetName, setVoiceCallTargetName] = useState<string>('');
   const activeCallRecordIdRef = useRef<string | null>(null);
   const pendingMediaFilesRef = useRef<Map<string, File | Blob>>(new Map());
+  const pendingMediaSaveMapRef = useRef<Map<string, Promise<boolean>>>(new Map());
+  const restoredBlobUrlsRef = useRef<Map<string, string>>(new Map());
+  const deletedAccountIdsRef = useRef<Set<string>>(new Set());
   const scheduleRevokeBlobUrls = (urls: Array<string | undefined | null>) => {
     const blobUrls = urls.filter((u): u is string => typeof u === 'string' && u.startsWith('blob:'));
     if (blobUrls.length === 0) return;
@@ -481,6 +501,79 @@ export default function App() {
         } catch {}
       });
     }, 1500);
+  };
+  const getOrCreateRestoredBlobUrl = (
+    accountId: string,
+    messageId: string,
+    mediaField: PendingMediaField,
+    blob: Blob
+  ): string => {
+    const cacheKey = `${accountId || 'default'}::${messageId}::${mediaField}`;
+    const existing = restoredBlobUrlsRef.current.get(cacheKey);
+    if (existing) return existing;
+    const nextUrl = URL.createObjectURL(blob);
+    restoredBlobUrlsRef.current.set(cacheKey, nextUrl);
+    return nextUrl;
+  };
+  const revokeRestoredBlobUrlsForMessage = (accountId: string, messageId: string) => {
+    const prefix = `${accountId || 'default'}::${messageId}::`;
+    const toRevoke: string[] = [];
+    for (const [key, url] of Array.from(restoredBlobUrlsRef.current.entries())) {
+      if (key.startsWith(prefix)) {
+        toRevoke.push(url);
+        restoredBlobUrlsRef.current.delete(key);
+      }
+    }
+    if (toRevoke.length > 0) {
+      scheduleRevokeBlobUrls(toRevoke);
+    }
+  };
+  const cleanupPersistedPendingMedia = async (accountId: string, messageId: string) => {
+    const inflight = pendingMediaSaveMapRef.current.get(messageId);
+    if (inflight) {
+      await inflight.catch(() => {});
+      pendingMediaSaveMapRef.current.delete(messageId);
+    }
+    await deletePendingMediaBlob(accountId, messageId);
+  };
+  const hydrateBucketPendingMedia = async (accountId: string, chatId: string) => {
+    if (!chatId) return;
+    const records = await listChatPendingMediaBlobs(accountId, chatId);
+    if (records.length === 0) return;
+
+    const byMsgId = new Map(records.map((r) => [r.messageId, r]));
+    const bKey = msgBucketKey(accountId, chatId);
+    const deliveredToClean: string[] = [];
+
+    setMessagesMap((prev) => {
+      const currentList = getBucketMessages(prev, accountId, chatId);
+      if (currentList.length === 0) return prev;
+      let changed = false;
+      const nextList = currentList.map((m) => {
+        const rec = byMsgId.get(m.id);
+        if (!rec) return m;
+        if (m.deliveryStatus === 'delivered') {
+          deliveredToClean.push(m.id);
+          return m;
+        }
+        if (!pendingMediaFilesRef.current.has(m.id)) {
+          pendingMediaFilesRef.current.set(m.id, rec.blob);
+        }
+        if (!m[rec.mediaField]) {
+          const restoredUrl = getOrCreateRestoredBlobUrl(accountId, m.id, rec.mediaField, rec.blob);
+          changed = true;
+          return { ...m, [rec.mediaField]: restoredUrl };
+        }
+        return m;
+      });
+      if (!changed) return prev;
+      return { ...prev, [bKey]: nextList };
+    });
+
+    for (const deliveredId of deliveredToClean) {
+      pendingMediaFilesRef.current.delete(deliveredId);
+      void cleanupPersistedPendingMedia(accountId, deliveredId);
+    }
   };
   const [offlineReasonByAccount, setOfflineReasonByAccount] = useState<Record<string, string>>({});
   const [isReconnectingAccount, setIsReconnectingAccount] = useState(false);
@@ -644,6 +737,24 @@ export default function App() {
 
       if (Object.keys(reconstructed).length > 0 || isRestore) {
         setMessagesMap(reconstructed);
+        for (const [bKey, list] of Object.entries(reconstructed)) {
+          const hasPendingMedia =
+            Array.isArray(list) &&
+            list.some(
+              (m) =>
+                m &&
+                (m.deliveryStatus === 'failed' ||
+                  m.deliveryStatus === 'pending' ||
+                  m.deliveryStatus === 'retrying') &&
+                (m.isImage || m.isVideo || m.isAudio || m.isFile)
+            );
+          if (hasPendingMedia) {
+            const sepIdx = bKey.indexOf('::');
+            const bAcc = sepIdx >= 0 ? bKey.slice(0, sepIdx) : resolvedActiveAccId;
+            const bChat = sepIdx >= 0 ? bKey.slice(sepIdx + 2) : bKey;
+            void hydrateBucketPendingMedia(bAcc, bChat);
+          }
+        }
       }
 
       const rawSavedLlm =
@@ -759,18 +870,47 @@ export default function App() {
     secureSetItemSync('tg_pro_chats', chats);
   }, [chats, isHydrated]);
 
-  // Post-commit message bucket persistence (eliminates StrictMode double-writes & updater side-effects)
+  // Post-commit message bucket persistence & unified cleanup (eliminates StrictMode double-writes & updater side-effects)
   useEffect(() => {
     if (!isHydrated) return;
     const prevMap = prevPersistedMessagesMapRef.current;
+    const parseBucketKey = (bKey: string) => {
+      const sepIdx = bKey.indexOf('::');
+      const bAcc = sepIdx >= 0 ? bKey.slice(0, sepIdx) : activeAccountIdRef.current;
+      const bChat = sepIdx >= 0 ? bKey.slice(sepIdx + 2) : bKey;
+      return { bAcc, bChat };
+    };
+
     for (const [bKey, list] of Object.entries(messagesMap)) {
       if (prevMap[bKey] !== list && Array.isArray(list)) {
-        const sepIdx = bKey.indexOf('::');
-        const bAcc = sepIdx >= 0 ? bKey.slice(0, sepIdx) : activeAccountIdRef.current;
-        const bChat = sepIdx >= 0 ? bKey.slice(sepIdx + 2) : bKey;
-        setLocalMessages(bChat, list, bAcc);
+        const { bAcc, bChat } = parseBucketKey(bKey);
+        if (list.length === 0) {
+          if (
+            Array.isArray(prevMap[bKey]) &&
+            prevMap[bKey].length > 0 &&
+            !deletedAccountIdsRef.current.has(bAcc)
+          ) {
+            clearLocalMessages(bChat, prevMap[bKey], bAcc);
+          }
+        } else {
+          setLocalMessages(bChat, list, bAcc);
+        }
       }
     }
+
+    for (const removedKey of Object.keys(prevMap)) {
+      if (!(removedKey in messagesMap)) {
+        const { bAcc, bChat } = parseBucketKey(removedKey);
+        if (!deletedAccountIdsRef.current.has(bAcc)) {
+          clearLocalMessages(
+            bChat,
+            Array.isArray(prevMap[removedKey]) ? prevMap[removedKey] : [],
+            bAcc
+          );
+        }
+      }
+    }
+
     prevPersistedMessagesMapRef.current = messagesMap;
   }, [messagesMap, isHydrated]);
 
@@ -902,6 +1042,11 @@ export default function App() {
 
   const handleMemberLogout = async () => {
     await adminLogout({ revokeTelegramSessions: true });
+    prevPersistedMessagesMapRef.current = {};
+    pendingMediaFilesRef.current.clear();
+    pendingMediaSaveMapRef.current.clear();
+    scheduleRevokeBlobUrls(Array.from(restoredBlobUrlsRef.current.values()));
+    restoredBlobUrlsRef.current.clear();
     purgeAllLocalChatData();
     notifiedExpiredRef.current.clear();
     setAccounts([]);
@@ -1248,6 +1393,7 @@ export default function App() {
         ...prev,
         [bucketKey]: localMsgs.filter((m) => !isMessageDeleted(m.id, targetAccId, m.chatId || targetChatId)),
       }));
+      void hydrateBucketPendingMedia(targetAccId, targetChatId);
     }
 
     if (!localMsgs || localMsgs.length === 0 || targetAccId === 'acc_telegram_bot') {
@@ -1266,6 +1412,7 @@ export default function App() {
             );
             return { ...prev, [bucketKey]: merged };
           });
+          void hydrateBucketPendingMedia(targetAccId, targetChatId);
         }
       }).catch(() => {});
     }
@@ -1304,6 +1451,7 @@ export default function App() {
           );
           return { ...prev, [bucketKey]: merged };
         });
+        void hydrateBucketPendingMedia(targetAccId, targetChatId);
       }).catch(() => {});
 
       fetchTelegramChatFullInfoApi(targetChatId, targetAccId).then((info) => {
@@ -1336,12 +1484,24 @@ export default function App() {
 
     const localProf = getLocalCustomerProfile(targetChatId, targetAccId);
     if (localProf) {
-      setCustomerProfile(localProf);
+      setCustomerProfile({ ...localProf, chatId: localProf.chatId || targetChatId, accountId: localProf.accountId || targetAccId });
+    } else {
+      setCustomerProfile(null);
     }
     fetchCustomerProfile(targetChatId, targetAccId).then((prof) => {
-      if (isMounted && prof) {
-        setCustomerProfile(prof);
-        saveLocalCustomerProfile(targetChatId, prof, targetAccId);
+      if (
+        isMounted &&
+        activeAccountIdRef.current === targetAccId &&
+        activeChatIdRef.current === targetChatId &&
+        prof
+      ) {
+        const normalizedProf: CustomerProfile = {
+          ...prof,
+          chatId: prof.chatId || targetChatId,
+          accountId: prof.accountId || targetAccId,
+        };
+        setCustomerProfile(normalizedProf);
+        saveLocalCustomerProfile(targetChatId, normalizedProf, targetAccId);
       }
     }).catch(() => {});
 
@@ -1357,6 +1517,8 @@ export default function App() {
   const customLLMConfigRef = useRef(customLLMConfig);
   const activeAccountIdRef = useRef(activeAccountId);
   const activeChatIdRef = useRef(activeChatId);
+  const selectAccountSeqRef = useRef(0);
+  const selectChatSeqRef = useRef(0);
 
   useEffect(() => {
     chatsRef.current = chats;
@@ -1442,10 +1604,14 @@ export default function App() {
     for (let i = currentMsgs.length - 1; i >= 0; i--) {
       const m = currentMsgs[i];
       if (!m || m.deliveryStatus === 'pending') continue;
+      const isHistoryError =
+        m.translationErrorChannel === 'history_google' ||
+        (!m.translationErrorChannel &&
+          Boolean(m.translationError) &&
+          (m.translationError!.includes('历史') || m.translationError!.includes('谷歌')));
       const isFreshLiveTranslationError =
         Boolean(m.translationError) &&
-        !m.translationError!.includes('历史') &&
-        !m.translationError!.includes('谷歌') &&
+        !isHistoryError &&
         typeof m.createdAt === 'number' &&
         nowTs - m.createdAt < 60_000;
       if ((m.translatedText || '').trim() || m.isTranslating || isFreshLiveTranslationError) continue;
@@ -1484,7 +1650,15 @@ export default function App() {
     }
     candidates.forEach((c) => attemptedInboundBackfillRef.current.add(c.dedupeKey));
 
-    const pendingUpdates = new Map<string, { msg: Message; translatedText?: string; translationError?: string }>();
+    const pendingUpdates = new Map<
+      string,
+      {
+        msg: Message;
+        translatedText?: string;
+        translationError?: string;
+        translationErrorChannel?: Message['translationErrorChannel'];
+      }
+    >();
     let flushTimer: ReturnType<typeof setTimeout> | null = null;
     let remaining = candidates.length;
 
@@ -1505,9 +1679,18 @@ export default function App() {
           if (!patch || (item.translatedText || '').trim()) return item;
           changed = true;
           if (patch.translatedText !== undefined) {
-            return { ...item, translatedText: patch.translatedText, translationError: undefined };
+            return {
+              ...item,
+              translatedText: patch.translatedText,
+              translationError: undefined,
+              translationErrorChannel: undefined,
+            };
           }
-          return { ...item, translationError: patch.translationError };
+          return {
+            ...item,
+            translationError: patch.translationError,
+            translationErrorChannel: patch.translationErrorChannel ?? 'history_google',
+          };
         });
         if (!changed) return prevMap;
         return { ...prevMap, [targetBucketKey]: updated };
@@ -1590,7 +1773,11 @@ export default function App() {
             scheduleBackfillRetryWakeup(backoffMs + 150);
           }
           const errMsg = err?.message || '历史消息谷歌机翻失败';
-          pendingUpdates.set(msg.id, { msg, translationError: errMsg });
+          pendingUpdates.set(msg.id, {
+            msg,
+            translationError: errMsg,
+            translationErrorChannel: 'history_google',
+          });
           scheduleFlush();
         });
     });
@@ -2037,7 +2224,12 @@ export default function App() {
               )
                 .then((trans) => {
                   if (trans && trans.trim() && trans.trim().toLowerCase() !== trimmedIncomingText.toLowerCase()) {
-                    const withTrans: Message = { ...incomingMsg, translatedText: trans, translationError: undefined };
+                    const withTrans: Message = {
+                      ...incomingMsg,
+                      translatedText: trans,
+                      translationError: undefined,
+                      translationErrorChannel: undefined,
+                    };
                     saveLocalMessage(targetChatId, withTrans, targetAccountId);
                     updateMessageTranslationInDb(incomingMsg.id, trans, {
                       chatId: targetChatId,
@@ -2057,6 +2249,7 @@ export default function App() {
                   const withErr: Message = {
                     ...incomingMsg,
                     translationError: err?.message || '翻译通道不可用',
+                    translationErrorChannel: engineToLiveErrorChannel(effectiveInboundEngine),
                   };
                   saveLocalMessage(targetChatId, withErr, targetAccountId);
                   setMessagesMap((prevMap) => {
@@ -2141,65 +2334,76 @@ export default function App() {
 
   // Handle select chat (Saved Messages connects to real 'me' / InputPeerSelf cloud dialog)
   const handleSelectChat = async (chatId: string) => {
+    const callSeq = ++selectChatSeqRef.current;
+    const targetAccId = activeAccountIdRef.current || activeAccountId;
+
     if (chatId === 'chat_saved_messages') {
-      const res = await fetchTelegramSavedMessagesApi(activeAccountId);
+      const res = await fetchTelegramSavedMessagesApi(targetAccId);
       if (!res.ok || !res.chat) {
-        showCloudError(res.error || '当前账号未连接 Telegram，无法打开官方云端收藏夹 (Saved Messages)');
+        if (activeAccountIdRef.current === targetAccId && selectChatSeqRef.current === callSeq) {
+          showCloudError(res.error || '当前账号未连接 Telegram，无法打开官方云端收藏夹 (Saved Messages)');
+        }
         return;
       }
-      const targetAccId = res.chat.accountId || activeAccountId;
+      const savedAccId = res.chat.accountId || targetAccId;
       const existingSaved = chatsRef.current.find(
-        (c) => c.accountId === targetAccId && (c.id === res.chat!.id || c.id === 'chat_saved_messages')
+        (c) => c.accountId === savedAccId && (c.id === res.chat!.id || c.id === 'chat_saved_messages')
       );
       const realSavedChat: Chat = {
         ...res.chat,
-        accountId: targetAccId,
+        accountId: savedAccId,
+        unreadCount: 0,
         sourceLang: existingSaved?.sourceLang || res.chat.sourceLang || 'Auto',
         targetLang: existingSaved?.targetLang || res.chat.targetLang || 'Auto',
       };
       const cloudMsgs = Array.isArray(res.messages) ? res.messages : [];
-      const bucketKey = msgBucketKey(targetAccId, realSavedChat.id);
+      const bucketKey = msgBucketKey(savedAccId, realSavedChat.id);
       setChats((prev) => {
         const cleaned = prev.filter(
           (c) =>
-            !(c.accountId === targetAccId && (c.id === 'chat_saved_messages' || c.id === realSavedChat.id))
+            !(c.accountId === savedAccId && (c.id === 'chat_saved_messages' || c.id === realSavedChat.id))
         );
         return [realSavedChat, ...cleaned];
       });
       setMessagesMap((prev) => {
-        const base = getBucketMessages(prev, targetAccId, realSavedChat.id);
-        const localSaved = base.length > 0 ? base : getLocalMessages(realSavedChat.id, targetAccId);
+        const base = getBucketMessages(prev, savedAccId, realSavedChat.id);
+        const localSaved = base.length > 0 ? base : getLocalMessages(realSavedChat.id, savedAccId);
         const merged = mergeCloudMessagesWithLocal(localSaved, cloudMsgs, {
-          accountId: targetAccId,
+          accountId: savedAccId,
           chatId: realSavedChat.id,
           allowEmptyCloudPrune: true,
         });
         return { ...prev, [bucketKey]: merged };
       });
-      setActiveChatId(realSavedChat.id);
+      if (activeAccountIdRef.current === savedAccId && selectChatSeqRef.current === callSeq) {
+        activeChatIdRef.current = realSavedChat.id;
+        setActiveChatId(realSavedChat.id);
+      }
       return;
     }
+
+    activeChatIdRef.current = chatId;
     setActiveChatId(chatId);
-    const targetChatObj = chats.find(
-      (c) => c.id === chatId && (!activeAccountId || c.accountId === activeAccountId)
+    const targetChatObj = chatsRef.current.find(
+      (c) => c.id === chatId && (!targetAccId || c.accountId === targetAccId)
     );
     setChats((prev) =>
       prev.map((c) =>
-        c.id === chatId && (!activeAccountId || c.accountId === activeAccountId)
+        c.id === chatId && (!targetAccId || c.accountId === targetAccId)
           ? { ...c, unreadCount: 0 }
           : c
       )
     );
-    if (chatId.startsWith('tg_') && activeAccountId !== 'acc_telegram_bot') {
-      const existingMsgs = getBucketMessages(messagesMapRef.current, activeAccountId, chatId);
-      const fallbackMsgs = existingMsgs.length > 0 ? existingMsgs : getLocalMessages(chatId, activeAccountId);
+    if (chatId.startsWith('tg_') && targetAccId !== 'acc_telegram_bot') {
+      const existingMsgs = getBucketMessages(messagesMapRef.current, targetAccId, chatId);
+      const fallbackMsgs = existingMsgs.length > 0 ? existingMsgs : getLocalMessages(chatId, targetAccId);
       const tgIds = fallbackMsgs
         .map((m) => m.telegramMessageId)
         .filter((id): id is number => typeof id === 'number' && id > 0);
       const maxTgId = tgIds.length > 0 ? Math.max(...tgIds) : undefined;
       if ((targetChatObj?.unreadCount || 0) > 0 || maxTgId !== undefined) {
         markTelegramDialogReadApi({
-          accountId: activeAccountId,
+          accountId: targetAccId,
           chatId,
           ...(maxTgId ? { maxId: maxTgId } : {}),
         }).catch(() => {});
@@ -2211,10 +2415,10 @@ export default function App() {
   const handleSendMessage = (
     newMsg: Partial<Message> & { skipCloudRelay?: boolean; mediaFile?: File | Blob }
   ) => {
-    if (!activeChatId) return;
+    const targetChatId = newMsg.chatId || activeChatIdRef.current || activeChatId;
+    const targetAccountId = newMsg.accountId || activeAccountIdRef.current || activeAccountId;
+    if (!targetChatId) return;
 
-    const targetChatId = activeChatId;
-    const targetAccountId = activeAccountId;
     const bucketKey = msgBucketKey(targetAccountId, targetChatId);
     const senderRole = newMsg.sender || 'me';
     const isTelegramOutbound =
@@ -2259,6 +2463,24 @@ export default function App() {
 
     if (mediaFile && !newMsg.skipCloudRelay) {
       pendingMediaFilesRef.current.set(fullMessage.id, mediaFile);
+      const mediaField: PendingMediaField = fullMessage.isVideo
+        ? 'videoUrl'
+        : fullMessage.isImage
+        ? 'imageUrl'
+        : fullMessage.isAudio
+        ? 'audioUrl'
+        : 'fileUrl';
+      const persistPromise = savePendingMediaBlob({
+        accountId: targetAccountId,
+        chatId: targetChatId,
+        messageId: fullMessage.id,
+        mediaField,
+        blob: mediaFile,
+        fileName: (mediaFile as File).name || fullMessage.fileName,
+        mimeType: mediaFile.type,
+        createdAt: fullMessage.createdAt,
+      });
+      pendingMediaSaveMapRef.current.set(fullMessage.id, persistPromise);
     }
 
     // 1. Store lightweight metadata in local client storage (blob:/huge base64 stripped automatically)
@@ -2289,11 +2511,9 @@ export default function App() {
     // 3. Relay outbound via streaming multipart (when mediaFile present) or compact JSON
     saveMessageToDb(fullMessage, mediaFile ? { mediaFile } : undefined).then((result) => {
       const finalStatus = result.deliveryStatus;
-      const hasServerMedia = Boolean(
-        result.imageUrl || result.videoUrl || result.audioUrl || result.fileUrl
-      );
-      if (hasServerMedia || result.ok) {
+      if (result.ok) {
         pendingMediaFilesRef.current.delete(fullMessage.id);
+        void cleanupPersistedPendingMedia(targetAccountId, fullMessage.id);
       }
 
       if (result.code === 'TELEGRAM_SESSION_EXPIRED' && targetAccountId) {
@@ -2347,11 +2567,13 @@ export default function App() {
   };
 
   const handleRetryMessage = async (messageId: string): Promise<{ ok: boolean; error?: string }> => {
-    if (!activeChatId) return { ok: false, error: '未选中对话' };
-    const targetChatId = activeChatId;
-    const targetAccountId = activeAccountId;
+    const targetChatId = activeChatIdRef.current || activeChatId;
+    const targetAccountId = activeAccountIdRef.current || activeAccountId;
+    if (!targetChatId) return { ok: false, error: '未选中对话' };
     const bucketKey = msgBucketKey(targetAccountId, targetChatId);
-    const targetMsg = getBucketMessages(messagesMap, targetAccountId, targetChatId).find((m) => m.id === messageId);
+    const targetMsg = getBucketMessages(messagesMapRef.current, targetAccountId, targetChatId).find(
+      (m) => m.id === messageId
+    );
     if (!targetMsg) return { ok: false, error: '未找到要重发的消息' };
 
     setMessagesMap((prev) => {
@@ -2362,7 +2584,15 @@ export default function App() {
       return { ...prev, [bucketKey]: updated };
     });
 
-    const pendingMediaFile = pendingMediaFilesRef.current.get(messageId);
+    let pendingMediaFile = pendingMediaFilesRef.current.get(messageId);
+    const isMediaMessage = Boolean(targetMsg.isImage || targetMsg.isVideo || targetMsg.isAudio || targetMsg.isFile);
+    if (!pendingMediaFile && isMediaMessage) {
+      const storedRecord = await getPendingMediaBlob(targetAccountId, messageId);
+      if (storedRecord?.blob) {
+        pendingMediaFile = storedRecord.blob;
+        pendingMediaFilesRef.current.set(messageId, storedRecord.blob);
+      }
+    }
     const result = await retryMessageDelivery(
       messageId,
       targetAccountId,
@@ -2370,11 +2600,9 @@ export default function App() {
       pendingMediaFile ? { mediaFile: pendingMediaFile } : undefined
     );
     const nextStatus = result.deliveryStatus;
-    const hasServerMedia = Boolean(
-      result.imageUrl || result.videoUrl || result.audioUrl || result.fileUrl
-    );
-    if (hasServerMedia || result.ok) {
+    if (result.ok) {
       pendingMediaFilesRef.current.delete(messageId);
+      void cleanupPersistedPendingMedia(targetAccountId, messageId);
     }
 
     if (result.code === 'TELEGRAM_SESSION_EXPIRED' && targetAccountId) {
@@ -2403,6 +2631,9 @@ export default function App() {
     }
     if (result.fileUrl && targetMsg.fileUrl?.startsWith('blob:') && result.fileUrl !== targetMsg.fileUrl) {
       replacedBlobUrls.push(targetMsg.fileUrl);
+    }
+    if (result.ok && replacedBlobUrls.length > 0) {
+      revokeRestoredBlobUrlsForMessage(targetAccountId, messageId);
     }
 
     setMessagesMap((prev) => {
@@ -2483,12 +2714,13 @@ export default function App() {
     return { ok: true };
   };
 
-  const selectAccountSeqRef = useRef(0);
-
   // Switch Active Telegram Account (account-level useEffect handles real dialog sync & auto-selection cleanly without duplicate calls)
   const handleSelectAccount = (accountId: string) => {
     selectAccountSeqRef.current += 1;
+    selectChatSeqRef.current += 1;
     pendingAutoSelectAccountRef.current = accountId;
+    activeAccountIdRef.current = accountId;
+    activeChatIdRef.current = null;
     setActiveAccountId(accountId);
     setActiveApiAccount(accountId);
     setActiveChatId(null);
@@ -2498,6 +2730,7 @@ export default function App() {
   // Add new account and sync its real dialogs strictly isolated by accountId
   const handleAddAccount = (newAccountData: Partial<Account>) => {
     const id = newAccountData.id || `acc_${Date.now()}`;
+    deletedAccountIdsRef.current.delete(id);
     notifiedExpiredRef.current.delete(id);
     const newAcc: Account = {
       id,
@@ -2521,6 +2754,7 @@ export default function App() {
 
   // Delete account and clean up associated chats, messagesMap entries, and scoped encrypted caches
   const handleDeleteAccount = (id: string) => {
+    deletedAccountIdsRef.current.add(id);
     notifiedExpiredRef.current.delete(id);
     const remaining = accounts.filter((a) => a.id !== id);
     const removedChats = chats.filter((c) => c.accountId === id);
@@ -2530,8 +2764,19 @@ export default function App() {
     const unsharedRemovedChatIds = removedChatIds.filter((cid) => !remainingChatIds.has(cid));
 
     const nextMessagesMap: Record<string, Message[]> = {};
+    const removedAccountBlobUrls: string[] = [];
     for (const [key, msgs] of Object.entries(messagesMap)) {
       if (key.startsWith(`${id}::`)) {
+        if (Array.isArray(msgs)) {
+          msgs.forEach((m) => {
+            pendingMediaFilesRef.current.delete(m.id);
+            revokeRestoredBlobUrlsForMessage(id, m.id);
+            if (m.imageUrl) removedAccountBlobUrls.push(m.imageUrl);
+            if (m.videoUrl) removedAccountBlobUrls.push(m.videoUrl);
+            if (m.audioUrl) removedAccountBlobUrls.push(m.audioUrl);
+            if (m.fileUrl) removedAccountBlobUrls.push(m.fileUrl);
+          });
+        }
         continue;
       }
       if (key.includes('::')) {
@@ -2548,8 +2793,10 @@ export default function App() {
         nextMessagesMap[key] = filteredMsgs;
       }
     }
+    scheduleRevokeBlobUrls(removedAccountBlobUrls);
 
     clearAccountLocalCache(id, unsharedRemovedChatIds);
+    void clearAccountPendingMediaBlobs(id);
 
     setAccounts(remaining);
     setChats(remainingChats);
@@ -2660,6 +2907,8 @@ export default function App() {
     }
 
     pendingMediaFilesRef.current.delete(messageId);
+    revokeRestoredBlobUrlsForMessage(targetAccountId, messageId);
+    void cleanupPersistedPendingMedia(targetAccountId, messageId);
     if (targetMsg) {
       scheduleRevokeBlobUrls([targetMsg.imageUrl, targetMsg.videoUrl, targetMsg.audioUrl, targetMsg.fileUrl]);
     }
@@ -2737,6 +2986,8 @@ export default function App() {
 
     messageIds.forEach((id) => {
       pendingMediaFilesRef.current.delete(id);
+      revokeRestoredBlobUrlsForMessage(targetAccountId, id);
+      void cleanupPersistedPendingMedia(targetAccountId, id);
       recordDeletedMessageId(id, targetAccountId, targetChatId);
     });
     const deletedBlobUrls: string[] = [];
@@ -3001,11 +3252,18 @@ export default function App() {
     return { ok: true };
   };
 
-  const handleUpdateMessage = (messageId: string, patch: Partial<Message>) => {
-    if (!activeChatId) return;
-    const targetChatId = activeChatId;
-    const targetAccountId = activeAccountId;
+  const handleUpdateMessage = (
+    messageId: string,
+    patch: Partial<Message>,
+    scope?: { chatId?: string; accountId?: string }
+  ) => {
+    const targetChatId = scope?.chatId || patch.chatId || activeChatIdRef.current || activeChatId;
+    const targetAccountId = scope?.accountId || patch.accountId || activeAccountIdRef.current || activeAccountId;
+    if (!targetChatId) return;
     const bucketKey = msgBucketKey(targetAccountId, targetChatId);
+    const existingMsg = getBucketMessages(messagesMapRef.current, targetAccountId, targetChatId).find(
+      (m) => m.id === messageId
+    );
     setMessagesMap((prev) => {
       const currentList = getBucketMessages(prev, targetAccountId, targetChatId);
       const updated = currentList.map((m) =>
@@ -3013,6 +3271,24 @@ export default function App() {
       );
       return { ...prev, [bucketKey]: updated };
     });
+    if (typeof patch.sttText === 'string') {
+      void updateMessageSttInDb(
+        messageId,
+        patch.sttText,
+        typeof patch.translatedText === 'string' ? patch.translatedText : undefined,
+        {
+          chatId: targetChatId,
+          telegramMessageId: existingMsg?.telegramMessageId,
+          accountId: targetAccountId,
+        }
+      ).catch(() => {});
+    } else if (typeof patch.translatedText === 'string') {
+      void updateMessageTranslationInDb(messageId, patch.translatedText, {
+        chatId: targetChatId,
+        telegramMessageId: existingMsg?.telegramMessageId,
+        accountId: targetAccountId,
+      }).catch(() => {});
+    }
   };
 
   const handleRetranslateMessage = async (messageId: string): Promise<void> => {
@@ -3038,10 +3314,12 @@ export default function App() {
     }
 
     const isHistoricalTarget =
-      Boolean(
-        targetMsg.translationError &&
-          (targetMsg.translationError.includes('历史') || targetMsg.translationError.includes('谷歌'))
-      ) ||
+      targetMsg.translationErrorChannel === 'history_google' ||
+      (!targetMsg.translationErrorChannel &&
+        Boolean(
+          targetMsg.translationError &&
+            (targetMsg.translationError.includes('历史') || targetMsg.translationError.includes('谷歌'))
+        )) ||
       typeof targetMsg.createdAt !== 'number' ||
       Date.now() - targetMsg.createdAt > 120_000;
 
@@ -3069,7 +3347,9 @@ export default function App() {
       return {
         ...prev,
         [bucketKey]: list.map((m) =>
-          m.id === messageId ? { ...m, isTranslating: true, translationError: undefined } : m
+          m.id === messageId
+            ? { ...m, isTranslating: true, translationError: undefined, translationErrorChannel: undefined }
+            : m
         ),
       };
     });
@@ -3101,6 +3381,7 @@ export default function App() {
                 translatedText: finalTranslatedText,
                 isTranslating: false,
                 translationError: undefined,
+                translationErrorChannel: undefined,
               }
             : m
         );
@@ -3113,10 +3394,20 @@ export default function App() {
       });
     } catch (err: any) {
       const errMsg = err?.message || '重新翻译失败';
+      const errChannel: Message['translationErrorChannel'] = isHistoricalTarget
+        ? 'history_google'
+        : engineToLiveErrorChannel(effectiveEngine);
       setMessagesMap((prev) => {
         const list = getBucketMessages(prev, targetAccountId, targetChatId);
         const updated = list.map((m) =>
-          m.id === messageId ? { ...m, isTranslating: false, translationError: errMsg } : m
+          m.id === messageId
+            ? {
+                ...m,
+                isTranslating: false,
+                translationError: errMsg,
+                translationErrorChannel: errChannel,
+              }
+            : m
         );
         return { ...prev, [bucketKey]: updated };
       });
@@ -3261,7 +3552,7 @@ export default function App() {
     chatId: string,
     options?: { revoke?: boolean }
   ): Promise<{ ok: boolean; error?: string }> => {
-    const targetAccountId = activeAccountId;
+    const targetAccountId = activeAccountIdRef.current || activeAccountId;
     const bucketKey = msgBucketKey(targetAccountId, chatId);
     if (isTelegramCloudChat(chatId)) {
       const clearRes = await clearTelegramDialogHistoryApi({
@@ -3275,23 +3566,23 @@ export default function App() {
         return { ok: false, error: errMsg };
       }
     }
-    const clearedMsgs = getBucketMessages(messagesMap, targetAccountId, chatId);
+    const clearedMsgs = getBucketMessages(messagesMapRef.current, targetAccountId, chatId);
     const clearedBlobUrls: string[] = [];
     clearedMsgs.forEach((m) => {
       pendingMediaFilesRef.current.delete(m.id);
+      revokeRestoredBlobUrlsForMessage(targetAccountId, m.id);
       if (m.imageUrl) clearedBlobUrls.push(m.imageUrl);
       if (m.videoUrl) clearedBlobUrls.push(m.videoUrl);
       if (m.audioUrl) clearedBlobUrls.push(m.audioUrl);
       if (m.fileUrl) clearedBlobUrls.push(m.fileUrl);
     });
     scheduleRevokeBlobUrls(clearedBlobUrls);
-    setMessagesMap((prev) => {
-      clearLocalMessages(chatId, getBucketMessages(prev, targetAccountId, chatId), targetAccountId);
-      return {
-        ...prev,
-        [bucketKey]: [],
-      };
-    });
+    void clearChatPendingMediaBlobs(targetAccountId, chatId);
+    clearLocalMessages(chatId, clearedMsgs, targetAccountId);
+    setMessagesMap((prev) => ({
+      ...prev,
+      [bucketKey]: [],
+    }));
     setChats((prev) =>
       prev.map((c) =>
         c.id === chatId && (!targetAccountId || c.accountId === targetAccountId)
@@ -3394,7 +3685,7 @@ export default function App() {
   };
 
   const handleDeleteChat = async (chatId: string, options?: { revoke?: boolean }) => {
-    const targetAccountId = activeAccountId;
+    const targetAccountId = activeAccountIdRef.current || activeAccountId;
     const bucketKey = msgBucketKey(targetAccountId, chatId);
     if (isTelegramCloudChat(chatId)) {
       const res = await deleteTelegramDialogApi({
@@ -3407,18 +3698,20 @@ export default function App() {
         return;
       }
     }
-    const deletedChatMsgs = getBucketMessages(messagesMap, targetAccountId, chatId);
+    const deletedChatMsgs = getBucketMessages(messagesMapRef.current, targetAccountId, chatId);
     const deletedChatBlobUrls: string[] = [];
     deletedChatMsgs.forEach((m) => {
       pendingMediaFilesRef.current.delete(m.id);
+      revokeRestoredBlobUrlsForMessage(targetAccountId, m.id);
       if (m.imageUrl) deletedChatBlobUrls.push(m.imageUrl);
       if (m.videoUrl) deletedChatBlobUrls.push(m.videoUrl);
       if (m.audioUrl) deletedChatBlobUrls.push(m.audioUrl);
       if (m.fileUrl) deletedChatBlobUrls.push(m.fileUrl);
     });
     scheduleRevokeBlobUrls(deletedChatBlobUrls);
+    void clearChatPendingMediaBlobs(targetAccountId, chatId);
+    clearLocalMessages(chatId, deletedChatMsgs, targetAccountId);
     setMessagesMap((prev) => {
-      clearLocalMessages(chatId, getBucketMessages(prev, targetAccountId, chatId), targetAccountId);
       const next = { ...prev };
       delete next[bucketKey];
       return next;
@@ -3426,7 +3719,8 @@ export default function App() {
     setChats((prev) =>
       prev.filter((c) => !(c.id === chatId && (!targetAccountId || c.accountId === targetAccountId)))
     );
-    if (activeChatId === chatId) {
+    if (activeChatIdRef.current === chatId) {
+      activeChatIdRef.current = null;
       setActiveChatId(null);
     }
   };
@@ -3846,15 +4140,17 @@ export default function App() {
             setIsVoiceCallOpen(true);
           }}
           onMessagesSynced={(synced, meta) => {
-            if (activeChatId) {
-              const bucketKey = msgBucketKey(activeAccountId, activeChatId);
+            const syncChatId = meta?.chatId || activeChatIdRef.current || activeChatId;
+            const syncAccountId = meta?.accountId || activeAccountIdRef.current || activeAccountId;
+            if (syncChatId) {
+              const bucketKey = msgBucketKey(syncAccountId, syncChatId);
               if (meta && typeof meta.hasMore === 'boolean') {
                 setChatHasMoreMap((prev) => ({ ...prev, [bucketKey]: meta.hasMore! }));
               }
               if (meta && typeof meta.readOutboxMaxId === 'number') {
                 setChats((prev) =>
                   prev.map((c) =>
-                    c.id === activeChatId && (!activeAccountId || c.accountId === activeAccountId)
+                    c.id === syncChatId && (!syncAccountId || c.accountId === syncAccountId)
                       ? { ...c, readOutboxMaxId: Math.max(c.readOutboxMaxId || 0, meta.readOutboxMaxId!) }
                       : c
                   )
@@ -3862,13 +4158,13 @@ export default function App() {
               }
               if (synced.length > 0 || !meta?.fromLocalFallback) {
                 setMessagesMap((prev) => {
-                  const base = getBucketMessages(prev, activeAccountId, activeChatId);
+                  const base = getBucketMessages(prev, syncAccountId, syncChatId);
                   const merged = mergeCloudMessagesWithLocal(
-                    base.length > 0 ? base : getLocalMessages(activeChatId, activeAccountId),
+                    base.length > 0 ? base : getLocalMessages(syncChatId, syncAccountId),
                     synced,
                     {
-                      accountId: activeAccountId,
-                      chatId: activeChatId,
+                      accountId: syncAccountId,
+                      chatId: syncChatId,
                       allowEmptyCloudPrune: !meta?.fromLocalFallback,
                     }
                   );
@@ -3888,7 +4184,24 @@ export default function App() {
           onSelectPanel={openRightPanel}
           onClose={() => setActiveRightPanel(null)}
           customerProfile={customerProfile}
-          onUpdateCustomerProfile={setCustomerProfile}
+          onUpdateCustomerProfile={(updated) => {
+            if (
+              updated.chatId &&
+              updated.chatId !== 'current' &&
+              activeChatIdRef.current &&
+              updated.chatId !== activeChatIdRef.current
+            ) {
+              return;
+            }
+            if (
+              updated.accountId &&
+              activeAccountIdRef.current &&
+              updated.accountId !== activeAccountIdRef.current
+            ) {
+              return;
+            }
+            setCustomerProfile(updated);
+          }}
           activeChatId={activeChatId}
           activeAccountId={activeAccountId}
           currentChat={currentChat}
@@ -3954,6 +4267,12 @@ export default function App() {
         isOpen={isDatabaseOpen}
         onClose={() => setIsDatabaseOpen(false)}
         onPurgeComplete={() => {
+          prevPersistedMessagesMapRef.current = {};
+          pendingMediaFilesRef.current.clear();
+          pendingMediaSaveMapRef.current.clear();
+          scheduleRevokeBlobUrls(Array.from(restoredBlobUrlsRef.current.values()));
+          restoredBlobUrlsRef.current.clear();
+          void purgeAllPendingMediaBlobs();
           setMessagesMap({});
           setChats((prev) => prev.map((c) => ({ ...c, lastMessage: '暂无消息' })));
         }}

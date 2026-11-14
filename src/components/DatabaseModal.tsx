@@ -17,13 +17,19 @@ import {
   uploadDatabaseRestore,
   purgeDatabaseApi,
 } from '../services/apiService';
-import { clearCryptoStorageCache } from '../services/cryptoStorage';
+import {
+  clearCryptoStorageCache,
+  flushPendingCryptoWrites,
+  secureGetItemAsync,
+  secureSetItemAsync,
+} from '../services/cryptoStorage';
 
 const EXCLUDED_BACKUP_KEYS = new Set([
   'tg_pro_session_token',
   'tg_pro_member_user',
   'tg_custom_api_id',
   'tg_custom_api_hash',
+  'tg_pro_crypto_seed_v1',
 ]);
 
 const EXACT_BACKUP_KEYS = new Set([
@@ -94,21 +100,28 @@ export const DatabaseModal: React.FC<DatabaseModalProps> = ({ isOpen, onClose, o
     try {
       setBackupLoading(true);
       setActionNotice(null);
+      await flushPendingCryptoWrites();
       const sqliteSnapshot = await downloadDatabaseBackup();
 
       const localPayload: Record<string, string | null> = {};
+      const decryptedPayload: Record<string, any> = {};
       for (let i = 0; i < localStorage.length; i++) {
         const key = localStorage.key(i) || '';
         if (shouldBackupLocalKey(key)) {
           localPayload[key] = localStorage.getItem(key);
+          const decoded = await secureGetItemAsync(key);
+          if (decoded !== null && decoded !== undefined) {
+            decryptedPayload[key] = decoded;
+          }
         }
       }
 
       const backupData = {
         exportedAt: new Date().toISOString(),
-        version: 'humansense_full_v3.0',
+        version: 'humansense_full_v3.1',
         type: 'HumanSense_Full_Desktop_Backup',
         sqliteSnapshot,
+        decryptedPayload,
         payload: localPayload,
       };
 
@@ -149,9 +162,10 @@ export const DatabaseModal: React.FC<DatabaseModalProps> = ({ isOpen, onClose, o
           : parsed?.tables
           ? parsed
           : null;
+      const hasDecryptedPayload = Boolean(parsed?.decryptedPayload && typeof parsed.decryptedPayload === 'object');
       const hasLocalPayload = Boolean(parsed?.payload && typeof parsed.payload === 'object');
 
-      if (!snapshotToRestore && !hasLocalPayload) {
+      if (!snapshotToRestore && !hasLocalPayload && !hasDecryptedPayload) {
         throw new Error('无效的 HumanSense 备份文件（未检测到 SQLite 快照或本地会话数据）');
       }
 
@@ -170,14 +184,23 @@ export const DatabaseModal: React.FC<DatabaseModalProps> = ({ isOpen, onClose, o
         summaryParts.push(`SQLite 数据库记录 ${totalSqlRows} 条`);
       }
 
-      if (hasLocalPayload) {
-        let restoredKeys = 0;
+      let restoredKeys = 0;
+      if (hasDecryptedPayload) {
+        for (const [k, v] of Object.entries(parsed.decryptedPayload)) {
+          if (!EXCLUDED_BACKUP_KEYS.has(k) && shouldBackupLocalKey(k) && v !== undefined) {
+            await secureSetItemAsync(k, v);
+            restoredKeys++;
+          }
+        }
+      } else if (hasLocalPayload) {
         for (const [k, v] of Object.entries(parsed.payload)) {
           if (typeof v === 'string' && !EXCLUDED_BACKUP_KEYS.has(k) && shouldBackupLocalKey(k)) {
             localStorage.setItem(k, v);
             restoredKeys++;
           }
         }
+      }
+      if (restoredKeys > 0) {
         summaryParts.push(`本地加密缓存 ${restoredKeys} 项`);
       }
 

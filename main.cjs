@@ -1,8 +1,9 @@
-const { app, BrowserWindow, Menu, dialog, shell } = require('electron');
+const { app, BrowserWindow, Menu, dialog, shell, ipcMain, safeStorage } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const http = require('http');
 const net = require('net');
+const crypto = require('crypto');
 const { pathToFileURL } = require('url');
 
 // Set application name and Windows AppUserModelId explicitly
@@ -36,6 +37,197 @@ let mainWindow = null;
 let currentPort = FIXED_APP_PORT;
 let backendChild = null;
 let isQuitting = false;
+
+// 2.5 OS-level safeStorage (Windows DPAPI) + AES-256-GCM Master Key Custody
+const AES_GCM_PREFIX = 'enc:gcm256:';
+let cachedDpapiMasterKey = null;
+
+function getMasterKeyStoragePaths() {
+  const dataDir = path.join(app.getPath('userData'), 'data');
+  if (!fs.existsSync(dataDir)) {
+    fs.mkdirSync(dataDir, { recursive: true });
+  }
+  return {
+    dpapiPath: path.join(dataDir, '.hs_master_key.dpapi'),
+    fallbackPath: path.join(dataDir, '.hs_master_key.local'),
+  };
+}
+
+function isSafeStorageReady() {
+  try {
+    return Boolean(safeStorage && typeof safeStorage.isEncryptionAvailable === 'function' && safeStorage.isEncryptionAvailable());
+  } catch {
+    return false;
+  }
+}
+
+function persistMasterKeyBytes(keyBuf) {
+  const { dpapiPath, fallbackPath } = getMasterKeyStoragePaths();
+  if (isSafeStorageReady()) {
+    const sealed = safeStorage.encryptString(keyBuf.toString('base64'));
+    fs.writeFileSync(dpapiPath, sealed);
+    try {
+      if (fs.existsSync(fallbackPath)) fs.unlinkSync(fallbackPath);
+    } catch {}
+    return true;
+  }
+  fs.writeFileSync(fallbackPath, keyBuf.toString('base64'), { encoding: 'utf8', mode: 0o600 });
+  return false;
+}
+
+function getOrCreateMasterKeyBytes() {
+  if (cachedDpapiMasterKey && Buffer.isBuffer(cachedDpapiMasterKey) && cachedDpapiMasterKey.length === 32) {
+    return cachedDpapiMasterKey;
+  }
+  const { dpapiPath, fallbackPath } = getMasterKeyStoragePaths();
+  if (isSafeStorageReady() && fs.existsSync(dpapiPath)) {
+    try {
+      const sealed = fs.readFileSync(dpapiPath);
+      const b64 = safeStorage.decryptString(sealed);
+      const decoded = Buffer.from(b64, 'base64');
+      if (decoded.length === 32) {
+        cachedDpapiMasterKey = decoded;
+        return cachedDpapiMasterKey;
+      }
+    } catch (err) {
+      writeLog('warn', `Failed to decrypt DPAPI master key: ${err.message}`);
+    }
+  }
+  if (fs.existsSync(fallbackPath)) {
+    try {
+      const b64 = fs.readFileSync(fallbackPath, 'utf8').trim();
+      const decoded = Buffer.from(b64, 'base64');
+      if (decoded.length === 32) {
+        if (isSafeStorageReady()) {
+          persistMasterKeyBytes(decoded);
+        }
+        cachedDpapiMasterKey = decoded;
+        return cachedDpapiMasterKey;
+      }
+    } catch {}
+  }
+  const fresh = crypto.randomBytes(32);
+  persistMasterKeyBytes(fresh);
+  cachedDpapiMasterKey = fresh;
+  return cachedDpapiMasterKey;
+}
+
+function isAuthorizedCryptoIpcEvent(event) {
+  try {
+    const url = event?.senderFrame?.url || event?.sender?.getURL?.() || '';
+    return url.startsWith(`http://127.0.0.1:${FIXED_APP_PORT}`) || url.startsWith(`http://localhost:${FIXED_APP_PORT}`);
+  } catch {
+    return false;
+  }
+}
+
+function registerCryptoIpcHandlers() {
+  ipcMain.on('hs-crypto:status', (event) => {
+    if (!isAuthorizedCryptoIpcEvent(event)) {
+      event.returnValue = { isElectron: true, hardwareProtected: false, storageMode: 'unauthorized' };
+      return;
+    }
+    const hardwareProtected = isSafeStorageReady();
+    event.returnValue = {
+      isElectron: true,
+      hardwareProtected,
+      storageMode: hardwareProtected ? 'dpapi_aes_gcm' : 'electron_aes_gcm',
+    };
+  });
+
+  ipcMain.on('hs-crypto:encrypt-sync', (event, plaintext) => {
+    if (!isAuthorizedCryptoIpcEvent(event) || typeof plaintext !== 'string') {
+      event.returnValue = null;
+      return;
+    }
+    try {
+      const key = getOrCreateMasterKeyBytes();
+      const iv = crypto.randomBytes(12);
+      const cipher = crypto.createCipheriv('aes-256-gcm', key, iv);
+      const encrypted = Buffer.concat([cipher.update(plaintext, 'utf8'), cipher.final()]);
+      const tag = cipher.getAuthTag();
+      const payload = Buffer.concat([encrypted, tag]);
+      event.returnValue = `${AES_GCM_PREFIX}${iv.toString('base64')}:${payload.toString('base64')}`;
+    } catch (err) {
+      writeLog('warn', `hs-crypto encrypt-sync error: ${err.message}`);
+      event.returnValue = null;
+    }
+  });
+
+  ipcMain.on('hs-crypto:decrypt-sync', (event, ciphertext) => {
+    if (!isAuthorizedCryptoIpcEvent(event) || typeof ciphertext !== 'string') {
+      event.returnValue = null;
+      return;
+    }
+    try {
+      if (!ciphertext.startsWith(AES_GCM_PREFIX)) {
+        event.returnValue = null;
+        return;
+      }
+      const rest = ciphertext.slice(AES_GCM_PREFIX.length);
+      const parts = rest.split(':');
+      if (parts.length !== 2) {
+        event.returnValue = null;
+        return;
+      }
+      const iv = Buffer.from(parts[0], 'base64');
+      const combined = Buffer.from(parts[1], 'base64');
+      if (iv.length !== 12 || combined.length < 16) {
+        event.returnValue = null;
+        return;
+      }
+      const tag = combined.subarray(combined.length - 16);
+      const enc = combined.subarray(0, combined.length - 16);
+      const key = getOrCreateMasterKeyBytes();
+      const decipher = crypto.createDecipheriv('aes-256-gcm', key, iv);
+      decipher.setAuthTag(tag);
+      const decrypted = Buffer.concat([decipher.update(enc), decipher.final()]).toString('utf8');
+      event.returnValue = decrypted;
+    } catch {
+      event.returnValue = null;
+    }
+  });
+
+  ipcMain.on('hs-crypto:migrate-legacy-seed', (event, legacySeedBase64) => {
+    if (!isAuthorizedCryptoIpcEvent(event) || typeof legacySeedBase64 !== 'string') {
+      event.returnValue = false;
+      return;
+    }
+    try {
+      const decoded = Buffer.from(legacySeedBase64, 'base64');
+      if (decoded.length !== 32) {
+        event.returnValue = false;
+        return;
+      }
+      const { dpapiPath, fallbackPath } = getMasterKeyStoragePaths();
+      if (!fs.existsSync(dpapiPath) && !fs.existsSync(fallbackPath)) {
+        persistMasterKeyBytes(decoded);
+        cachedDpapiMasterKey = decoded;
+        event.returnValue = true;
+        return;
+      }
+      event.returnValue = false;
+    } catch {
+      event.returnValue = false;
+    }
+  });
+
+  ipcMain.on('hs-crypto:purge-key', (event) => {
+    if (!isAuthorizedCryptoIpcEvent(event)) {
+      event.returnValue = false;
+      return;
+    }
+    try {
+      cachedDpapiMasterKey = null;
+      const { dpapiPath, fallbackPath } = getMasterKeyStoragePaths();
+      if (fs.existsSync(dpapiPath)) fs.unlinkSync(dpapiPath);
+      if (fs.existsSync(fallbackPath)) fs.unlinkSync(fallbackPath);
+      event.returnValue = true;
+    } catch {
+      event.returnValue = false;
+    }
+  });
+}
 
 // 3. Setup persistent file logging in %APPDATA%/HumanSense/logs/main.log
 let logFilePath = null;
@@ -341,6 +533,8 @@ async function createWindow() {
     webPreferences: {
       nodeIntegration: false,
       contextIsolation: true,
+      sandbox: true,
+      preload: path.join(__dirname, 'electron', 'preload.cjs'),
     },
   });
 
@@ -438,7 +632,10 @@ async function createWindow() {
   });
 }
 
-app.whenReady().then(createWindow);
+app.whenReady().then(() => {
+  registerCryptoIpcHandlers();
+  return createWindow();
+});
 
 app.on('second-instance', () => {
   if (mainWindow) {

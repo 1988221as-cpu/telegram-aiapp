@@ -59,7 +59,24 @@ import {
   isSignedResourceUrlExpiringSoon,
   refreshSignedResourceUrlsApi,
   ensureFreshSignedResourceUrl,
+  saveLocalMessage,
+  updateMessageSttInDb,
 } from '../services/apiService';
+
+function getTranslationErrorLabel(channel?: Message['translationErrorChannel']): string {
+  switch (channel) {
+    case 'live_gemini':
+      return '实时 Gemini 译文失败';
+    case 'live_custom_llm':
+      return '自定义模型译文失败';
+    case 'live_google':
+      return '实时谷歌机翻失败';
+    case 'history_google':
+      return '历史谷歌补译失败';
+    default:
+      return '译文失败';
+  }
+}
 
 function formatMediaSizeLabel(bytes: number): string {
   if (!Number.isFinite(bytes) || bytes <= 0) return '0 KB';
@@ -300,6 +317,52 @@ const DETECTED_CODE_TO_LANGUAGE_NAME: Record<string, string> = {
   am: 'Amharic',
 };
 
+export function isSystemMediaPlaceholder(text?: string | null, msg?: Partial<Message>): boolean {
+  const trimmed = String(text || '').trim();
+  if (!trimmed) return true;
+
+  if (
+    /^\[(语音|图片|视频|文件|多媒体|贴纸)消息\]$/i.test(trimmed) ||
+    /^\[贴纸\]$/i.test(trimmed) ||
+    /^Voice Message$/i.test(trimmed) ||
+    /^(?:🎤\s*语音消息|🎥\s*视频消息|🎬\s*(?:视频消息|视频|\[视频\])|🖼️\s*(?:图片消息|图片|\[图片\]|贴纸)|📎\s*(?:文件附件|文件|媒体消息)|📍\s*位置信息|👤\s*联系人名片(?:\s*[:：].*)?|📊\s*投票|🔗\s*网页链接|暂无消息)$/.test(
+      trimmed
+    ) ||
+    /^🎵\s*音频(?:\s*[:：].*)?$/.test(trimmed) ||
+    /^📁\s*\[文件\](?:\s+.*)?$/.test(trimmed) ||
+    /^[^\p{L}\d]*\[贴纸\]$/u.test(trimmed)
+  ) {
+    return true;
+  }
+
+  if (msg?.isFile && /^(📎|📁)\s+/.test(trimmed)) return true;
+  if (msg?.isAudio && /^(🎤|🎵)\s+/.test(trimmed)) return true;
+  if (msg?.isVideo && /^(🎬|🎥)\s+/.test(trimmed)) return true;
+  if (msg?.isImage && /^🖼️\s+/.test(trimmed)) return true;
+
+  return false;
+}
+
+function getPeerMessageNaturalTextCandidates(msg: Partial<Message>): string[] {
+  const candidates: string[] = [];
+  const pushCandidate = (raw?: string | null) => {
+    let clean = String(raw || '').trim();
+    if (!clean) return;
+    if (/^📊\s*投票\s*[:：]\s*/.test(clean)) {
+      clean = clean.replace(/^📊\s*投票\s*[:：]\s*/, '').trim();
+      if (!clean) return;
+    }
+    if (isSystemMediaPlaceholder(clean, msg)) return;
+    if (!hasTranslatableLetters(clean)) return;
+    candidates.push(clean);
+  };
+
+  pushCandidate(msg.sttText);
+  pushCandidate(msg.imageCaption);
+  pushCandidate(msg.text);
+  return candidates;
+}
+
 export function getOutboundTargetLanguage(
   chat?: Chat | null,
   settings?: TranslationSettings | null,
@@ -315,11 +378,14 @@ export function getOutboundTargetLanguage(
   }
 
   if (recentMessages && recentMessages.length > 0) {
-    const peerMessages = recentMessages.filter((m) => m.sender === 'peer');
-    const lastPeerMsg = peerMessages[peerMessages.length - 1];
-    if (lastPeerMsg?.text) {
-      const code = detectClientLangCode(lastPeerMsg.text);
-      if (code) return DETECTED_CODE_TO_LANGUAGE_NAME[code] || code;
+    for (let i = recentMessages.length - 1; i >= 0; i--) {
+      const msg = recentMessages[i];
+      if (!msg || msg.sender !== 'peer') continue;
+      const candidates = getPeerMessageNaturalTextCandidates(msg);
+      for (const candidate of candidates) {
+        const code = detectClientLangCode(candidate);
+        if (code) return DETECTED_CODE_TO_LANGUAGE_NAME[code] || code;
+      }
     }
   }
 
@@ -355,13 +421,13 @@ interface ChatAreaProps {
   availableChats?: Chat[];
   hasMoreHistory?: boolean;
   onLoadOlderMessages?: (chatId: string, offsetId: number) => Promise<{ ok: boolean; count: number; hasMore: boolean; error?: string }>;
-  onMessagesSynced?: (synced: Message[], meta?: { hasMore?: boolean; readOutboxMaxId?: number; fromLocalFallback?: boolean }) => void;
+  onMessagesSynced?: (synced: Message[], meta?: { hasMore?: boolean; readOutboxMaxId?: number; fromLocalFallback?: boolean; chatId?: string; accountId?: string }) => void;
   onOpenKnowledgeEvolution?: () => void;
   onDeleteMessage?: (messageId: string, options?: { revoke?: boolean }) => void | Promise<{ ok: boolean; error?: string } | void>;
   onBatchDeleteMessages?: (messageIds: string[], options?: { revoke?: boolean }) => void | Promise<{ ok: boolean; error?: string } | void>;
   onForwardMessages?: (payload: { messageIds: string[]; telegramMessageIds: number[]; toChatId: string; dropAuthor?: boolean }) => Promise<{ ok: boolean; error?: string }>;
   onEditMessage?: (messageId: string, newText: string, options?: { translatedText?: string }) => void | Promise<{ ok: boolean; error?: string } | void>;
-  onUpdateMessage?: (messageId: string, patch: Partial<Message>) => void;
+  onUpdateMessage?: (messageId: string, patch: Partial<Message>, scope?: { chatId?: string; accountId?: string }) => void;
   onRetranslateMessage?: (messageId: string) => void | Promise<void>;
   onRetryMessage?: (messageId: string) => Promise<{ ok: boolean; error?: string }>;
   onToggleReaction?: (messageId: string, emoji: string) => void | Promise<any>;
@@ -483,6 +549,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
   const [playingAudioId, setPlayingAudioId] = useState<string | null>(null);
   const [audioProgress, setAudioProgress] = useState<Record<string, number>>({});
   const [transcribingMap, setTranscribingMap] = useState<Record<string, boolean>>({});
+  const [uncontrolledMsgPatches, setUncontrolledMsgPatches] = useState<Record<string, Partial<Message>>>({});
   const [isRecordingMic, setIsRecordingMic] = useState(false);
   const [recordDuration, setRecordDuration] = useState(0);
   const recordDurationRef = useRef<number>(0);
@@ -797,11 +864,33 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
   const prevMsgCountRef = useRef<number>(0);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
+  const audioPlaySeqRef = useRef(0);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
   const recordTimerRef = useRef<any>(null);
   const [refreshedUrlsMap, setRefreshedUrlsMap] = useState<Record<string, string>>({});
   const attemptedRefreshUrlsRef = useRef<Set<string>>(new Set());
+
+  useEffect(() => {
+    setUncontrolledMsgPatches({});
+    const stopAudio = () => {
+      audioPlaySeqRef.current += 1;
+      if (audioRef.current) {
+        audioRef.current.onended = null;
+        audioRef.current.ontimeupdate = null;
+        audioRef.current.onerror = null;
+        audioRef.current.pause();
+      }
+      if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
+        window.speechSynthesis.cancel();
+      }
+      setPlayingAudioId(null);
+    };
+    stopAudio();
+    return () => {
+      stopAudio();
+    };
+  }, [chat?.id, currentAccountId]);
 
   const resolveDisplayUrl = useCallback(
     (rawUrl?: string) => {
@@ -905,6 +994,8 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
           hasMore: res.hasMore,
           readOutboxMaxId: res.readOutboxMaxId,
           fromLocalFallback: res.fromLocalFallback,
+          chatId: chat.id,
+          accountId: currentAccountId,
         });
         setSyncNotice(`云端同步成功！已拉取 ${res.messages.length} 条真实聊天记录`);
       } else if (!res.ok) {
@@ -914,6 +1005,8 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
           hasMore: false,
           readOutboxMaxId: res.readOutboxMaxId,
           fromLocalFallback: res.fromLocalFallback,
+          chatId: chat.id,
+          accountId: currentAccountId,
         });
         setSyncNotice('云端已是最新记录或暂无更多历史');
       }
@@ -997,7 +1090,13 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
     try {
       const res = await sendAutonomousChat(
         messages.slice(-30).map((m) => {
-          const resolvedText = (m.text || m.sttText || m.imageCaption || '').trim();
+          const rawBody = (m.text || '').trim();
+          const preferredMediaText = (m.sttText || m.imageCaption || '').trim();
+          const resolvedText = (
+            preferredMediaText && (!rawBody || isSystemMediaPlaceholder(rawBody, m))
+              ? preferredMediaText
+              : rawBody || preferredMediaText
+          ).trim();
           const maybeCreatedAt = (m as unknown as { createdAt?: unknown }).createdAt;
           return {
             id: m.id,
@@ -1020,23 +1119,41 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
       );
       if (res && res.replyText) {
         setAiSuggestion(res.replyText);
+        const refTargetLang =
+          inboundTargetLang && inboundTargetLang !== 'Auto' ? inboundTargetLang : 'Chinese';
+        const refTargetNorm = normalizeChatLangCode(refTargetLang);
+        const replyLangNorm = normalizeChatLangCode(detectClientLangCode(res.replyText));
+        const isDualOffMode = Boolean(
+          customLLMConfig && (customLLMConfig.enabled === false || customLLMConfig.explicitlyDisabled)
+        );
+        const isCustomMode = Boolean(
+          !isDualOffMode && customLLMConfig?.enabled && customLLMConfig?.engineMode === 'custom'
+        );
+        const effectiveRefEngine: 'gemini' | 'google' | 'custom_llm' = isDualOffMode
+          ? 'google'
+          : isCustomMode
+          ? 'custom_llm'
+          : translationSettings?.preferredEngine === 'google'
+          ? 'google'
+          : 'gemini';
+
         if (res.cnTranslation) {
           setAiSuggestionTranslation(res.cnTranslation);
-        } else if (outboundTargetLang && outboundTargetLang !== 'Chinese' && outboundTargetLang !== 'zh-CN') {
+        } else if (refTargetNorm !== 'auto' && replyLangNorm !== refTargetNorm) {
           setIsTranslatingSuggestion(true);
           try {
-            const cn = await translateText(
+            const refTrans = await translateText(
               res.replyText,
               'Auto',
-              'Chinese',
+              refTargetLang,
               customLLMConfig,
-              translationSettings?.preferredEngine || 'gemini',
+              effectiveRefEngine,
               undefined,
               translationSettings?.geminiModel,
               translationSettings?.geminiApiKey,
               translationSettings?.customModelName
             );
-            setAiSuggestionTranslation(cn || null);
+            setAiSuggestionTranslation(refTrans || null);
           } catch (transErr: any) {
             setAiSuggestionTranslation(null);
             showSyncNotice(`参考译文失败：${transErr?.message || '请检查翻译通道配置'}`, 5000);
@@ -1294,6 +1411,8 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
     if (isSending) return;
     const textToSend = inputText.trim();
     if (!textToSend || !chat) return;
+    const originChatId = chat.id;
+    const originAccountId = currentAccountId;
 
     setIsSending(true);
     try {
@@ -1392,6 +1511,8 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
       }
 
       onSendMessage({
+        chatId: originChatId,
+        accountId: originAccountId,
         sender: 'me',
         text: targetText,
         translatedText: translationOfTarget,
@@ -1447,7 +1568,9 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
 
   const handleVideoSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
-    if (!file) return;
+    if (!file || !chat) return;
+    const originChatId = chat.id;
+    const originAccountId = currentAccountId;
     try {
       if (file.size > TELEGRAM_MAX_MEDIA) {
         const maxMb = Math.round(TELEGRAM_MAX_MEDIA / (1024 * 1024));
@@ -1473,6 +1596,8 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
       } catch {}
 
       onSendMessage({
+        chatId: originChatId,
+        accountId: originAccountId,
         sender: 'me',
         isVideo: true,
         videoUrl: previewUrl,
@@ -1499,7 +1624,9 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
 
   const handleAudioSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
-    if (!file) return;
+    if (!file || !chat) return;
+    const originChatId = chat.id;
+    const originAccountId = currentAccountId;
     try {
       if (file.size > TELEGRAM_MAX_MEDIA) {
         const maxMb = Math.round(TELEGRAM_MAX_MEDIA / (1024 * 1024));
@@ -1521,6 +1648,8 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
       } catch {}
 
       onSendMessage({
+        chatId: originChatId,
+        accountId: originAccountId,
         sender: 'me',
         isAudio: true,
         audioUrl: previewUrl,
@@ -1896,6 +2025,37 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
       return;
     }
 
+    const originChatId = msg.chatId || chat?.id || '';
+    const originAccountId = msg.accountId || currentAccountId || '';
+    const persistPatch = (patch: Partial<Message>) => {
+      if (onUpdateMessage) {
+        onUpdateMessage(msg.id, patch, {
+          chatId: originChatId,
+          accountId: originAccountId,
+        });
+        return;
+      }
+      setUncontrolledMsgPatches((prev) => ({
+        ...prev,
+        [msg.id]: { ...prev[msg.id], ...patch },
+      }));
+      if (originChatId) {
+        saveLocalMessage(originChatId, { ...msg, ...patch }, originAccountId);
+      }
+      if (typeof patch.sttText === 'string') {
+        void updateMessageSttInDb(
+          msg.id,
+          patch.sttText,
+          typeof patch.translatedText === 'string' ? patch.translatedText : undefined,
+          {
+            chatId: originChatId || undefined,
+            telegramMessageId: msg.telegramMessageId,
+            accountId: originAccountId || undefined,
+          }
+        ).catch(() => {});
+      }
+    };
+
     setTranscribingMap((prev) => ({ ...prev, [msg.id]: true }));
 
     try {
@@ -1910,27 +2070,57 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
         return;
       }
 
-      const currentInboundTarget = getInboundTargetLanguage(chat, translationSettings);
-      const translated = await translateText(
-        transcribed,
-        'Auto',
-        currentInboundTarget,
-        customLLMConfig,
-        translationSettings?.preferredEngine,
-        undefined,
-        translationSettings?.geminiModel,
-        translationSettings?.geminiApiKey,
-        translationSettings?.customModelName
-      );
+      // Immediately persist STT transcript before translation so translation errors cannot lose it
+      persistPatch({ sttText: transcribed });
 
-      if (onUpdateMessage) {
-        onUpdateMessage(msg.id, {
+      const currentInboundTarget = getInboundTargetLanguage(chat, translationSettings);
+      const isDualOffMode = Boolean(
+        customLLMConfig && (customLLMConfig.enabled === false || customLLMConfig.explicitlyDisabled)
+      );
+      const isCustomMode = Boolean(
+        !isDualOffMode && customLLMConfig?.enabled && customLLMConfig?.engineMode === 'custom'
+      );
+      const effectiveEngine = isDualOffMode
+        ? 'google'
+        : isCustomMode
+        ? 'custom_llm'
+        : translationSettings?.preferredEngine === 'google'
+        ? 'google'
+        : 'gemini';
+
+      try {
+        const translated = await translateText(
+          transcribed,
+          'Auto',
+          currentInboundTarget,
+          customLLMConfig,
+          effectiveEngine,
+          undefined,
+          translationSettings?.geminiModel,
+          translationSettings?.geminiApiKey,
+          translationSettings?.customModelName
+        );
+        persistPatch({
           sttText: transcribed,
           translatedText: translated,
+          translationError: undefined,
+          translationErrorChannel: undefined,
         });
-      } else {
-        msg.sttText = transcribed;
-        msg.translatedText = translated;
+      } catch (transErr: any) {
+        const errChannel: Message['translationErrorChannel'] =
+          effectiveEngine === 'custom_llm'
+            ? 'live_custom_llm'
+            : effectiveEngine === 'google'
+            ? 'live_google'
+            : 'live_gemini';
+        const transErrMsg = transErr?.message || '译文生成失败';
+        persistPatch({
+          sttText: transcribed,
+          translationError: transErrMsg,
+          translationErrorChannel: errChannel,
+        });
+        setSyncNotice(`语音转写已完成，但译文失败：${transErrMsg}`);
+        setTimeout(() => setSyncNotice(null), 3500);
       }
     } catch (err: any) {
       console.error('Transcribe failed', err);
@@ -1943,7 +2133,14 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
 
   const handlePlayAudio = async (msgId: string, audioUrl?: string) => {
     if (playingAudioId === msgId) {
-      audioRef.current?.pause();
+      audioPlaySeqRef.current += 1;
+      if (audioRef.current) {
+        audioRef.current.onended = null;
+        audioRef.current.ontimeupdate = null;
+        audioRef.current.onloadedmetadata = null;
+        audioRef.current.onerror = null;
+        audioRef.current.pause();
+      }
       if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
         window.speechSynthesis.cancel();
       }
@@ -1951,48 +2148,80 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
       return;
     }
 
+    const playSeq = ++audioPlaySeqRef.current;
+    const matchedMsg =
+      messages.find((m) => m.id === msgId) ||
+      cloudSearchResults?.find((m) => m.id === msgId);
+    const originChatId = matchedMsg?.chatId || chat?.id || '';
+    const originAccountId = matchedMsg?.accountId || currentAccountId || '';
+
     if (audioUrl) {
       let effectiveUrl = resolveDisplayUrl(audioUrl) || audioUrl;
       if (isSignedResourceUrlExpiringSoon(effectiveUrl)) {
         const fresh = await triggerSilentUrlRefresh(effectiveUrl, true);
+        if (audioPlaySeqRef.current !== playSeq) return;
         if (fresh) {
           effectiveUrl = fresh;
-          onUpdateMessage?.(msgId, { audioUrl: fresh });
+          onUpdateMessage?.(msgId, { audioUrl: fresh }, { chatId: originChatId, accountId: originAccountId });
         }
       }
+      if (audioPlaySeqRef.current !== playSeq) return;
       if (!audioRef.current) {
         audioRef.current = new Audio();
+      } else {
+        audioRef.current.onended = null;
+        audioRef.current.ontimeupdate = null;
+        audioRef.current.onloadedmetadata = null;
+        audioRef.current.onerror = null;
+        audioRef.current.pause();
       }
+      const audioEl = audioRef.current;
       let retriedWithFreshUrl = false;
-      audioRef.current.src = effectiveUrl;
-      audioRef.current.play().catch((err) => {
-        setPlayingAudioId(null);
-        setSyncNotice(`语音播放失败：${err?.message || '浏览器阻止或音频不可用'}`);
-        setTimeout(() => setSyncNotice(null), 3000);
-      });
+      audioEl.src = effectiveUrl;
       setPlayingAudioId(msgId);
 
-      audioRef.current.onended = () => {
+      audioEl.onloadedmetadata = () => {
+        if (audioPlaySeqRef.current !== playSeq) return;
+        if (
+          (!matchedMsg?.audioDuration || matchedMsg.audioDuration <= 0) &&
+          Number.isFinite(audioEl.duration) &&
+          audioEl.duration > 0
+        ) {
+          const decodedSeconds = Math.max(1, Math.round(audioEl.duration));
+          onUpdateMessage?.(
+            msgId,
+            { audioDuration: decodedSeconds },
+            { chatId: originChatId, accountId: originAccountId }
+          );
+        }
+      };
+
+      audioEl.onended = () => {
+        if (audioPlaySeqRef.current !== playSeq) return;
         setPlayingAudioId(null);
         setAudioProgress((prev) => ({ ...prev, [msgId]: 0 }));
       };
 
-      audioRef.current.ontimeupdate = () => {
-        if (audioRef.current && audioRef.current.duration) {
-          const prog = (audioRef.current.currentTime / audioRef.current.duration) * 100;
+      audioEl.ontimeupdate = () => {
+        if (audioPlaySeqRef.current !== playSeq) return;
+        if (audioEl.duration) {
+          const prog = (audioEl.currentTime / audioEl.duration) * 100;
           setAudioProgress((prev) => ({ ...prev, [msgId]: prog }));
         }
       };
 
-      audioRef.current.onerror = async () => {
+      audioEl.onerror = async () => {
+        if (audioPlaySeqRef.current !== playSeq) return;
         if (!retriedWithFreshUrl && isSignedResourceUrl(effectiveUrl)) {
           retriedWithFreshUrl = true;
           const nextUrl = await triggerSilentUrlRefresh(effectiveUrl, true);
-          if (nextUrl && nextUrl !== effectiveUrl && audioRef.current) {
+          if (audioPlaySeqRef.current !== playSeq) return;
+          if (nextUrl && nextUrl !== effectiveUrl && audioRef.current === audioEl) {
             effectiveUrl = nextUrl;
-            onUpdateMessage?.(msgId, { audioUrl: nextUrl });
-            audioRef.current.src = nextUrl;
-            audioRef.current.play().catch(() => {
+            onUpdateMessage?.(msgId, { audioUrl: nextUrl }, { chatId: originChatId, accountId: originAccountId });
+            audioEl.src = nextUrl;
+            audioEl.play().catch(() => {
+              if (audioPlaySeqRef.current !== playSeq) return;
               setPlayingAudioId(null);
               setAudioProgress((prev) => ({ ...prev, [msgId]: 0 }));
               setSyncNotice('语音音频加载失败，请检查网络或重新生成');
@@ -2001,11 +2230,19 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
             return;
           }
         }
+        if (audioPlaySeqRef.current !== playSeq) return;
         setPlayingAudioId(null);
         setAudioProgress((prev) => ({ ...prev, [msgId]: 0 }));
         setSyncNotice('语音音频加载失败，请检查网络或重新生成');
         setTimeout(() => setSyncNotice(null), 3000);
       };
+
+      audioEl.play().catch((err) => {
+        if (audioPlaySeqRef.current !== playSeq) return;
+        setPlayingAudioId(null);
+        setSyncNotice(`语音播放失败：${err?.message || '浏览器阻止或音频不可用'}`);
+        setTimeout(() => setSyncNotice(null), 3000);
+      });
     } else {
       // 纯净真实执行：坚决杜绝任何假数据兜底，无真实音频时不进行任何伪造播放
       setPlayingAudioId(null);
@@ -2048,6 +2285,8 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
           const audioUrl = URL.createObjectURL(audioFile);
 
           onSendMessage({
+            chatId: chat?.id,
+            accountId: currentAccountId,
             sender: 'me',
             isAudio: true,
             audioDuration: recordDurationRef.current || 1,
@@ -2129,7 +2368,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
     );
   }
 
-  const displayedMessages = cloudSearchResults !== null
+  const baseDisplayedMessages = cloudSearchResults !== null
     ? cloudSearchResults
         .filter((r) => !isMessageDeleted(r.id, currentAccountId, chat?.id))
         .map((r) => {
@@ -2145,7 +2384,10 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
           return {
             ...r,
             text: live.text,
+            sttText: live.sttText ?? r.sttText,
             translatedText: live.translatedText ?? r.translatedText,
+            translationError: live.translationError ?? r.translationError,
+            translationErrorChannel: live.translationErrorChannel ?? r.translationErrorChannel,
             imageCaption: live.imageCaption ?? r.imageCaption,
             isPinned: live.isPinned,
             isEdited: live.isEdited,
@@ -2155,17 +2397,24 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
         })
     : chatSearchQuery.trim()
     ? messages.filter((m) => {
+        const patched = uncontrolledMsgPatches[m.id] ? { ...m, ...uncontrolledMsgPatches[m.id] } : m;
         const q = chatSearchQuery.toLowerCase();
         return (
-          m.text?.toLowerCase().includes(q) ||
-          m.translatedText?.toLowerCase().includes(q) ||
-          m.sttText?.toLowerCase().includes(q) ||
-          m.fileName?.toLowerCase().includes(q) ||
-          m.imageCaption?.toLowerCase().includes(q) ||
-          m.forwardFrom?.toLowerCase().includes(q)
+          patched.text?.toLowerCase().includes(q) ||
+          patched.translatedText?.toLowerCase().includes(q) ||
+          patched.sttText?.toLowerCase().includes(q) ||
+          patched.fileName?.toLowerCase().includes(q) ||
+          patched.imageCaption?.toLowerCase().includes(q) ||
+          patched.forwardFrom?.toLowerCase().includes(q)
         );
       })
     : messages;
+
+  const displayedMessages = Object.keys(uncontrolledMsgPatches).length > 0
+    ? baseDisplayedMessages.map((m) =>
+        uncontrolledMsgPatches[m.id] ? { ...m, ...uncontrolledMsgPatches[m.id] } : m
+      )
+    : baseDisplayedMessages;
 
   const pinnedMessages = messages.filter((m) => m.isPinned);
   const safePinnedIndex = pinnedMessages.length > 0 ? pinnedBannerIndex % pinnedMessages.length : 0;
@@ -3039,7 +3288,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                           />
                         </div>
                         <div className="flex items-center justify-between text-[11px] mt-1 opacity-70 tabular-nums">
-                          <span>{msg.audioDuration ? `${msg.audioDuration}"` : '0:04'}</span>
+                          <span>{msg.audioDuration && msg.audioDuration > 0 ? `${msg.audioDuration}"` : '--'}</span>
                           <span className="flex items-center gap-1.5">
                             {(msg.isMasterVoice || msg.voiceName) && (
                               <span className="text-[10px] text-[#2481cc] dark:text-cyan-300">
@@ -3057,11 +3306,29 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                       <div className="mt-1 pt-1.5 border-t border-black/10 dark:border-white/10 text-xs">
                         <div className="text-[11px] opacity-70 mb-0.5 select-none">转文字:</div>
                         <p className="select-text cursor-text">{msg.sttText}</p>
-                        {msg.translatedText && (
+                        {msg.translatedText ? (
                           <p className="mt-1 font-medium text-[#2481cc] dark:text-[#2ba0ff] select-text cursor-text">
                             译文: {msg.translatedText}
                           </p>
-                        )}
+                        ) : msg.translationError ? (
+                          <div className="mt-1 text-[11px] text-rose-500 dark:text-rose-400 flex items-center justify-between gap-2">
+                            <span className="min-w-0 break-words">
+                              {getTranslationErrorLabel(msg.translationErrorChannel)}：{msg.translationError}
+                            </span>
+                            {onRetranslateMessage && (
+                              <button
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  void onRetranslateMessage(msg.id);
+                                }}
+                                className="shrink-0 px-1.5 py-0.5 rounded bg-rose-500/15 hover:bg-rose-500/25 text-rose-600 dark:text-rose-300 font-semibold text-[10px] cursor-pointer"
+                              >
+                                重试翻译
+                              </button>
+                            )}
+                          </div>
+                        ) : null}
                       </div>
                     ) : (
                       <button
@@ -3221,7 +3488,9 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                                   : 'border-rose-500/20 text-rose-500 dark:text-rose-400'
                               }`}
                             >
-                              <span className="min-w-0 break-words">译文失败：{msg.translationError}</span>
+                              <span className="min-w-0 break-words">
+                                {getTranslationErrorLabel(msg.translationErrorChannel)}：{msg.translationError}
+                              </span>
                               {onRetranslateMessage && (
                                 <button
                                   type="button"
@@ -3458,7 +3727,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                   <Languages className="w-3.5 h-3.5 mt-0.5 shrink-0 opacity-80" />
                   <div className="flex-1">
                     <span className="text-[10px] font-semibold text-[#64748b] dark:text-gray-400 block mb-0.5">
-                      中文对照：
+                      {getLanguageDisplayName(inboundTargetLang)}对照：
                     </span>
                     <span className="leading-relaxed font-sans text-[#1e293b] dark:text-gray-200">
                       {aiSuggestionTranslation}
@@ -3468,7 +3737,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
               ) : isTranslatingSuggestion ? (
                 <div className="pt-2 border-t border-[#e2e8f0] dark:border-white/10 text-[11px] text-[#2481cc] dark:text-[#2ba0ff] flex items-center gap-1.5 animate-pulse">
                   <Languages className="w-3 h-3 animate-spin shrink-0" />
-                  <span>正在获取中文含义翻译...</span>
+                  <span>正在获取{getLanguageDisplayName(inboundTargetLang)}含义翻译...</span>
                 </div>
               ) : null}
             </div>
@@ -3489,7 +3758,9 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                 type="button"
                 disabled={isSending}
                 onClick={async () => {
-                  if (isSending) return;
+                  if (isSending || !chat) return;
+                  const originChatId = chat.id;
+                  const originAccountId = currentAccountId;
                   setIsSending(true);
                   const targetSuggestion = aiSuggestion;
                   const targetTranslation = aiSuggestionTranslation;
@@ -3497,18 +3768,33 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                   setAiSuggestionTranslation(null);
                   try {
                     let cnTranslation = targetTranslation || '';
+                    const isDualOffSend = Boolean(
+                      customLLMConfig && (customLLMConfig.enabled === false || customLLMConfig.explicitlyDisabled)
+                    );
+                    const isCustomSend = Boolean(
+                      !isDualOffSend && customLLMConfig?.enabled && customLLMConfig?.engineMode === 'custom'
+                    );
+                    const effectiveSendRefEngine: 'gemini' | 'google' | 'custom_llm' = isDualOffSend
+                      ? 'google'
+                      : isCustomSend
+                      ? 'custom_llm'
+                      : translationSettings?.preferredEngine === 'google'
+                      ? 'google'
+                      : 'gemini';
+                    const resolvedInbound =
+                      inboundTargetLang && inboundTargetLang !== 'Auto' ? inboundTargetLang : 'Chinese';
                     if (
                       !cnTranslation &&
                       outboundTargetLang &&
-                      normalizeChatLangCode(outboundTargetLang) !== normalizeChatLangCode(inboundTargetLang)
+                      normalizeChatLangCode(outboundTargetLang) !== normalizeChatLangCode(resolvedInbound)
                     ) {
                       try {
                         cnTranslation = await translateText(
                           targetSuggestion,
                           outboundTargetLang,
-                          inboundTargetLang,
+                          resolvedInbound,
                           customLLMConfig,
-                          translationSettings?.preferredEngine || 'gemini',
+                          effectiveSendRefEngine,
                           undefined,
                           translationSettings?.geminiModel,
                           translationSettings?.geminiApiKey,
@@ -3520,6 +3806,8 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                       }
                     }
                     onSendMessage({
+                      chatId: originChatId,
+                      accountId: originAccountId,
                       sender: 'me',
                       text: targetSuggestion,
                       translatedText: cnTranslation,
@@ -3527,10 +3815,19 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                       timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false }),
                     });
                     if (replyingTo) setReplyingTo(null);
-                    const lastPeerMsg = [...messages].reverse().find((m) => m.sender === 'peer');
+                    let peerCueText = '';
+                    for (let i = messages.length - 1; i >= 0; i--) {
+                      const pm = messages[i];
+                      if (!pm || pm.sender !== 'peer') continue;
+                      const candidates = getPeerMessageNaturalTextCandidates(pm);
+                      if (candidates.length > 0) {
+                        peerCueText = candidates[0];
+                        break;
+                      }
+                    }
                     submitTrainingFeedbackApi({
                       snippet: targetSuggestion.slice(0, 500),
-                      peerCue: lastPeerMsg?.text ? lastPeerMsg.text.slice(0, 200) : undefined,
+                      peerCue: peerCueText ? peerCueText.slice(0, 200) : undefined,
                       engineLicenseKey: customLLMConfig?.engineLicenseKey,
                     }).catch(() => {});
                   } finally {
@@ -3845,7 +4142,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
           <button
             type="button"
             onClick={() => setIsVoiceStudioOpen(true)}
-            title="打开音色克隆与语音合成工作室"
+            title="打开预设音色与语音合成台"
             className="inline-flex items-center gap-1 px-2 py-1 rounded-lg text-[#64748b] hover:text-[#2481cc] hover:bg-[#f1f5f9] dark:text-[#94a3b8] dark:hover:text-[#2ba0ff] dark:hover:bg-[#101c2d] transition-colors cursor-pointer shrink-0"
           >
             <AudioWaveform className="w-3.5 h-3.5" />

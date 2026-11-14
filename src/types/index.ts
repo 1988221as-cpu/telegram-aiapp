@@ -1,3 +1,5 @@
+declare const __APP_VERSION__: string | undefined;
+
 export interface Account {
   id: string;
   name: string;
@@ -114,6 +116,7 @@ export interface Message {
   text: string;
   translatedText?: string;
   translationError?: string;
+  translationErrorChannel?: 'live_gemini' | 'live_custom_llm' | 'live_google' | 'history_google' | 'manual';
   isTranslating?: boolean;
   isAudio?: boolean;
   audioDuration?: number;

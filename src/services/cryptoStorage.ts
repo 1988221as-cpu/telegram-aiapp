@@ -1,21 +1,46 @@
 /**
- * Client-Side Web Crypto API Local Storage Encryption Engine
- * Encrypts all sensitive local storage data (chats, account info, customer memory, LLM config)
- * ensuring that data viewed in browser DevTools is encrypted (starts with "enc:gcm256:").
- * 
- * Provides 100% reliable synchronous encryption/decryption with full UTF-8 support
- * preventing data loss and empty-resets across page reloads and browser restarts.
+ * Client-Side AES-256-GCM Local Storage Encryption Engine
+ *
+ * Security Architecture:
+ * 1. Electron Desktop: Uses main-process OS-level safeStorage (Windows DPAPI) to seal the
+ *    256-bit master key on disk, performing synchronous & asynchronous AES-256-GCM encryption
+ *    across contextBridge without ever storing plaintext keys in localStorage.
+ * 2. Browser (Web Crypto API): Uses a non-extractable (extractable: false) AES-256-GCM
+ *    CryptoKey stored in IndexedDB (`hs_secure_keystore`), strictly separated from localStorage.
+ * 3. Zero Downgrade Policy: Real `enc:gcm256:<iv>:<ciphertext>` payloads are never downgraded
+ *    back to legacy stream ciphers; legacy formats (`s256:`, `sync:`, `raw:`, plain JSON)
+ *    are transparently upgraded to real AES-256-GCM on async read.
  */
 
-const KEY_STORE_KEY = 'tg_pro_crypto_seed_v1';
+const LEGACY_KEY_STORE_KEY = 'tg_pro_crypto_seed_v1';
 const ENCRYPTION_PREFIX = 'enc:gcm256:';
 const SYNC_CIPHER_PREFIX = `${ENCRYPTION_PREFIX}s256:`;
+const IDB_NAME = 'hs_secure_keystore';
+const IDB_STORE_NAME = 'keys';
+const IDB_KEY_RECORD = 'master_aes_gcm_key';
+
+interface ElectronCryptoBridge {
+  getStatus: () => { isElectron: boolean; hardwareProtected: boolean; storageMode: string };
+  encryptSync: (plaintext: string) => string | null;
+  decryptSync: (ciphertext: string) => string | null;
+  migrateLegacySeed: (legacySeedBase64: string) => boolean;
+  purgeMasterKey: () => boolean;
+}
+
+declare global {
+  interface Window {
+    humanSenseCrypto?: ElectronCryptoBridge;
+  }
+}
 
 let cachedCryptoKey: CryptoKey | null = null;
 let initPromise: Promise<CryptoKey> | null = null;
+let ephemeralNodeOrFallbackSeed: Uint8Array | null = null;
+let legacyMigratedSeedBytes: Uint8Array | null = null;
+let legacySeedChecked = false;
 const inMemoryCache = new Map<string, any>();
+const pendingAsyncWrites = new Map<string, Promise<void>>();
 
-// Convert Uint8Array to Base64 string
 function bytesToBase64(bytes: Uint8Array): string {
   let binary = '';
   const len = bytes.byteLength;
@@ -25,7 +50,6 @@ function bytesToBase64(bytes: Uint8Array): string {
   return btoa(binary);
 }
 
-// Convert Base64 string to Uint8Array
 function base64ToBytes(base64: string): Uint8Array {
   const binary = atob(base64);
   const len = binary.length;
@@ -36,30 +60,97 @@ function base64ToBytes(base64: string): Uint8Array {
   return bytes;
 }
 
-/**
- * Retrieves or initializes the persistent 256-bit key seed synchronously.
- */
-function getRawKeyBytesSync(): Uint8Array {
-  if (typeof window === 'undefined') return new Uint8Array(32);
-  let rawKeyBase64 = localStorage.getItem(KEY_STORE_KEY);
-  if (rawKeyBase64) {
-    try {
-      const bytes = base64ToBytes(rawKeyBase64);
-      if (bytes.length === 32) return bytes;
-    } catch {}
+function getElectronBridge(): ElectronCryptoBridge | null {
+  if (typeof window === 'undefined') return null;
+  const bridge = window.humanSenseCrypto;
+  if (
+    bridge &&
+    typeof bridge.getStatus === 'function' &&
+    typeof bridge.encryptSync === 'function' &&
+    typeof bridge.decryptSync === 'function'
+  ) {
+    return bridge;
   }
-  const cryptoObj = typeof globalThis !== 'undefined' ? globalThis.crypto : undefined;
-  const bytes =
-    cryptoObj && typeof cryptoObj.getRandomValues === 'function'
-      ? cryptoObj.getRandomValues(new Uint8Array(32))
-      : new Uint8Array(32).map(() => Math.floor(Math.random() * 256));
-  localStorage.setItem(KEY_STORE_KEY, bytesToBase64(bytes));
-  return bytes;
+  return null;
+}
+
+function hasWebCryptoSubtle(): boolean {
+  return (
+    typeof window !== 'undefined' &&
+    Boolean(window.crypto && window.crypto.subtle && typeof window.crypto.subtle.encrypt === 'function')
+  );
+}
+
+export function isTrueAesGcmCiphertext(raw: string | null | undefined): boolean {
+  if (!raw || typeof raw !== 'string') return false;
+  if (!raw.startsWith(ENCRYPTION_PREFIX)) return false;
+  if (
+    raw.startsWith(SYNC_CIPHER_PREFIX) ||
+    raw.startsWith(`${ENCRYPTION_PREFIX}sync:`) ||
+    raw.startsWith(`${ENCRYPTION_PREFIX}raw:`)
+  ) {
+    return false;
+  }
+  const rest = raw.slice(ENCRYPTION_PREFIX.length);
+  const parts = rest.split(':');
+  return parts.length === 2 && parts[0].length > 0 && parts[1].length > 0;
 }
 
 /**
- * Fast, reversible 256-bit synchronous stream cipher keystream generator
- * initialized from key (32 bytes) + IV (12 bytes).
+ * Consumes any legacy plaintext seed left in localStorage from older versions,
+ * migrating it into Electron DPAPI or IndexedDB and deleting it from localStorage.
+ */
+function consumeLegacyLocalStorageSeedOnce(): Uint8Array | null {
+  if (legacySeedChecked) return legacyMigratedSeedBytes;
+  legacySeedChecked = true;
+  if (typeof window === 'undefined') return null;
+  try {
+    const rawKeyBase64 = localStorage.getItem(LEGACY_KEY_STORE_KEY);
+    if (!rawKeyBase64) return null;
+    const bytes = base64ToBytes(rawKeyBase64);
+    if (bytes.length === 32) {
+      legacyMigratedSeedBytes = bytes;
+      const bridge = getElectronBridge();
+      if (bridge && typeof bridge.migrateLegacySeed === 'function') {
+        try {
+          bridge.migrateLegacySeed(rawKeyBase64);
+          localStorage.removeItem(LEGACY_KEY_STORE_KEY);
+        } catch {}
+      } else if (hasWebCryptoSubtle() && typeof indexedDB !== 'undefined') {
+        // Remove plaintext seed from localStorage once imported by getOrCreateCryptoKey()
+      }
+      return legacyMigratedSeedBytes;
+    }
+  } catch {}
+  return null;
+}
+
+function getFallbackSyncKeyBytes(): Uint8Array {
+  if (typeof window === 'undefined') {
+    if (!ephemeralNodeOrFallbackSeed) {
+      const cryptoObj = typeof globalThis !== 'undefined' ? globalThis.crypto : undefined;
+      ephemeralNodeOrFallbackSeed =
+        cryptoObj && typeof cryptoObj.getRandomValues === 'function'
+          ? cryptoObj.getRandomValues(new Uint8Array(32))
+          : new Uint8Array(32).map(() => Math.floor(Math.random() * 256));
+    }
+    return ephemeralNodeOrFallbackSeed;
+  }
+  const legacy = consumeLegacyLocalStorageSeedOnce();
+  if (legacy) return legacy;
+  if (!ephemeralNodeOrFallbackSeed) {
+    const cryptoObj = typeof globalThis !== 'undefined' ? globalThis.crypto : undefined;
+    ephemeralNodeOrFallbackSeed =
+      cryptoObj && typeof cryptoObj.getRandomValues === 'function'
+        ? cryptoObj.getRandomValues(new Uint8Array(32))
+        : new Uint8Array(32).map(() => Math.floor(Math.random() * 256));
+  }
+  return ephemeralNodeOrFallbackSeed;
+}
+
+/**
+ * Legacy s256 synchronous stream keystream generator (kept strictly for backward-compatible
+ * decryption of pre-upgrade data and non-WebCrypto fallback).
  */
 function generateKeystream(key: Uint8Array, iv: Uint8Array, length: number): Uint8Array {
   const stream = new Uint8Array(length);
@@ -118,87 +209,212 @@ function generateKeystream(key: Uint8Array, iv: Uint8Array, length: number): Uin
   return stream;
 }
 
+// ==================== INDEXEDDB KEYSTORE (NON-EXTRACTABLE CRYPTOKEY) ====================
+
+function openKeystoreDb(): Promise<IDBDatabase> {
+  return new Promise((resolve, reject) => {
+    if (typeof indexedDB === 'undefined') {
+      reject(new Error('IndexedDB unavailable'));
+      return;
+    }
+    const req = indexedDB.open(IDB_NAME, 1);
+    req.onupgradeneeded = () => {
+      const db = req.result;
+      if (!db.objectStoreNames.contains(IDB_STORE_NAME)) {
+        db.createObjectStore(IDB_STORE_NAME);
+      }
+    };
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error || new Error('IndexedDB open error'));
+  });
+}
+
+async function readKeyFromIdb(): Promise<CryptoKey | null> {
+  try {
+    const db = await openKeystoreDb();
+    return await new Promise<CryptoKey | null>((resolve) => {
+      const tx = db.transaction(IDB_STORE_NAME, 'readonly');
+      const store = tx.objectStore(IDB_STORE_NAME);
+      const getReq = store.get(IDB_KEY_RECORD);
+      getReq.onsuccess = () => resolve((getReq.result as CryptoKey) || null);
+      getReq.onerror = () => resolve(null);
+      tx.oncomplete = () => {
+        try { db.close(); } catch {}
+      };
+    });
+  } catch {
+    return null;
+  }
+}
+
+async function writeKeyToIdb(key: CryptoKey): Promise<void> {
+  try {
+    const db = await openKeystoreDb();
+    await new Promise<void>((resolve) => {
+      const tx = db.transaction(IDB_STORE_NAME, 'readwrite');
+      const store = tx.objectStore(IDB_STORE_NAME);
+      store.put(key, IDB_KEY_RECORD);
+      tx.oncomplete = () => {
+        try { db.close(); } catch {}
+        resolve();
+      };
+      tx.onerror = () => resolve();
+    });
+  } catch {}
+}
+
+async function deleteKeyFromIdb(): Promise<void> {
+  try {
+    const db = await openKeystoreDb();
+    await new Promise<void>((resolve) => {
+      const tx = db.transaction(IDB_STORE_NAME, 'readwrite');
+      const store = tx.objectStore(IDB_STORE_NAME);
+      store.delete(IDB_KEY_RECORD);
+      tx.oncomplete = () => {
+        try { db.close(); } catch {}
+        resolve();
+      };
+      tx.onerror = () => resolve();
+    });
+  } catch {}
+}
+
 /**
- * Initializes or retrieves the persistent AES-256-GCM CryptoKey using Web Crypto API.
+ * Initializes or retrieves the persistent non-extractable AES-256-GCM CryptoKey.
+ * Stored in IndexedDB (isolated from localStorage) with extractable = false.
  */
 export async function getOrCreateCryptoKey(): Promise<CryptoKey> {
   if (cachedCryptoKey) return cachedCryptoKey;
   if (initPromise) return initPromise;
 
   initPromise = (async () => {
-    if (typeof window === 'undefined' || !window.crypto || !window.crypto.subtle) {
+    if (!hasWebCryptoSubtle()) {
       throw new Error('Web Crypto API (subtle) is not available in this environment');
     }
 
-    const rawKeyBytes = getRawKeyBytesSync();
+    // 1. Check IndexedDB for existing non-extractable CryptoKey
+    const existingIdbKey = await readKeyFromIdb();
+    if (existingIdbKey) {
+      consumeLegacyLocalStorageSeedOnce();
+      try {
+        localStorage.removeItem(LEGACY_KEY_STORE_KEY);
+      } catch {}
+      cachedCryptoKey = existingIdbKey;
+      return existingIdbKey;
+    }
 
-    const key = await window.crypto.subtle.importKey(
-      'raw',
-      rawKeyBytes.buffer as unknown as BufferSource,
-      { name: 'AES-GCM', length: 256 },
-      false,
-      ['encrypt', 'decrypt']
-    );
+    // 2. Migrate any legacy localStorage seed into a non-extractable IndexedDB CryptoKey, then delete plaintext seed
+    const legacySeed = consumeLegacyLocalStorageSeedOnce();
+    let key: CryptoKey;
+    if (legacySeed) {
+      key = await window.crypto.subtle.importKey(
+        'raw',
+        legacySeed.buffer as unknown as BufferSource,
+        { name: 'AES-GCM', length: 256 },
+        false,
+        ['encrypt', 'decrypt']
+      );
+    } else {
+      key = await window.crypto.subtle.generateKey(
+        { name: 'AES-GCM', length: 256 },
+        false,
+        ['encrypt', 'decrypt']
+      );
+    }
 
+    await writeKeyToIdb(key);
+    try {
+      localStorage.removeItem(LEGACY_KEY_STORE_KEY);
+    } catch {}
     cachedCryptoKey = key;
     return key;
-  })();
+  })().catch((err) => {
+    initPromise = null;
+    throw err;
+  });
 
   return initPromise;
 }
 
-// Trigger initialization immediately
-if (typeof window !== 'undefined' && window.crypto && window.crypto.subtle) {
-  getOrCreateCryptoKey().catch((err) => {
-    console.warn('[WebCryptoStorage] Key initialization warning:', err);
-  });
+if (typeof window !== 'undefined') {
+  consumeLegacyLocalStorageSeedOnce();
+  if (!getElectronBridge() && hasWebCryptoSubtle()) {
+    getOrCreateCryptoKey().catch((err) => {
+      console.warn('[WebCryptoStorage] Key initialization warning:', err);
+    });
+  }
+}
+
+function encryptFallbackSyncStream(dataStr: string): string {
+  const keyBytes = getFallbackSyncKeyBytes();
+  const cryptoObj = typeof globalThis !== 'undefined' ? globalThis.crypto : undefined;
+  const iv =
+    cryptoObj && typeof cryptoObj.getRandomValues === 'function'
+      ? cryptoObj.getRandomValues(new Uint8Array(12))
+      : new Uint8Array(12).map(() => Math.floor(Math.random() * 256));
+
+  const encoder = new TextEncoder();
+  const utf8Bytes = encoder.encode(dataStr);
+  const keystream = generateKeystream(keyBytes, iv, utf8Bytes.length);
+
+  const ciphertext = new Uint8Array(utf8Bytes.length);
+  for (let i = 0; i < utf8Bytes.length; i++) {
+    ciphertext[i] = utf8Bytes[i] ^ keystream[i];
+  }
+
+  return `${SYNC_CIPHER_PREFIX}${bytesToBase64(iv)}:${bytesToBase64(ciphertext)}`;
 }
 
 /**
- * Synchronous encryption: Uses 256-bit key seed + 12-byte random IV + UTF-8 TextEncoder.
- * Formats output as: enc:gcm256:s256:<iv_base64>:<ciphertext_base64>
+ * Synchronous encryption:
+ * - In Electron: Uses genuine OS-backed AES-256-GCM via safeStorage master key (`enc:gcm256:<iv>:<ct+tag>`).
+ * - Outside Electron (Node tests / insecure fallback): Uses ephemeral-key synchronous stream cipher (`enc:gcm256:s256:...`).
  */
 export function encryptDataSync(dataStr: string): string {
-  try {
-    const keyBytes = getRawKeyBytesSync();
-    const cryptoObj = typeof globalThis !== 'undefined' ? globalThis.crypto : undefined;
-    const iv =
-      cryptoObj && typeof cryptoObj.getRandomValues === 'function'
-        ? cryptoObj.getRandomValues(new Uint8Array(12))
-        : new Uint8Array(12).map(() => Math.floor(Math.random() * 256));
-
-    const encoder = new TextEncoder();
-    const utf8Bytes = encoder.encode(dataStr);
-    const keystream = generateKeystream(keyBytes, iv, utf8Bytes.length);
-
-    const ciphertext = new Uint8Array(utf8Bytes.length);
-    for (let i = 0; i < utf8Bytes.length; i++) {
-      ciphertext[i] = utf8Bytes[i] ^ keystream[i];
+  const bridge = getElectronBridge();
+  if (bridge) {
+    const gcmCipher = bridge.encryptSync(dataStr);
+    if (gcmCipher && isTrueAesGcmCiphertext(gcmCipher)) {
+      return gcmCipher;
     }
+  }
+  return encryptFallbackSyncStream(dataStr);
+}
 
-    return `${SYNC_CIPHER_PREFIX}${bytesToBase64(iv)}:${bytesToBase64(ciphertext)}`;
-  } catch (err) {
-    console.warn('[WebCryptoStorage] Sync encryption warning:', err);
-    throw err;
+function parseDecodedValue<T = any>(jsonStr: string): T {
+  try {
+    return JSON.parse(jsonStr) as T;
+  } catch {
+    return jsonStr as unknown as T;
   }
 }
 
 /**
- * Synchronous decryption: Reverses 256-bit stream cipher or legacy fallback formats.
+ * Synchronous decryption:
+ * - Supports Electron DPAPI-backed `enc:gcm256:<iv>:<ct+tag>`
+ * - Supports legacy `enc:gcm256:s256:`, `enc:gcm256:sync:`, `enc:gcm256:raw:`, and plain JSON.
  */
 export function decryptDataSync<T = any>(encryptedStr: string | null): T | null {
   if (!encryptedStr) return null;
 
   // 1. Unencrypted legacy data
   if (!encryptedStr.startsWith(ENCRYPTION_PREFIX)) {
-    try {
-      return JSON.parse(encryptedStr) as T;
-    } catch {
-      return encryptedStr as unknown as T;
-    }
+    return parseDecodedValue<T>(encryptedStr);
   }
 
-  // 2. New 256-bit Synchronous Cipher format: enc:gcm256:s256:<iv>:<ciphertext>
+  // 2. True AES-256-GCM via Electron DPAPI bridge
+  if (isTrueAesGcmCiphertext(encryptedStr)) {
+    const bridge = getElectronBridge();
+    if (bridge) {
+      const plain = bridge.decryptSync(encryptedStr);
+      if (plain !== null) {
+        return parseDecodedValue<T>(plain);
+      }
+    }
+    return null;
+  }
+
+  // 3. Legacy 256-bit Synchronous Cipher format: enc:gcm256:s256:<iv>:<ciphertext>
   if (encryptedStr.startsWith(SYNC_CIPHER_PREFIX)) {
     try {
       const payload = encryptedStr.slice(SYNC_CIPHER_PREFIX.length);
@@ -208,7 +424,7 @@ export function decryptDataSync<T = any>(encryptedStr: string | null): T | null 
       const [ivBase64, ciphertextBase64] = parts;
       const iv = base64ToBytes(ivBase64);
       const ciphertext = base64ToBytes(ciphertextBase64);
-      const keyBytes = getRawKeyBytesSync();
+      const keyBytes = getFallbackSyncKeyBytes();
 
       const keystream = generateKeystream(keyBytes, iv, ciphertext.length);
       const plainBytes = new Uint8Array(ciphertext.length);
@@ -217,19 +433,14 @@ export function decryptDataSync<T = any>(encryptedStr: string | null): T | null 
       }
 
       const decoder = new TextDecoder();
-      const jsonStr = decoder.decode(plainBytes);
-      try {
-        return JSON.parse(jsonStr) as T;
-      } catch {
-        return jsonStr as unknown as T;
-      }
+      return parseDecodedValue<T>(decoder.decode(plainBytes));
     } catch (err) {
       console.warn('[WebCryptoStorage] Decrypt s256 warning:', err);
       return null;
     }
   }
 
-  // 3. Legacy sync format: enc:gcm256:sync:<bytes>
+  // 4. Legacy sync format: enc:gcm256:sync:<bytes>
   if (encryptedStr.startsWith(`${ENCRYPTION_PREFIX}sync:`)) {
     try {
       const b64 = encryptedStr.slice(`${ENCRYPTION_PREFIX}sync:`.length);
@@ -255,7 +466,7 @@ export function decryptDataSync<T = any>(encryptedStr: string | null): T | null 
     }
   }
 
-  // 4. Fallback raw b64
+  // 5. Fallback raw b64
   if (encryptedStr.startsWith(`${ENCRYPTION_PREFIX}raw:`)) {
     try {
       const b64 = encryptedStr.slice(`${ENCRYPTION_PREFIX}raw:`.length);
@@ -270,50 +481,53 @@ export function decryptDataSync<T = any>(encryptedStr: string | null): T | null 
 }
 
 /**
- * Asynchronously encrypts arbitrary data using Web Crypto API AES-256-GCM.
- * Output format: enc:gcm256:<iv_base64>:<ciphertext_base64>
+ * Asynchronously encrypts arbitrary data using genuine AES-256-GCM.
+ * Output format: enc:gcm256:<iv_base64>:<ciphertext_plus_tag_base64>
  */
 export async function encryptDataAsync(data: any): Promise<string> {
   const jsonStr = typeof data === 'string' ? data : JSON.stringify(data);
 
-  if (typeof window === 'undefined' || !window.crypto || !window.crypto.subtle) {
-    return encryptDataSync(jsonStr);
+  const bridge = getElectronBridge();
+  if (bridge) {
+    const gcmCipher = bridge.encryptSync(jsonStr);
+    if (gcmCipher && isTrueAesGcmCiphertext(gcmCipher)) {
+      return gcmCipher;
+    }
   }
 
-  try {
-    const key = await getOrCreateCryptoKey();
-    const iv = window.crypto.getRandomValues(new Uint8Array(12));
-    const encoder = new TextEncoder();
-    const encodedData = encoder.encode(jsonStr);
-
-    const ciphertextBuffer = await window.crypto.subtle.encrypt(
-      { name: 'AES-GCM', iv: iv as unknown as BufferSource },
-      key,
-      encodedData as unknown as BufferSource
-    );
-
-    const ivBase64 = bytesToBase64(iv);
-    const ciphertextBase64 = bytesToBase64(new Uint8Array(ciphertextBuffer));
-
-    return `${ENCRYPTION_PREFIX}${ivBase64}:${ciphertextBase64}`;
-  } catch (err) {
-    console.error('[WebCryptoStorage] Encryption error:', err);
-    return encryptDataSync(jsonStr);
+  if (!hasWebCryptoSubtle()) {
+    return encryptFallbackSyncStream(jsonStr);
   }
+
+  const key = await getOrCreateCryptoKey();
+  const iv = window.crypto.getRandomValues(new Uint8Array(12));
+  const encoder = new TextEncoder();
+  const encodedData = encoder.encode(jsonStr);
+
+  const ciphertextBuffer = await window.crypto.subtle.encrypt(
+    { name: 'AES-GCM', iv: iv as unknown as BufferSource },
+    key,
+    encodedData as unknown as BufferSource
+  );
+
+  const ivBase64 = bytesToBase64(iv);
+  const ciphertextBase64 = bytesToBase64(new Uint8Array(ciphertextBuffer));
+
+  return `${ENCRYPTION_PREFIX}${ivBase64}:${ciphertextBase64}`;
 }
 
 /**
- * Asynchronously decrypts an encrypted payload string using Web Crypto API AES-256-GCM.
- * Supports backward compatibility for plain JSON strings or unencrypted data.
+ * Asynchronously decrypts an encrypted payload string using AES-256-GCM
+ * or legacy fallback formats (for seamless zero-data-loss migration).
  */
 export async function decryptDataAsync<T = any>(encryptedStr: string | null): Promise<T | null> {
   if (!encryptedStr) return null;
 
-  // Try sync decrypt first (covers s256, sync, raw, and plain unencrypted JSON)
+  // Try sync decrypt first (covers Electron DPAPI AES-GCM, s256, sync, raw, and plain JSON)
   const syncResult = decryptDataSync<T>(encryptedStr);
   if (syncResult !== null) return syncResult;
 
-  if (typeof window === 'undefined' || !window.crypto || !window.crypto.subtle) {
+  if (!hasWebCryptoSubtle() || !isTrueAesGcmCiphertext(encryptedStr)) {
     return null;
   }
 
@@ -335,12 +549,7 @@ export async function decryptDataAsync<T = any>(encryptedStr: string | null): Pr
 
     const decoder = new TextDecoder();
     const jsonStr = decoder.decode(decryptedBuffer);
-
-    try {
-      return JSON.parse(jsonStr) as T;
-    } catch {
-      return jsonStr as unknown as T;
-    }
+    return parseDecodedValue<T>(jsonStr);
   } catch (err) {
     console.error('[WebCryptoStorage] Async decryption error:', err);
     return null;
@@ -348,13 +557,11 @@ export async function decryptDataAsync<T = any>(encryptedStr: string | null): Pr
 }
 
 /**
- * Synchronously reads and decrypts an item from localStorage.
- * Guarantees that data is never wiped on refresh.
+ * Synchronously reads from in-memory cache or decrypts synchronously when supported.
  */
 export function secureGetItemSync<T = any>(storageKey: string): T | null {
   if (typeof window === 'undefined') return null;
 
-  // 1. Check in-memory cache first
   if (inMemoryCache.has(storageKey)) {
     return inMemoryCache.get(storageKey) as T;
   }
@@ -371,26 +578,101 @@ export function secureGetItemSync<T = any>(storageKey: string): T | null {
   return null;
 }
 
+function enqueueAsyncAesGcmPersist(storageKey: string, data: any): void {
+  const prev = pendingAsyncWrites.get(storageKey) || Promise.resolve();
+  const next = prev
+    .catch(() => {})
+    .then(async () => {
+      // Only write if cache was not subsequently purged/removed
+      if (!inMemoryCache.has(storageKey)) return;
+      const latestData = inMemoryCache.get(storageKey);
+      const encrypted = await encryptDataAsync(latestData !== undefined ? latestData : data);
+      if (inMemoryCache.has(storageKey)) {
+        localStorage.setItem(storageKey, encrypted);
+      }
+    })
+    .catch((err) => {
+      console.warn('[WebCryptoStorage] Async AES-256-GCM persist warning:', err);
+    })
+    .finally(() => {
+      if (pendingAsyncWrites.get(storageKey) === next) {
+        pendingAsyncWrites.delete(storageKey);
+      }
+    });
+  pendingAsyncWrites.set(storageKey, next);
+}
+
 /**
- * Saves and encrypts an item into localStorage synchronously and persistently.
+ * Flushes all pending async AES-256-GCM writes to localStorage.
  */
-export function secureSetItemSync(storageKey: string, data: any): void {
+export async function flushPendingCryptoWrites(): Promise<void> {
+  const inflight = Array.from(pendingAsyncWrites.values());
+  if (inflight.length > 0) {
+    await Promise.allSettled(inflight);
+  }
+}
+
+if (typeof window !== 'undefined' && typeof window.addEventListener === 'function') {
+  window.addEventListener('pagehide', () => {
+    void flushPendingCryptoWrites();
+  });
+  if (typeof document !== 'undefined' && typeof document.addEventListener === 'function') {
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'hidden') {
+        void flushPendingCryptoWrites();
+      }
+    });
+  }
+}
+
+/**
+ * Asynchronously encrypts and persists an item using genuine AES-256-GCM.
+ */
+export async function secureSetItemAsync(storageKey: string, data: any): Promise<void> {
   if (typeof window === 'undefined') return;
-
-  // Update in-memory cache immediately
   inMemoryCache.set(storageKey, data);
-
-  const jsonStr = typeof data === 'string' ? data : JSON.stringify(data);
-  // Encrypt with persistent 256-bit synchronous cipher
-  const encrypted = encryptDataSync(jsonStr);
+  const encrypted = await encryptDataAsync(data);
   localStorage.setItem(storageKey, encrypted);
 }
 
 /**
- * Asynchronously retrieves and decrypts item from localStorage using Web Crypto API.
+ * Saves an item into in-memory cache synchronously and persists as genuine AES-256-GCM:
+ * - In Electron: synchronous DPAPI + AES-256-GCM via main process IPC.
+ * - In Browser: serialized WebCrypto AES-256-GCM write using IndexedDB non-extractable key
+ *   (never stores plaintext seed or s256 XOR ciphertext when WebCrypto is available).
+ */
+export function secureSetItemSync(storageKey: string, data: any): void {
+  if (typeof window === 'undefined') return;
+
+  inMemoryCache.set(storageKey, data);
+
+  const bridge = getElectronBridge();
+  if (bridge) {
+    const jsonStr = typeof data === 'string' ? data : JSON.stringify(data);
+    const gcmCipher = bridge.encryptSync(jsonStr);
+    if (gcmCipher && isTrueAesGcmCiphertext(gcmCipher)) {
+      localStorage.setItem(storageKey, gcmCipher);
+      return;
+    }
+  }
+
+  if (hasWebCryptoSubtle()) {
+    enqueueAsyncAesGcmPersist(storageKey, data);
+    return;
+  }
+
+  const jsonStr = typeof data === 'string' ? data : JSON.stringify(data);
+  localStorage.setItem(storageKey, encryptFallbackSyncStream(jsonStr));
+}
+
+/**
+ * Asynchronously retrieves and decrypts an item from localStorage using AES-256-GCM.
+ * Never downgrades true `enc:gcm256:` ciphertext; upgrades legacy formats to real AES-256-GCM.
  */
 export async function secureGetItemAsync<T = any>(storageKey: string): Promise<T | null> {
   if (typeof window === 'undefined') return null;
+
+  await flushPendingCryptoWrites();
 
   if (inMemoryCache.has(storageKey)) {
     return inMemoryCache.get(storageKey) as T;
@@ -402,9 +684,10 @@ export async function secureGetItemAsync<T = any>(storageKey: string): Promise<T
   const decrypted = await decryptDataAsync<T>(raw);
   if (decrypted !== null) {
     inMemoryCache.set(storageKey, decrypted);
-    // If it was stored in old async-only format, upgrade to s256 format for fast sync read next time
-    if (!raw.startsWith(SYNC_CIPHER_PREFIX)) {
-      secureSetItemSync(storageKey, decrypted);
+    // Upgrade legacy formats (s256:, sync:, raw:, or plain JSON) to real AES-256-GCM;
+    // NEVER overwrite/downgrade true AES-256-GCM ciphertext.
+    if (!isTrueAesGcmCiphertext(raw)) {
+      await secureSetItemAsync(storageKey, decrypted);
     }
     return decrypted;
   }
@@ -416,6 +699,7 @@ export async function secureGetItemAsync<T = any>(storageKey: string): Promise<T
  */
 export function secureRemoveItem(storageKey: string): void {
   inMemoryCache.delete(storageKey);
+  pendingAsyncWrites.delete(storageKey);
   if (typeof window !== 'undefined') {
     try {
       localStorage.removeItem(storageKey);
@@ -425,24 +709,76 @@ export function secureRemoveItem(storageKey: string): void {
 
 /**
  * Clears in-memory decryption caches and cached Web Crypto key so restored backups
- * immediately read from the updated localStorage values and seed.
+ * immediately read from the updated localStorage values and key store.
  */
 export function clearCryptoStorageCache(): void {
   inMemoryCache.clear();
+  pendingAsyncWrites.clear();
   cachedCryptoKey = null;
   initPromise = null;
 }
 
 /**
- * Purges both the in-memory decryption cache and the persisted encryption seed key.
- * Call on explicit logout / local privacy shred so no decryption material remains.
+ * Purges the in-memory cache and all isolated key custody material (Electron DPAPI key,
+ * IndexedDB CryptoKey, and any legacy localStorage seed).
  */
 export function purgeCryptoSeed(): void {
   clearCryptoStorageCache();
+  ephemeralNodeOrFallbackSeed = null;
+  legacyMigratedSeedBytes = null;
+  legacySeedChecked = false;
   if (typeof window !== 'undefined') {
     try {
-      localStorage.removeItem(KEY_STORE_KEY);
+      localStorage.removeItem(LEGACY_KEY_STORE_KEY);
     } catch {}
+    const bridge = getElectronBridge();
+    if (bridge && typeof bridge.purgeMasterKey === 'function') {
+      try {
+        bridge.purgeMasterKey();
+      } catch {}
+    }
+    void deleteKeyFromIdb();
   }
 }
 
+export function getCryptoStorageSecurityInfo(): {
+  mode: 'dpapi_aes_gcm' | 'electron_aes_gcm' | 'webcrypto_idb_aes_gcm' | 'fallback_stream';
+  label: string;
+  detail: string;
+  hardwareProtected: boolean;
+} {
+  const bridge = getElectronBridge();
+  if (bridge) {
+    try {
+      const status = bridge.getStatus();
+      if (status?.hardwareProtected) {
+        return {
+          mode: 'dpapi_aes_gcm',
+          label: 'OS DPAPI + AES-256-GCM（同步落盘）',
+          detail: '由 Electron 主进程通过 Windows DPAPI 封存主密钥并执行真实同步 AES-256-GCM 加密。',
+          hardwareProtected: true,
+        };
+      }
+      return {
+        mode: 'electron_aes_gcm',
+        label: '主进程密钥 + AES-256-GCM（DPAPI 未启用）',
+        detail: '由 Electron 主进程隔离密钥文件执行同步 AES-256-GCM 加密（系统级 DPAPI 不可用）。',
+        hardwareProtected: false,
+      };
+    } catch {}
+  }
+  if (hasWebCryptoSubtle()) {
+    return {
+      mode: 'webcrypto_idb_aes_gcm',
+      label: 'WebCrypto AES-256-GCM（异步落盘）',
+      detail: '浏览器环境：不可导出 CryptoKey 隔离于 IndexedDB，缓存写入以异步 AES-256-GCM 队列落盘。',
+      hardwareProtected: false,
+    };
+  }
+  return {
+    mode: 'fallback_stream',
+    label: '未启用 AES-256-GCM（非安全上下文临时混淆）',
+    detail: '当前环境缺少 Electron 桥接与 WebCrypto 安全上下文，仅使用临时流混淆且不可视作硬件级加密。',
+    hardwareProtected: false,
+  };
+}

@@ -16,6 +16,11 @@ import {
   SystemProxyConfig,
 } from '../types';
 import { normalizeLanguageCode } from '../data/mockData';
+import { clearAccountPendingMediaBlobs, purgeAllPendingMediaBlobs } from './pendingMediaStorage';
+
+declare const __APP_VERSION__: string | undefined;
+export const APP_VERSION =
+  typeof __APP_VERSION__ !== 'undefined' && __APP_VERSION__ ? __APP_VERSION__ : '1.0.0';
 
 // ==================== SESSION TOKEN & TENANT AUTHENTICATION HELPERS ====================
 
@@ -1227,11 +1232,26 @@ export async function generateTTSVoice(
   customConfig?: CustomLLMConfig,
   importance: 'normal' | 'high' = 'normal',
   emotion: string = '',
-  model: string = 'gemini-3.8-flash-tts'
-): Promise<{ audioUrl?: string; format?: string; modelUsed?: string; routingReason?: string; error?: string }> {
+  model: string = 'gemini-3.8-flash-tts',
+  options?: { speechRate?: number; pitch?: number }
+): Promise<{
+  audioUrl?: string;
+  format?: string;
+  modelUsed?: string;
+  routingReason?: string;
+  speechRate?: number;
+  pitch?: number;
+  audioProcessed?: boolean;
+  error?: string;
+}> {
   try {
     const cleanBaseUrl = (customConfig?.baseUrl || '').trim();
     const cleanApiKey = (customConfig?.apiKey || '').trim();
+    const explicitProtocol = customConfig?.protocol;
+    const resolvedProtocol =
+      explicitProtocol === 'gemini' || explicitProtocol === 'openai' || explicitProtocol === 'anthropic'
+        ? explicitProtocol
+        : inferGatewayProtocolFromUrlAndModel(cleanBaseUrl, model);
     const ttsGatewayConfig =
       customConfig || cleanBaseUrl || cleanApiKey
         ? {
@@ -1242,10 +1262,20 @@ export async function generateTTSVoice(
             ...(customConfig?.engineMode ? { engineMode: customConfig.engineMode } : {}),
             baseUrl: cleanBaseUrl,
             apiKey: cleanApiKey,
-            protocol: inferGatewayProtocolFromUrlAndModel(cleanBaseUrl, model),
+            protocol: resolvedProtocol,
+            ...(customConfig?.modelName ? { modelName: customConfig.modelName } : {}),
             customHeaders: customConfig?.customHeaders || '',
           }
         : undefined;
+
+    const speechRate =
+      typeof options?.speechRate === 'number' && Number.isFinite(options.speechRate)
+        ? Math.min(1.5, Math.max(0.7, options.speechRate))
+        : 1.0;
+    const pitch =
+      typeof options?.pitch === 'number' && Number.isFinite(options.pitch)
+        ? Math.min(1.5, Math.max(0.7, options.pitch))
+        : 1.0;
 
     const res = await fetchWithTimeout(
       '/api/audio/tts-clone',
@@ -1259,6 +1289,8 @@ export async function generateTTSVoice(
           importance,
           emotion,
           model,
+          speechRate,
+          pitch,
           customConfig: ttsGatewayConfig,
         }),
       },
@@ -1627,6 +1659,36 @@ export async function updateMessageTranslationInDb(
   }
 }
 
+export async function updateMessageSttInDb(
+  messageId: string,
+  sttText: string,
+  translatedText?: string,
+  meta?: { chatId?: string; telegramMessageId?: number; accountId?: string }
+): Promise<boolean> {
+  try {
+    const effectiveAcc = meta?.accountId || currentActiveAccountId;
+    const res = await fetchWithTimeout(
+      `/api/messages/${encodeURIComponent(messageId)}/translation`,
+      {
+        method: 'PATCH',
+        headers: getAuthHeaders(effectiveAcc),
+        body: JSON.stringify({
+          sttText,
+          ...(typeof translatedText === 'string' ? { translatedText } : {}),
+          chatId: meta?.chatId,
+          telegramMessageId: meta?.telegramMessageId,
+          accountId: effectiveAcc,
+        }),
+      },
+      10000
+    );
+    return res.ok;
+  } catch (err) {
+    console.warn('Failed to update message STT in DB:', err);
+    return false;
+  }
+}
+
 function dataUrlToBlob(dataUrl: string): Blob | null {
   try {
     const commaIdx = dataUrl.indexOf(',');
@@ -1913,16 +1975,25 @@ export async function retryMessageDelivery(
 }
 
 export async function fetchCustomerProfile(chatId: string, accountId?: string): Promise<CustomerProfile | null> {
+  const effectiveAccountId = accountId || currentActiveAccountId;
   try {
     const res = await fetchWithTimeout(
       `/api/customer/profile/${chatId}`,
       {
-        headers: getAuthHeaders(accountId),
+        headers: getAuthHeaders(effectiveAccountId),
       },
       10000
     );
     if (res.ok) {
-      return await res.json();
+      const data = await res.json();
+      if (data && typeof data === 'object') {
+        return {
+          ...data,
+          chatId: data.chatId || chatId,
+          accountId: data.accountId || effectiveAccountId,
+        };
+      }
+      return data;
     }
   } catch (err) {
     console.warn('Failed to load customer profile from DB:', err);
@@ -2637,6 +2708,13 @@ export function saveLocalMessage(chatId: string, message: Message, accountId?: s
     } else {
       let changed = false;
       if (
+        message.sttText !== undefined &&
+        message.sttText !== existing[existingIdx].sttText
+      ) {
+        existing[existingIdx].sttText = message.sttText;
+        changed = true;
+      }
+      if (
         message.translatedText !== undefined &&
         message.translatedText !== existing[existingIdx].translatedText
       ) {
@@ -2645,6 +2723,13 @@ export function saveLocalMessage(chatId: string, message: Message, accountId?: s
       }
       if ('translationError' in message && message.translationError !== existing[existingIdx].translationError) {
         existing[existingIdx].translationError = message.translationError;
+        changed = true;
+      }
+      if (
+        'translationErrorChannel' in message &&
+        message.translationErrorChannel !== existing[existingIdx].translationErrorChannel
+      ) {
+        existing[existingIdx].translationErrorChannel = message.translationErrorChannel;
         changed = true;
       }
       if (incomingTgId !== undefined && !existing[existingIdx].telegramMessageId) {
@@ -2733,6 +2818,7 @@ export function clearAccountLocalCache(accountId: string, unsharedChatIds: strin
     }
 
     new Set(keysToRemove).forEach((k) => secureRemoveItem(k));
+    void clearAccountPendingMediaBlobs(accountId);
 
     if (localStorage.getItem(ACTIVE_ACCOUNT_STORAGE_KEY) === accountId) {
       localStorage.removeItem(ACTIVE_ACCOUNT_STORAGE_KEY);
@@ -2760,6 +2846,7 @@ export function purgeAllLocalChatData(): void {
     }
     keysToRemove.forEach((k) => secureRemoveItem(k));
     purgeCryptoSeed();
+    void purgeAllPendingMediaBlobs();
   } catch (e) {
     console.error('Failed to purge local encrypted data', e);
   }

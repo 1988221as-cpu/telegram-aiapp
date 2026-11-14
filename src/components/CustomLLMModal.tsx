@@ -252,7 +252,7 @@ export const CustomLLMModal: React.FC<CustomLLMModalProps> = ({
         ? result.message ||
           (isCustomPriorityEnabled
             ? `优先自有密钥网关与模型 (${probeModel}) 握手成功！响应延迟 ${result.latencyMs ?? 0}ms。`
-            : `网关握手成功！响应延迟 ${result.latencyMs ?? 0}ms，可用于自定义翻译与音色克隆。`)
+            : `网关握手成功！响应延迟 ${result.latencyMs ?? 0}ms，可用于自定义翻译与语音合成。`)
         : `连接失败：${result.error || '请检查接入网址或 API 密钥'}`,
     });
   };
@@ -463,7 +463,7 @@ export const CustomLLMModal: React.FC<CustomLLMModalProps> = ({
               <div className="p-2.5 rounded-lg bg-white dark:bg-[#090f19] border border-[#e2e8f0] dark:border-[#18273a] text-[11px] text-[#475569] dark:text-[#9bb3c9] leading-relaxed">
                 <div>云端引擎模式负责：<span className="font-medium text-[#0f172a] dark:text-[#eef4fb]">智能聊天回复（含 Cloud RAG 话术）、谷歌大模型 (Gemma 4 26B / 31B) 翻译、客户全息记忆提炼</span>。</div>
                 <div className="mt-1 text-[10.5px] text-[#64748b] dark:text-[#7b93ad]">
-                  在云端模式下，音色克隆生成可独立走「接入自有模型网关」；如需使用自定义翻译选择其他大模型，请先前往「接入自有模型网关」开启「启用优先自有密钥回复」。
+                  在云端模式下，语音合成生成可独立走「接入自有模型网关」；如需使用自定义翻译选择其他大模型，请先前往「接入自有模型网关」开启「启用优先自有密钥回复」。
                 </div>
               </div>
             </div>

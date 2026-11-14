@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   Brain,
   Sparkles,
@@ -15,7 +15,7 @@ import {
   Edit3,
 } from 'lucide-react';
 import { CustomerProfile, CustomerMemoryItem, CustomLLMConfig } from '../types';
-import { analyzeCustomerMemory, saveCustomerProfile } from '../services/apiService';
+import { analyzeCustomerMemory, saveCustomerProfile, saveLocalCustomerProfile } from '../services/apiService';
 
 interface CustomerMemoryDrawerProps {
   isOpen: boolean;
@@ -23,7 +23,7 @@ interface CustomerMemoryDrawerProps {
   profile: CustomerProfile | null;
   chatId?: string;
   currentAccountId?: string;
-  onUpdateProfile: (updated: CustomerProfile) => void;
+  onUpdateProfile: (updated: CustomerProfile, options?: { skipRemoteSave?: boolean }) => void;
   customConfig: CustomLLMConfig;
   chatTitle: string;
   messages?: any[];
@@ -61,11 +61,36 @@ export const CustomerMemoryDrawer: React.FC<CustomerMemoryDrawerProps> = ({
   const [editTone, setEditTone] = useState('');
   const [editStage, setEditStage] = useState('');
 
+  const activeScope = `${chatId || ''}::${currentAccountId || ''}`;
+  const activeScopeRef = useRef(activeScope);
+  activeScopeRef.current = activeScope;
+
+  useEffect(() => {
+    setIsEditingAttributes(false);
+    setIsAddingMemory(false);
+    setNewLikeInput('');
+    setNewTabooInput('');
+    setErrorMessage(null);
+    setSaveSuccessMsg(false);
+  }, [chatId, currentAccountId]);
+
   if (!isOpen) return null;
 
-  const currentProfile: CustomerProfile = profile || {
+  const effectiveAccountId =
+    currentAccountId ||
+    (profile && (!chatId || profile.chatId === chatId) ? profile.accountId : '') ||
+    '';
+
+  const scopedProfile =
+    profile &&
+    (!chatId || profile.chatId === chatId) &&
+    (!effectiveAccountId || !profile.accountId || profile.accountId === effectiveAccountId)
+      ? { ...profile, accountId: profile.accountId || effectiveAccountId }
+      : null;
+
+  const currentProfile: CustomerProfile = scopedProfile || {
     chatId: chatId || 'current',
-    accountId: currentAccountId || '',
+    accountId: effectiveAccountId,
     clientName: chatTitle || '当前联系人',
     relationshipStage: '沟通中',
     ageEstimate: '待分析',
@@ -80,6 +105,20 @@ export const CustomerMemoryDrawer: React.FC<CustomerMemoryDrawerProps> = ({
     updatedAt: Date.now(),
   };
 
+  const commitProfileUpdate = (updated: CustomerProfile, options?: { skipRemoteSave?: boolean }) => {
+    const targetAccId = currentAccountId || updated.accountId || effectiveAccountId;
+    const targetChatId = chatId || updated.chatId || currentProfile.chatId;
+    const scopedUpdated: CustomerProfile = {
+      ...updated,
+      chatId: targetChatId,
+      accountId: targetAccId,
+    };
+    onUpdateProfile(scopedUpdated, options);
+    if (!embedded && !options?.skipRemoteSave && targetChatId && targetChatId !== 'current') {
+      void saveCustomerProfile(targetChatId, scopedUpdated, targetAccId);
+    }
+  };
+
   // Run AI Deep Analysis over unified cloud + local conversation history
   const handleTriggerAnalysis = async () => {
     if ((!messages || messages.length === 0) && (!currentProfile.chatId || currentProfile.chatId === 'current')) {
@@ -88,26 +127,43 @@ export const CustomerMemoryDrawer: React.FC<CustomerMemoryDrawerProps> = ({
       return;
     }
 
+    const requestChatId = currentProfile.chatId;
+    const requestAccountId = effectiveAccountId;
+    const requestScope = activeScope;
+
     setIsAnalyzing(true);
     setErrorMessage(null);
     try {
       const freshProfile = await analyzeCustomerMemory(
-        currentProfile.chatId,
+        requestChatId,
         customConfig,
-        currentProfile.accountId,
+        requestAccountId,
         messages,
         chatTitle
       );
       if (freshProfile) {
-        onUpdateProfile(freshProfile);
+        const scopedFresh: CustomerProfile = {
+          ...freshProfile,
+          chatId: freshProfile.chatId || requestChatId,
+          accountId: freshProfile.accountId || requestAccountId,
+        };
+        if (activeScopeRef.current !== requestScope) {
+          saveLocalCustomerProfile(requestChatId, scopedFresh, requestAccountId);
+          return;
+        }
+        commitProfileUpdate(scopedFresh, { skipRemoteSave: true });
         setSaveSuccessMsg(true);
         setTimeout(() => setSaveSuccessMsg(false), 3000);
       }
     } catch (err: any) {
-      setErrorMessage(err?.message || 'AI 记忆提炼失败，请检查网络或模型配置');
-      setTimeout(() => setErrorMessage(null), 5000);
+      if (activeScopeRef.current === requestScope) {
+        setErrorMessage(err?.message || 'AI 记忆提炼失败，请检查网络或模型配置');
+        setTimeout(() => setErrorMessage(null), 5000);
+      }
     } finally {
-      setIsAnalyzing(false);
+      if (activeScopeRef.current === requestScope) {
+        setIsAnalyzing(false);
+      }
     }
   };
 
@@ -118,8 +174,7 @@ export const CustomerMemoryDrawer: React.FC<CustomerMemoryDrawerProps> = ({
       ...currentProfile,
       likesInterests: [...currentProfile.likesInterests, newLikeInput.trim()],
     };
-    onUpdateProfile(updated);
-    saveCustomerProfile(currentProfile.chatId, updated);
+    commitProfileUpdate(updated);
     setNewLikeInput('');
   };
 
@@ -129,8 +184,7 @@ export const CustomerMemoryDrawer: React.FC<CustomerMemoryDrawerProps> = ({
       ...currentProfile,
       likesInterests: currentProfile.likesInterests.filter((_, i) => i !== idx),
     };
-    onUpdateProfile(updated);
-    saveCustomerProfile(currentProfile.chatId, updated);
+    commitProfileUpdate(updated);
   };
 
   // Add taboo
@@ -140,8 +194,7 @@ export const CustomerMemoryDrawer: React.FC<CustomerMemoryDrawerProps> = ({
       ...currentProfile,
       dislikesTaboos: [...currentProfile.dislikesTaboos, newTabooInput.trim()],
     };
-    onUpdateProfile(updated);
-    saveCustomerProfile(currentProfile.chatId, updated);
+    commitProfileUpdate(updated);
     setNewTabooInput('');
   };
 
@@ -151,8 +204,7 @@ export const CustomerMemoryDrawer: React.FC<CustomerMemoryDrawerProps> = ({
       ...currentProfile,
       dislikesTaboos: currentProfile.dislikesTaboos.filter((_, i) => i !== idx),
     };
-    onUpdateProfile(updated);
-    saveCustomerProfile(currentProfile.chatId, updated);
+    commitProfileUpdate(updated);
   };
 
   // Add memory
@@ -175,8 +227,7 @@ export const CustomerMemoryDrawer: React.FC<CustomerMemoryDrawerProps> = ({
       ...currentProfile,
       keyMemories: [newMemItem, ...currentProfile.keyMemories],
     };
-    onUpdateProfile(updated);
-    saveCustomerProfile(currentProfile.chatId, updated);
+    commitProfileUpdate(updated);
 
     setMemTopic('');
     setMemSummary('');
@@ -189,8 +240,7 @@ export const CustomerMemoryDrawer: React.FC<CustomerMemoryDrawerProps> = ({
       ...currentProfile,
       keyMemories: currentProfile.keyMemories.filter((m) => m.id !== id),
     };
-    onUpdateProfile(updated);
-    saveCustomerProfile(currentProfile.chatId, updated);
+    commitProfileUpdate(updated);
   };
 
   // Manual attributes editing
@@ -213,8 +263,7 @@ export const CustomerMemoryDrawer: React.FC<CustomerMemoryDrawerProps> = ({
       relationshipStage: editStage.trim() || '沟通中',
       updatedAt: Date.now(),
     };
-    onUpdateProfile(updated);
-    saveCustomerProfile(currentProfile.chatId, updated);
+    commitProfileUpdate(updated);
     setIsEditingAttributes(false);
     setSaveSuccessMsg(true);
     setTimeout(() => setSaveSuccessMsg(false), 2500);

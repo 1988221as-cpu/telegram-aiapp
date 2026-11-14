@@ -52,6 +52,8 @@ export const KnowledgeEvolutionModal: React.FC<KnowledgeEvolutionModalProps> = (
   const [personaSaveSuccess, setPersonaSaveSuccess] = useState<boolean>(false);
   const [isResettingPersona, setIsResettingPersona] = useState<boolean>(false);
   const [isImportingTemplate, setIsImportingTemplate] = useState<boolean>(false);
+  const [pendingConfirmAction, setPendingConfirmAction] = useState<'reset' | 'import' | null>(null);
+  const [personaActionError, setPersonaActionError] = useState<string>('');
   const [traitInput, setTraitInput] = useState<string>('');
 
   // 2. Sandbox State (blank initial state — no hardcoded persona transcripts)
@@ -95,6 +97,7 @@ export const KnowledgeEvolutionModal: React.FC<KnowledgeEvolutionModalProps> = (
   const handleSavePersona = async () => {
     if (!persona) return;
     setIsSavingPersona(true);
+    setPersonaActionError('');
     try {
       const normalizedPersona: GlobalPersonaConfig = {
         ...persona,
@@ -108,17 +111,25 @@ export const KnowledgeEvolutionModal: React.FC<KnowledgeEvolutionModalProps> = (
         setPersona(res.persona || normalizedPersona);
         setPersonaSaveSuccess(true);
         setTimeout(() => setPersonaSaveSuccess(false), 3000);
+      } else {
+        setPersonaActionError((res as any)?.error || '保存人设配置失败，请重试');
       }
-    } catch (err) {
+    } catch (err: any) {
       console.error(err);
+      setPersonaActionError(err?.message || '保存人设配置异常');
     } finally {
       setIsSavingPersona(false);
     }
   };
 
-  const handleResetPersona = async () => {
-    if (!window.confirm('确认清空当前全局人设档案与五阶提示词，恢复为空白初始状态？')) return;
+  const handleResetPersona = () => {
+    setPersonaActionError('');
+    setPendingConfirmAction('reset');
+  };
+
+  const executeResetPersona = async () => {
     setIsResettingPersona(true);
+    setPersonaActionError('');
     try {
       const res = await resetGlobalPersonaApi();
       if (res.success && res.persona) {
@@ -128,19 +139,28 @@ export const KnowledgeEvolutionModal: React.FC<KnowledgeEvolutionModalProps> = (
           setActiveStageEdit(res.persona.activeStage);
           setSandboxStage(res.persona.activeStage);
         }
+        setPendingConfirmAction(null);
         setPersonaSaveSuccess(true);
         setTimeout(() => setPersonaSaveSuccess(false), 3000);
+      } else {
+        setPersonaActionError((res as any)?.error || '清空全局人设失败，请重试');
       }
-    } catch (err) {
+    } catch (err: any) {
       console.error('Failed to reset persona:', err);
+      setPersonaActionError(err?.message || '清空全局人设异常');
     } finally {
       setIsResettingPersona(false);
     }
   };
 
-  const handleImportTemplate = async () => {
-    if (!window.confirm('确认导入参考人设模板？导入后将覆盖当前空白或已填人设字段，您可在此基础上自由修改。')) return;
+  const handleImportTemplate = () => {
+    setPersonaActionError('');
+    setPendingConfirmAction('import');
+  };
+
+  const executeImportTemplate = async () => {
     setIsImportingTemplate(true);
+    setPersonaActionError('');
     try {
       const res = await importPersonaTemplateApi();
       if (res.success && res.persona) {
@@ -150,11 +170,15 @@ export const KnowledgeEvolutionModal: React.FC<KnowledgeEvolutionModalProps> = (
           setActiveStageEdit(res.persona.activeStage);
           setSandboxStage(res.persona.activeStage);
         }
+        setPendingConfirmAction(null);
         setPersonaSaveSuccess(true);
         setTimeout(() => setPersonaSaveSuccess(false), 3000);
+      } else {
+        setPersonaActionError((res as any)?.error || '导入参考人设模板失败，请重试');
       }
-    } catch (err) {
+    } catch (err: any) {
       console.error('Failed to import persona template:', err);
+      setPersonaActionError(err?.message || '导入参考人设模板异常');
     } finally {
       setIsImportingTemplate(false);
     }
@@ -314,6 +338,56 @@ export const KnowledgeEvolutionModal: React.FC<KnowledgeEvolutionModalProps> = (
                 </button>
               </div>
             </div>
+
+            {personaActionError && (
+              <div className="px-3 py-2 rounded-lg bg-rose-500/10 border border-rose-500/30 text-xs text-rose-600 dark:text-rose-400">
+                {personaActionError}
+              </div>
+            )}
+
+            {pendingConfirmAction && (
+              <div className="p-3 rounded-xl bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-700/50 flex flex-wrap items-center justify-between gap-2.5">
+                <p className="text-xs text-amber-900 dark:text-amber-100 leading-relaxed">
+                  {pendingConfirmAction === 'reset'
+                    ? '确认清空当前全局人设档案与五阶提示词，恢复为空白初始状态？'
+                    : '确认导入参考人设模板？导入后将覆盖当前空白或已填人设字段，您可在此基础上自由修改。'}
+                </p>
+                <div className="flex items-center gap-2 shrink-0">
+                  <button
+                    type="button"
+                    disabled={isResettingPersona || isImportingTemplate}
+                    onClick={() => setPendingConfirmAction(null)}
+                    className="px-2.5 py-1 rounded-lg text-[11px] font-medium bg-white dark:bg-[#0e1726] border border-[#cbd5e1] dark:border-[#1e3148] text-[#475569] dark:text-[#cbd5e1] hover:bg-[#f1f5f9] dark:hover:bg-[#162338] cursor-pointer disabled:opacity-50"
+                  >
+                    取消
+                  </button>
+                  <button
+                    type="button"
+                    disabled={isResettingPersona || isImportingTemplate}
+                    onClick={() => {
+                      if (pendingConfirmAction === 'reset') {
+                        void executeResetPersona();
+                      } else {
+                        void executeImportTemplate();
+                      }
+                    }}
+                    className={`px-3 py-1 rounded-lg text-[11px] font-semibold text-white cursor-pointer disabled:opacity-50 ${
+                      pendingConfirmAction === 'reset'
+                        ? 'bg-rose-600 hover:bg-rose-500'
+                        : 'bg-[#2ba0ff] hover:bg-[#1e8ee8]'
+                    }`}
+                  >
+                    {pendingConfirmAction === 'reset'
+                      ? isResettingPersona
+                        ? '清空中...'
+                        : '确认清空'
+                      : isImportingTemplate
+                        ? '导入中...'
+                        : '确认导入'}
+                  </button>
+                </div>
+              </div>
+            )}
 
             <div className={embedded ? 'space-y-4' : 'grid grid-cols-1 lg:grid-cols-12 gap-6'}>
               {/* Basic Persona Profile */}

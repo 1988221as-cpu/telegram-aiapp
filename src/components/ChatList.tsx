@@ -30,6 +30,36 @@ import {
   ensureFreshSignedResourceUrl,
 } from '../services/apiService';
 
+export function formatChatSubtitle(chat: Chat): string {
+  if (chat.username) {
+    const clean = chat.username.replace(/^@/, '').trim();
+    if (clean) return `@${clean}`;
+  }
+  if (chat.isChannel) {
+    return chat.membersCount && chat.membersCount > 0
+      ? `频道 · ${chat.membersCount} 位订阅者`
+      : '频道会话';
+  }
+  if (chat.isGroup) {
+    return chat.membersCount && chat.membersCount > 0
+      ? `群组 · ${chat.membersCount} 位成员`
+      : '群组会话';
+  }
+  if (chat.isBot) {
+    return 'Telegram 机器人';
+  }
+  if (chat.phone) {
+    return chat.phone;
+  }
+  if (chat.statusText) {
+    return chat.statusText;
+  }
+  if (chat.isOnline) {
+    return '私聊联系人 · 在线';
+  }
+  return '未设置用户名';
+}
+
 interface ChatListProps {
   chats: Chat[];
   activeChatId: string | null;
@@ -856,7 +886,7 @@ export const ChatList: React.FC<ChatListProps> = ({
                 </div>
                 <div>
                   <h4 className="font-bold text-sm text-[#111827] dark:text-[#f5f7fa]">{previewChat.title}</h4>
-                  <p className="text-xs text-[#2481cc] dark:text-[#2ba0ff]">{previewChat.username || '活跃联系人'}</p>
+                  <p className="text-xs text-[#2481cc] dark:text-[#2ba0ff]">{formatChatSubtitle(previewChat)}</p>
                 </div>
               </div>
               <button

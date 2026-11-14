@@ -909,7 +909,11 @@ export const TelegramChatInfoDrawer: React.FC<TelegramChatInfoDrawerProps> = ({
                     <div key={m.id} className="p-2.5 rounded-xl bg-gray-50 dark:bg-[#202b36] flex items-center justify-between text-xs">
                       <div className="flex items-center gap-2">
                         <Mic className="w-4 h-4 text-[#2481cc]" />
-                        <span>语音消息 ({m.audioDuration ? `${m.audioDuration}"` : '0:04'})</span>
+                        <span>
+                          {m.audioDuration && m.audioDuration > 0
+                            ? `语音消息 (${m.audioDuration}")`
+                            : '语音消息 (--)'}
+                        </span>
                       </div>
                       <span className="text-[10px] text-[#707579] dark:text-[#7f93a5]">{m.timestamp}</span>
                     </div>

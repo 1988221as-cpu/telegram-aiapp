@@ -3,7 +3,7 @@ import type { MasterVoiceprint } from '../types/index.ts';
 const STORAGE_KEY = 'tg_master_voiceprint';
 
 export const DEFAULT_SAMPLE_TRANSCRIPT =
-  '你好，这是我的 Telegram 个人参考录音与预设音色配置，用于记录常用语速与音色基准。';
+  '你好，这是我的个人预设音色与语速音高配置，用于语音合成输出。';
 
 export function getMasterVoiceprint(): MasterVoiceprint | null {
   if (typeof window === 'undefined') return null;

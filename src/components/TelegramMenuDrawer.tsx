@@ -16,7 +16,7 @@ import {
   LogOut,
 } from 'lucide-react';
 import { Account, MemberUser } from '../types';
-import { disconnectTelegramAccount } from '../services/apiService';
+import { APP_VERSION, disconnectTelegramAccount } from '../services/apiService';
 
 interface TelegramMenuDrawerProps {
   isOpen: boolean;
@@ -525,7 +525,7 @@ export const TelegramMenuDrawer: React.FC<TelegramMenuDrawerProps> = ({
           <img src="/app-icon.png" alt="HumanSense" className="w-4 h-4 rounded-sm object-cover" />
           <span className="font-medium text-[#546778] dark:text-[#8ea4ba]">HumanSense Desktop</span>
           <span className="font-bold">·</span>
-          <span>v2.5.0</span>
+          <span>v{APP_VERSION}</span>
         </div>
       </div>
     </div>

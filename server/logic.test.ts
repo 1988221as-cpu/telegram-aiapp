@@ -2038,7 +2038,7 @@ test('Separation of Cloud Engine & Custom Gateway: translation customModelName, 
 
   // 3. Verify server.ts contracts for TTS custom gateway & memory extraction cloud engine
   const serverSrc = readFileSync(resolve(process.cwd(), 'server.ts'), 'utf8');
-  assert.match(serverSrc, /app\.post\('\/api\/audio\/tts-clone'[\s\S]*?音色克隆需使用自有模型网关/);
+  assert.match(serverSrc, /app\.post\('\/api\/audio\/tts-clone'[\s\S]*?语音合成需使用自有模型网关/);
   assert.match(serverSrc, /app\.post\('\/api\/audio\/tts-clone'[\s\S]*?\/audio\/speech/);
   assert.match(serverSrc, /app\.post\('\/api\/customer\/analyze\/:chatId'[\s\S]*?engineMode:\s*'cloud'[\s\S]*?purpose:\s*'memory_extraction'/);
 
@@ -2049,7 +2049,7 @@ test('Separation of Cloud Engine & Custom Gateway: translation customModelName, 
 
   const voiceprintSrc = readFileSync(resolve(process.cwd(), 'src/components/MasterVoiceprintModal.tsx'), 'utf8');
   assert.equal(voiceprintSrc.includes('ttsModel'), true);
-  assert.equal(voiceprintSrc.includes('音色克隆 / 语音合成模型型号'), true);
+  assert.equal(voiceprintSrc.includes('语音合成模型型号'), true);
 
   const customLlmSrc = readFileSync(resolve(process.cwd(), 'src/components/CustomLLMModal.tsx'), 'utf8');
   assert.equal(customLlmSrc.includes('大模型接入网址 (Base URL)'), true);
@@ -5146,3 +5146,856 @@ test('H2: trust proxy avoids ERR_ERL_PERMISSIVE_TRUST_PROXY, removes admin passw
     else process.env.JWT_SECRET = prevJwtSecret;
   }
 });
+
+test('H3: Custom OpenAI TTS/STT strips polluted gemini-* model names, Cloud chat blocks -tts/-transcribe, ChatArea follows inboundTargetLang, and cloud brain defines audio endpoints', async () => {
+  const { app, syncServerCustomLlmConfig, getServerCustomLlmConfig } = await import('../server.ts');
+  const http = await import('node:http');
+  const { createHmac } = await import('node:crypto');
+  const { readFileSync } = await import('node:fs');
+  const { resolve } = await import('node:path');
+
+  const prevJwtSecret = process.env.JWT_SECRET;
+  const prevCustomCfg = await getServerCustomLlmConfig().catch(() => null);
+  process.env.JWT_SECRET = 'h3_test_jwt_secret';
+
+  const capturedRequests: Array<{ path: string; body: any }> = [];
+  const mockGateway = http.createServer(async (req, res) => {
+    const chunks: Buffer[] = [];
+    for await (const chunk of req) chunks.push(chunk as Buffer);
+    const rawBody = Buffer.concat(chunks).toString('utf8');
+    let parsed: any = null;
+    try {
+      parsed = JSON.parse(rawBody);
+    } catch {
+      parsed = rawBody;
+    }
+    capturedRequests.push({ path: req.url || '', body: parsed });
+
+    if (req.url === '/v1/audio/speech') {
+      res.writeHead(200, { 'Content-Type': 'audio/mpeg' });
+      res.end(Buffer.from('FAKE_MP3_AUDIO_BYTES'));
+      return;
+    }
+    if (req.url === '/v1/audio/transcriptions') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ text: 'transcribed hello world', model: 'whisper-1' }));
+      return;
+    }
+    res.writeHead(404);
+    res.end('not found');
+  });
+  await new Promise<void>((r) => mockGateway.listen(0, '127.0.0.1', r));
+  const mockGwPort = (mockGateway.address() as any).port;
+
+  const srv = http.createServer(app);
+  await new Promise<void>((r) => srv.listen(0, '127.0.0.1', r));
+  const port = (srv.address() as any).port;
+
+  const headerB64 = Buffer.from(JSON.stringify({ alg: 'HS256', typ: 'JWT' })).toString('base64url');
+  const payloadB64 = Buffer.from(
+    JSON.stringify({ sub: 'member_h3', username: 'member_h3', role: 'member', exp: Math.floor(Date.now() / 1000) + 3600 })
+  ).toString('base64url');
+  const sigB64 = createHmac('sha256', process.env.JWT_SECRET).update(`${headerB64}.${payloadB64}`).digest('base64url');
+  const memberJwt = `${headerB64}.${payloadB64}.${sigB64}`;
+
+  try {
+    await syncServerCustomLlmConfig({
+      enabled: true,
+      explicitlyDisabled: false,
+      engineMode: 'custom',
+      protocol: 'openai',
+      baseUrl: `http://127.0.0.1:${mockGwPort}`, // no /v1 suffix — previously triggered preferGeminiNative!
+      apiKey: 'sk-test-openai',
+      modelName: 'gpt-4o-mini',
+    });
+
+    // 1. TTS clone with polluted 'gemini-3.8-flash-tts' on OpenAI gateway without /v1
+    const ttsRes = await fetch(`http://127.0.0.1:${port}/api/audio/tts-clone`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${memberJwt}`,
+      },
+      body: JSON.stringify({
+        text: 'Hello there',
+        voiceName: 'Kore',
+        model: 'gemini-3.8-flash-tts',
+        customConfig: {
+          enabled: true,
+          engineMode: 'custom',
+          protocol: 'openai',
+          baseUrl: `http://127.0.0.1:${mockGwPort}`,
+          apiKey: 'sk-test-openai',
+        },
+      }),
+    });
+    assert.equal(ttsRes.status, 200);
+    const ttsJson = (await ttsRes.json()) as any;
+    assert.equal(ttsJson.modelUsed, 'tts-1');
+    const speechReq = capturedRequests.find((r) => r.path === '/v1/audio/speech');
+    assert.ok(speechReq, 'Must hit /v1/audio/speech instead of Gemini native SDK');
+    assert.equal(speechReq?.body?.model, 'tts-1');
+
+    // 2. STT transcribe with polluted 'gemini-3.5-transcribe' on OpenAI gateway
+    const sttRes = await fetch(`http://127.0.0.1:${port}/api/audio/transcribe`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${memberJwt}`,
+      },
+      body: JSON.stringify({
+        audioBase64: Buffer.from('FAKE_OGG_BYTES').toString('base64'),
+        mimeType: 'audio/ogg',
+        model: 'gemini-3.5-transcribe',
+        customConfig: {
+          enabled: true,
+          engineMode: 'custom',
+          protocol: 'openai',
+          baseUrl: `http://127.0.0.1:${mockGwPort}`,
+          apiKey: 'sk-test-openai',
+        },
+      }),
+    });
+    assert.equal(sttRes.status, 200);
+    const sttJson = (await sttRes.json()) as any;
+    assert.equal(sttJson.modelUsed, 'whisper-1');
+
+    // 3. Frontend, server chat guard, and cloud brain contracts
+    const chatAreaSrc = readFileSync(resolve(process.cwd(), 'src/components/ChatArea.tsx'), 'utf8');
+    assert.ok(!chatAreaSrc.includes("translateText(\n              res.replyText,\n              'Auto',\n              'Chinese'"));
+    assert.match(chatAreaSrc, /getLanguageDisplayName\(inboundTargetLang\)\}对照/);
+
+    const serverSrc = readFileSync(resolve(process.cwd(), 'server.ts'), 'utf8');
+    assert.match(serverSrc, /!\s*\/\(tts\|transcribe\)\/i\.test\(rawChatModel\)/);
+
+    const voiceModalSrc = readFileSync(resolve(process.cwd(), 'src/components/VoiceCloneStudioModal.tsx'), 'utf8');
+    assert.match(voiceModalSrc, /isCustomOpenAiGateway/);
+    assert.match(voiceModalSrc, /gpt-4o-mini-tts/);
+
+    const brainSrc = readFileSync(resolve(process.cwd(), 'deploy/railway-brain-server.ts'), 'utf8');
+    assert.match(brainSrc, /app\.post\('\/v1\/audio\/transcriptions'/);
+    assert.match(brainSrc, /app\.post\('\/v1\/audio\/speech'/);
+  } finally {
+    await new Promise<void>((r) => srv.close(() => r()));
+    await new Promise<void>((r) => mockGateway.close(() => r()));
+    if (prevCustomCfg) {
+      await syncServerCustomLlmConfig(prevCustomCfg).catch(() => {});
+    }
+    if (prevJwtSecret === undefined) delete process.env.JWT_SECRET;
+    else process.env.JWT_SECRET = prevJwtSecret;
+  }
+});
+
+test('H4: cryptoStorage never downgrades AES-256-GCM to s256, isolates keys from localStorage, and Electron integrates safeStorage DPAPI', async () => {
+  const { readFileSync, existsSync } = await import('node:fs');
+  const { resolve } = await import('node:path');
+  const { isTrueAesGcmCiphertext } = await import('../src/services/cryptoStorage.ts');
+
+  // 1. Ciphertext format classifier
+  assert.equal(isTrueAesGcmCiphertext('enc:gcm256:AAAA:BBBB'), true);
+  assert.equal(isTrueAesGcmCiphertext('enc:gcm256:s256:AAAA:BBBB'), false);
+  assert.equal(isTrueAesGcmCiphertext('enc:gcm256:sync:AAAA'), false);
+  assert.equal(isTrueAesGcmCiphertext('enc:gcm256:raw:AAAA'), false);
+
+  // 2. Source code security contracts (no downgrade in secureGetItemAsync, no plaintext seed write)
+  const cryptoSrc = readFileSync(resolve(process.cwd(), 'src/services/cryptoStorage.ts'), 'utf8');
+  assert.equal(cryptoSrc.includes("localStorage.setItem(KEY_STORE_KEY"), false);
+  assert.equal(cryptoSrc.includes("localStorage.setItem(LEGACY_KEY_STORE_KEY"), false);
+  assert.match(cryptoSrc, /if \(!isTrueAesGcmCiphertext\(raw\)\)\s*\{\s*await secureSetItemAsync\(storageKey,\s*decrypted\)/);
+  assert.match(cryptoSrc, /extractable:\s*false|generateKey\(\s*\{\s*name:\s*'AES-GCM',\s*length:\s*256\s*\},\s*false/);
+
+  // 3. Electron main.cjs & preload.cjs DPAPI + AES-256-GCM integration
+  assert.equal(existsSync(resolve(process.cwd(), 'electron/preload.cjs')), true);
+  const preloadSrc = readFileSync(resolve(process.cwd(), 'electron/preload.cjs'), 'utf8');
+  assert.match(preloadSrc, /contextBridge\.exposeInMainWorld\('humanSenseCrypto'/);
+
+  const mainSrc = readFileSync(resolve(process.cwd(), 'main.cjs'), 'utf8');
+  assert.match(mainSrc, /safeStorage\.encryptString/);
+  assert.match(mainSrc, /safeStorage\.decryptString/);
+  assert.match(mainSrc, /createCipheriv\('aes-256-gcm'/);
+  assert.match(mainSrc, /preload:\s*path\.join\(__dirname,\s*'electron',\s*'preload\.cjs'\)/);
+});
+
+test('M1: getOutboundTargetLanguage & server context skip media placeholders, prioritize sttText/imageCaption, and walk backwards for peer natural language', async () => {
+  const { getOutboundTargetLanguage, isSystemMediaPlaceholder } = await import('../src/components/ChatArea.tsx');
+  const { extractRecentTwoWayMessages } = await import('../server.ts');
+
+  const autoChat = { id: 'c_m1', sourceLang: 'Auto', targetLang: 'Chinese' } as any;
+  const autoSettings = { defaultSourceLang: 'Auto', defaultTargetLang: 'Chinese' } as any;
+
+  // 1. Placeholders detected accurately
+  assert.equal(isSystemMediaPlaceholder('🎤 语音消息'), true);
+  assert.equal(isSystemMediaPlaceholder('[图片消息]'), true);
+  assert.equal(isSystemMediaPlaceholder('🎬 视频消息'), true);
+  assert.equal(isSystemMediaPlaceholder('🎥 视频消息'), true);
+  assert.equal(isSystemMediaPlaceholder('😀 [贴纸]'), true);
+  assert.equal(isSystemMediaPlaceholder('📎 合同_2026.pdf', { isFile: true }), true);
+  assert.equal(isSystemMediaPlaceholder('Hello, how much is this?'), false);
+
+  // 2. Foreign customer sends English/Turkish/Russian text, then un-transcribed voice/image/video/file/emoji
+  assert.equal(
+    getOutboundTargetLanguage(autoChat, autoSettings, [
+      { id: '1', sender: 'peer', text: 'Hello, can you check my order?' } as any,
+      { id: '2', sender: 'me', text: 'Sure, checking now.' } as any,
+      { id: '3', sender: 'peer', isAudio: true, text: '🎤 语音消息' } as any,
+      { id: '4', sender: 'peer', isImage: true, text: '[图片消息]' } as any,
+      { id: '5', sender: 'peer', isVideo: true, text: '🎬 视频消息' } as any,
+      { id: '6', sender: 'peer', isFile: true, text: '📎 invoice.pdf' } as any,
+      { id: '7', sender: 'peer', text: '👍👍👍' } as any,
+    ]),
+    'English'
+  );
+
+  assert.equal(
+    getOutboundTargetLanguage(autoChat, autoSettings, [
+      { id: '1', sender: 'peer', text: 'Merhaba, fiyatı nedir?' } as any,
+      { id: '2', sender: 'peer', isImage: true, text: '🖼️ 图片消息' } as any,
+    ]),
+    'Turkish'
+  );
+
+  // 3. sttText and imageCaption take priority over placeholder text
+  assert.equal(
+    getOutboundTargetLanguage(autoChat, autoSettings, [
+      { id: '1', sender: 'peer', text: 'Hello there' } as any,
+      { id: '2', sender: 'peer', isAudio: true, text: '🎤 语音消息', sttText: 'Привет, сколько стоит доставка?' } as any,
+    ]),
+    'Russian'
+  );
+
+  assert.equal(
+    getOutboundTargetLanguage(autoChat, autoSettings, [
+      { id: '1', sender: 'peer', text: 'Hello there' } as any,
+      { id: '2', sender: 'peer', isImage: true, text: '🖼️ 图片消息', imageCaption: 'Bonjour, merci beaucoup!' } as any,
+    ]),
+    'French'
+  );
+
+  // 4. Only media placeholders (no natural language at all) -> defaults to English, NEVER Chinese
+  assert.equal(
+    getOutboundTargetLanguage(autoChat, autoSettings, [
+      { id: '1', sender: 'peer', isAudio: true, text: '🎤 语音消息' } as any,
+      { id: '2', sender: 'peer', isImage: true, text: '[图片消息]' } as any,
+      { id: '3', sender: 'peer', isVideo: true, text: '[视频消息]' } as any,
+    ]),
+    'English'
+  );
+
+  // 5. Real Chinese peer message still resolves Chinese even after media placeholder
+  assert.equal(
+    getOutboundTargetLanguage(autoChat, autoSettings, [
+      { id: '1', sender: 'peer', text: '你好，麻烦看一下这张图' } as any,
+      { id: '2', sender: 'peer', isImage: true, text: '🖼️ 图片消息' } as any,
+    ]),
+    'Chinese'
+  );
+
+  // 6. Server normalizeMessageTurn prioritizes sttText/imageCaption over media placeholders
+  const turns = await extractRecentTwoWayMessages(
+    'm1_test_chat',
+    'm1_test_chat',
+    [
+      { id: 's1', sender: 'peer', text: '🎤 语音消息', sttText: 'Quanto costa?', createdAt: 1000 },
+      { id: 's2', sender: 'peer', text: '🖼️ 图片消息', imageCaption: 'See attached photo', createdAt: 2000 },
+    ],
+    30,
+    'acc_m1'
+  );
+  assert.equal(turns[0]?.text, 'Quanto costa?');
+  assert.equal(turns[0]?.mediaType, 'voice');
+  assert.equal(turns[1]?.text, 'See attached photo');
+  assert.equal(turns[1]?.mediaType, 'image');
+});
+
+test('M2: customer profile save/read propagates explicit accountId, handleSelectChat avoids stale closure races, and profiles isolate by account', async () => {
+  const { readFileSync } = await import('node:fs');
+  const { resolve } = await import('node:path');
+  const http = await import('node:http');
+  const { createHmac } = await import('node:crypto');
+  const { initDatabase } = await import('./db.ts');
+  const { app } = await import('../server.ts');
+
+  await initDatabase();
+
+  const dockSrc = readFileSync(resolve(process.cwd(), 'src/components/UnifiedRightDock.tsx'), 'utf8');
+  assert.match(dockSrc, /saveLocalCustomerProfile\(targetChatId,\s*normalizedUpdated,\s*targetAccountId\)/);
+  assert.match(dockSrc, /saveCustomerProfile\(targetChatId,\s*normalizedUpdated,\s*targetAccountId\)/);
+
+  const drawerSrc = readFileSync(resolve(process.cwd(), 'src/components/CustomerMemoryDrawer.tsx'), 'utf8');
+  // Every saveCustomerProfile call in CustomerMemoryDrawer must explicitly pass targetAccId (3rd arg)
+  const drawerSaveCalls = drawerSrc.match(/saveCustomerProfile\([^)]*\)/g) || [];
+  assert.ok(drawerSaveCalls.length >= 1);
+  for (const call of drawerSaveCalls) {
+    assert.equal(call.split(',').length >= 3, true, `Expected explicit accountId 3rd arg in: ${call}`);
+  }
+  assert.match(drawerSrc, /activeScopeRef\.current !== requestScope/);
+  assert.match(drawerSrc, /const scopedProfile =/);
+
+  const appSrc = readFileSync(resolve(process.cwd(), 'src/App.tsx'), 'utf8');
+  assert.match(appSrc, /const selectChatSeqRef = useRef\(0\)/);
+  assert.match(appSrc, /const targetChatObj = chatsRef\.current\.find\(/);
+  assert.match(appSrc, /activeAccountIdRef\.current === savedAccId && selectChatSeqRef\.current === callSeq/);
+  assert.match(appSrc, /activeAccountIdRef\.current === targetAccId &&[\s\S]*?activeChatIdRef\.current === targetChatId/);
+  assert.match(appSrc, /setCustomerProfile\(null\)/);
+  assert.match(appSrc, /const targetChatId = newMsg\.chatId \|\| activeChatIdRef\.current \|\| activeChatId;/);
+  assert.match(appSrc, /const targetAccountId = newMsg\.accountId \|\| activeAccountIdRef\.current \|\| activeAccountId;/);
+
+  const chatAreaSrc = readFileSync(resolve(process.cwd(), 'src/components/ChatArea.tsx'), 'utf8');
+  assert.match(chatAreaSrc, /const originChatId = chat\.id;\s*const originAccountId = currentAccountId;/);
+
+  // Runtime HTTP isolation check: same chatId across two accounts stays strictly isolated even if currentActiveAccountId lags
+  const prevJwtSecret = process.env.JWT_SECRET;
+  process.env.JWT_SECRET = 'm2_test_jwt_secret';
+  const srv = http.createServer(app);
+  await new Promise<void>((r) => srv.listen(0, '127.0.0.1', r));
+  const port = (srv.address() as any).port;
+
+  const headerB64 = Buffer.from(JSON.stringify({ alg: 'HS256', typ: 'JWT' })).toString('base64url');
+  const payloadB64 = Buffer.from(
+    JSON.stringify({ sub: 'member_m2', username: 'member_m2', role: 'member', exp: Math.floor(Date.now() / 1000) + 3600 })
+  ).toString('base64url');
+  const sigB64 = createHmac('sha256', process.env.JWT_SECRET).update(`${headerB64}.${payloadB64}`).digest('base64url');
+  const memberJwt = `${headerB64}.${payloadB64}.${sigB64}`;
+
+  const sharedChatId = `tg_shared_${Date.now()}`;
+  const accA = 'acc_tg_m2_a';
+  const accB = 'acc_tg_m2_b';
+
+  try {
+    const saveA = await fetch(`http://127.0.0.1:${port}/api/customer/profile/${sharedChatId}`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${memberJwt}`,
+        'X-Account-Id': accA,
+      },
+      body: JSON.stringify({
+        accountId: accA,
+        clientName: 'Client Alpha',
+        relationshipStage: 'VIP',
+        likesInterests: ['Coffee'],
+      }),
+    });
+    assert.equal(saveA.status, 200);
+
+    const saveB = await fetch(`http://127.0.0.1:${port}/api/customer/profile/${sharedChatId}`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${memberJwt}`,
+        'X-Account-Id': accB,
+      },
+      body: JSON.stringify({
+        accountId: accB,
+        clientName: 'Client Beta',
+        relationshipStage: '初次接触',
+        likesInterests: ['Tea'],
+      }),
+    });
+    assert.equal(saveB.status, 200);
+
+    const getA = await fetch(`http://127.0.0.1:${port}/api/customer/profile/${sharedChatId}`, {
+      headers: { Authorization: `Bearer ${memberJwt}`, 'X-Account-Id': accA },
+    });
+    assert.equal(getA.status, 200);
+    const profA = (await getA.json()) as any;
+    assert.equal(profA.clientName, 'Client Alpha');
+    assert.deepEqual(profA.likesInterests, ['Coffee']);
+
+    const getB = await fetch(`http://127.0.0.1:${port}/api/customer/profile/${sharedChatId}`, {
+      headers: { Authorization: `Bearer ${memberJwt}`, 'X-Account-Id': accB },
+    });
+    assert.equal(getB.status, 200);
+    const profB = (await getB.json()) as any;
+    assert.equal(profB.clientName, 'Client Beta');
+    assert.deepEqual(profB.likesInterests, ['Tea']);
+  } finally {
+    await new Promise<void>((r) => srv.close(() => r()));
+    if (prevJwtSecret === undefined) delete process.env.JWT_SECRET;
+    else process.env.JWT_SECRET = prevJwtSecret;
+  }
+});
+
+test('M3: pure setMessagesMap updaters, unified prevPersistedMessagesMapRef cleanup, and cross-restart pending media persistence & retry', async () => {
+  const { readFileSync, existsSync } = await import('node:fs');
+  const { resolve } = await import('node:path');
+  const http = await import('node:http');
+  const { createHmac } = await import('node:crypto');
+  const { db, initDatabase } = await import('./db.ts');
+  const { app, resolveLocalMediaDiskPath } = await import('../server.ts');
+
+  await initDatabase();
+
+  // 1. Verify pendingMediaStorage module exists and behaves safely without fabricating data
+  assert.equal(existsSync(resolve(process.cwd(), 'src/services/pendingMediaStorage.ts')), true);
+  const pendingMediaMod = await import('../src/services/pendingMediaStorage.ts');
+  assert.equal(pendingMediaMod.buildPendingMediaKey('acc_1', 'msg_1'), 'acc_1::msg_1');
+  assert.equal(pendingMediaMod.buildPendingMediaKey('', 'msg_1'), 'default::msg_1');
+  assert.equal(await pendingMediaMod.getPendingMediaBlob('acc_1', 'msg_missing'), null);
+  assert.deepEqual(await pendingMediaMod.listChatPendingMediaBlobs('acc_1', 'chat_1'), []);
+
+  // 2. Verify App.tsx has no clearLocalMessages inside setMessagesMap updaters and has unified bucket cleanup
+  const appSrc = readFileSync(resolve(process.cwd(), 'src/App.tsx'), 'utf8');
+  assert.equal(
+    /setMessagesMap\s*\(\s*\(?prev\)?\s*=>\s*\{[\s\S]{0,300}clearLocalMessages\s*\(/.test(appSrc),
+    false,
+    'clearLocalMessages must NEVER be invoked inside setMessagesMap state updater'
+  );
+  assert.match(appSrc, /if \(list\.length === 0\)\s*\{[\s\S]*?clearLocalMessages\(bChat,\s*prevMap\[bKey\],\s*bAcc\)/);
+  assert.match(appSrc, /for \(const removedKey of Object\.keys\(prevMap\)\)\s*\{\s*if \(!\(removedKey in messagesMap\)\)/);
+  assert.match(appSrc, /savePendingMediaBlob\(/);
+  assert.match(appSrc, /getPendingMediaBlob\(targetAccountId,\s*messageId\)/);
+  assert.match(appSrc, /hydrateBucketPendingMedia\(/);
+
+  // 3. Real Express HTTP verification: failed multipart media send persists real file to disk & retries cleanly
+  const prevJwtSecret = process.env.JWT_SECRET;
+  process.env.JWT_SECRET = 'm3_test_jwt_secret';
+  const srv = http.createServer(app);
+  await new Promise<void>((r) => srv.listen(0, '127.0.0.1', r));
+  const port = (srv.address() as any).port;
+
+  const headerB64 = Buffer.from(JSON.stringify({ alg: 'HS256', typ: 'JWT' })).toString('base64url');
+  const payloadB64 = Buffer.from(
+    JSON.stringify({ sub: 'member_m3', username: 'member_m3', role: 'member', exp: Math.floor(Date.now() / 1000) + 3600 })
+  ).toString('base64url');
+  const sigB64 = createHmac('sha256', process.env.JWT_SECRET).update(`${headerB64}.${payloadB64}`).digest('base64url');
+  const memberJwt = `${headerB64}.${payloadB64}.${sigB64}`;
+
+  const testAccId = 'acc_tg_m3_offline';
+  const testChatId = `tg_m3_${Date.now()}`;
+  const testMsgId = `msg_m3_${Date.now()}`;
+  const pngBytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d]);
+  const createdDiskPaths: string[] = [];
+
+  try {
+    const form = new FormData();
+    form.append(
+      'payload',
+      JSON.stringify({
+        id: testMsgId,
+        chatId: testChatId,
+        accountId: testAccId,
+        sender: 'me',
+        text: '[图片消息]',
+        isImage: true,
+        imageCaption: 'test caption',
+        createdAt: Date.now(),
+        timestamp: '10:00',
+      })
+    );
+    form.append('file', new Blob([pngBytes], { type: 'image/png' }), 'receipt.png');
+
+    const sendRes = await fetch(`http://127.0.0.1:${port}/api/messages`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${memberJwt}`,
+        'X-Account-Id': testAccId,
+      },
+      body: form,
+    });
+    assert.equal(sendRes.status, 200);
+    const sendData = (await sendRes.json()) as any;
+    assert.equal(sendData.delivered, false);
+    assert.equal(sendData.deliveryStatus, 'failed');
+    assert.equal(typeof sendData.imageUrl, 'string');
+    assert.equal(sendData.imageUrl.startsWith('/api/messages/local-media/'), true);
+
+    const diskPath1 = resolveLocalMediaDiskPath(sendData.imageUrl);
+    if (diskPath1) createdDiskPaths.push(diskPath1);
+
+    // Fetch persisted media file & verify byte-for-byte authenticity
+    const mediaFetch = await fetch(`http://127.0.0.1:${port}${sendData.imageUrl}`);
+    assert.equal(mediaFetch.status, 200);
+    const fetchedBuf = Buffer.from(await mediaFetch.arrayBuffer());
+    assert.deepEqual(fetchedBuf, pngBytes);
+
+    // Retry via JSON only (simulating client restart without RAM File)
+    const retryJsonRes = await fetch(`http://127.0.0.1:${port}/api/messages/${encodeURIComponent(testMsgId)}/retry`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${memberJwt}`,
+        'X-Account-Id': testAccId,
+      },
+      body: JSON.stringify({
+        id: testMsgId,
+        chatId: testChatId,
+        accountId: testAccId,
+        sender: 'me',
+        text: '[图片消息]',
+        isImage: true,
+      }),
+    });
+    assert.equal(retryJsonRes.status, 200);
+    const retryJsonData = (await retryJsonRes.json()) as any;
+    assert.equal(retryJsonData.delivered, false);
+    assert.equal(retryJsonData.deliveryStatus, 'failed');
+    assert.equal(typeof retryJsonData.imageUrl, 'string');
+    assert.equal(retryJsonData.imageUrl.startsWith('/api/messages/local-media/'), true);
+
+    // Retry via multipart upload (simulating IndexedDB client-side Blob recovery when initial upload didn't hit Express)
+    const retryForm = new FormData();
+    retryForm.append(
+      'payload',
+      JSON.stringify({
+        id: testMsgId,
+        chatId: testChatId,
+        accountId: testAccId,
+        sender: 'me',
+        text: '[图片消息]',
+        isImage: true,
+      })
+    );
+    retryForm.append('file', new Blob([pngBytes], { type: 'image/png' }), 'receipt_idb.png');
+    const retryMultipartRes = await fetch(`http://127.0.0.1:${port}/api/messages/${encodeURIComponent(testMsgId)}/retry`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${memberJwt}`,
+        'X-Account-Id': testAccId,
+      },
+      body: retryForm,
+    });
+    assert.equal(retryMultipartRes.status, 200);
+    const retryMultipartData = (await retryMultipartRes.json()) as any;
+    assert.equal(typeof retryMultipartData.imageUrl, 'string');
+    assert.equal(retryMultipartData.imageUrl.startsWith('/api/messages/local-media/'), true);
+    const diskPath2 = resolveLocalMediaDiskPath(retryMultipartData.imageUrl);
+    if (diskPath2) createdDiskPaths.push(diskPath2);
+  } finally {
+    const { unlinkSync } = await import('node:fs');
+    for (const p of createdDiskPaths) {
+      try {
+        unlinkSync(p);
+      } catch {}
+    }
+    try {
+      await db.prepare('DELETE FROM messages WHERE id = ?').run(testMsgId);
+    } catch {}
+    await new Promise<void>((r) => srv.close(() => r()));
+    if (prevJwtSecret === undefined) delete process.env.JWT_SECRET;
+    else process.env.JWT_SECRET = prevJwtSecret;
+  }
+});
+
+test('M4: eliminates native window.confirm/alert/prompt in KnowledgeEvolutionModal and entire Electron/React client', async () => {
+  const { readFileSync, readdirSync, statSync } = await import('node:fs');
+  const { resolve, join } = await import('node:path');
+
+  const collectSourceFiles = (dir: string): string[] => {
+    const out: string[] = [];
+    for (const entry of readdirSync(dir)) {
+      const full = join(dir, entry);
+      const st = statSync(full);
+      if (st.isDirectory()) {
+        out.push(...collectSourceFiles(full));
+      } else if (/\.(ts|tsx|js|cjs|mjs)$/.test(entry)) {
+        out.push(full);
+      }
+    }
+    return out;
+  };
+
+  const filesToScan = [
+    ...collectSourceFiles(resolve(process.cwd(), 'src')),
+    ...collectSourceFiles(resolve(process.cwd(), 'electron')),
+    resolve(process.cwd(), 'main.cjs'),
+  ];
+
+  for (const filePath of filesToScan) {
+    const content = readFileSync(filePath, 'utf8');
+    // Strip single-line and multi-line comments before checking for native browser dialogs
+    const codeOnly = content
+      .replace(/\/\*[\s\S]*?\*\//g, '')
+      .replace(/^\s*\/\/.*$/gm, '');
+    assert.equal(
+      /\bwindow\.(confirm|alert|prompt)\s*\(/.test(codeOnly),
+      false,
+      `Found native window dialog in ${filePath}`
+    );
+    assert.equal(
+      /(?<![.\w$])(confirm|alert|prompt)\s*\(/.test(codeOnly),
+      false,
+      `Found bare browser confirm/alert/prompt in ${filePath}`
+    );
+  }
+
+  const kbSrc = readFileSync(resolve(process.cwd(), 'src/components/KnowledgeEvolutionModal.tsx'), 'utf8');
+  assert.match(kbSrc, /pendingConfirmAction/);
+  assert.match(kbSrc, /executeResetPersona/);
+  assert.match(kbSrc, /executeImportTemplate/);
+  assert.match(kbSrc, /personaActionError/);
+  assert.equal(kbSrc.includes('确认清空'), true);
+  assert.equal(kbSrc.includes('确认导入'), true);
+});
+
+test('M5: structured translationErrorChannel, STT durability across translation errors/uncontrolled mode, audio concurrency guard, and PATCH stt_text SQLite persistence', async () => {
+  const { readFileSync } = await import('node:fs');
+  const { resolve } = await import('node:path');
+  const http = await import('node:http');
+  const { createHmac } = await import('node:crypto');
+  const { db, initDatabase } = await import('./db.ts');
+  const { app } = await import('../server.ts');
+
+  await initDatabase();
+
+  // 1. Types & Frontend source contracts
+  const typesSrc = readFileSync(resolve(process.cwd(), 'src/types/index.ts'), 'utf8');
+  assert.match(
+    typesSrc,
+    /translationErrorChannel\?:\s*'live_gemini'\s*\|\s*'live_custom_llm'\s*\|\s*'live_google'\s*\|\s*'history_google'\s*\|\s*'manual'/
+  );
+
+  const apiServiceSrc = readFileSync(resolve(process.cwd(), 'src/services/apiService.ts'), 'utf8');
+  assert.match(apiServiceSrc, /export async function updateMessageSttInDb\(/);
+  assert.match(apiServiceSrc, /message\.sttText !== undefined/);
+  assert.match(apiServiceSrc, /'translationErrorChannel' in message/);
+
+  const appSrc = readFileSync(resolve(process.cwd(), 'src/App.tsx'), 'utf8');
+  assert.match(appSrc, /function engineToLiveErrorChannel\(/);
+  assert.match(appSrc, /m\.translationErrorChannel === 'history_google'/);
+  assert.match(appSrc, /translationErrorChannel:\s*'history_google'/);
+  assert.match(appSrc, /translationErrorChannel:\s*engineToLiveErrorChannel\(effectiveInboundEngine\)/);
+  assert.match(appSrc, /const handleUpdateMessage = \(\s*messageId: string,\s*patch: Partial<Message>,\s*scope\?: \{ chatId\?: string; accountId\?: string \}/);
+  assert.match(appSrc, /updateMessageSttInDb\(/);
+
+  const chatAreaSrc = readFileSync(resolve(process.cwd(), 'src/components/ChatArea.tsx'), 'utf8');
+  assert.match(chatAreaSrc, /function getTranslationErrorLabel\(/);
+  assert.match(chatAreaSrc, /const audioPlaySeqRef = useRef\(0\)/);
+  assert.match(chatAreaSrc, /audioPlaySeqRef\.current !== playSeq/);
+  assert.match(chatAreaSrc, /uncontrolledMsgPatches/);
+  assert.match(chatAreaSrc, /persistPatch\(\{ sttText: transcribed \}\)/);
+  assert.match(chatAreaSrc, /saveLocalMessage\(originChatId,\s*\{\s*\.\.\.msg,\s*\.\.\.patch\s*\},\s*originAccountId\)/);
+
+  // 2. Runtime HTTP & SQLite persistence for PATCH /api/messages/:id/translation (sttText + tenant isolation)
+  const prevJwtSecret = process.env.JWT_SECRET;
+  process.env.JWT_SECRET = 'm5_test_jwt_secret';
+  const srv = http.createServer(app);
+  await new Promise<void>((r) => srv.listen(0, '127.0.0.1', r));
+  const port = (srv.address() as any).port;
+
+  const headerB64 = Buffer.from(JSON.stringify({ alg: 'HS256', typ: 'JWT' })).toString('base64url');
+  const payloadB64 = Buffer.from(
+    JSON.stringify({ sub: 'member_m5', username: 'member_m5', role: 'member', exp: Math.floor(Date.now() / 1000) + 3600 })
+  ).toString('base64url');
+  const sigB64 = createHmac('sha256', process.env.JWT_SECRET).update(`${headerB64}.${payloadB64}`).digest('base64url');
+  const memberJwt = `${headerB64}.${payloadB64}.${sigB64}`;
+
+  const msgIdA = `msg_m5_a_${Date.now()}`;
+  const msgIdB = `msg_m5_b_${Date.now()}`;
+  const chatId = `tg_m5_${Date.now()}`;
+  const accA = 'acc_tg_m5_a';
+  const accB = 'acc_tg_m5_b';
+  const nowTs = Date.now();
+
+  try {
+    await db
+      .prepare(
+        `INSERT INTO messages (id, chat_id, account_id, sender, text, is_audio, timestamp, created_at)
+         VALUES (?, ?, ?, 'peer', '🎤 语音消息', 1, '10:00', ?)`
+      )
+      .run(msgIdA, chatId, accA, nowTs);
+    await db
+      .prepare(
+        `INSERT INTO messages (id, chat_id, account_id, sender, text, is_audio, timestamp, created_at)
+         VALUES (?, ?, ?, 'peer', '🎤 语音消息', 1, '10:00', ?)`
+      )
+      .run(msgIdB, chatId, accB, nowTs);
+
+    // 2a. Empty payload rejected with 400
+    const badRes = await fetch(`http://127.0.0.1:${port}/api/messages/${encodeURIComponent(msgIdA)}/translation`, {
+      method: 'PATCH',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${memberJwt}`,
+        'X-Account-Id': accA,
+      },
+      body: JSON.stringify({ chatId, accountId: accA }),
+    });
+    assert.equal(badRes.status, 400);
+
+    // 2b. Tenant isolation: accA cannot update accB's message
+    const crossTenantRes = await fetch(
+      `http://127.0.0.1:${port}/api/messages/${encodeURIComponent(msgIdB)}/translation`,
+      {
+        method: 'PATCH',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${memberJwt}`,
+          'X-Account-Id': accA,
+        },
+        body: JSON.stringify({ sttText: 'hacked stt', chatId, accountId: accA }),
+      }
+    );
+    assert.equal(crossTenantRes.status, 200);
+    const crossData = (await crossTenantRes.json()) as any;
+    assert.equal(crossData.updated, false);
+    const rowBAfterCross = (await db
+      .prepare('SELECT stt_text, translated_text FROM messages WHERE id = ?')
+      .get(msgIdB)) as any;
+    assert.equal(rowBAfterCross.stt_text ?? null, null);
+
+    // 2c. STT-only update persists stt_text without touching translated_text
+    const sttOnlyRes = await fetch(
+      `http://127.0.0.1:${port}/api/messages/${encodeURIComponent(msgIdA)}/translation`,
+      {
+        method: 'PATCH',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${memberJwt}`,
+          'X-Account-Id': accA,
+        },
+        body: JSON.stringify({ sttText: 'Ciao come stai?', chatId, accountId: accA }),
+      }
+    );
+    assert.equal(sttOnlyRes.status, 200);
+    const sttOnlyData = (await sttOnlyRes.json()) as any;
+    assert.equal(sttOnlyData.ok, true);
+    assert.equal(sttOnlyData.updated, true);
+
+    const rowAfterStt = (await db
+      .prepare('SELECT stt_text, translated_text FROM messages WHERE id = ?')
+      .get(msgIdA)) as any;
+    assert.equal(rowAfterStt.stt_text, 'Ciao come stai?');
+    assert.equal(rowAfterStt.translated_text ?? null, null);
+
+    // 2d. Subsequent translation persists alongside stt_text
+    const bothRes = await fetch(
+      `http://127.0.0.1:${port}/api/messages/${encodeURIComponent(msgIdA)}/translation`,
+      {
+        method: 'PATCH',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${memberJwt}`,
+          'X-Account-Id': accA,
+        },
+        body: JSON.stringify({
+          sttText: 'Ciao come stai?',
+          translatedText: '你好，近来如何？',
+          chatId,
+          accountId: accA,
+        }),
+      }
+    );
+    assert.equal(bothRes.status, 200);
+    const rowAfterBoth = (await db
+      .prepare('SELECT stt_text, translated_text FROM messages WHERE id = ?')
+      .get(msgIdA)) as any;
+    assert.equal(rowAfterBoth.stt_text, 'Ciao come stai?');
+    assert.equal(rowAfterBoth.translated_text, '你好，近来如何？');
+  } finally {
+    try {
+      await db.prepare('DELETE FROM messages WHERE id IN (?, ?)').run(msgIdA, msgIdB);
+    } catch {}
+    await new Promise<void>((r) => srv.close(() => r()));
+    if (prevJwtSecret === undefined) delete process.env.JWT_SECRET;
+    else process.env.JWT_SECRET = prevJwtSecret;
+  }
+});
+
+test('Audit Item 1-5: no fake durations, versions, contact labels, cloning claims, or silent crypto downgrade; real ffmpeg speed/pitch processing', async () => {
+  const { readFileSync } = await import('node:fs');
+  const { resolve } = await import('node:path');
+  const { applyAudioPitchAndRateWithFfmpeg } = await import('../server.ts');
+  const { formatChatSubtitle } = await import('../src/components/ChatList.tsx');
+  const { APP_VERSION } = await import('../src/services/apiService.ts');
+  const { getCryptoStorageSecurityInfo } = await import('../src/services/cryptoStorage.ts');
+
+  // 1. Package version consistency (no hardcoded v2.5.0)
+  const pkg = JSON.parse(readFileSync(resolve(process.cwd(), 'package.json'), 'utf8'));
+  assert.equal(APP_VERSION, pkg.version);
+
+  const filesToCheck = [
+    'src/components/ChatArea.tsx',
+    'src/components/TelegramChatInfoDrawer.tsx',
+    'src/components/SystemSettingsModal.tsx',
+    'src/components/TelegramMenuDrawer.tsx',
+    'src/components/ChatList.tsx',
+    'src/components/MasterVoiceprintModal.tsx',
+    'src/components/VoiceCloneStudioModal.tsx',
+    'src/components/CustomLLMModal.tsx',
+    'src/components/UnifiedRightDock.tsx',
+  ];
+  for (const rel of filesToCheck) {
+    const content = readFileSync(resolve(process.cwd(), rel), 'utf8');
+    assert.equal(content.includes('0:04'), false, `${rel} must not contain fake 0:04 duration`);
+    assert.equal(content.includes('v2.5.0'), false, `${rel} must not contain hardcoded v2.5.0`);
+    assert.equal(content.includes('活跃联系人'), false, `${rel} must not contain hardcoded 活跃联系人`);
+    assert.equal(content.includes('原声纹'), false, `${rel} must not claim 原声纹`);
+    assert.equal(content.includes('音色克隆'), false, `${rel} must not claim 音色克隆`);
+    assert.equal(content.includes('呼吸拟真'), false, `${rel} must not contain non-functional 呼吸拟真`);
+  }
+
+  // 2. VoiceCloneStudioModal must not rely on fake playbackRate trick and must pass speechRate & pitch
+  const studioSrc = readFileSync(resolve(process.cwd(), 'src/components/VoiceCloneStudioModal.tsx'), 'utf8');
+  assert.equal(studioSrc.includes('.playbackRate'), false);
+  assert.match(studioSrc, /speechRate:\s*speedRate/);
+  assert.match(studioSrc, /pitch:\s*pitchRate/);
+  assert.match(studioSrc, /decodeAudioDurationSeconds/);
+
+  // 3. Real ffmpeg speed & pitch processing on synthetic 24kHz PCM WAV buffer (2.0 seconds)
+  const sampleRate = 24000;
+  const numSamples = sampleRate * 2;
+  const dataBytes = numSamples * 2;
+  const wavBuf = Buffer.alloc(44 + dataBytes);
+  wavBuf.write('RIFF', 0);
+  wavBuf.writeUInt32LE(36 + dataBytes, 4);
+  wavBuf.write('WAVEfmt ', 8);
+  wavBuf.writeUInt32LE(16, 16);
+  wavBuf.writeUInt16LE(1, 20);
+  wavBuf.writeUInt16LE(1, 22);
+  wavBuf.writeUInt32LE(sampleRate, 24);
+  wavBuf.writeUInt32LE(sampleRate * 2, 28);
+  wavBuf.writeUInt16LE(2, 32);
+  wavBuf.writeUInt16LE(16, 34);
+  wavBuf.write('data', 36);
+  wavBuf.writeUInt32LE(dataBytes, 40);
+  for (let i = 0; i < numSamples; i++) {
+    const sample = Math.round(Math.sin((2 * Math.PI * 440 * i) / sampleRate) * 12000);
+    wavBuf.writeInt16LE(sample, 44 + i * 2);
+  }
+
+  const unchanged = await applyAudioPitchAndRateWithFfmpeg(wavBuf, 'wav', 1.0, 1.0);
+  assert.equal(unchanged.applied, false);
+  assert.equal(unchanged.buffer.length, wavBuf.length);
+
+  const spedUpAndPitched = await applyAudioPitchAndRateWithFfmpeg(wavBuf, 'wav', 1.25, 1.1);
+  assert.equal(spedUpAndPitched.applied, true);
+  assert.equal(spedUpAndPitched.format, 'wav');
+  assert.equal(spedUpAndPitched.buffer.subarray(0, 4).toString('ascii'), 'RIFF');
+  // Output WAV sample rate is 44100 Hz mono 16-bit; at 1.25x speed, 2.0s audio -> ~1.6s -> ~141,120 bytes of PCM
+  const outSamplesSec = (spedUpAndPitched.buffer.length - 44) / (44100 * 2);
+  assert.ok(outSamplesSec > 1.4 && outSamplesSec < 1.8, `Expected ~1.6s output, got ${outSamplesSec.toFixed(3)}s`);
+
+  // 4. ChatList formatChatSubtitle accurately handles all chat types without fake label
+  assert.equal(formatChatSubtitle({ id: '1', title: 'Alice', username: '@alice_dev' } as any), '@alice_dev');
+  assert.equal(formatChatSubtitle({ id: '2', title: 'News', isChannel: true, membersCount: 120 } as any), '频道 · 120 位订阅者');
+  assert.equal(formatChatSubtitle({ id: '3', title: 'VIP Group', isGroup: true, membersCount: 18 } as any), '群组 · 18 位成员');
+  assert.equal(formatChatSubtitle({ id: '4', title: 'Helper', isBot: true } as any), 'Telegram 机器人');
+  assert.equal(formatChatSubtitle({ id: '5', title: 'Bob', phone: '+8613800138000' } as any), '+8613800138000');
+  assert.equal(formatChatSubtitle({ id: '6', title: 'Stranger' } as any), '未设置用户名');
+
+  // 5. Crypto storage reports fallback honestly when outside Electron/WebCrypto and encryptDataAsync does not catch/downgrade WebCrypto errors
+  const secInfo = getCryptoStorageSecurityInfo();
+  assert.equal(secInfo.mode, 'fallback_stream');
+  assert.equal(secInfo.hardwareProtected, false);
+  assert.match(secInfo.label, /未启用 AES-256-GCM/);
+
+  const cryptoSrc = readFileSync(resolve(process.cwd(), 'src/services/cryptoStorage.ts'), 'utf8');
+  assert.match(cryptoSrc, /window\.addEventListener\('pagehide'/);
+  assert.match(cryptoSrc, /document\.addEventListener\('visibilitychange'/);
+  const asyncEncryptFn = cryptoSrc.slice(
+    cryptoSrc.indexOf('export async function encryptDataAsync'),
+    cryptoSrc.indexOf('export async function decryptDataAsync')
+  );
+  assert.equal(/catch\s*[\(\{][\s\S]*?encryptFallbackSyncStream/.test(asyncEncryptFn), false);
+
+  const sysSettingsSrc = readFileSync(resolve(process.cwd(), 'src/components/SystemSettingsModal.tsx'), 'utf8');
+  assert.match(sysSettingsSrc, /cryptoInfo\.mode === 'fallback_stream'/);
+  assert.match(sysSettingsSrc, /cryptoInfo\.detail/);
+});
+
+
+
+
+
+

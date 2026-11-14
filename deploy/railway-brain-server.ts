@@ -22,10 +22,11 @@
  * - JWT_PUBLIC_KEY (可选；默认使用下方内置公钥，与 Cloudflare Worker 私钥配对)
  */
 
-import express, { Request, Response, NextFunction } from 'express';
+import express, { type Request, type Response, type NextFunction } from 'express';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
+import busboy from 'busboy';
 import { GoogleGenAI } from '@google/genai';
 
 const app = express();
@@ -479,6 +480,225 @@ app.post('/v1/chat/completions', requireCloudAuth, async (req: Request, res: Res
     return res.status(upstreamRes.status).json(data);
   } catch (err: any) {
     return res.status(502).json({ ok: false, error: err?.message || 'Upstream LLM gateway error' });
+  }
+});
+
+app.post('/v1/audio/transcriptions', requireCloudAuth, async (req: Request, res: Response) => {
+  const upstreamBase = String(process.env.UPSTREAM_LLM_BASE_URL || '').replace(/\/+$/, '');
+  const upstreamKey = String(process.env.UPSTREAM_LLM_API_KEY || '').trim();
+  const geminiApiKey = String(process.env.GEMINI_API_KEY || '').trim();
+
+  let audioBuffer: Buffer | null = null;
+  let audioMime = 'audio/ogg';
+  let fileName = 'audio.ogg';
+  let requestedModel = '';
+
+  const contentType = String(req.headers['content-type'] || '').toLowerCase();
+  if (contentType.includes('multipart/form-data')) {
+    try {
+      const parsed = await new Promise<{ buf: Buffer; mime: string; name: string; model: string }>((resolve, reject) => {
+        const bb = busboy({ headers: req.headers, limits: { fileSize: 25 * 1024 * 1024 } });
+        const chunks: Buffer[] = [];
+        let mime = 'audio/ogg';
+        let name = 'audio.ogg';
+        let model = '';
+        let fileSeen = false;
+
+        bb.on('field', (fieldName, val) => {
+          if (fieldName === 'model' && typeof val === 'string') {
+            model = val.trim();
+          }
+        });
+        bb.on('file', (_fieldName, file, info) => {
+          fileSeen = true;
+          mime = info?.mimeType || 'audio/ogg';
+          name = info?.filename || 'audio.ogg';
+          file.on('data', (chunk: Buffer) => chunks.push(chunk));
+        });
+        bb.on('error', reject);
+        bb.on('finish', () => {
+          if (!fileSeen || chunks.length === 0) {
+            return reject(new Error('Audio file is required'));
+          }
+          resolve({ buf: Buffer.concat(chunks), mime, name, model });
+        });
+        req.pipe(bb);
+      });
+      audioBuffer = parsed.buf;
+      audioMime = parsed.mime;
+      fileName = parsed.name;
+      requestedModel = parsed.model;
+    } catch (err: any) {
+      return res.status(400).json({ ok: false, error: err?.message || 'Invalid multipart audio payload' });
+    }
+  } else {
+    const rawB64 = String(req.body?.audioBase64 || '').trim();
+    if (!rawB64) {
+      return res.status(400).json({ ok: false, error: 'Audio file or audioBase64 is required' });
+    }
+    const cleanB64 = rawB64.replace(/^data:[^;]+;base64,/, '');
+    audioBuffer = Buffer.from(cleanB64, 'base64');
+    audioMime = String(req.body?.mimeType || 'audio/ogg');
+    requestedModel = String(req.body?.model || '').trim();
+  }
+
+  if (!audioBuffer || audioBuffer.length === 0) {
+    return res.status(400).json({ ok: false, error: 'Audio payload is empty' });
+  }
+
+  const isGeminiStt = !upstreamBase || !upstreamKey || (geminiApiKey && requestedModel.startsWith('gemini-'));
+  if (geminiApiKey && isGeminiStt) {
+    try {
+      const ai = new GoogleGenAI({
+        apiKey: geminiApiKey,
+        httpOptions: { headers: { 'User-Agent': 'aistudio-build' } },
+      });
+      const sttModel =
+        requestedModel && requestedModel.startsWith('gemini-')
+          ? requestedModel
+          : String(process.env.GEMINI_STT_MODEL || 'gemini-2.5-flash').trim();
+      const geminiRes = await ai.models.generateContent({
+        model: sttModel,
+        contents: {
+          parts: [
+            { inlineData: { mimeType: audioMime, data: audioBuffer.toString('base64') } },
+            { text: 'Transcribe this voice message accurately into text verbatim.' },
+          ],
+        },
+      });
+      const text = geminiRes.text?.trim() || '';
+      if (!text) {
+        return res.status(502).json({ ok: false, error: `Gemini(${sttModel}) returned empty transcription` });
+      }
+      return res.json({ text, model: sttModel });
+    } catch (err: any) {
+      return res.status(502).json({ ok: false, error: err?.message || 'Cloud STT error' });
+    }
+  }
+
+  if (!upstreamBase || !upstreamKey) {
+    return res.status(503).json({
+      ok: false,
+      error: 'Cloud STT not configured (GEMINI_API_KEY or UPSTREAM_LLM_BASE_URL / UPSTREAM_LLM_API_KEY)',
+    });
+  }
+
+  try {
+    const form = new FormData();
+    form.append('file', new Blob([new Uint8Array(audioBuffer)], { type: audioMime }), fileName);
+    const openAiSttModel =
+      requestedModel && !/^gemini-/i.test(requestedModel)
+        ? requestedModel
+        : String(process.env.UPSTREAM_STT_MODEL || 'whisper-1').trim();
+    form.append('model', openAiSttModel);
+    const encodedForm = new Response(form);
+    const formBuf = Buffer.from(await encodedForm.arrayBuffer());
+    const upstreamRes = await fetch(`${upstreamBase}/audio/transcriptions`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': encodedForm.headers.get('content-type') || 'multipart/form-data',
+        Authorization: `Bearer ${upstreamKey}`,
+      },
+      body: formBuf,
+    });
+    const data = await upstreamRes.json().catch(() => ({}));
+    return res.status(upstreamRes.status).json(data);
+  } catch (err: any) {
+    return res.status(502).json({ ok: false, error: err?.message || 'Upstream STT gateway error' });
+  }
+});
+
+app.post('/v1/audio/speech', requireCloudAuth, async (req: Request, res: Response) => {
+  const upstreamBase = String(process.env.UPSTREAM_LLM_BASE_URL || '').replace(/\/+$/, '');
+  const upstreamKey = String(process.env.UPSTREAM_LLM_API_KEY || '').trim();
+  const geminiApiKey = String(process.env.GEMINI_API_KEY || '').trim();
+
+  const input = String(req.body?.input || '').trim();
+  if (!input) {
+    return res.status(400).json({ ok: false, error: 'input text is required' });
+  }
+  const requestedModel = String(req.body?.model || '').trim();
+  const geminiVoice = String(req.body?.gemini_voice || 'Kore').trim();
+  const openAiVoice = String(req.body?.voice || 'nova').trim();
+  const toneStyle = String(req.body?.tone_style || '').trim();
+  const responseFormat = String(req.body?.response_format || 'mp3').trim();
+
+  const shouldUseGeminiTts = Boolean(geminiApiKey) && (!upstreamBase || !upstreamKey || requestedModel.startsWith('gemini-'));
+  if (shouldUseGeminiTts) {
+    try {
+      const ai = new GoogleGenAI({
+        apiKey: geminiApiKey,
+        httpOptions: { headers: { 'User-Agent': 'aistudio-build' } },
+      });
+      const ttsModel =
+        requestedModel && requestedModel.startsWith('gemini-')
+          ? requestedModel
+          : String(process.env.GEMINI_TTS_MODEL || 'gemini-3.8-flash-tts').trim();
+      const response = await ai.models.generateContent({
+        model: ttsModel,
+        contents: [{ role: 'user', parts: [{ text: input }] }],
+        config: {
+          responseModalities: ['AUDIO'],
+          speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: geminiVoice } } },
+          systemInstruction: toneStyle
+            ? `Please speak in an authentic, natural voice with tone and style: ${toneStyle}`
+            : undefined,
+        },
+      });
+      const audioPart = response.candidates?.[0]?.content?.parts?.[0]?.inlineData;
+      const base64Audio = audioPart?.data;
+      if (!base64Audio) {
+        return res.status(502).json({ ok: false, error: `Gemini(${ttsModel}) returned empty audio` });
+      }
+      const mimeType = audioPart?.mimeType || 'audio/wav';
+      return res.json({
+        audio: `data:${mimeType};base64,${base64Audio}`,
+        model: ttsModel,
+      });
+    } catch (err: any) {
+      return res.status(502).json({ ok: false, error: err?.message || 'Cloud TTS error' });
+    }
+  }
+
+  if (!upstreamBase || !upstreamKey) {
+    return res.status(503).json({
+      ok: false,
+      error: 'Cloud TTS not configured (GEMINI_API_KEY or UPSTREAM_LLM_BASE_URL / UPSTREAM_LLM_API_KEY)',
+    });
+  }
+
+  try {
+    const openAiTtsModel =
+      requestedModel && !/^gemini-/i.test(requestedModel)
+        ? requestedModel
+        : String(process.env.UPSTREAM_TTS_MODEL || 'tts-1').trim();
+    const upstreamRes = await fetch(`${upstreamBase}/audio/speech`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${upstreamKey}`,
+      },
+      body: JSON.stringify({
+        model: openAiTtsModel,
+        input,
+        voice: openAiVoice,
+        response_format: responseFormat,
+      }),
+    });
+    if (!upstreamRes.ok) {
+      const errTxt = await upstreamRes.text().catch(() => '');
+      return res.status(upstreamRes.status).json({ ok: false, error: errTxt || `Upstream HTTP ${upstreamRes.status}` });
+    }
+    const contentType = upstreamRes.headers.get('content-type') || 'audio/mpeg';
+    if (contentType.includes('application/json')) {
+      const json = await upstreamRes.json().catch(() => ({}));
+      return res.status(200).json(json);
+    }
+    const buf = Buffer.from(await upstreamRes.arrayBuffer());
+    res.setHeader('Content-Type', contentType);
+    return res.status(200).send(buf);
+  } catch (err: any) {
+    return res.status(502).json({ ok: false, error: err?.message || 'Upstream TTS gateway error' });
   }
 });
 

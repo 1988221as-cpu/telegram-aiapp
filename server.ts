@@ -1298,6 +1298,130 @@ export async function convertAudioToOggOpus(input: Buffer | string): Promise<Buf
   });
 }
 
+export async function applyAudioPitchAndRateWithFfmpeg(
+  input: Buffer,
+  format: 'mp3' | 'wav' | 'ogg' = 'wav',
+  rate = 1.0,
+  pitch = 1.0
+): Promise<{ buffer: Buffer; format: 'mp3' | 'wav' | 'ogg'; mimeType: string; applied: boolean }> {
+  const safeRate = Number.isFinite(rate) ? Math.min(1.5, Math.max(0.7, rate)) : 1.0;
+  const safePitch = Number.isFinite(pitch) ? Math.min(1.5, Math.max(0.7, pitch)) : 1.0;
+  const mimeTypeMap: Record<'mp3' | 'wav' | 'ogg', string> = {
+    mp3: 'audio/mpeg',
+    wav: 'audio/wav',
+    ogg: 'audio/ogg',
+  };
+
+  if (!input || input.length === 0) {
+    throw new Error('音频数据为空，无法进行语速/音高处理');
+  }
+
+  if (Math.abs(safeRate - 1.0) < 0.01 && Math.abs(safePitch - 1.0) < 0.01) {
+    return {
+      buffer: input,
+      format,
+      mimeType: mimeTypeMap[format],
+      applied: false,
+    };
+  }
+
+  const targetSampleRate = 44100;
+  const filterParts: string[] = [];
+  if (Math.abs(safePitch - 1.0) >= 0.01) {
+    filterParts.push(`aresample=${targetSampleRate}`);
+    filterParts.push(`asetrate=${Math.round(targetSampleRate * safePitch)}`);
+    filterParts.push(`aresample=${targetSampleRate}`);
+  }
+  let atempoRatio = safeRate / safePitch;
+  if (Math.abs(atempoRatio - 1.0) >= 0.01) {
+    while (atempoRatio > 2.0) {
+      filterParts.push('atempo=2.0');
+      atempoRatio /= 2.0;
+    }
+    while (atempoRatio < 0.5) {
+      filterParts.push('atempo=0.5');
+      atempoRatio /= 0.5;
+    }
+    filterParts.push(`atempo=${atempoRatio.toFixed(4)}`);
+  }
+
+  if (filterParts.length === 0) {
+    return {
+      buffer: input,
+      format,
+      mimeType: mimeTypeMap[format],
+      applied: false,
+    };
+  }
+
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'hs-tts-fx-'));
+  const ext = format === 'mp3' ? 'mp3' : format === 'ogg' ? 'ogg' : 'wav';
+  const inputPath = path.join(tmpDir, `in.${ext}`);
+  const outputPath = path.join(tmpDir, `out.${ext}`);
+
+  try {
+    await fs.promises.writeFile(inputPath, input);
+    const codecArgs =
+      format === 'mp3'
+        ? ['-c:a', 'libmp3lame', '-b:a', '128k', '-f', 'mp3']
+        : format === 'ogg'
+        ? ['-c:a', 'libopus', '-b:a', '32k', '-vbr', 'on', '-application', 'voip', '-f', 'ogg']
+        : ['-c:a', 'pcm_s16le', '-f', 'wav'];
+
+    await new Promise<void>((resolve, reject) => {
+      const ffmpegBin = resolveFfmpegBinaryPath();
+      const args = [
+        '-y',
+        '-loglevel', 'error',
+        '-i', inputPath,
+        '-af', filterParts.join(','),
+        ...codecArgs,
+        outputPath,
+      ];
+      const proc = spawn(ffmpegBin, args);
+      const errChunks: Buffer[] = [];
+      proc.stderr.on('data', (chunk) => errChunks.push(chunk));
+      let settled = false;
+      proc.on('error', (err) => {
+        if (!settled) {
+          settled = true;
+          reject(new Error(`内置音频处理器 (${ffmpegBin}) 启动失败: ${err.message}`));
+        }
+      });
+      proc.on('close', (code) => {
+        if (!settled) {
+          settled = true;
+          if (code === 0 && fs.existsSync(outputPath)) {
+            resolve();
+          } else {
+            const stderrText = Buffer.concat(errChunks).toString('utf8').trim();
+            reject(
+              new Error(
+                `ffmpeg 语速/音高处理失败 (exit=${code})${stderrText ? `: ${stderrText}` : ''}`
+              )
+            );
+          }
+        }
+      });
+    });
+
+    const outBuf = await fs.promises.readFile(outputPath);
+    if (!outBuf || outBuf.length === 0) {
+      throw new Error('ffmpeg 语速/音高处理输出为空');
+    }
+    return {
+      buffer: outBuf,
+      format,
+      mimeType: mimeTypeMap[format],
+      applied: true,
+    };
+  } finally {
+    try {
+      await fs.promises.rm(tmpDir, { recursive: true, force: true });
+    } catch {}
+  }
+}
+
 /**
  * High-Performance SQL-level RAG Knowledge Search.
  * Avoids dumping the entire knowledge base table into Node.js process memory.
@@ -5572,20 +5696,33 @@ app.delete('/api/messages/:id', requireTenantAuth, async (req: Request, res: Res
   }
 });
 
-// 3.5 Persist translatedText update (for inbound auto-translation & manual retranslation)
+// 3.5 Persist translatedText & sttText update (for inbound auto-translation, manual retranslation & voice STT)
 app.patch('/api/messages/:id/translation', requireTenantAuth, async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
-    const { translatedText, chatId: rawChatId, telegramMessageId: rawTgId, accountId: rawAccountId } = req.body || {};
-    if (typeof translatedText !== 'string') {
-      return res.status(400).json({ ok: false, error: 'translatedText 必须为字符串' });
+    const {
+      translatedText,
+      sttText,
+      chatId: rawChatId,
+      telegramMessageId: rawTgId,
+      accountId: rawAccountId,
+    } = req.body || {};
+    const hasTranslatedText = typeof translatedText === 'string';
+    const hasSttText = typeof sttText === 'string';
+    if (!hasTranslatedText && !hasSttText) {
+      return res.status(400).json({ ok: false, error: 'translatedText 或 sttText 至少需提供一项字符串' });
     }
     const authContext = (req as any).auth;
-    const effectiveAccountId =
+    const claimedAccountId =
       (typeof rawAccountId === 'string' && rawAccountId.trim()) ||
+      (typeof req.headers['x-account-id'] === 'string' && req.headers['x-account-id'].trim()) ||
+      '';
+    const effectiveAccountId =
+      claimedAccountId ||
       authContext?.effectiveAccountId ||
       'acc_1';
     const isMaster = Boolean(authContext?.session?.isMaster);
+    const enforceAccountScope = !isMaster || Boolean(claimedAccountId);
     const accVariants = getScopedAccountIdVariants(effectiveAccountId);
     if ((effectiveAccountId === 'acc_telegram_bot' || effectiveAccountId === 'acc_1') && !accVariants.includes('acc_telegram_bot')) {
       accVariants.push('acc_telegram_bot');
@@ -5598,34 +5735,46 @@ app.patch('/api/messages/:id/translation', requireTenantAuth, async (req: Reques
         ? rawTgId
         : resolveTelegramMessageNumericId(id);
 
+    const setClauses: string[] = [];
+    const setValues: any[] = [];
+    if (hasTranslatedText) {
+      setClauses.push('translated_text = ?');
+      setValues.push(translatedText);
+    }
+    if (hasSttText) {
+      setClauses.push('stt_text = ?');
+      setValues.push(sttText);
+    }
+    const setSql = setClauses.join(', ');
+
     let totalChanges = 0;
     const idWhere = ['id = ?'];
-    const idParams: any[] = [translatedText, id];
+    const idParams: any[] = [...setValues, id];
     if (chatId) {
       idWhere.push('(chat_id = ? OR chat_id = ?)');
       idParams.push(chatId, altChatId);
     }
-    if (!isMaster) {
+    if (enforceAccountScope) {
       idWhere.push(`account_id IN (${accPlaceholders})`);
       idParams.push(...accVariants);
     }
-    const idRes = await db.prepare(`UPDATE messages SET translated_text = ? WHERE ${idWhere.join(' AND ')}`).run(...idParams);
+    const idRes = await db.prepare(`UPDATE messages SET ${setSql} WHERE ${idWhere.join(' AND ')}`).run(...idParams);
     totalChanges += Number((idRes as any)?.changes || 0);
 
     if (tgMsgId && chatId) {
       const tgWhere = ['(chat_id = ? OR chat_id = ?)', 'telegram_message_id = ?'];
-      const tgParams: any[] = [translatedText, chatId, altChatId, tgMsgId];
-      if (!isMaster) {
+      const tgParams: any[] = [...setValues, chatId, altChatId, tgMsgId];
+      if (enforceAccountScope) {
         tgWhere.push(`account_id IN (${accPlaceholders})`);
         tgParams.push(...accVariants);
       }
-      const tgRes = await db.prepare(`UPDATE messages SET translated_text = ? WHERE ${tgWhere.join(' AND ')}`).run(...tgParams);
+      const tgRes = await db.prepare(`UPDATE messages SET ${setSql} WHERE ${tgWhere.join(' AND ')}`).run(...tgParams);
       totalChanges += Number((tgRes as any)?.changes || 0);
     }
 
     res.json({ ok: true, updated: totalChanges > 0, changes: totalChanges });
   } catch (err: any) {
-    res.status(500).json({ ok: false, error: err?.message || '更新译文失败' });
+    res.status(500).json({ ok: false, error: err?.message || '更新译文或语音转写失败' });
   }
 });
 
@@ -9021,12 +9170,11 @@ app.post('/api/audio/transcribe', aiGenerationLimiter, requireTenantAuth, async 
         });
       }
 
-      const inferredProtocol =
-        effectiveCustomConfig?.protocol === 'gemini' || cleanBaseUrl.toLowerCase().includes('googleapis.com')
-          ? 'gemini'
-          : effectiveCustomConfig?.protocol === 'anthropic'
-          ? 'anthropic'
-          : 'openai';
+      const inferredProtocol = inferGatewayProtocol(
+        cleanBaseUrl,
+        undefined,
+        effectiveCustomConfig?.protocol
+      );
 
       if (inferredProtocol === 'anthropic') {
         return res.status(400).json({
@@ -9069,8 +9217,9 @@ app.post('/api/audio/transcribe', aiGenerationLimiter, requireTenantAuth, async 
         }
       }
 
-      // OpenAI-compatible /audio/transcriptions (Whisper)
-      const sttModel = (typeof model === 'string' && model.trim()) || 'whisper-1';
+      // OpenAI-compatible /audio/transcriptions (Whisper): never leak gemini-* model names to OpenAI relays
+      const rawSttModel = typeof model === 'string' ? model.trim() : '';
+      const sttModel = rawSttModel && !/^gemini-/i.test(rawSttModel) ? rawSttModel : 'whisper-1';
       const ext = effectiveMimeType.includes('ogg')
         ? 'ogg'
         : effectiveMimeType.includes('mpeg') || effectiveMimeType.includes('mp3')
@@ -9303,12 +9452,58 @@ app.post('/api/audio/tts-clone', aiGenerationLimiter, requireTenantAuth, async (
       voiceName = 'Kore',
       toneStyle = 'Natural, friendly and conversational',
       model: requestedModel,
+      speechRate: rawSpeechRate,
+      pitch: rawPitch,
       customConfig,
     } = req.body;
 
     if (!text || typeof text !== 'string' || !text.trim()) {
       return res.status(400).json({ error: 'Text is required for TTS' });
     }
+
+    const effectiveRate =
+      typeof rawSpeechRate === 'number' && Number.isFinite(rawSpeechRate)
+        ? Math.min(1.5, Math.max(0.7, rawSpeechRate))
+        : 1.0;
+    const effectivePitch =
+      typeof rawPitch === 'number' && Number.isFinite(rawPitch)
+        ? Math.min(1.5, Math.max(0.7, rawPitch))
+        : 1.0;
+
+    const finalizeSynthesizedAudio = async (
+      rawBuffer: Buffer,
+      rawFormat: 'mp3' | 'wav' | 'ogg'
+    ): Promise<{ audioUrl: string; format: 'mp3' | 'wav' | 'ogg'; audioProcessed: boolean }> => {
+      const processed = await applyAudioPitchAndRateWithFfmpeg(
+        rawBuffer,
+        rawFormat,
+        effectiveRate,
+        effectivePitch
+      );
+      return {
+        audioUrl: `data:${processed.mimeType};base64,${processed.buffer.toString('base64')}`,
+        format: processed.format,
+        audioProcessed: processed.applied,
+      };
+    };
+
+    const finalizeSynthesizedDataUrl = async (
+      rawDataUrl: string,
+      fallbackFormat: 'mp3' | 'wav' | 'ogg' = 'mp3'
+    ): Promise<{ audioUrl: string; format: 'mp3' | 'wav' | 'ogg'; audioProcessed: boolean }> => {
+      const match = rawDataUrl.match(/^data:([^;]+);base64,([\s\S]+)$/i);
+      if (!match) {
+        return { audioUrl: rawDataUrl, format: fallbackFormat, audioProcessed: false };
+      }
+      const mime = match[1].toLowerCase();
+      const fmt: 'mp3' | 'wav' | 'ogg' = mime.includes('wav')
+        ? 'wav'
+        : mime.includes('ogg')
+        ? 'ogg'
+        : 'mp3';
+      const rawBuf = Buffer.from(match[2], 'base64');
+      return finalizeSynthesizedAudio(rawBuf, fmt);
+    };
 
     const savedCustomConfig = await getServerCustomLlmConfig().catch(() => null);
     const effectiveTtsConfig =
@@ -9336,8 +9531,8 @@ app.post('/api/audio/tts-clone', aiGenerationLimiter, requireTenantAuth, async (
     if (isDualOff) {
       return res.status(400).json({
         ok: false,
-        error: '当前处于双关状态（官方大模型与自有密钥均已关闭），严禁调用语音合成/音色克隆；请前往「模型」开启官方大模型或优先自有密钥后再试。',
-        message: '当前处于双关状态（官方大模型与自有密钥均已关闭），严禁调用语音合成/音色克隆；请前往「模型」开启官方大模型或优先自有密钥后再试。',
+        error: '当前处于双关状态（官方大模型与自有密钥均已关闭），严禁调用语音合成；请前往「模型」开启官方大模型或优先自有密钥后再试。',
+        message: '当前处于双关状态（官方大模型与自有密钥均已关闭），严禁调用语音合成；请前往「模型」开启官方大模型或优先自有密钥后再试。',
       });
     }
 
@@ -9408,14 +9603,18 @@ app.post('/api/audio/tts-clone', aiGenerationLimiter, requireTenantAuth, async (
               const json = await cloudTtsRes.json().catch(() => null);
               const rawB64 = json?.audio || json?.data?.[0]?.b64_json || json?.audioBase64;
               if (typeof rawB64 === 'string' && rawB64.trim()) {
-                const audioUrl = rawB64.startsWith('data:') ? rawB64 : `data:audio/mp3;base64,${rawB64}`;
+                const rawUrl = rawB64.startsWith('data:') ? rawB64 : `data:audio/mp3;base64,${rawB64}`;
+                const finalized = await finalizeSynthesizedDataUrl(rawUrl, 'mp3');
                 return res.json({
-                  audioUrl,
-                  format: 'mp3',
+                  audioUrl: finalized.audioUrl,
+                  format: finalized.format,
                   voiceName: chosenVoice,
                   toneStyle,
+                  speechRate: effectiveRate,
+                  pitch: effectivePitch,
+                  audioProcessed: finalized.audioProcessed,
                   modelUsed: json?.model || 'lingxi_cloud_brain_tts',
-                  routingReason: '通过 HumanSense 云端引擎合成语音',
+                  routingReason: '通过 HumanSense 云端引擎合成预设音色语音',
                 });
               }
             } else {
@@ -9426,14 +9625,19 @@ app.post('/api/audio/tts-clone', aiGenerationLimiter, requireTenantAuth, async (
                   : contentType.includes('ogg')
                   ? 'audio/ogg'
                   : 'audio/mpeg';
-                const format = mimeType === 'audio/wav' ? 'wav' : mimeType === 'audio/ogg' ? 'ogg' : 'mp3';
+                const format: 'mp3' | 'wav' | 'ogg' =
+                  mimeType === 'audio/wav' ? 'wav' : mimeType === 'audio/ogg' ? 'ogg' : 'mp3';
+                const finalized = await finalizeSynthesizedAudio(buf, format);
                 return res.json({
-                  audioUrl: `data:${mimeType};base64,${buf.toString('base64')}`,
-                  format,
+                  audioUrl: finalized.audioUrl,
+                  format: finalized.format,
                   voiceName: chosenVoice,
                   toneStyle,
+                  speechRate: effectiveRate,
+                  pitch: effectivePitch,
+                  audioProcessed: finalized.audioProcessed,
                   modelUsed: 'lingxi_cloud_brain_tts',
-                  routingReason: '通过 HumanSense 云端引擎合成语音',
+                  routingReason: '通过 HumanSense 云端引擎合成预设音色语音',
                 });
               }
             }
@@ -9465,13 +9669,19 @@ app.post('/api/audio/tts-clone', aiGenerationLimiter, requireTenantAuth, async (
           const base64Audio = audioPart?.data;
           if (base64Audio && Buffer.from(base64Audio, 'base64').length > 0) {
             const mimeType = audioPart?.mimeType || 'audio/wav';
+            const format: 'mp3' | 'wav' | 'ogg' =
+              mimeType.includes('ogg') ? 'ogg' : mimeType.includes('mp3') ? 'mp3' : 'wav';
+            const finalized = await finalizeSynthesizedAudio(Buffer.from(base64Audio, 'base64'), format);
             return res.json({
-              audioUrl: `data:${mimeType};base64,${base64Audio}`,
-              format: mimeType.includes('ogg') ? 'ogg' : mimeType.includes('mp3') ? 'mp3' : 'wav',
+              audioUrl: finalized.audioUrl,
+              format: finalized.format,
               voiceName: chosenVoice,
               toneStyle,
+              speechRate: effectiveRate,
+              pitch: effectivePitch,
+              audioProcessed: finalized.audioProcessed,
               modelUsed: resolveGeminiModel(requestedModel, 'tts'),
-              routingReason: '通过官方 Gemini 引擎合成语音',
+              routingReason: '通过官方 Gemini 引擎合成预设音色语音',
             });
           }
         } catch (e: any) {
@@ -9482,20 +9692,20 @@ app.post('/api/audio/tts-clone', aiGenerationLimiter, requireTenantAuth, async (
       const isMissingEndpoint = cloudTtsStatus === 404 || cloudTtsStatus === 405 || cloudTtsStatus === 501;
       return res.status(isMissingEndpoint ? 400 : cloudTtsStatus || 400).json({
         ok: false,
-        error: isMissingEndpoint ? '云端网关暂未开通音色合成端点，需配置自有网关' : '音色克隆需使用自有模型网关',
+        error: isMissingEndpoint ? '云端网关暂未开通语音合成端点，需配置自有网关' : '语音合成需使用自有模型网关',
         message: isMissingEndpoint
-          ? '云端引擎暂未开通音色合成端点；请前往「模型 → 接入自有模型网关」填写支持 OpenAI TTS / Gemini 音频的 Base URL 与 API 密钥后重试。'
+          ? '云端引擎暂未开通语音合成端点；请前往「模型 → 接入自有模型网关」填写支持 OpenAI TTS / Gemini 音频的 Base URL 与 API 密钥后重试。'
           : cloudTtsErr
           ? `云端语音合成失败 (${cloudTtsErr})；您也可在「模型 → 接入自有模型网关」配置自有网关独立使用。`
-          : '音色克隆需登录会员或前往「模型 → 接入自有模型网关」填写 Base URL 与 API 密钥。',
+          : '语音合成需登录会员或前往「模型 → 接入自有模型网关」填写 Base URL 与 API 密钥。',
       });
     }
 
     if (!cleanBaseUrl || isBuiltInCloudGatewayUrl(cleanBaseUrl)) {
       return res.status(400).json({
         ok: false,
-        error: '音色克隆需使用自有模型网关',
-        message: '音色克隆统一走「模型 → 接入自有模型网关」，请先填写大模型接入网址 (Base URL) 与 API 密钥。',
+        error: '语音合成需使用自有模型网关',
+        message: '语音合成统一走「模型 → 接入自有模型网关」，请先填写大模型接入网址 (Base URL) 与 API 密钥。',
       });
     }
 
@@ -9514,14 +9724,35 @@ app.post('/api/audio/tts-clone', aiGenerationLimiter, requireTenantAuth, async (
     if (!cleanApiKey && !isLocalhostUrl) {
       return res.status(400).json({
         ok: false,
-        error: '音色克隆缺少 API 密钥',
+        error: '语音合成缺少 API 密钥',
         message: '请先在「模型 → 接入自有模型网关」填写 API 密钥。',
       });
     }
 
+    const resolvedCustomProto = inferGatewayProtocol(
+      cleanBaseUrl,
+      undefined,
+      effectiveTtsConfig?.protocol || customConfig?.protocol
+    );
+    if (resolvedCustomProto === 'anthropic') {
+      return res.status(400).json({
+        ok: false,
+        error: 'Anthropic 协议暂不支持语音合成 (TTS)',
+        message: 'Anthropic 协议暂不支持语音合成，请在「模型 → 接入自有模型网关」切换 OpenAI 或 Gemini 协议接口。',
+      });
+    }
+
     const isOfficialGeminiUrl = cleanBaseUrl.toLowerCase().includes('googleapis.com');
-    const isGeminiStyleModel = selectedTtsModel.toLowerCase().includes('gemini');
-    const preferGeminiNative = isOfficialGeminiUrl || (isGeminiStyleModel && !cleanBaseUrl.endsWith('/v1'));
+    const preferGeminiNative = isOfficialGeminiUrl || resolvedCustomProto === 'gemini';
+    const savedCustomModelName = String(
+      effectiveTtsConfig?.modelName || savedCustomConfig?.modelName || ''
+    ).trim();
+    const openAiTtsModel =
+      typeof requestedModel === 'string' && requestedModel.trim() && !/^gemini-/i.test(requestedModel.trim())
+        ? requestedModel.trim()
+        : savedCustomModelName && /tts/i.test(savedCustomModelName) && !/^gemini-/i.test(savedCustomModelName)
+        ? savedCustomModelName
+        : 'tts-1';
 
     const invokeGeminiNativeTts = async (): Promise<Response | { audioUrl: string; format: string; modelUsed: string } | { status: number; message: string }> => {
       try {
@@ -9582,7 +9813,7 @@ app.post('/api/audio/tts-clone', aiGenerationLimiter, requireTenantAuth, async (
               ...(cleanApiKey ? { Authorization: `Bearer ${cleanApiKey}` } : {}),
             },
             body: JSON.stringify({
-              model: selectedTtsModel,
+              model: openAiTtsModel,
               input: text,
               voice: mappedOpenAiVoice,
               response_format: 'mp3',
@@ -9604,7 +9835,7 @@ app.post('/api/audio/tts-clone', aiGenerationLimiter, requireTenantAuth, async (
             const rawB64 = json?.audio || json?.data?.[0]?.b64_json || json?.audioBase64;
             if (typeof rawB64 === 'string' && rawB64.trim()) {
               const dataUrl = rawB64.startsWith('data:') ? rawB64 : `data:audio/mp3;base64,${rawB64}`;
-              return { audioUrl: dataUrl, format: 'mp3', modelUsed: selectedTtsModel };
+              return { audioUrl: dataUrl, format: 'mp3', modelUsed: openAiTtsModel };
             }
             lastStatus = 502;
             lastMessage = json?.error?.message || '网关返回 JSON 但未包含音频数据';
@@ -9627,7 +9858,7 @@ app.post('/api/audio/tts-clone', aiGenerationLimiter, requireTenantAuth, async (
           return {
             audioUrl: `data:${mimeType};base64,${buf.toString('base64')}`,
             format,
-            modelUsed: selectedTtsModel,
+            modelUsed: openAiTtsModel,
           };
         } catch (err: any) {
           lastStatus = 503;
@@ -9642,19 +9873,23 @@ app.post('/api/audio/tts-clone', aiGenerationLimiter, requireTenantAuth, async (
       result = await invokeGeminiNativeTts();
     } else {
       result = await invokeOpenAiSpeechTts();
-      if (!('audioUrl' in result) && result.status === 404 && isGeminiStyleModel) {
-        result = await invokeGeminiNativeTts();
-      }
     }
 
     if ('audioUrl' in result) {
+      const finalized = await finalizeSynthesizedDataUrl(
+        result.audioUrl,
+        (result.format as 'mp3' | 'wav' | 'ogg') || 'mp3'
+      );
       return res.json({
-        audioUrl: result.audioUrl,
-        format: result.format,
+        audioUrl: finalized.audioUrl,
+        format: finalized.format,
         voiceName: chosenVoice,
         toneStyle,
+        speechRate: effectiveRate,
+        pitch: effectivePitch,
+        audioProcessed: finalized.audioProcessed,
         modelUsed: result.modelUsed,
-        routingReason: `通过自有模型网关 (${result.modelUsed}) 合成语音`,
+        routingReason: `通过自有模型网关 (${result.modelUsed}) 合成预设音色语音`,
       });
     }
 
@@ -9817,6 +10052,34 @@ export function resolveCanonicalChatIds(
   };
 }
 
+function isSystemMediaPlaceholderText(text?: string | null, raw?: any): boolean {
+  const trimmed = String(text || '').trim();
+  if (!trimmed) return true;
+
+  if (
+    /^\[(语音|图片|视频|文件|多媒体|贴纸)消息\]$/i.test(trimmed) ||
+    /^\[贴纸\]$/i.test(trimmed) ||
+    /^Voice Message$/i.test(trimmed) ||
+    /^(?:🎤\s*语音消息|🎥\s*视频消息|🎬\s*(?:视频消息|视频|\[视频\])|🖼️\s*(?:图片消息|图片|\[图片\]|贴纸)|📎\s*(?:文件附件|文件|媒体消息)|📍\s*位置信息|👤\s*联系人名片(?:\s*[:：].*)?|📊\s*投票|🔗\s*网页链接|暂无消息)$/.test(
+      trimmed
+    ) ||
+    /^🎵\s*音频(?:\s*[:：].*)?$/.test(trimmed) ||
+    /^📁\s*\[文件\](?:\s+.*)?$/.test(trimmed) ||
+    /^[^\p{L}\d]*\[贴纸\]$/u.test(trimmed)
+  ) {
+    return true;
+  }
+
+  if (raw && typeof raw === 'object') {
+    if ((raw.isFile || raw.is_file) && /^(📎|📁)\s+/.test(trimmed)) return true;
+    if ((raw.isAudio || raw.is_audio) && /^(🎤|🎵)\s+/.test(trimmed)) return true;
+    if ((raw.isVideo || raw.is_video) && /^(🎬|🎥)\s+/.test(trimmed)) return true;
+    if ((raw.isImage || raw.is_image) && /^🖼️\s+/.test(trimmed)) return true;
+  }
+
+  return false;
+}
+
 function normalizeMessageTurn(raw: any, fallbackSeq: number): NormalizedChatTurn | null {
   if (!raw || typeof raw !== 'object') return null;
   const senderRaw = String(raw.sender || raw.role || '').trim().toLowerCase();
@@ -9836,10 +10099,22 @@ function normalizeMessageTurn(raw: any, fallbackSeq: number): NormalizedChatTurn
         ? raw.imageCaption
         : '';
   const bodyText = typeof raw.text === 'string' ? raw.text : typeof raw.content === 'string' ? raw.content : '';
-  const resolvedText = (bodyText || sttText || imageCaption || '').trim();
+  const cleanStt = sttText.trim();
+  const cleanCaption = imageCaption.trim();
+  const cleanBody = bodyText.trim();
+  const bodyIsPlaceholder = !cleanBody || isSystemMediaPlaceholderText(cleanBody, raw);
+  const resolvedText = (
+    (cleanStt && bodyIsPlaceholder ? cleanStt : '') ||
+    (cleanCaption && bodyIsPlaceholder ? cleanCaption : '') ||
+    cleanBody ||
+    cleanStt ||
+    cleanCaption ||
+    ''
+  ).trim();
   if (!resolvedText) return null;
 
-  const mediaType: 'text' | 'voice' | 'image' = sttText && !bodyText ? 'voice' : imageCaption && !bodyText ? 'image' : 'text';
+  const mediaType: 'text' | 'voice' | 'image' =
+    cleanStt && bodyIsPlaceholder ? 'voice' : cleanCaption && bodyIsPlaceholder ? 'image' : 'text';
   const rawCreatedAt = Number(raw.created_at ?? raw.createdAt);
   const createdAt = Number.isFinite(rawCreatedAt) && rawCreatedAt > 0 ? rawCreatedAt : fallbackSeq;
 
@@ -10332,14 +10607,31 @@ ${t.dialogue_text.split('\n').slice(-14).join('\n')}
     }
 
     // Intelligent foreign-language detection & anti-drift lock
-    let resolvedLang = targetLanguage || language;
+    let resolvedLang =
+      (targetLanguage && targetLanguage !== 'Auto' ? targetLanguage : '') ||
+      (language && language !== 'Auto' ? language : '');
     if (!resolvedLang) {
-      const lastPeerMsg = [...recent30Messages].reverse().find((m) => m.sender === 'peer');
-      const peerText = lastPeerMsg?.text || '';
-      const detectedCode = detectSourceLangCode(peerText);
-      if (detectedCode && detectedCode !== 'zh-CN') {
-        resolvedLang = detectedCode === 'tr' ? 'Turkish' : detectedCode === 'ru' ? 'Russian' : detectedCode === 'en' ? 'English' : detectedCode;
-      } else if (customerProfileData?.location_timezone) {
+      for (let i = recent30Messages.length - 1; i >= 0; i--) {
+        const m = recent30Messages[i];
+        if (!m || m.sender !== 'peer') continue;
+        let peerText = String(m.text || '').trim();
+        if (/^📊\s*投票\s*[:：]\s*/.test(peerText)) {
+          peerText = peerText.replace(/^📊\s*投票\s*[:：]\s*/, '').trim();
+        }
+        if (!peerText || isSystemMediaPlaceholderText(peerText)) continue;
+        const detectedCode = detectSourceLangCode(peerText);
+        if (detectedCode) {
+          if (detectedCode !== 'zh-CN') {
+            resolvedLang =
+              PROMPT_LANGUAGE_NAMES[detectedCode] ||
+              (detectedCode === 'tr' ? 'Turkish' : detectedCode === 'ru' ? 'Russian' : detectedCode === 'en' ? 'English' : detectedCode);
+          } else {
+            resolvedLang = 'Chinese';
+          }
+          break;
+        }
+      }
+      if (!resolvedLang && customerProfileData?.location_timezone) {
         const tz = String(customerProfileData.location_timezone).toLowerCase();
         if (tz.includes('istanbul') || tz.includes('turkey') || tz.includes('土耳其')) resolvedLang = 'Turkish';
         else if (tz.includes('moscow') || tz.includes('russia') || tz.includes('俄')) resolvedLang = 'Russian';
@@ -10565,11 +10857,12 @@ ${transcriptContext}${langRequirement}`;
             })),
           ];
 
+          const rawChatModel = String(effectiveChatConfig.modelName || '').trim();
           const resolvedChatModel = isCloudBrainChat
-            ? (effectiveChatConfig.modelName && /^(gemini|gemma)/i.test(String(effectiveChatConfig.modelName).trim())
-                ? String(effectiveChatConfig.modelName).trim()
+            ? (rawChatModel && /^(gemini|gemma)/i.test(rawChatModel) && !/(tts|transcribe)/i.test(rawChatModel)
+                ? rawChatModel
                 : 'gemini-4-hydrogen')
-            : (effectiveChatConfig.modelName || 'gpt-4o-mini');
+            : (rawChatModel && !/(tts|transcribe)/i.test(rawChatModel) ? rawChatModel : 'gpt-4o-mini');
 
           const requestBody: Record<string, any> = {
             model: resolvedChatModel,
@@ -12080,10 +12373,9 @@ export async function generateTtsAudio(
     }
 
     const customModel = (serverCustomConfig?.modelName || '').trim() || 'tts-1';
+    const resolvedCustomProto = inferGatewayProtocol(cleanBaseUrl, undefined, serverCustomConfig?.protocol);
     const isGeminiProtocol =
-      serverCustomConfig?.protocol === 'gemini' ||
-      cleanBaseUrl.toLowerCase().includes('googleapis.com') ||
-      customModel.toLowerCase().includes('tts');
+      resolvedCustomProto === 'gemini' || cleanBaseUrl.toLowerCase().includes('googleapis.com');
     const openAiVoiceMap: Record<string, string> = {
       Kore: 'nova',
       Zephyr: 'shimmer',
@@ -12128,11 +12420,14 @@ export async function generateTtsAudio(
       };
     };
 
-    if (serverCustomConfig?.protocol === 'gemini' || cleanBaseUrl.toLowerCase().includes('googleapis.com')) {
+    if (isGeminiProtocol) {
       return await tryGeminiNativeCustomTts();
     }
 
-    const openAiTtsModel = customModel.toLowerCase().includes('tts') ? customModel : 'tts-1';
+    const openAiTtsModel =
+      customModel.toLowerCase().includes('tts') && !customModel.toLowerCase().startsWith('gemini-')
+        ? customModel
+        : 'tts-1';
     const candidateUrls = cleanBaseUrl.endsWith('/audio/speech')
       ? [cleanBaseUrl]
       : cleanBaseUrl.endsWith('/v1')
@@ -12194,9 +12489,6 @@ export async function generateTtsAudio(
       } catch (err: any) {
         lastErr = err?.message || String(err);
       }
-    }
-    if (lastStatus === 404 && isGeminiProtocol) {
-      return await tryGeminiNativeCustomTts();
     }
     throw new Error(`自有模型网关语音合成失败: ${lastErr}`);
   }
@@ -13000,7 +13292,24 @@ ${t.dialogue_text.split('\n').slice(-12).join('\n')}
     } catch {}
     const webhookHabitIds = webhookPersonaContext.activeHabitIds;
 
-    let webhookTargetLangCode = detectSourceLangCode(effectiveIncomingText);
+    const cleanWebhookIncoming = String(effectiveIncomingText || '').replace(/^📊\s*投票\s*[:：]\s*/, '').trim();
+    let webhookTargetLangCode =
+      cleanWebhookIncoming && !isSystemMediaPlaceholderText(cleanWebhookIncoming)
+        ? detectSourceLangCode(cleanWebhookIncoming)
+        : '';
+    if (!webhookTargetLangCode && Array.isArray(recentMessages)) {
+      for (let i = recentMessages.length - 1; i >= 0; i--) {
+        const rm = recentMessages[i];
+        if (!rm || rm.sender !== 'peer') continue;
+        const candidate = String(rm.stt_text || rm.image_caption || (!isSystemMediaPlaceholderText(rm.text, rm) ? rm.text : '') || '').trim();
+        if (!candidate || isSystemMediaPlaceholderText(candidate, rm)) continue;
+        const code = detectSourceLangCode(candidate);
+        if (code) {
+          webhookTargetLangCode = code;
+          break;
+        }
+      }
+    }
     if ((!webhookTargetLangCode || webhookTargetLangCode === 'zh-CN') && profile?.location_timezone) {
       const tz = String(profile.location_timezone).toLowerCase();
       if (tz.includes('istanbul') || tz.includes('turkey') || tz.includes('土耳其')) webhookTargetLangCode = 'tr';
@@ -21546,7 +21855,24 @@ export function attachTelegramClientMessageListener(client: TelegramClient, phon
                 }
               } catch {}
 
-              let targetLangCode = detectSourceLangCode(effectiveIncomingText);
+              const cleanAutoIncoming = String(effectiveIncomingText || '').replace(/^📊\s*投票\s*[:：]\s*/, '').trim();
+              let targetLangCode =
+                cleanAutoIncoming && !isSystemMediaPlaceholderText(cleanAutoIncoming)
+                  ? detectSourceLangCode(cleanAutoIncoming)
+                  : '';
+              if (!targetLangCode && Array.isArray(recentHistoryTurns)) {
+                for (let i = recentHistoryTurns.length - 1; i >= 0; i--) {
+                  const turn = recentHistoryTurns[i];
+                  if (!turn || turn.sender !== 'peer') continue;
+                  const candidate = String(turn.text || '').replace(/^📊\s*投票\s*[:：]\s*/, '').trim();
+                  if (!candidate || isSystemMediaPlaceholderText(candidate)) continue;
+                  const code = detectSourceLangCode(candidate);
+                  if (code) {
+                    targetLangCode = code;
+                    break;
+                  }
+                }
+              }
               if ((!targetLangCode || targetLangCode === 'zh-CN') && p?.location_timezone) {
                 const tz = String(p.location_timezone).toLowerCase();
                 if (tz.includes('istanbul') || tz.includes('turkey') || tz.includes('土耳其')) targetLangCode = 'tr';

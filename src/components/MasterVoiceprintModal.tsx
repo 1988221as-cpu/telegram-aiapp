@@ -1,16 +1,12 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
-  Mic,
-  Square,
-  Play,
-  Pause,
-  Upload,
   AudioWaveform,
   Check,
   X,
-  FileAudio,
   Cpu,
   Link,
+  Sliders,
+  Info,
 } from 'lucide-react';
 import { MasterVoiceprint } from '../types';
 import {
@@ -19,7 +15,7 @@ import {
   DEFAULT_SAMPLE_TRANSCRIPT,
 } from '../services/voiceprintStorage';
 
-const VOICE_CLONE_MODEL_PRESETS: Array<{ value: string; label: string }> = [
+const TTS_MODEL_PRESETS: Array<{ value: string; label: string }> = [
   { value: 'gemini-3.8-flash-tts', label: 'gemini-3.8-flash-tts (Gemini 3.8 Flash 拟真语音)' },
   { value: 'gemini-3.8-flash-lite-tts', label: 'gemini-3.8-flash-lite-tts (Gemini 3.8 Lite 极速)' },
   { value: 'gpt-4o-mini-tts', label: 'gpt-4o-mini-tts (OpenAI 情感语音)' },
@@ -27,14 +23,19 @@ const VOICE_CLONE_MODEL_PRESETS: Array<{ value: string; label: string }> = [
   { value: 'tts-1-hd', label: 'tts-1-hd (OpenAI 高清语音)' },
 ];
 
-function blobToDataUrl(blob: Blob): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onloadend = () => resolve(reader.result as string);
-    reader.onerror = reject;
-    reader.readAsDataURL(blob);
-  });
-}
+const BASE_PRESET_VOICES: Array<{
+  id: 'Kore' | 'Zephyr' | 'Fenrir' | 'Puck' | 'Charon';
+  label: string;
+  tag: string;
+  openaiHint: string;
+  desc: string;
+}> = [
+  { id: 'Kore', label: '甜美女', tag: 'F1', openaiHint: 'nova', desc: '女声 · 甜美温润' },
+  { id: 'Zephyr', label: '知性女', tag: 'F2', openaiHint: 'shimmer', desc: '女声 · 知性从容' },
+  { id: 'Fenrir', label: '磁性男', tag: 'M1', openaiHint: 'onyx', desc: '男声 · 磁性沉稳' },
+  { id: 'Puck', label: '阳光男', tag: 'M2', openaiHint: 'echo', desc: '男声 · 阳光开朗' },
+  { id: 'Charon', label: '商务男', tag: 'M3', openaiHint: 'fable', desc: '男声 · 商务精英' },
+];
 
 interface MasterVoiceprintModalProps {
   isOpen: boolean;
@@ -50,229 +51,49 @@ export const MasterVoiceprintModal: React.FC<MasterVoiceprintModalProps> = ({
   embedded = false,
 }) => {
   const [voiceprint, setVoiceprint] = useState<MasterVoiceprint | null>(null);
-  const [isRecording, setIsRecording] = useState(false);
-  const [recordingSeconds, setRecordingSeconds] = useState(0);
-  const [isPlayingPreview, setIsPlayingPreview] = useState(false);
-  const [sampleAudioUrl, setSampleAudioUrl] = useState<string | null>(null);
-  const [audioSourceLabel, setAudioSourceLabel] = useState<string>('系统默认采样');
-  const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [statusText, setStatusText] = useState<string | null>(null);
 
-  // Editable parameters - clean defaults
-  const [name, setName] = useState('我的专属原声纹');
+  const [name, setName] = useState('个人预设音色档');
   const [enabledAsDefault, setEnabledAsDefault] = useState(true);
   const [pitch, setPitch] = useState(1.0);
   const [rate, setRate] = useState(1.0);
-  const [warmth, setWarmth] = useState(90);
-  const [timbreTag, setTimbreTag] = useState('全域基准克隆源 · 自然真实质感');
   const [baseVoice, setBaseVoice] = useState<'Kore' | 'Zephyr' | 'Fenrir' | 'Puck' | 'Charon'>('Kore');
   const [ttsModel, setTtsModel] = useState<string>('gemini-3.8-flash-tts');
-
-  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
-  const audioChunksRef = useRef<Blob[]>([]);
-  const timerRef = useRef<any>(null);
-  const audioPlayerRef = useRef<HTMLAudioElement | null>(null);
-  const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
     if (isOpen) {
       const current = getMasterVoiceprint();
       if (current) {
         setVoiceprint(current);
-        setName(current.name || '我的专属原声纹');
+        setName(current.name || '个人预设音色档');
         setEnabledAsDefault(current.enabledAsDefault);
-        setPitch(current.pitch || 1.0);
-        setRate(current.rate || 1.0);
-        setWarmth(current.warmth || 90);
-        setTimbreTag(current.timbreTag || '全域基准克隆源 · 自然真实质感');
+        setPitch(typeof current.pitch === 'number' && Number.isFinite(current.pitch) ? current.pitch : 1.0);
+        setRate(typeof current.rate === 'number' && Number.isFinite(current.rate) ? current.rate : 1.0);
         setBaseVoice(current.baseVoice || (current.pitch && current.pitch < 0.95 ? 'Fenrir' : 'Kore'));
         setTtsModel(current.ttsModel || 'gemini-3.8-flash-tts');
-        if (current.sampleAudioUrl) {
-          setSampleAudioUrl(current.sampleAudioUrl);
-          setAudioSourceLabel('已保存的原声条样本');
-        }
       }
-      setIsRecording(false);
-      setRecordingSeconds(0);
-      setIsPlayingPreview(false);
       setStatusText(null);
-    }
-  }, [isOpen]);
-
-  // Clean up audio on unmount/close
-  useEffect(() => {
-    if (!isOpen) {
-      if (audioPlayerRef.current) {
-        audioPlayerRef.current.pause();
-      }
-      if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
-        window.speechSynthesis.cancel();
-      }
-      if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording') {
-        mediaRecorderRef.current.stop();
-      }
-      clearInterval(timerRef.current);
     }
   }, [isOpen]);
 
   if (!isOpen && !embedded) return null;
 
-  // 1. Microphone recording
-  const handleStartRecording = async () => {
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      mediaRecorderRef.current = new MediaRecorder(stream);
-      audioChunksRef.current = [];
+  const selectedPresetMeta =
+    BASE_PRESET_VOICES.find((v) => v.id === baseVoice) || BASE_PRESET_VOICES[0];
 
-      mediaRecorderRef.current.ondataavailable = (event) => {
-        if (event.data.size > 0) {
-          audioChunksRef.current.push(event.data);
-        }
-      };
-
-      mediaRecorderRef.current.onstop = async () => {
-        const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
-        let resolvedUrl = '';
-        try {
-          resolvedUrl = await blobToDataUrl(audioBlob);
-        } catch {
-          resolvedUrl = URL.createObjectURL(audioBlob);
-        }
-        setSampleAudioUrl(resolvedUrl);
-        setAudioSourceLabel(`麦克风录制参考音频 (${(audioBlob.size / 1024).toFixed(1)} KB)`);
-        stream.getTracks().forEach((track) => track.stop());
-
-        if (resolvedUrl) {
-          const tempAudio = new Audio(resolvedUrl);
-          tempAudio.onloadedmetadata = () => {
-            if (Number.isFinite(tempAudio.duration) && tempAudio.duration > 0) {
-              setRecordingSeconds(Math.max(1, Math.round(tempAudio.duration)));
-            }
-          };
-        }
-        setStatusText('麦克风参考音频已录制完成，可试听或保存预设音色配置');
-        setTimeout(() => setStatusText(null), 3000);
-      };
-
-      mediaRecorderRef.current.start();
-      setIsRecording(true);
-      setRecordingSeconds(0);
-      let count = 0;
-      clearInterval(timerRef.current);
-      timerRef.current = setInterval(() => {
-        count++;
-        setRecordingSeconds(count);
-        if (count >= 20) {
-          if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording') {
-            mediaRecorderRef.current.stop();
-          }
-          clearInterval(timerRef.current);
-          setIsRecording(false);
-          setStatusText('已达单次录制上限 (20秒)');
-          setTimeout(() => setStatusText(null), 3000);
-        } else if (count === 10) {
-          setStatusText('已录制 10 秒，可随时点击停止录制');
-          setTimeout(() => setStatusText(null), 3000);
-        }
-      }, 1000);
-    } catch (err: any) {
-      console.warn('Microphone error', err);
-      setIsRecording(false);
-      setStatusText(`麦克风访问失败：${err.message || '请允许浏览器麦克风权限'}。您可点击下方直接上传本地音频文件。`);
-      setTimeout(() => setStatusText(null), 5000);
-    }
-  };
-
-  const handleStopRecording = () => {
-    if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording') {
-      mediaRecorderRef.current.stop();
-    }
-    clearInterval(timerRef.current);
-    setIsRecording(false);
-  };
-
-  // 2. Upload / Import Audio File (本地参考音频)
-  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-
-    if (file.size > 2.5 * 1024 * 1024) {
-      setStatusText('音频文件过大 (超过 2.5MB)，请截取 5-20 秒参考音频以保证本地持久化');
-      setTimeout(() => setStatusText(null), 4000);
-      return;
-    }
-
-    setIsAnalyzing(true);
-    try {
-      const dataUrl = await blobToDataUrl(file);
-      const tempAudio = new Audio(dataUrl);
-      await new Promise<void>((resolve, reject) => {
-        tempAudio.onloadedmetadata = () => {
-          const dur = Number.isFinite(tempAudio.duration) && tempAudio.duration > 0
-            ? Math.max(1, Math.round(tempAudio.duration))
-            : 1;
-          setRecordingSeconds(dur);
-          resolve();
-        };
-        tempAudio.onerror = () => reject(new Error('无法解码该音频文件，请确认音频格式有效'));
-      });
-      setSampleAudioUrl(dataUrl);
-      setAudioSourceLabel(`本地音频: ${file.name} (${(file.size / 1024).toFixed(1)} KB)`);
-      setStatusText(`参考音频「${file.name}」已验证加载，可试听或保存。`);
-      setTimeout(() => setStatusText(null), 3500);
-    } catch (err: any) {
-      setStatusText(err?.message || '音频文件读取或解码失败，请选择有效的音频文件');
-      setTimeout(() => setStatusText(null), 4000);
-    } finally {
-      setIsAnalyzing(false);
-    }
-  };
-
-  // 3. Preview Playback
-  const handleTogglePlayPreview = () => {
-    if (isPlayingPreview) {
-      if (audioPlayerRef.current) audioPlayerRef.current.pause();
-      if (typeof window !== 'undefined' && 'speechSynthesis' in window) window.speechSynthesis.cancel();
-      setIsPlayingPreview(false);
-      return;
-    }
-
-    if (sampleAudioUrl) {
-      if (!audioPlayerRef.current) {
-        audioPlayerRef.current = new Audio();
-      }
-      audioPlayerRef.current.src = sampleAudioUrl;
-      audioPlayerRef.current.playbackRate = rate;
-      audioPlayerRef.current.onended = () => setIsPlayingPreview(false);
-      audioPlayerRef.current.onerror = () => {
-        setIsPlayingPreview(false);
-        setStatusText('音频播放失败，请重新录制或上传有效音频文件');
-      };
-      audioPlayerRef.current.play().catch((err) => {
-        setIsPlayingPreview(false);
-        setStatusText(`音频播放失败：${err?.message || '浏览器阻止播放'}`);
-      });
-      setIsPlayingPreview(true);
-    } else {
-      setStatusText('请先使用下方麦克风录制或导入参考音频样本，再进行试听。');
-      setTimeout(() => setStatusText(null), 3500);
-    }
-  };
-
-  // 4. Save
   const handleSave = () => {
     const resolvedTtsModel = ttsModel.trim() || 'gemini-3.8-flash-tts';
     const updated: MasterVoiceprint = {
       id: voiceprint?.id || 'master_' + Date.now(),
-      name: name.trim() || '我的专属原声纹',
-      sampleAudioUrl: sampleAudioUrl || voiceprint?.sampleAudioUrl || '',
-      duration: recordingSeconds || voiceprint?.duration || 0,
+      name: name.trim() || '个人预设音色档',
+      sampleAudioUrl: '',
+      duration: 0,
       recordedAt: Date.now(),
       enabledAsDefault,
       pitch,
       rate,
-      warmth,
-      timbreTag: timbreTag.trim() || '全域基准克隆源 · 自然真实质感',
+      warmth: 100,
+      timbreTag: '预设音色 · 服务端 ffmpeg 真实调速调音高',
       sampleTranscript: DEFAULT_SAMPLE_TRANSCRIPT,
       baseVoice,
       gender: baseVoice === 'Fenrir' || baseVoice === 'Puck' || baseVoice === 'Charon' ? 'male' : 'female',
@@ -287,18 +108,14 @@ export const MasterVoiceprintModal: React.FC<MasterVoiceprintModalProps> = ({
     setVoiceprint(updated);
     onVoiceprintSaved?.(updated);
     if (embedded) {
-      setStatusText(
-        sampleAudioUrl
-          ? `原声纹与音色模型 (${resolvedTtsModel}) 已保存并设为全域声纹`
-          : `音色配置与克隆模型 (${resolvedTtsModel}) 已保存（后续可随时补充参考录音）`
-      );
+      setStatusText(`预设音色配置与模型 (${resolvedTtsModel}) 已保存`);
       setTimeout(() => setStatusText(null), 3000);
     } else {
       onClose();
     }
   };
 
-  const isPresetTtsModel = VOICE_CLONE_MODEL_PRESETS.some((m) => m.value === ttsModel);
+  const isPresetTtsModel = TTS_MODEL_PRESETS.some((m) => m.value === ttsModel);
 
   const innerContent = (
     <>
@@ -310,7 +127,9 @@ export const MasterVoiceprintModal: React.FC<MasterVoiceprintModalProps> = ({
               <AudioWaveform className="w-4.5 h-4.5" />
             </div>
             <div>
-              <h2 className="text-sm font-semibold text-[#0f172a] dark:text-[#eef4fb] tracking-wide">参考录音与预设音色配置</h2>
+              <h2 className="text-sm font-semibold text-[#0f172a] dark:text-[#eef4fb] tracking-wide">
+                预设音色与语音合成配置
+              </h2>
             </div>
           </div>
           <button
@@ -332,62 +151,46 @@ export const MasterVoiceprintModal: React.FC<MasterVoiceprintModalProps> = ({
           </div>
         )}
 
-        {/* Voiceprint Info Card */}
-        <div className="p-3.5 rounded-xl bg-[#f8fafc] dark:bg-[#0e1726]/85 border border-[#e2e8f0] dark:border-[#18273a] space-y-3">
-          <div className="flex items-center justify-between">
-            <div className="flex-1 min-w-0 pr-2">
-              <input
-                type="text"
-                value={name}
-                onChange={(e) => setName(e.target.value)}
-                className="bg-transparent text-xs font-semibold text-[#0f172a] dark:text-[#eef4fb] focus:outline-none border-b border-transparent focus:border-[#2ba0ff] w-full"
-                placeholder="输入原声纹名称"
-              />
-              <div className="text-[11px] text-[#64748b] dark:text-[#7f95ab] flex items-center gap-1.5 mt-0.5 truncate">
-                <span>{sampleAudioUrl ? audioSourceLabel : '未录制原声（可直接配置音色与模型）'}</span>
-                <span>·</span>
-                <span className="font-mono text-[#0284c7] dark:text-[#7cc4ff]">{ttsModel.trim() || 'gemini-3.8-flash-tts'}</span>
-              </div>
-            </div>
+        {/* Honest Capability Notice */}
+        <div className="p-3 rounded-xl bg-sky-500/8 border border-sky-500/25 text-[11px] text-[#334155] dark:text-[#9ec2e6] flex items-start gap-2 leading-relaxed">
+          <Info className="w-4 h-4 text-[#0284c7] dark:text-[#2ba0ff] shrink-0 mt-0.5" />
+          <span>
+            当前使用官方/自有网关的<strong>预设音色库</strong>进行语音合成（不支持真人声音采样复刻）。下方设置的<strong>音高基线</strong>与<strong>语速倍率</strong>会在服务端通过本地 ffmpeg 真实处理导出音频，试听与发往 Telegram 的语音条保持完全一致。
+          </span>
+        </div>
 
-            {/* Audition Button */}
-            <button
-              type="button"
-              onClick={handleTogglePlayPreview}
-              className={`px-3 py-1.5 rounded-lg text-xs font-medium flex items-center gap-1.5 transition-colors cursor-pointer shrink-0 border ${
-                isPlayingPreview
-                  ? 'bg-[#2ba0ff] border-[#2ba0ff] text-white shadow-xs'
-                  : 'bg-white hover:bg-[#f1f5f9] dark:bg-[#132033] dark:hover:bg-[#1a2b44] text-[#334155] dark:text-[#dbe6f0] border-[#cbd5e1] dark:border-[#1e3148]'
-              }`}
-            >
-              {isPlayingPreview ? (
-                <>
-                  <Pause className="w-3 h-3 fill-current" />
-                  <span>停止</span>
-                </>
-              ) : (
-                <>
-                  <Play className="w-3 h-3 fill-current" />
-                  <span>试听原声</span>
-                </>
-              )}
-            </button>
+        {/* Preset Summary Card */}
+        <div className="p-3.5 rounded-xl bg-[#f8fafc] dark:bg-[#0e1726]/85 border border-[#e2e8f0] dark:border-[#18273a] space-y-3">
+          <div className="flex-1 min-w-0">
+            <input
+              type="text"
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              className="bg-transparent text-xs font-semibold text-[#0f172a] dark:text-[#eef4fb] focus:outline-none border-b border-transparent focus:border-[#2ba0ff] w-full"
+              placeholder="输入预设音色档名称"
+            />
+            <div className="text-[11px] text-[#64748b] dark:text-[#7f95ab] flex items-center gap-1.5 mt-0.5 truncate">
+              <span>预设音色 {baseVoice} (OpenAI 映射 {selectedPresetMeta.openaiHint})</span>
+              <span>·</span>
+              <span className="font-mono text-[#0284c7] dark:text-[#7cc4ff]">{ttsModel.trim() || 'gemini-3.8-flash-tts'}</span>
+            </div>
           </div>
 
-          {/* Real Measurable Stats */}
           <div className="grid grid-cols-3 gap-2 pt-2.5 border-t border-[#e2e8f0] dark:border-[#152234] text-[11px]">
             <div className="text-center">
-              <div className="text-[#64748b] dark:text-[#7f95ab] text-[10px]">匹配预设音色</div>
-              <div className="font-medium text-[#0f172a] dark:text-[#eef4fb] mt-0.5 tabular-nums truncate">
-                {sampleAudioUrl ? `${baseVoice} · ${recordingSeconds || voiceprint?.duration || 0}s` : baseVoice}
+              <div className="text-[#64748b] dark:text-[#7f95ab] text-[10px]">基础预设音色</div>
+              <div className="font-medium text-[#0f172a] dark:text-[#eef4fb] mt-0.5 truncate">
+                {baseVoice}
               </div>
             </div>
             <div className="text-center">
-              <div className="text-[#64748b] dark:text-[#7f95ab] text-[10px]">语速倍率</div>
-              <div className="font-medium text-[#0f172a] dark:text-[#eef4fb] mt-0.5 tabular-nums">{rate.toFixed(2)}x</div>
+              <div className="text-[#64748b] dark:text-[#7f95ab] text-[10px]">语速 / 音高</div>
+              <div className="font-medium text-[#0f172a] dark:text-[#eef4fb] mt-0.5 tabular-nums">
+                {rate.toFixed(2)}x / {pitch.toFixed(2)}x
+              </div>
             </div>
             <div className="text-center">
-              <div className="text-[#64748b] dark:text-[#7f95ab] text-[10px]">全局应用</div>
+              <div className="text-[#64748b] dark:text-[#7f95ab] text-[10px]">应用状态</div>
               <div className="font-medium text-[#0284c7] dark:text-[#2ba0ff] mt-0.5">
                 {voiceprint ? (enabledAsDefault ? '默认配置' : '已保存') : '待保存'}
               </div>
@@ -395,12 +198,12 @@ export const MasterVoiceprintModal: React.FC<MasterVoiceprintModalProps> = ({
           </div>
         </div>
 
-        {/* Voice Clone / TTS Model Selector (Routes via Tab 3 Custom Gateway) */}
+        {/* TTS Model Selector */}
         <div className="p-3.5 rounded-xl bg-[#f8fafc] dark:bg-[#0e1726]/85 border border-[#e2e8f0] dark:border-[#18273a] space-y-2.5">
           <div className="flex items-center justify-between gap-2">
             <span className="text-xs font-medium text-[#0f172a] dark:text-[#eef4fb] flex items-center gap-1.5">
               <Cpu className="w-3.5 h-3.5 text-[#2ba0ff]" />
-              音色克隆 / 语音合成模型型号
+              语音合成模型型号
             </span>
             <span className="text-[10px] text-[#64748b] dark:text-[#7f95ab]">支持自由输入</span>
           </div>
@@ -416,7 +219,7 @@ export const MasterVoiceprintModal: React.FC<MasterVoiceprintModalProps> = ({
             }}
             className="w-full bg-white dark:bg-[#090f19] border border-[#cbd5e1] dark:border-[#1e3148] rounded-lg px-3 py-1.5 text-xs text-[#0f172a] dark:text-[#eef4fb] focus:outline-none focus:border-[#2ba0ff]"
           >
-            {VOICE_CLONE_MODEL_PRESETS.map((m) => (
+            {TTS_MODEL_PRESETS.map((m) => (
               <option key={m.value} value={m.value}>
                 {m.label}
               </option>
@@ -434,109 +237,31 @@ export const MasterVoiceprintModal: React.FC<MasterVoiceprintModalProps> = ({
 
           <p className="text-[10.5px] text-[#64748b] dark:text-[#7f95ab] flex items-center gap-1.5 leading-snug">
             <Link className="w-3 h-3 text-[#2ba0ff] shrink-0" />
-            <span>接入口与密钥统一走「模型 → 接入自有模型网关」配置的大模型接入网址与密钥。</span>
+            <span>接入口与密钥统一走「模型 → 接入自有模型网关」配置的大模型接入网址与密钥，或使用官方云端引擎。</span>
           </p>
         </div>
 
-        {/* Recording & Audio Clip Import Section */}
-        <div className="p-3.5 rounded-xl bg-[#f8fafc] dark:bg-[#0e1726]/85 border border-[#e2e8f0] dark:border-[#18273a] space-y-3">
-          <div className="flex items-center justify-between text-xs text-[#64748b] dark:text-[#7f95ab]">
-            <span className="font-medium text-[#0f172a] dark:text-[#eef4fb] flex items-center gap-1.5">
-              <FileAudio className="w-3.5 h-3.5 text-[#2ba0ff]" />
-              录制采样或导入原声条
-            </span>
-            <span>
-              {isRecording ? (
-                <span className="text-rose-500 dark:text-rose-400 font-semibold tabular-nums">
-                  录音中 {recordingSeconds}s
-                </span>
-              ) : (
-                '支持音频条/语音文件'
-              )}
-            </span>
-          </div>
-
-          {/* Calibration Script */}
-          <div className="p-2.5 rounded-lg bg-white dark:bg-[#090f19] border border-[#e2e8f0] dark:border-[#18273a] text-[11.5px] text-[#475569] dark:text-[#cbd5e1] leading-relaxed">
-            <span className="text-[10px] text-[#64748b] dark:text-[#7f95ab] block mb-0.5">参考校准范句：</span>
-            <p className="italic">“{DEFAULT_SAMPLE_TRANSCRIPT}”</p>
-          </div>
-
-          {/* Mic & File Import Action Buttons */}
-          <div className="flex items-center gap-2.5 pt-0.5">
-            {isRecording ? (
-              <button
-                type="button"
-                onClick={handleStopRecording}
-                className="w-full py-2 rounded-lg bg-rose-600 hover:bg-rose-700 text-white font-medium text-xs flex items-center justify-center gap-2 transition-colors cursor-pointer shadow-sm tabular-nums"
-              >
-                <Square className="w-3.5 h-3.5 fill-current" />
-                <span>完成录制 ({recordingSeconds}s)</span>
-              </button>
-            ) : (
-              <>
-                <button
-                  type="button"
-                  onClick={handleStartRecording}
-                  disabled={isAnalyzing}
-                  className="flex-1 py-2 px-3 rounded-lg bg-[#2ba0ff] hover:bg-[#1e8ee8] text-white font-medium text-xs flex items-center justify-center gap-1.5 transition-colors cursor-pointer shadow-xs"
-                >
-                  <Mic className="w-3.5 h-3.5" />
-                  <span>{sampleAudioUrl ? '麦克风重录' : '麦克风录制'}</span>
-                </button>
-
-                <input
-                  ref={fileInputRef}
-                  type="file"
-                  accept="audio/*,.wav,.mp3,.ogg,.m4a,.webm"
-                  onChange={handleFileUpload}
-                  className="hidden"
-                />
-
-                <button
-                  type="button"
-                  onClick={() => fileInputRef.current?.click()}
-                  disabled={isAnalyzing}
-                  title="选择已有语音条或音频文件导入声纹"
-                  className="flex-1 py-2 px-3 rounded-lg bg-white hover:bg-[#f1f5f9] dark:bg-[#132033] dark:hover:bg-[#1a2b44] text-[#0f172a] dark:text-white border border-[#cbd5e1] dark:border-[#1e3148] font-medium text-xs flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
-                >
-                  <Upload className="w-3.5 h-3.5 text-[#2ba0ff]" />
-                  <span>导入参考音频</span>
-                </button>
-              </>
-            )}
-          </div>
-        </div>
-
-        {/* Sliders */}
+        {/* Preset Voice & ffmpeg Audio Parameters */}
         <div className="p-3.5 rounded-xl bg-[#f8fafc] dark:bg-[#0e1726]/85 border border-[#e2e8f0] dark:border-[#18273a] space-y-3 text-xs">
-          <span className="font-medium text-[#0f172a] dark:text-[#eef4fb] block">
-            拟真微调 (Fine Tuning)
+          <span className="font-medium text-[#0f172a] dark:text-[#eef4fb] flex items-center gap-1.5">
+            <Sliders className="w-3.5 h-3.5 text-[#2ba0ff]" />
+            <span>预设音色与音频参数（ffmpeg 实效处理）</span>
           </span>
 
-          {/* Base Voice Timbre Anchor */}
+          {/* Base Voice Anchor */}
           <div className="space-y-1.5 pt-0.5">
             <div className="flex justify-between text-[11px] text-[#64748b] dark:text-[#7f95ab]">
-              <span>音色特征锚点 (男女音质基准)</span>
+              <span>系统预设音色库 (Gemini / OpenAI 自动映射)</span>
               <span className="text-[#0284c7] dark:text-[#2ba0ff] font-medium">
-                {baseVoice === 'Kore' ? '女声 · 甜美温润' :
-                 baseVoice === 'Zephyr' ? '女声 · 知性从容' :
-                 baseVoice === 'Fenrir' ? '男声 · 磁性沉稳' :
-                 baseVoice === 'Puck' ? '男声 · 阳光开朗' : '男声 · 商务精英'}
+                {selectedPresetMeta.desc}
               </span>
             </div>
             <div className="grid grid-cols-5 gap-1.5">
-              {[
-                { id: 'Kore', label: '甜美女', tag: 'F1' },
-                { id: 'Zephyr', label: '知性女', tag: 'F2' },
-                { id: 'Fenrir', label: '磁性男', tag: 'M1' },
-                { id: 'Puck', label: '阳光男', tag: 'M2' },
-                { id: 'Charon', label: '商务男', tag: 'M3' },
-              ].map((v) => (
+              {BASE_PRESET_VOICES.map((v) => (
                 <button
                   key={v.id}
                   type="button"
-                  onClick={() => setBaseVoice(v.id as any)}
+                  onClick={() => setBaseVoice(v.id)}
                   className={`py-1.5 px-1 rounded-lg text-center border transition-all cursor-pointer ${
                     baseVoice === v.id
                       ? 'bg-[#2ba0ff] border-[#2ba0ff] text-white shadow-xs'
@@ -555,7 +280,7 @@ export const MasterVoiceprintModal: React.FC<MasterVoiceprintModalProps> = ({
           {/* Pitch */}
           <div className="space-y-1">
             <div className="flex justify-between text-[11px] text-[#64748b] dark:text-[#7f95ab]">
-              <span>音高基线</span>
+              <span>音高基线 (ffmpeg 实效变调)</span>
               <span className="text-[#0f172a] dark:text-[#eef4fb] font-medium tabular-nums">{pitch.toFixed(2)}x</span>
             </div>
             <input
@@ -572,7 +297,7 @@ export const MasterVoiceprintModal: React.FC<MasterVoiceprintModalProps> = ({
           {/* Rate */}
           <div className="space-y-1">
             <div className="flex justify-between text-[11px] text-[#64748b] dark:text-[#7f95ab]">
-              <span>语速节奏</span>
+              <span>语速节奏 (ffmpeg 实效变速)</span>
               <span className="text-[#0f172a] dark:text-[#eef4fb] font-medium tabular-nums">{rate.toFixed(2)}x</span>
             </div>
             <input
@@ -585,29 +310,12 @@ export const MasterVoiceprintModal: React.FC<MasterVoiceprintModalProps> = ({
               className="w-full h-1 bg-[#cbd5e1] dark:bg-[#1e3148] rounded-lg appearance-none cursor-pointer accent-[#2ba0ff]"
             />
           </div>
-
-          {/* Warmth */}
-          <div className="space-y-1">
-            <div className="flex justify-between text-[11px] text-[#64748b] dark:text-[#7f95ab]">
-              <span>呼吸拟真感</span>
-              <span className="text-[#0f172a] dark:text-[#eef4fb] font-medium tabular-nums">{warmth}%</span>
-            </div>
-            <input
-              type="range"
-              min="60"
-              max="100"
-              step="1"
-              value={warmth}
-              onChange={(e) => setWarmth(parseInt(e.target.value, 10))}
-              className="w-full h-1 bg-[#cbd5e1] dark:bg-[#1e3148] rounded-lg appearance-none cursor-pointer accent-[#2ba0ff]"
-            />
-          </div>
         </div>
 
         {/* Global Default Toggle */}
         <div className="p-3 rounded-xl bg-[#f8fafc] dark:bg-[#0e1726]/85 border border-[#e2e8f0] dark:border-[#18273a] flex items-center justify-between gap-3">
           <div className="text-xs font-semibold text-[#0f172a] dark:text-[#eef4fb]">
-            设为默认音色预设
+            设为默认语音合成预设
           </div>
           <button
             type="button"
@@ -637,7 +345,7 @@ export const MasterVoiceprintModal: React.FC<MasterVoiceprintModalProps> = ({
           </button>
         ) : (
           <span className="text-[11px] text-[#64748b] dark:text-[#7f95ab]">
-            {voiceprint ? '已关联音色预设' : '选择型号或录入后保存'}
+            {voiceprint ? '已关联语音合成预设' : '选择预设与型号后保存'}
           </span>
         )}
 
@@ -647,7 +355,7 @@ export const MasterVoiceprintModal: React.FC<MasterVoiceprintModalProps> = ({
           className="px-4 py-2 rounded-lg bg-[#2ba0ff] hover:bg-[#1e8ee8] text-white font-medium text-xs flex items-center gap-1.5 shadow-xs transition-colors cursor-pointer"
         >
           <Check className="w-3.5 h-3.5" />
-          <span>保存并设为全域声纹</span>
+          <span>保存预设音色配置</span>
         </button>
       </div>
     </>
@@ -669,4 +377,3 @@ export const MasterVoiceprintModal: React.FC<MasterVoiceprintModalProps> = ({
     </div>
   );
 };
-

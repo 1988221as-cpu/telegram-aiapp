@@ -13,11 +13,13 @@ import {
   RefreshCw
 } from 'lucide-react';
 import {
+  APP_VERSION,
   fetchAuthStatus,
   getSystemProxyApi,
   saveSystemProxyApi,
   reconnectTelegramSessionsApi,
 } from '../services/apiService';
+import { getCryptoStorageSecurityInfo } from '../services/cryptoStorage';
 
 interface SystemSettingsModalProps {
   isOpen: boolean;
@@ -118,6 +120,8 @@ export const SystemSettingsModal: React.FC<SystemSettingsModalProps> = ({
 
   if (!isOpen) return null;
 
+  const cryptoInfo = getCryptoStorageSecurityInfo();
+
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/75 backdrop-blur-xs animate-in fade-in duration-200 select-none">
       <div className="relative w-full max-w-lg bg-[#0e1621] border border-[#1e2f42] rounded-2xl shadow-2xl flex flex-col overflow-hidden text-[#f5f7fa] max-h-[92vh]">
@@ -141,19 +145,36 @@ export const SystemSettingsModal: React.FC<SystemSettingsModalProps> = ({
 
         {/* Content Body */}
         <div className="p-6 space-y-4 overflow-y-auto flex-1">
-          {/* Section 1: Zero-DB Security Protocol */}
+          {/* Section 1: Storage Security & Auth Isolation */}
           <div className="bg-[#121c27] border border-[#1e2f42] rounded-xl p-4 space-y-3">
             <div className="flex items-center gap-2">
-              <ShieldCheck className="w-4 h-4 text-emerald-400" />
+              <ShieldCheck
+                className={`w-4 h-4 ${
+                  cryptoInfo.mode === 'fallback_stream' ? 'text-amber-400' : 'text-emerald-400'
+                }`}
+              />
               <span className="text-sm font-semibold text-white">系统安全与加密状态</span>
             </div>
             <div className="grid grid-cols-2 gap-2 text-xs">
               <div className="p-2.5 rounded-lg bg-[#0c131c] border border-[#1e2f42]/60">
                 <div className="text-[10px] text-[#7f93a5]">会话安全存储</div>
-                <div className="text-emerald-400 font-medium mt-0.5 flex items-center gap-1">
-                  <Lock className="w-3 h-3" />
-                  <span>本地加密保护（凭据 AES-256-GCM）</span>
+                <div
+                  className={`font-medium mt-0.5 flex items-center gap-1 ${
+                    cryptoInfo.mode === 'fallback_stream'
+                      ? 'text-amber-400'
+                      : cryptoInfo.mode === 'electron_aes_gcm'
+                        ? 'text-sky-400'
+                        : 'text-emerald-400'
+                  }`}
+                >
+                  {cryptoInfo.mode === 'fallback_stream' ? (
+                    <AlertCircle className="w-3 h-3 shrink-0" />
+                  ) : (
+                    <Lock className="w-3 h-3 shrink-0" />
+                  )}
+                  <span>{cryptoInfo.label}</span>
                 </div>
+                <p className="text-[10px] text-[#7f93a5] mt-1 leading-snug">{cryptoInfo.detail}</p>
               </div>
               <div className="p-2.5 rounded-lg bg-[#0c131c] border border-[#1e2f42]/60">
                 <div className="text-[10px] text-[#7f93a5]">运行隔离与鉴权</div>
@@ -322,7 +343,7 @@ export const SystemSettingsModal: React.FC<SystemSettingsModalProps> = ({
 
         {/* Footer */}
         <div className="px-6 py-3 border-t border-[#17212b] bg-[#121c27] flex items-center justify-between shrink-0">
-          <span className="text-[11px] text-[#55697d]">HumanSense Internal Settings · v2.5.0</span>
+          <span className="text-[11px] text-[#55697d]">HumanSense Internal Settings · v{APP_VERSION}</span>
           <button
             onClick={onClose}
             className="px-4 py-2 rounded-lg bg-[#2481cc] hover:bg-[#1d6fae] text-white text-xs font-semibold shadow-xs cursor-pointer transition-colors"

@@ -32,48 +32,48 @@ export const VOICE_PROFILES: VoiceProfile[] = [
     id: 'Kore',
     name: 'Kore · 治愈甜美声',
     gender: 'female',
-    tag: '高情商伴侣首选',
-    desc: '轻柔温和、带有微人类呼吸感与自然停顿，最适合情感陪伴与暖心关怀',
+    tag: '温和自然女声 (OpenAI: nova)',
+    desc: '轻柔温和、语调亲切自然，适合日常陪伴与客户关怀',
     avatar: '🌸',
-    defaultTone: 'Gentle, affectionate and soothing with natural breath pauses',
-    samplePhrase: '今天辛苦啦，有没有好好吃饭？我一直在想着你呢。',
+    defaultTone: 'Gentle, affectionate and soothing with natural pauses',
+    samplePhrase: '今天辛苦啦，有没有好好吃饭？',
   },
   {
     id: 'Zephyr',
-    name: 'Zephyr · 知性成熟御姐',
+    name: 'Zephyr · 知性成熟女声',
     gender: 'female',
-    tag: '稳重深情倾听者',
-    desc: '嗓音温润醇厚、从容大方，适合深度倾听与成熟默契对话',
+    tag: '稳重从容女声 (OpenAI: shimmer)',
+    desc: '嗓音温润醇厚、从容大方，适合深度倾听与默契对话',
     avatar: '👑',
     defaultTone: 'Warm, mature, steady and reassuring',
-    samplePhrase: '放轻松，无论遇到什么事，我都会陪在你身边。',
+    samplePhrase: '放轻松，有什么需要随时告诉我。',
   },
   {
     id: 'Puck',
     name: 'Puck · 阳光活力青年',
     gender: 'male',
-    tag: '生活化开朗语调',
-    desc: '富有朝气、语调自然轻松，适合日常分享与愉快幽默互动',
+    tag: '生活化开朗语调 (OpenAI: echo)',
+    desc: '富有朝气、语调自然轻松，适合日常分享与愉快互动',
     avatar: '☀️',
     defaultTone: 'Cheerful, lively, energetic and friendly',
-    samplePhrase: '哈喽！刚才看到一个特别好玩的事情，忍不住第一时间想告诉你！',
+    samplePhrase: '哈喽！刚才看到一个有意思的消息想分享给你。',
   },
   {
     id: 'Fenrir',
-    name: 'Fenrir · 磁性男神低音',
+    name: 'Fenrir · 磁性沉稳男低音',
     gender: 'male',
-    tag: '安全感沉稳低音',
-    desc: '音色低沉有厚度、充满荷尔蒙与安全感，极具声音辨识度',
+    tag: '沉稳低音男声 (OpenAI: onyx)',
+    desc: '音色低沉有厚度、沉稳可靠，极具辨识度',
     avatar: '⚡',
-    defaultTone: 'Deep, resonant, magnetic and protective',
-    samplePhrase: '别担心，一切有我在。好好休息，晚安。',
+    defaultTone: 'Deep, resonant, calm and steady',
+    samplePhrase: '别担心，一切交给我来处理。',
   },
   {
     id: 'Charon',
     name: 'Charon · 商务干练精英',
     gender: 'male',
-    tag: '专业严谨干练',
-    desc: '发音饱满标准、节奏清晰从容，适合正式咨询与高效沟通',
+    tag: '专业严谨男声 (OpenAI: fable)',
+    desc: '发音饱满标准、节奏清晰从容，适合正式咨询与商务沟通',
     avatar: '💼',
     defaultTone: 'Crisp, articulate, professional and authoritative',
     samplePhrase: '您好，相关业务与资料已为您核对完毕，请查阅。',
@@ -82,11 +82,40 @@ export const VOICE_PROFILES: VoiceProfile[] = [
 
 export const EMOTION_PRESETS = [
   { label: '💫 自然日常', tone: 'Natural, friendly and conversational', emotion: '日常' },
-  { label: '💖 甜蜜温存', tone: 'Sweet, affectionate, whispering gently and lovingly', emotion: '甜蜜' },
-  { label: '🍵 贴心关怀', tone: 'Caring, soft-spoken with real breath pauses', emotion: '关怀' },
-  { label: '🎉 开朗欢快', tone: 'Playful, excited with a slight laugh', emotion: '欢快' },
+  { label: '💖 亲切温和', tone: 'Sweet, affectionate and gentle', emotion: '温和' },
+  { label: '🍵 贴心关怀', tone: 'Caring, soft-spoken and reassuring', emotion: '关怀' },
+  { label: '🎉 开朗欢快', tone: 'Playful, upbeat and cheerful', emotion: '欢快' },
   { label: '👔 严谨商务', tone: 'Professional, articulate and confident', emotion: '商务' },
 ];
+
+function decodeAudioDurationSeconds(src: string): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const probe = new Audio();
+    const timer = setTimeout(() => {
+      cleanup();
+      reject(new Error('音频元数据解码超时'));
+    }, 6000);
+    const cleanup = () => {
+      clearTimeout(timer);
+      probe.onloadedmetadata = null;
+      probe.onerror = null;
+    };
+    probe.onloadedmetadata = () => {
+      const dur = probe.duration;
+      cleanup();
+      if (Number.isFinite(dur) && dur > 0) {
+        resolve(Math.max(1, Math.round(dur)));
+      } else {
+        reject(new Error('无法读取有效音频时长'));
+      }
+    };
+    probe.onerror = () => {
+      cleanup();
+      reject(new Error('音频文件解码失败'));
+    };
+    probe.src = src;
+  });
+}
 
 interface VoiceCloneStudioModalProps {
   isOpen: boolean;
@@ -118,39 +147,71 @@ export const VoiceCloneStudioModal: React.FC<VoiceCloneStudioModalProps> = ({
   const [selectedVoice, setSelectedVoice] = useState<string>('master_voice');
   const [selectedEmotionIdx, setSelectedEmotionIdx] = useState<number>(0);
   const [speedRate, setSpeedRate] = useState<number>(1.0);
+  const [pitchRate, setPitchRate] = useState<number>(1.0);
   const [isGenerating, setIsGenerating] = useState(false);
+  const [isSending, setIsSending] = useState(false);
   const [isPlayingPreview, setIsPlayingPreview] = useState(false);
   const [audioUrl, setAudioUrl] = useState<string | null>(null);
+  const [realAudioDuration, setRealAudioDuration] = useState<number | null>(null);
   const [statusNotice, setStatusNotice] = useState<string | null>(null);
   const [ttsEngine, setTtsEngine] = useState<string>('gemini-3.8-flash-tts');
 
-  // Master Voiceprint state
   const [masterVoiceprint, setMasterVoiceprint] = useState<MasterVoiceprint | null>(null);
   const [isMasterModalOpen, setIsMasterModalOpen] = useState(false);
 
   const audioPlayerRef = useRef<HTMLAudioElement | null>(null);
 
-  // Sync initialText & load Master Voiceprint when modal opens
+  const isCustomPriority = Boolean(
+    customConfig &&
+      customConfig.enabled !== false &&
+      !customConfig.explicitlyDisabled &&
+      customConfig.engineMode === 'custom'
+  );
+  const isCustomGeminiGateway = Boolean(
+    isCustomPriority &&
+      (customConfig?.protocol === 'gemini' ||
+        (customConfig?.baseUrl || '').toLowerCase().includes('googleapis.com'))
+  );
+  const isCustomOpenAiGateway = Boolean(isCustomPriority && !isCustomGeminiGateway);
+
+  const invalidateSynthesizedAudio = () => {
+    if (audioPlayerRef.current) {
+      audioPlayerRef.current.pause();
+    }
+    setIsPlayingPreview(false);
+    setAudioUrl(null);
+    setRealAudioDuration(null);
+  };
+
   useEffect(() => {
     if (isOpen) {
       setText(initialText.trim() || '你好呀，今天过得怎么样？');
       setAudioUrl(null);
+      setRealAudioDuration(null);
       setIsPlayingPreview(false);
+      setIsSending(false);
       setStatusNotice(null);
 
       const mv = getMasterVoiceprint();
       setMasterVoiceprint(mv);
-      setTtsEngine(mv?.ttsModel?.trim() || 'gemini-3.8-flash-tts');
+      const savedTts = mv?.ttsModel?.trim() || '';
+      if (isCustomOpenAiGateway) {
+        setTtsEngine(savedTts && !/^gemini-/i.test(savedTts) ? savedTts : 'tts-1');
+      } else {
+        setTtsEngine(savedTts || 'gemini-3.8-flash-tts');
+      }
       if (mv?.baseVoice) {
         setSelectedVoice('master_voice');
-        setSpeedRate(mv.rate || 1.0);
+        setSpeedRate(typeof mv.rate === 'number' && Number.isFinite(mv.rate) ? mv.rate : 1.0);
+        setPitchRate(typeof mv.pitch === 'number' && Number.isFinite(mv.pitch) ? mv.pitch : 1.0);
       } else {
         setSelectedVoice(VOICE_PROFILES[0].id);
+        setSpeedRate(1.0);
+        setPitchRate(1.0);
       }
     }
-  }, [isOpen, initialText]);
+  }, [isOpen, initialText, isCustomOpenAiGateway]);
 
-  // Cleanup audio playback on close
   useEffect(() => {
     if (!isOpen) {
       if (audioPlayerRef.current) {
@@ -172,28 +233,24 @@ export const VoiceCloneStudioModal: React.FC<VoiceCloneStudioModalProps> = ({
         name: masterVoiceprint?.name || '个人预设音色档',
         gender: (masterVoiceprint?.gender || 'female') as 'female' | 'male',
         tag: `基于预设 ${masterVoiceprint?.baseVoice || 'Kore'}`,
-        desc: `使用已保存的个人预设音色（Gemini 官方音色 ${masterVoiceprint?.baseVoice || 'Kore'} · 语速 ${(masterVoiceprint?.rate || 1.0).toFixed(2)}x）`,
+        desc: `使用已保存的个人预设音色（基础音色 ${masterVoiceprint?.baseVoice || 'Kore'}）`,
         avatar: '🎙️',
         defaultTone: 'Natural voice with selected emotion style',
-        samplePhrase: masterVoiceprint?.sampleTranscript || '你好，这是预设音色试听。',
       }
     : VOICE_PROFILES.find((v) => v.id === selectedVoice) || VOICE_PROFILES[0];
 
   const activeEmotion = EMOTION_PRESETS[selectedEmotionIdx] || EMOTION_PRESETS[0];
 
-  // Estimate audio duration based on text length (roughly 4-5 chars per second)
-  const estimatedSeconds = Math.max(2, Math.ceil(text.trim().length / 4.5));
+  const estimatedSeconds = Math.max(2, Math.ceil(text.trim().length / (4.5 * speedRate)));
 
-  // Handle Voice Preview Generation & Playback
   const handlePreviewVoice = async () => {
     if (!text.trim()) return;
 
     if (isMasterSelected && !hasMasterVoice) {
-      setStatusNotice('尚未保存个人预设音色档，请先选择下方官方预设音色，或点击「配置预设与参考录音」。');
+      setStatusNotice('尚未保存个人预设音色档，请先选择下方官方预设音色，或点击「配置预设音色与参数」。');
       return;
     }
 
-    // If currently playing, stop
     if (isPlayingPreview) {
       if (audioPlayerRef.current) audioPlayerRef.current.pause();
       if (typeof window !== 'undefined' && 'speechSynthesis' in window) window.speechSynthesis.cancel();
@@ -202,13 +259,16 @@ export const VoiceCloneStudioModal: React.FC<VoiceCloneStudioModalProps> = ({
     }
 
     setIsGenerating(true);
-    setStatusNotice(`正在通过自有模型网关 (${ttsEngine}) 合成语音...`);
+    setRealAudioDuration(null);
+    setStatusNotice(
+      isCustomPriority
+        ? `正在通过自有模型网关 (${ttsEngine}) 合成并处理音频...`
+        : `正在通过云端/官方引擎 (${ttsEngine}) 合成并处理音频...`
+    );
 
     try {
       const voiceParam = isMasterSelected ? (masterVoiceprint?.baseVoice || 'Kore') : selectedVoice;
-      const toneParam = isMasterSelected
-        ? `Base preset voice ${voiceParam}, speech rate ${(masterVoiceprint?.rate || speedRate).toFixed(2)}x. Emotion style: ${activeEmotion.tone}`
-        : activeEmotion.tone;
+      const toneParam = activeEmotion.tone;
 
       const res = await generateTTSVoice(
         text.trim(),
@@ -217,7 +277,11 @@ export const VoiceCloneStudioModal: React.FC<VoiceCloneStudioModalProps> = ({
         customConfig,
         'high',
         activeEmotion.emotion,
-        ttsEngine
+        ttsEngine,
+        {
+          speechRate: speedRate,
+          pitch: pitchRate,
+        }
       );
 
       if (res.audioUrl) {
@@ -225,24 +289,36 @@ export const VoiceCloneStudioModal: React.FC<VoiceCloneStudioModalProps> = ({
         if (!audioPlayerRef.current) {
           audioPlayerRef.current = new Audio();
         }
-        audioPlayerRef.current.src = res.audioUrl;
-        audioPlayerRef.current.playbackRate = isMasterSelected ? masterVoiceprint?.rate || speedRate : speedRate;
-        audioPlayerRef.current.onended = () => setIsPlayingPreview(false);
-        audioPlayerRef.current.onerror = () => {
+        const player = audioPlayerRef.current;
+        player.src = res.audioUrl;
+        player.onloadedmetadata = () => {
+          if (Number.isFinite(player.duration) && player.duration > 0) {
+            setRealAudioDuration(Math.max(1, Math.round(player.duration)));
+          }
+        };
+        player.onended = () => setIsPlayingPreview(false);
+        player.onerror = () => {
           setIsPlayingPreview(false);
           setStatusNotice('音频解码或播放失败，请检查网络或重新合成');
         };
-        await audioPlayerRef.current.play();
+        await player.play();
+        if (Number.isFinite(player.duration) && player.duration > 0) {
+          setRealAudioDuration(Math.max(1, Math.round(player.duration)));
+        }
         setIsPlayingPreview(true);
-        setStatusNotice(`正在播放真实合成语音 (${voiceParam} · ${res.modelUsed || ttsEngine})`);
+        setStatusNotice(
+          `正在播放真实合成语音 (${voiceParam} · ${res.modelUsed || ttsEngine} · 语速 ${speedRate.toFixed(2)}x · 音高 ${pitchRate.toFixed(2)}x)`
+        );
       } else {
         setAudioUrl(null);
+        setRealAudioDuration(null);
         setIsPlayingPreview(false);
         setStatusNotice(`语音合成失败：${res.error || '请检查模型密钥或配额'}`);
       }
     } catch (err: any) {
       console.error('Voice preview error:', err);
       setAudioUrl(null);
+      setRealAudioDuration(null);
       setIsPlayingPreview(false);
       setStatusNotice(`语音合成失败：${err?.message || '语音合成请求失败'}`);
     } finally {
@@ -250,9 +326,8 @@ export const VoiceCloneStudioModal: React.FC<VoiceCloneStudioModalProps> = ({
     }
   };
 
-  // Confirm and Send as Telegram Voice Memo
-  const handleSendVoiceMessage = () => {
-    if (!text.trim()) return;
+  const handleSendVoiceMessage = async () => {
+    if (!text.trim() || isSending) return;
     if (!audioUrl) {
       setStatusNotice('请先点击左下角「试听语音效果」，确认真实音频合成成功后再发送。');
       return;
@@ -261,27 +336,42 @@ export const VoiceCloneStudioModal: React.FC<VoiceCloneStudioModalProps> = ({
     if (isPlayingPreview) {
       if (audioPlayerRef.current) audioPlayerRef.current.pause();
       if (typeof window !== 'undefined' && 'speechSynthesis' in window) window.speechSynthesis.cancel();
+      setIsPlayingPreview(false);
     }
 
-    const realDuration =
-      audioPlayerRef.current &&
-      Number.isFinite(audioPlayerRef.current.duration) &&
-      audioPlayerRef.current.duration > 0
-        ? Math.max(1, Math.round(audioPlayerRef.current.duration))
-        : estimatedSeconds;
+    setIsSending(true);
+    try {
+      let resolvedDuration =
+        realAudioDuration && realAudioDuration > 0
+          ? realAudioDuration
+          : audioPlayerRef.current &&
+              Number.isFinite(audioPlayerRef.current.duration) &&
+              audioPlayerRef.current.duration > 0
+            ? Math.max(1, Math.round(audioPlayerRef.current.duration))
+            : null;
 
-    onSendVoice({
-      text: text.trim(),
-      audioUrl,
-      audioDuration: realDuration,
-      voiceName: isMasterSelected
-        ? `${masterVoiceprint?.name || '个人预设'} (${masterVoiceprint?.baseVoice || 'Kore'})`
-        : activeProfile.name.split('·')[0].trim(),
-      voiceTone: activeEmotion.label,
-      isMasterVoice: isMasterSelected,
-    });
+      if (!resolvedDuration) {
+        resolvedDuration = await decodeAudioDurationSeconds(audioUrl);
+        setRealAudioDuration(resolvedDuration);
+      }
 
-    onClose();
+      onSendVoice({
+        text: text.trim(),
+        audioUrl,
+        audioDuration: resolvedDuration,
+        voiceName: isMasterSelected
+          ? `${masterVoiceprint?.name || '个人预设'} (${masterVoiceprint?.baseVoice || 'Kore'})`
+          : activeProfile.name.split('·')[0].trim(),
+        voiceTone: activeEmotion.label,
+        isMasterVoice: isMasterSelected,
+      });
+
+      onClose();
+    } catch (err: any) {
+      setStatusNotice(`发送中止：${err?.message || '无法读取合成音频真实时长，请重新试听合成'}`);
+    } finally {
+      setIsSending(false);
+    }
   };
 
   return (
@@ -296,6 +386,9 @@ export const VoiceCloneStudioModal: React.FC<VoiceCloneStudioModalProps> = ({
               </div>
               <div>
                 <h2 className="text-base font-bold text-white tracking-wide">AI 预设音色语音合成台</h2>
+                <p className="text-[11px] text-[#7f93a5] mt-0.5">
+                  官方预设音色库 · 服务端 ffmpeg 真实变速变调（非真人声纹克隆）
+                </p>
               </div>
             </div>
             <button
@@ -319,6 +412,7 @@ export const VoiceCloneStudioModal: React.FC<VoiceCloneStudioModalProps> = ({
                 {statusNotice}
               </div>
             )}
+
             {/* 1. Text Input to synthesize */}
             <div>
               <div className="flex items-center justify-between mb-1.5">
@@ -326,14 +420,16 @@ export const VoiceCloneStudioModal: React.FC<VoiceCloneStudioModalProps> = ({
                   语音朗读文本 (支持中文及翻译外语)
                 </label>
                 <span className="text-[11px] text-[#7f93a5] tabular-nums">
-                  {text.length} 字 · 约 {estimatedSeconds} 秒
+                  {audioUrl && realAudioDuration
+                    ? `${text.length} 字 · 实测 ${realAudioDuration} 秒`
+                    : `${text.length} 字 · 预估约 ${estimatedSeconds} 秒`}
                 </span>
               </div>
               <textarea
                 value={text}
                 onChange={(e) => {
                   setText(e.target.value);
-                  setAudioUrl(null);
+                  invalidateSynthesizedAudio();
                 }}
                 rows={3}
                 placeholder="请输入要合成语音的消息内容..."
@@ -350,7 +446,7 @@ export const VoiceCloneStudioModal: React.FC<VoiceCloneStudioModalProps> = ({
                     type="button"
                     onClick={() => {
                       setText(translatedText);
-                      setAudioUrl(null);
+                      invalidateSynthesizedAudio();
                     }}
                     className="px-2 py-0.5 rounded bg-[#2481cc]/20 hover:bg-[#2481cc]/30 text-[#2ba0ff] text-[11px] font-semibold transition-colors cursor-pointer shrink-0"
                   >
@@ -365,48 +461,76 @@ export const VoiceCloneStudioModal: React.FC<VoiceCloneStudioModalProps> = ({
               <div className="flex items-center gap-2 min-w-0">
                 <Sparkles className="w-4 h-4 text-amber-400 shrink-0" />
                 <div className="min-w-0">
-                  <span className="text-xs font-semibold text-white block">语音合成模型</span>
+                  <span className="text-xs font-semibold text-white block">
+                    {isCustomOpenAiGateway ? '自有网关语音合成模型 (OpenAI 协议)' : '语音合成模型'}
+                  </span>
                   <span className="text-[10px] font-mono text-[#7cc4ff] truncate block">{ttsEngine}</span>
                 </div>
               </div>
-              <div className="flex items-center gap-1 shrink-0">
-                <button
-                  type="button"
-                  onClick={() => {
-                    setTtsEngine('gemini-3.8-flash-tts');
-                    setAudioUrl(null);
-                  }}
-                  className={`px-2 py-1 rounded-lg text-[11px] font-medium transition-colors cursor-pointer ${
-                    ttsEngine === 'gemini-3.8-flash-tts'
-                      ? 'bg-[#2481cc] text-white shadow-xs'
-                      : 'bg-[#152230] text-[#7f93a5] hover:text-white'
-                  }`}
-                >
-                  3.8 Flash
-                </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setTtsEngine('gemini-3.8-flash-lite-tts');
-                    setAudioUrl(null);
-                  }}
-                  className={`px-2 py-1 rounded-lg text-[11px] font-medium transition-colors cursor-pointer ${
-                    ttsEngine === 'gemini-3.8-flash-lite-tts'
-                      ? 'bg-[#2481cc] text-white shadow-xs'
-                      : 'bg-[#152230] text-[#7f93a5] hover:text-white'
-                  }`}
-                >
-                  3.8 Lite
-                </button>
-              </div>
+              {isCustomOpenAiGateway ? (
+                <div className="flex items-center gap-1 shrink-0">
+                  {[
+                    { id: 'tts-1', label: 'tts-1' },
+                    { id: 'gpt-4o-mini-tts', label: '4o-mini-tts' },
+                    { id: 'tts-1-hd', label: 'tts-1-hd' },
+                  ].map((opt) => (
+                    <button
+                      key={opt.id}
+                      type="button"
+                      onClick={() => {
+                        setTtsEngine(opt.id);
+                        invalidateSynthesizedAudio();
+                      }}
+                      className={`px-2 py-1 rounded-lg text-[11px] font-medium transition-colors cursor-pointer ${
+                        ttsEngine === opt.id
+                          ? 'bg-[#2481cc] text-white shadow-xs'
+                          : 'bg-[#152230] text-[#7f93a5] hover:text-white'
+                      }`}
+                    >
+                      {opt.label}
+                    </button>
+                  ))}
+                </div>
+              ) : (
+                <div className="flex items-center gap-1 shrink-0">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setTtsEngine('gemini-3.8-flash-tts');
+                      invalidateSynthesizedAudio();
+                    }}
+                    className={`px-2 py-1 rounded-lg text-[11px] font-medium transition-colors cursor-pointer ${
+                      ttsEngine === 'gemini-3.8-flash-tts'
+                        ? 'bg-[#2481cc] text-white shadow-xs'
+                        : 'bg-[#152230] text-[#7f93a5] hover:text-white'
+                    }`}
+                  >
+                    3.8 Flash
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setTtsEngine('gemini-3.8-flash-lite-tts');
+                      invalidateSynthesizedAudio();
+                    }}
+                    className={`px-2 py-1 rounded-lg text-[11px] font-medium transition-colors cursor-pointer ${
+                      ttsEngine === 'gemini-3.8-flash-lite-tts'
+                        ? 'bg-[#2481cc] text-white shadow-xs'
+                        : 'bg-[#152230] text-[#7f93a5] hover:text-white'
+                    }`}
+                  >
+                    3.8 Lite
+                  </button>
+                </div>
+              )}
             </div>
 
-            {/* 2. SAVED PRESET ANCHOR & OFFICIAL VOICE PROFILES */}
+            {/* 2. SAVED PRESET & OFFICIAL VOICE PROFILES */}
             <div className="space-y-2.5">
               <div className="flex items-center justify-between">
                 <label className="text-xs font-semibold text-white flex items-center gap-1.5">
                   <AudioWaveform className="w-3.5 h-3.5 text-[#2ba0ff]" />
-                  选择合成音色（Gemini 官方预设音色）
+                  选择预设合成音色
                 </label>
                 <button
                   type="button"
@@ -414,7 +538,7 @@ export const VoiceCloneStudioModal: React.FC<VoiceCloneStudioModalProps> = ({
                   className="text-[11px] text-[#2ba0ff] hover:underline flex items-center gap-1 cursor-pointer"
                 >
                   <Settings className="w-3 h-3" />
-                  <span>配置预设与参考录音</span>
+                  <span>配置预设音色与参数</span>
                 </button>
               </div>
 
@@ -422,7 +546,11 @@ export const VoiceCloneStudioModal: React.FC<VoiceCloneStudioModalProps> = ({
                 <div
                   onClick={() => {
                     setSelectedVoice('master_voice');
-                    setAudioUrl(null);
+                    if (masterVoiceprint) {
+                      setSpeedRate(typeof masterVoiceprint.rate === 'number' ? masterVoiceprint.rate : 1.0);
+                      setPitchRate(typeof masterVoiceprint.pitch === 'number' ? masterVoiceprint.pitch : 1.0);
+                    }
+                    invalidateSynthesizedAudio();
                   }}
                   className={`p-3 rounded-xl border text-left transition-all cursor-pointer flex items-center justify-between gap-3 ${
                     isMasterSelected
@@ -439,7 +567,7 @@ export const VoiceCloneStudioModal: React.FC<VoiceCloneStudioModalProps> = ({
                         {masterVoiceprint?.name || '个人预设音色档'}
                       </div>
                       <p className="text-[11px] text-[#7f93a5] mt-0.5 truncate tabular-nums">
-                        {masterVoiceprint?.baseVoice || 'Kore'} · {(masterVoiceprint?.rate || 1.0).toFixed(2)}x
+                        {masterVoiceprint?.baseVoice || 'Kore'} · 语速 {(masterVoiceprint?.rate || 1.0).toFixed(2)}x · 音高 {(masterVoiceprint?.pitch || 1.0).toFixed(2)}x
                       </p>
                     </div>
                   </div>
@@ -460,7 +588,7 @@ export const VoiceCloneStudioModal: React.FC<VoiceCloneStudioModalProps> = ({
                       type="button"
                       onClick={() => {
                         setSelectedVoice(profile.id);
-                        setAudioUrl(null);
+                        invalidateSynthesizedAudio();
                       }}
                       className={`p-2.5 rounded-xl border text-left transition-all cursor-pointer flex items-center justify-between gap-2 ${
                         isSel
@@ -486,8 +614,7 @@ export const VoiceCloneStudioModal: React.FC<VoiceCloneStudioModalProps> = ({
               </div>
             </div>
 
-
-            {/* 4. Tone Style & Emotion Presets */}
+            {/* 3. Tone Style & Emotion Presets */}
             <div>
               <label className="block text-xs font-semibold text-[#7f93a5] mb-2">
                 情绪与语气风格 (Emotion & Tone)
@@ -501,7 +628,7 @@ export const VoiceCloneStudioModal: React.FC<VoiceCloneStudioModalProps> = ({
                       type="button"
                       onClick={() => {
                         setSelectedEmotionIdx(idx);
-                        setAudioUrl(null);
+                        invalidateSynthesizedAudio();
                       }}
                       className={`px-3 py-1.5 rounded-xl text-xs font-medium transition-all cursor-pointer border ${
                         isSelected
@@ -516,29 +643,56 @@ export const VoiceCloneStudioModal: React.FC<VoiceCloneStudioModalProps> = ({
               </div>
             </div>
 
-            {/* 5. Speed Rate Control */}
-            <div className="flex items-center justify-between pt-1 text-xs">
-              <span className="text-[#7f93a5] font-medium flex items-center gap-1.5">
-                <Sliders className="w-3.5 h-3.5 text-[#2ba0ff]" /> 语速节奏控制：
-              </span>
-              <div className="flex items-center gap-1.5">
-                {[0.8, 1.0, 1.2].map((rate) => (
-                  <button
-                    key={rate}
-                    type="button"
-                    onClick={() => {
-                      setSpeedRate(rate);
-                      if (audioPlayerRef.current) audioPlayerRef.current.playbackRate = rate;
-                    }}
-                    className={`px-2.5 py-1 rounded-lg text-xs font-semibold transition-all cursor-pointer ${
-                      speedRate === rate
-                        ? 'bg-[#2481cc] text-white'
-                        : 'bg-[#152230] text-[#7f93a5] hover:text-white'
-                    }`}
-                  >
-                    {rate === 0.8 ? '0.8x 温柔慢速' : rate === 1.0 ? '1.0x 标准日常' : '1.2x 轻快活泼'}
-                  </button>
-                ))}
+            {/* 4. Server-side ffmpeg Speed & Pitch Controls */}
+            <div className="space-y-2.5 pt-1 text-xs p-3 rounded-xl bg-[#14202d] border border-[#1e2f42]">
+              <div className="flex items-center justify-between gap-2 flex-wrap">
+                <span className="text-[#9bb3c9] font-medium flex items-center gap-1.5">
+                  <Sliders className="w-3.5 h-3.5 text-[#2ba0ff]" /> 语速节奏：
+                </span>
+                <div className="flex items-center gap-1.5">
+                  {[0.8, 1.0, 1.2].map((rate) => (
+                    <button
+                      key={rate}
+                      type="button"
+                      onClick={() => {
+                        setSpeedRate(rate);
+                        invalidateSynthesizedAudio();
+                      }}
+                      className={`px-2.5 py-1 rounded-lg text-xs font-semibold transition-all cursor-pointer ${
+                        Math.abs(speedRate - rate) < 0.03
+                          ? 'bg-[#2481cc] text-white'
+                          : 'bg-[#152230] text-[#7f93a5] hover:text-white'
+                      }`}
+                    >
+                      {rate === 0.8 ? '0.8x 慢速' : rate === 1.0 ? '1.0x 标准' : '1.2x 轻快'}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div className="flex items-center justify-between gap-2 flex-wrap">
+                <span className="text-[#9bb3c9] font-medium flex items-center gap-1.5">
+                  <AudioWaveform className="w-3.5 h-3.5 text-[#2ba0ff]" /> 音高基线：
+                </span>
+                <div className="flex items-center gap-1.5">
+                  {[0.9, 1.0, 1.15].map((p) => (
+                    <button
+                      key={p}
+                      type="button"
+                      onClick={() => {
+                        setPitchRate(p);
+                        invalidateSynthesizedAudio();
+                      }}
+                      className={`px-2.5 py-1 rounded-lg text-xs font-semibold transition-all cursor-pointer ${
+                        Math.abs(pitchRate - p) < 0.03
+                          ? 'bg-[#2481cc] text-white'
+                          : 'bg-[#152230] text-[#7f93a5] hover:text-white'
+                      }`}
+                    >
+                      {p === 0.9 ? '0.9x 低沉' : p === 1.0 ? '1.0x 原声调' : '1.15x 清亮'}
+                    </button>
+                  ))}
+                </div>
               </div>
             </div>
           </div>
@@ -549,7 +703,7 @@ export const VoiceCloneStudioModal: React.FC<VoiceCloneStudioModalProps> = ({
             <button
               type="button"
               onClick={handlePreviewVoice}
-              disabled={isGenerating || !text.trim()}
+              disabled={isGenerating || isSending || !text.trim()}
               className={`px-4 py-2.5 rounded-xl text-xs font-medium flex items-center gap-2 border transition-all cursor-pointer ${
                 isPlayingPreview
                   ? 'bg-rose-500/20 border-rose-500/40 text-rose-400 animate-pulse'
@@ -577,27 +731,35 @@ export const VoiceCloneStudioModal: React.FC<VoiceCloneStudioModalProps> = ({
             {/* Send as Telegram Voice Memo */}
             <button
               type="button"
-              onClick={handleSendVoiceMessage}
-              disabled={isGenerating || !text.trim() || !audioUrl}
+              onClick={() => void handleSendVoiceMessage()}
+              disabled={isGenerating || isSending || !text.trim() || !audioUrl}
               className="px-6 py-2.5 rounded-xl bg-[#2481cc] hover:bg-[#2074b8] text-white font-medium text-xs flex items-center gap-2 shadow-md hover:scale-102 transition-all cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
             >
               <Send className="w-4 h-4" />
-              <span className="tabular-nums">发送为电报语音条 ({estimatedSeconds}")</span>
+              <span className="tabular-nums">
+                {audioUrl && realAudioDuration
+                  ? `发送为电报语音条 (${realAudioDuration}")`
+                  : '发送为电报语音条'}
+              </span>
             </button>
           </div>
         </div>
       </div>
 
-      {/* Nested Master Voiceprint Calibration Modal */}
+      {/* Nested Preset Voice Settings Modal */}
       <MasterVoiceprintModal
         isOpen={isMasterModalOpen}
         onClose={() => setIsMasterModalOpen(false)}
         onVoiceprintSaved={(newVp) => {
           setMasterVoiceprint(newVp);
           setSelectedVoice('master_voice');
-          if (newVp.ttsModel) setTtsEngine(newVp.ttsModel);
-          setSpeedRate(newVp.rate || 1.0);
-          setAudioUrl(null);
+          if (newVp.ttsModel) {
+            const nextTts = newVp.ttsModel.trim();
+            setTtsEngine(isCustomOpenAiGateway && /^gemini-/i.test(nextTts) ? 'tts-1' : nextTts);
+          }
+          setSpeedRate(typeof newVp.rate === 'number' ? newVp.rate : 1.0);
+          setPitchRate(typeof newVp.pitch === 'number' ? newVp.pitch : 1.0);
+          invalidateSynthesizedAudio();
         }}
       />
     </>
