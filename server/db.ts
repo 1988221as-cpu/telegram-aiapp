@@ -128,6 +128,15 @@ export function resolveDatabaseLocation(): {
   };
 }
 
+export function formatLibsqlFileUrl(fsPath: string): string {
+  const normalized = path.resolve(fsPath).replace(/\\/g, '/');
+  const encoded = normalized
+    .replace(/%/g, '%25')
+    .replace(/#/g, '%23')
+    .replace(/\?/g, '%3F');
+  return `file:${encoded}`;
+}
+
 export const locationInfo = resolveDatabaseLocation();
 export const dbDir = locationInfo.dbDir;
 export const dbPath = locationInfo.dbPath;
@@ -140,9 +149,11 @@ export const dbType = isTurso
   ? `Turso LibSQL Client (Persistent Volume: ${dbDir})`
   : 'Turso LibSQL Client (Local File)';
 
+const resolvedLibsqlUrl = process.env.TURSO_DATABASE_URL || formatLibsqlFileUrl(dbPath);
+
 // 1. Initialize Turso / LibSQL client
 export const turso: Client = createClient({
-  url: process.env.TURSO_DATABASE_URL || `file:${dbPath}`,
+  url: resolvedLibsqlUrl,
   authToken: process.env.TURSO_AUTH_TOKEN,
 });
 
@@ -151,7 +162,7 @@ export const db = {
   client: turso,
   isTurso,
   dbType,
-  tursoUrl: process.env.TURSO_DATABASE_URL || `file:${dbPath}`,
+  tursoUrl: resolvedLibsqlUrl,
 
   async execute(stmt: string | { sql: string; args?: any[] | Record<string, any> }) {
     return await turso.execute(typeof stmt === 'string' ? { sql: stmt, args: [] } : stmt);

@@ -1,12 +1,15 @@
-const { app, BrowserWindow, Menu, dialog, globalShortcut } = require('electron');
+const { app, BrowserWindow, Menu, dialog, shell } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const http = require('http');
 const net = require('net');
 const { pathToFileURL } = require('url');
 
-// Set application name explicitly
+// Set application name and Windows AppUserModelId explicitly
 app.setName('HumanSense');
+if (process.platform === 'win32' && typeof app.setAppUserModelId === 'function') {
+  app.setAppUserModelId('com.lingxicontext.app');
+}
 
 function resolveAppIcon() {
   const candidates = [
@@ -28,8 +31,11 @@ if (!gotTheLock) {
   process.exit(0);
 }
 
+const FIXED_APP_PORT = 38271;
 let mainWindow = null;
-let currentPort = 38271;
+let currentPort = FIXED_APP_PORT;
+let backendChild = null;
+let isQuitting = false;
 
 // 3. Setup persistent file logging in %APPDATA%/HumanSense/logs/main.log
 let logFilePath = null;
@@ -58,7 +64,7 @@ function writeLog(level, message, detail = '') {
   } catch {}
 }
 
-// 4. Port probing starting from 38271
+// 4. Fixed-port enforcement on 38271 (preserves Chromium localStorage origin & AES-encrypted local session store)
 function isPortAvailable(port) {
   return new Promise((resolve) => {
     const server = net.createServer();
@@ -70,39 +76,71 @@ function isPortAvailable(port) {
   });
 }
 
-async function findAvailablePort(startPort = 38271, maxAttempts = 20) {
-  for (let i = 0; i < maxAttempts; i++) {
-    const candidate = startPort + i;
-    if (await isPortAvailable(candidate)) {
-      return candidate;
+async function ensureFixedPortAvailable(port = FIXED_APP_PORT, maxRetries = 12, delayMs = 250) {
+  for (let i = 0; i < maxRetries; i++) {
+    if (await isPortAvailable(port)) {
+      return port;
     }
+    await new Promise((resolve) => setTimeout(resolve, delayMs));
   }
-  return startPort;
+  throw new Error(
+    `本地固定端口 127.0.0.1:${port} 已被其他程序占用，为防止本地加密凭证与聊天缓存丢失，已阻止切换端口启动。请关闭占用端口 ${port} 的进程后点击「重新载入」或重启客户端。`
+  );
 }
 
-// 5. Strict health check polling (strictly requires statusCode === 200)
-function waitForHealth200(url, maxRetries = 60, interval = 300) {
+// 5. Strict health check polling (strictly requires statusCode === 200; fails fast on HTTP 503 fatal DB error)
+function waitForHealth200(url, maxRetries = 120, interval = 250) {
   return new Promise((resolve) => {
     let attempts = 0;
+    let finished = false;
+    const done = (result) => {
+      if (finished) return;
+      finished = true;
+      resolve(result);
+    };
     const poll = () => {
+      if (finished) return;
       attempts++;
       const req = http.get(url, (res) => {
-        if (res.statusCode === 200) {
-          writeLog('info', `Server verified ready with HTTP 200 at ${url}`);
-          resolve(true);
-        } else if (attempts < maxRetries) {
-          setTimeout(poll, interval);
-        } else {
-          writeLog('warn', `Health check failed after ${attempts} attempts with status ${res.statusCode}`);
-          resolve(false);
-        }
+        let rawBody = '';
+        res.setEncoding('utf8');
+        res.on('data', (chunk) => {
+          if (rawBody.length < 4096) rawBody += chunk;
+        });
+        res.on('end', () => {
+          if (res.statusCode === 200) {
+            writeLog('info', `Server verified ready with HTTP 200 at ${url}`);
+            done({ ok: true });
+            return;
+          }
+          if (res.statusCode === 503) {
+            let parsedErr = '';
+            try {
+              const parsed = JSON.parse(rawBody);
+              parsedErr = parsed && parsed.error ? String(parsed.error) : '';
+            } catch {}
+            const fatalMsg = parsedErr || '本地数据库或核心引擎初始化失败 (HTTP 503)';
+            writeLog('fatal', `Health check reported fatal 503 error: ${fatalMsg}`);
+            done({ ok: false, fatalError: fatalMsg });
+            return;
+          }
+          if (attempts < maxRetries) {
+            setTimeout(poll, interval);
+          } else {
+            writeLog('warn', `Health check failed after ${attempts} attempts with status ${res.statusCode}`);
+            done({ ok: false });
+          }
+        });
+      });
+      req.setTimeout(2000, () => {
+        req.destroy(new Error('health check request timeout'));
       });
       req.on('error', (err) => {
         if (attempts < maxRetries) {
           setTimeout(poll, interval);
         } else {
           writeLog('warn', `Health check network error after ${attempts} attempts: ${err.message}`);
-          resolve(false);
+          done({ ok: false });
         }
       });
     };
@@ -273,16 +311,19 @@ async function startBackendServer(port) {
     const spawnCmd = isWin ? quoteWinArg(cmd) : cmd;
     const spawnArgs = isWin ? rawArgs.map(quoteWinArg) : rawArgs;
 
-    const child = spawn(spawnCmd, spawnArgs, {
+    backendChild = spawn(spawnCmd, spawnArgs, {
       cwd: appPath,
       env: process.env,
       stdio: 'pipe',
       shell: isWin,
       windowsHide: true,
     });
-    child.stdout?.on('data', (d) => writeLog('backend', d.toString().trim()));
-    child.stderr?.on('data', (d) => writeLog('backend-err', d.toString().trim()));
-    child.on('error', (err) => writeLog('error', `Failed to spawn tsx: ${err.message}`));
+    backendChild.stdout?.on('data', (d) => writeLog('backend', d.toString().trim()));
+    backendChild.stderr?.on('data', (d) => writeLog('backend-err', d.toString().trim()));
+    backendChild.on('error', (err) => writeLog('error', `Failed to spawn tsx: ${err.message}`));
+    backendChild.on('exit', () => {
+      backendChild = null;
+    });
   }
 }
 
@@ -331,15 +372,24 @@ async function createWindow() {
     writeLog('warn', `did-fail-load on ${validatedURL}: [${errorCode}] ${errorDescription}`);
   });
 
-  // Find port and start
+  // Open external links safely in OS default browser instead of empty Electron popups
+  mainWindow.webContents.setWindowOpenHandler(({ url }) => {
+    if (/^https?:\/\//i.test(url) && !url.startsWith(`http://127.0.0.1:${FIXED_APP_PORT}`)) {
+      shell.openExternal(url).catch((err) => writeLog('warn', `Failed to open external URL ${url}: ${err.message}`));
+    }
+    return { action: 'deny' };
+  });
+
+  // Ensure fixed port 38271 and start
   try {
-    currentPort = await findAvailablePort(38271);
-    writeLog('info', `Selected port: ${currentPort}`);
+    currentPort = await ensureFixedPortAvailable(FIXED_APP_PORT);
+    writeLog('info', `Verified fixed port available: ${currentPort}`);
 
     await startBackendServer(currentPort);
 
     const healthUrl = `http://127.0.0.1:${currentPort}/api/health`;
-    const isHealthy = await waitForHealth200(healthUrl, 60, 250);
+    const healthRes = await waitForHealth200(healthUrl, 120, 250);
+    const isHealthy = Boolean(healthRes && healthRes.ok);
 
     // Smoke Test mode (used by CI to verify startup)
     if (process.argv.includes('--smoke-test')) {
@@ -348,7 +398,7 @@ async function createWindow() {
         setTimeout(() => process.exit(0), 200);
         return;
       } else {
-        writeLog('fatal', 'SMOKE_TEST_FAILED: Backend failed to become healthy');
+        writeLog('fatal', `SMOKE_TEST_FAILED: ${healthRes?.fatalError || 'Backend failed to become healthy'}`);
         setTimeout(() => process.exit(1), 200);
         return;
       }
@@ -359,10 +409,12 @@ async function createWindow() {
       mainWindow.setTitle('HumanSense');
       mainWindow.loadURL(`http://127.0.0.1:${currentPort}`);
     } else if (mainWindow && !mainWindow.isDestroyed()) {
-      const msg = `后台服务启动超时：未能于 127.0.0.1:${currentPort}/api/health 取得正常状态响应。`;
+      const msg = healthRes?.fatalError
+        ? `本地数据与服务引擎初始化失败：${healthRes.fatalError}`
+        : `后台服务启动超时：未能于 127.0.0.1:${currentPort}/api/health 取得正常状态响应。`;
       writeLog('error', msg);
-      mainWindow.loadURL(renderErrorHtml('服务启动超时', msg));
-      dialog.showErrorBox('HumanSense 启动超时', `${msg}\n请查看日志文件: ${getLogFilePath()}`);
+      mainWindow.loadURL(renderErrorHtml(healthRes?.fatalError ? '本地引擎初始化失败' : '服务启动超时', msg));
+      dialog.showErrorBox('HumanSense 启动失败', `${msg}\n请查看日志文件: ${getLogFilePath()}`);
     }
   } catch (err) {
     writeLog('fatal', `Fatal error during startup: ${err.message}`, err.stack);
@@ -393,6 +445,43 @@ app.on('second-instance', () => {
     if (mainWindow.isMinimized()) mainWindow.restore();
     mainWindow.focus();
   }
+});
+
+async function cleanupBackendResources() {
+  try {
+    if (typeof globalThis.__humansenseGracefulShutdown === 'function') {
+      writeLog('info', 'Running in-process backend graceful shutdown...');
+      await Promise.race([
+        globalThis.__humansenseGracefulShutdown('electron-before-quit'),
+        new Promise((resolve) => setTimeout(resolve, 4000)),
+      ]);
+    }
+  } catch (err) {
+    writeLog('warn', `Error during graceful backend shutdown: ${err.message}`);
+  }
+
+  if (backendChild && !backendChild.killed && backendChild.pid) {
+    try {
+      writeLog('info', `Terminating spawned backend child pid=${backendChild.pid}`);
+      if (process.platform === 'win32') {
+        const { execFileSync } = require('child_process');
+        execFileSync('taskkill', ['/pid', String(backendChild.pid), '/t', '/f'], { stdio: 'ignore' });
+      } else {
+        backendChild.kill('SIGTERM');
+      }
+    } catch (err) {
+      writeLog('warn', `Failed to kill backendChild: ${err.message}`);
+    }
+    backendChild = null;
+  }
+}
+
+app.on('before-quit', async (event) => {
+  if (isQuitting) return;
+  event.preventDefault();
+  isQuitting = true;
+  await cleanupBackendResources();
+  app.quit();
 });
 
 app.on('window-all-closed', () => {

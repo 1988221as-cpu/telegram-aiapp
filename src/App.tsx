@@ -22,7 +22,6 @@ import { getMasterVoiceprint } from './services/voiceprintStorage';
 import {
   INITIAL_ACCOUNTS,
   INITIAL_CHATS,
-  INITIAL_MESSAGES,
   INITIAL_TRANSLATION_SETTINGS,
   INITIAL_CUSTOM_LLM
 } from './data/mockData';
@@ -50,6 +49,7 @@ import {
   fetchTelegramCloudMessagesApi,
   fetchTelegramActiveAccounts,
   fetchTelegramUserStatusApi,
+  reconnectTelegramSessionsApi,
   pollIncomingTelegramUpdates,
   ackIncomingTelegramUpdates,
   getLocalMessages,
@@ -128,7 +128,7 @@ function getBucketMessages(
   const legacy = map[chatId];
   if (Array.isArray(legacy)) {
     return accountId
-      ? legacy.filter((m) => (accountId === 'acc_1' && !m.accountId) || m.accountId === accountId)
+      ? legacy.filter((m) => m.accountId === accountId)
       : legacy;
   }
   return [];
@@ -258,11 +258,12 @@ function mergeCloudMessagesWithLocal(
   });
 }
 
-const DEFAULT_CALL_RECORDS: TelegramCallRecord[] = [
-  { id: 'call_rec_1', contactName: 'Elena Rostova', avatarBg: '#e17076', avatarInitial: 'ER', type: 'incoming', duration: '03:42', timestamp: '今天 10:24' },
-  { id: 'call_rec_2', contactName: 'Alex Cooper', avatarBg: '#65aadd', avatarInitial: 'AC', type: 'outgoing', duration: '01:15', timestamp: '昨天 17:50' },
-  { id: 'call_rec_3', contactName: 'David Harrison', avatarBg: '#7bc862', avatarInitial: 'DH', type: 'missed', duration: '00:00', timestamp: '周一 14:12' },
-];
+const LEGACY_MOCK_CALL_IDS = new Set(['call_rec_1', 'call_rec_2', 'call_rec_3']);
+
+function sanitizeCallRecords(list: any): TelegramCallRecord[] {
+  if (!Array.isArray(list)) return [];
+  return list.filter((rec) => rec && rec.id && !LEGACY_MOCK_CALL_IDS.has(String(rec.id)));
+}
 
 export default function App() {
   // 1. Core State with LocalStorage Web Crypto AES-256 Encrypted Persistence
@@ -299,7 +300,7 @@ export default function App() {
 
   const [messagesMap, setMessagesMap] = useState<Record<string, Message[]>>(() => {
     const saved = secureGetItemSync<Record<string, Message[]>>('tg_pro_messages');
-    return saved || INITIAL_MESSAGES;
+    return saved || {};
   });
 
   const [translationSettings, setTranslationSettings] = useState<TranslationSettings>(() => {
@@ -380,12 +381,20 @@ export default function App() {
   const [isMemberAuthenticated, setIsMemberAuthenticated] = useState(false);
   const [currentMember, setCurrentMember] = useState<MemberUser | null>(null);
   const [totalMembersCount, setTotalMembersCount] = useState<number>(0);
+  const [authPromptState, setAuthPromptState] = useState<{
+    initialTab?: 'login' | 'register' | 'redeem';
+    initialError?: string | null;
+  }>({});
+  const pendingAutoSelectAccountRef = useRef<string | null>(null);
 
   // Telegram Voice Call modal state
   const [isVoiceCallOpen, setIsVoiceCallOpen] = useState(false);
   const [voiceCallTargetName, setVoiceCallTargetName] = useState<string>('');
+  const activeCallRecordIdRef = useRef<string | null>(null);
+  const [offlineReasonByAccount, setOfflineReasonByAccount] = useState<Record<string, string>>({});
+  const [isReconnectingAccount, setIsReconnectingAccount] = useState(false);
 
-  // Telegram contacts (strictly scoped by account & AES-encrypted, zero mock defaults) and call history state
+  // Telegram contacts (strictly scoped by account & AES-encrypted, zero mock defaults) and real call history state
   const [contacts, setContacts] = useState<TelegramContact[]>(() => {
     return getScopedContacts(accounts[0]?.id || '');
   });
@@ -393,9 +402,9 @@ export default function App() {
   const [callRecords, setCallRecords] = useState<TelegramCallRecord[]>(() => {
     try {
       const saved = localStorage.getItem('tg_pro_call_records');
-      return saved ? JSON.parse(saved) : DEFAULT_CALL_RECORDS;
+      return saved ? sanitizeCallRecords(JSON.parse(saved)) : [];
     } catch {
-      return DEFAULT_CALL_RECORDS;
+      return [];
     }
   });
 
@@ -524,13 +533,13 @@ export default function App() {
           if ((!msgs || msgs.length === 0) && acc) {
             const legacy = await secureGetItemAsync<Message[]>(`tg_desktop_msgs_${c.id}`);
             if (Array.isArray(legacy)) {
-              msgs = legacy.filter((m) => (acc === 'acc_1' && !m.accountId) || m.accountId === acc);
+              msgs = legacy.filter((m) => m.accountId === acc);
             }
           }
           if (Array.isArray(msgs) && msgs.length > 0) {
             reconstructed[msgBucketKey(acc, c.id)] = normalizeStalePendingMessages(
               msgs.filter(
-                (m) => !isMessageDeleted(m.id) && (!acc || !m.accountId || m.accountId === acc)
+                (m) => !isMessageDeleted(m.id) && (!acc || m.accountId === acc)
               )
             );
           }
@@ -566,7 +575,7 @@ export default function App() {
         setContacts(getScopedContacts(resolvedActiveAccId || activeAccountIdRef.current));
         try {
           const savedCalls = localStorage.getItem('tg_pro_call_records');
-          if (savedCalls) setCallRecords(JSON.parse(savedCalls));
+          if (savedCalls) setCallRecords(sanitizeCallRecords(JSON.parse(savedCalls)));
         } catch {}
         const savedTheme = localStorage.getItem('tg_pro_theme');
         if (savedTheme === 'dark' || savedTheme === 'light') {
@@ -661,6 +670,14 @@ export default function App() {
         } else {
           setIsMemberAuthenticated(false);
           setCurrentMember(null);
+          const errCode = handshake.code || status.authErrorCode;
+          const errMsg = handshake.message || status.authErrorMessage;
+          if (errCode === 'VIP_EXPIRED' || errCode === 'DEVICE_MISMATCH' || errCode === 'AUTH_SESSION_REVOKED') {
+            setAuthPromptState({
+              initialTab: errCode === 'VIP_EXPIRED' ? 'redeem' : 'login',
+              initialError: errMsg || null,
+            });
+          }
         }
       } catch {
         if (active) setIsMemberAuthenticated(false);
@@ -672,6 +689,23 @@ export default function App() {
     return () => {
       active = false;
     };
+  }, []);
+
+  // Listen for runtime 401/403 member token/VIP expiration events across all API calls
+  useEffect(() => {
+    const onMemberAuthExpired = (e: Event) => {
+      const detail = (e as CustomEvent)?.detail || {};
+      const code = String(detail.code || '');
+      const message = typeof detail.message === 'string' ? detail.message : '会员登录已过期，请重新登录或续费卡密';
+      setIsMemberAuthenticated(false);
+      setCurrentMember(null);
+      setAuthPromptState({
+        initialTab: code === 'VIP_EXPIRED' ? 'redeem' : 'login',
+        initialError: message,
+      });
+    };
+    window.addEventListener('hs_member_auth_expired', onMemberAuthExpired);
+    return () => window.removeEventListener('hs_member_auth_expired', onMemberAuthExpired);
   }, []);
 
   const notifiedExpiredRef = useRef<Set<string>>(new Set());
@@ -714,92 +748,147 @@ export default function App() {
     }
   }, [isHydrated, customLLMConfig.enabled, customLLMConfig.engineMode, translationSettings.preferredEngine]);
 
+  const markAccountExpiredUi = (accId: string, errorReason?: string) => {
+    if (!accId) return;
+    setAccounts((prev) =>
+      prev.map((a) =>
+        a.id === accId ? { ...a, status: 'expired', bio: '会话已失效，请重新登录' } : a
+      )
+    );
+    if (!notifiedExpiredRef.current.has(accId)) {
+      notifiedExpiredRef.current.add(accId);
+      showCloudError(errorReason || 'Telegram 登录会话已失效，请重新扫码或验证码登录');
+    }
+  };
+
+  const syncTelegramAccountStatus = async () => {
+    const [activeAccs, statusRes] = await Promise.all([
+      fetchTelegramActiveAccounts(),
+      fetchTelegramUserStatusApi(),
+    ]);
+
+    const statusById = new Map<string, 'online' | 'away' | 'offline' | 'expired'>();
+    const reasonsMap: Record<string, string> = {};
+    if (statusRes.ok) {
+      statusRes.activeUsers.forEach((u) => {
+        const nextStatus: 'online' | 'away' | 'offline' = u.isConnected
+          ? 'online'
+          : u.isInMemoryConnected || statusRes.isRestoringSessions
+            ? 'away'
+            : 'offline';
+        statusById.set(u.id, nextStatus);
+        if (nextStatus !== 'online' && u.offlineReason) {
+          reasonsMap[u.id] = u.offlineReason;
+        }
+      });
+      statusRes.expiredAccounts.forEach((exp) => {
+        const expId = exp.accountId || (exp.userId ? `acc_tg_${exp.userId}` : '');
+        if (expId) {
+          statusById.set(expId, 'expired');
+          reasonsMap[expId] = exp.reason;
+          if (!notifiedExpiredRef.current.has(expId)) {
+            notifiedExpiredRef.current.add(expId);
+            showCloudError(exp.reason || `账号 ${expId} 登录会话已失效，请重新扫码或验证码登录`);
+          }
+        }
+      });
+    }
+
+    if (activeAccs && activeAccs.length > 0) {
+      activeAccs.forEach((acc: any) => {
+        if (!statusById.has(acc.id)) {
+          statusById.set(acc.id, acc.isConnected ? 'online' : 'away');
+        }
+      });
+    }
+
+    setOfflineReasonByAccount(reasonsMap);
+
+    setAccounts((prev) => {
+      const map = new Map<string, Account>();
+      prev.forEach((a) => {
+        if (a.id.startsWith('acc_tg_')) {
+          const realStatus = statusById.get(a.id) || 'offline';
+          const nextBio =
+            realStatus === 'expired'
+              ? '会话已失效，请重新登录'
+              : realStatus === 'online'
+                ? 'Telegram 账号 (已直连)'
+                : realStatus === 'away'
+                  ? 'Telegram 账号 (重连中)'
+                  : 'Telegram 账号 (未连接)';
+          map.set(a.id, { ...a, status: realStatus, bio: nextBio });
+        } else {
+          map.set(a.id, a);
+        }
+      });
+      if (activeAccs && activeAccs.length > 0) {
+        activeAccs.forEach((acc: any) => {
+          if (!map.has(acc.id)) {
+            const realStatus = statusById.get(acc.id) || (acc.isConnected ? 'online' : 'away');
+            map.set(acc.id, {
+              id: acc.id,
+              name: acc.name,
+              username: acc.username,
+              phone: acc.phone,
+              avatarBg: acc.avatarBg || '#2481cc',
+              avatarInitial: acc.avatarInitial || 'TG',
+              unreadTotal: 0,
+              isActive: false,
+              status: realStatus,
+              bio: realStatus === 'online' ? 'Telegram 账号 (已直连)' : 'Telegram 账号 (未连接)',
+            });
+          }
+        });
+      }
+      return Array.from(map.values());
+    });
+  };
+
+  const handleReconnectTelegram = async () => {
+    if (isReconnectingAccount) return;
+    setIsReconnectingAccount(true);
+    try {
+      const res = await reconnectTelegramSessionsApi(true);
+      await syncTelegramAccountStatus();
+      if (!res.ok) {
+        showCloudError(res.error || '重连 Telegram 会话失败');
+      } else {
+        const curAcc = activeAccountIdRef.current;
+        if (curAcc && curAcc.startsWith('acc_tg_')) {
+          const dlgRes = await fetchTelegramUserDialogsDetailedApi(curAcc);
+          if (dlgRes.ok && dlgRes.dialogs.length > 0) {
+            setChats((prev) => {
+              const otherChats = prev.filter((c) => c.accountId !== curAcc);
+              const prevMap = new Map<string, Chat>();
+              prev.filter((c) => c.accountId === curAcc).forEach((c) => prevMap.set(c.id, c));
+              const nextChats = dlgRes.dialogs.map((d: any) => mapCloudDialogToChat(d, curAcc, prevMap.get(d.id)));
+              return [...nextChats, ...otherChats];
+            });
+          }
+        }
+      }
+    } finally {
+      setIsReconnectingAccount(false);
+    }
+  };
+
   // Sync active connected Telegram accounts & real MTProto connectivity + expired sessions
   useEffect(() => {
     if (!isMemberAuthenticated) return;
     let isMounted = true;
 
-    const syncTelegramAccountStatus = async () => {
-      const [activeAccs, statusRes] = await Promise.all([
-        fetchTelegramActiveAccounts(),
-        fetchTelegramUserStatusApi(),
-      ]);
+    const runSync = async () => {
       if (!isMounted) return;
-
-      const statusById = new Map<string, 'online' | 'away' | 'offline' | 'expired'>();
-      if (statusRes.ok) {
-        statusRes.activeUsers.forEach((u) => {
-          const nextStatus: 'online' | 'away' | 'offline' =
-            u.isConnected ? 'online' : u.isInMemoryConnected ? 'away' : 'offline';
-          statusById.set(u.id, nextStatus);
-        });
-        statusRes.expiredAccounts.forEach((exp) => {
-          const expId = exp.accountId || (exp.userId ? `acc_tg_${exp.userId}` : '');
-          if (expId) {
-            statusById.set(expId, 'expired');
-            if (!notifiedExpiredRef.current.has(expId)) {
-              notifiedExpiredRef.current.add(expId);
-              showCloudError(exp.reason || `账号 ${expId} 登录会话已失效，请重新扫码或验证码登录`);
-            }
-          }
-        });
-      }
-
-      if (activeAccs && activeAccs.length > 0) {
-        activeAccs.forEach((acc: any) => {
-          if (!statusById.has(acc.id)) {
-            statusById.set(acc.id, acc.isConnected ? 'online' : 'away');
-          }
-        });
-      }
-
-      setAccounts((prev) => {
-        const map = new Map<string, Account>();
-        prev.forEach((a) => {
-          if (a.id.startsWith('acc_tg_')) {
-            const realStatus = statusById.get(a.id) || 'offline';
-            const nextBio =
-              realStatus === 'expired'
-                ? '会话已失效，请重新登录'
-                : realStatus === 'online'
-                  ? 'Telegram 账号 (已直连)'
-                  : realStatus === 'away'
-                    ? 'Telegram 账号 (重连中)'
-                    : 'Telegram 账号 (未连接)';
-            map.set(a.id, { ...a, status: realStatus, bio: nextBio });
-          } else {
-            map.set(a.id, a);
-          }
-        });
-        if (activeAccs && activeAccs.length > 0) {
-          activeAccs.forEach((acc: any) => {
-            if (!map.has(acc.id)) {
-              const realStatus = statusById.get(acc.id) || (acc.isConnected ? 'online' : 'away');
-              map.set(acc.id, {
-                id: acc.id,
-                name: acc.name,
-                username: acc.username,
-                phone: acc.phone,
-                avatarBg: acc.avatarBg || '#2481cc',
-                avatarInitial: acc.avatarInitial || 'TG',
-                unreadTotal: 0,
-                isActive: false,
-                status: realStatus,
-                bio: realStatus === 'online' ? 'Telegram 账号 (已直连)' : 'Telegram 账号 (未连接)',
-              });
-            }
-          });
-        }
-        return Array.from(map.values());
-      });
+      await syncTelegramAccountStatus();
     };
 
-    void syncTelegramAccountStatus();
+    void runSync();
     const initialRetryTimer = setTimeout(() => {
-      void syncTelegramAccountStatus();
+      void runSync();
     }, 2500);
     const statusPollTimer = setInterval(() => {
-      void syncTelegramAccountStatus();
+      void runSync();
     }, 15000);
 
     return () => {
@@ -809,32 +898,32 @@ export default function App() {
     };
   }, [isMemberAuthenticated]);
 
-  // Zero-DB Local Storage: Load local messages and customer memory for the active chat
+  // Account-level syncing: scoped contacts, DB chats, and MTProto dialogs (runs ONLY on activeAccountId/auth changes)
   useEffect(() => {
     if (!activeAccountId || !isMemberAuthenticated) return;
     setActiveApiAccount(activeAccountId);
 
     let isMounted = true;
-    setContacts(getScopedContacts(activeAccountId));
-    if (activeAccountId.startsWith('acc_tg_')) {
-      fetchTelegramUserContactsApi(activeAccountId).then((res) => {
-        if (isMounted && res.ok && Array.isArray(res.contacts)) {
-          handleSyncContacts(res.contacts, activeAccountId);
+    const targetAccId = activeAccountId;
+    setContacts(getScopedContacts(targetAccId));
+    if (targetAccId.startsWith('acc_tg_')) {
+      fetchTelegramUserContactsApi(targetAccId).then((res) => {
+        if (isMounted && activeAccountIdRef.current === targetAccId && res.ok && Array.isArray(res.contacts)) {
+          handleSyncContacts(res.contacts, targetAccId);
         }
       }).catch(() => {});
+    } else if (pendingAutoSelectAccountRef.current === targetAccId && !activeChatIdRef.current) {
+      pendingAutoSelectAccountRef.current = null;
+      const existingChat = chatsRef.current.find((c) => c.accountId === targetAccId);
+      if (existingChat) setActiveChatId(existingChat.id);
     }
 
-    // Load dialogs/chats for this account
     const syncChats = () => {
-      const targetAccId = activeAccountId;
       fetchChatsFromDb(targetAccId).then((dbChats) => {
         if (isMounted && dbChats && dbChats.length > 0) {
           const scopedDbChats = dbChats.filter((dbc: Chat) => {
             const rowAcc = dbc.accountId || targetAccId;
-            return (
-              rowAcc === targetAccId ||
-              (rowAcc === 'acc_telegram_bot' && (targetAccId === 'acc_telegram_bot' || targetAccId === 'acc_1'))
-            );
+            return rowAcc === targetAccId;
           });
           if (scopedDbChats.length === 0) return;
           setChats((prev) => {
@@ -855,36 +944,33 @@ export default function App() {
       });
 
       // Also sync live MTProto cloud dialogs if this is a connected personal Telegram account
-      if (activeAccountId && activeAccountId.startsWith('acc_tg_')) {
-        fetchTelegramUserDialogsDetailedApi(activeAccountId).then((res) => {
-          if (!isMounted) return;
+      if (targetAccId.startsWith('acc_tg_')) {
+        const seq = selectAccountSeqRef.current;
+        fetchTelegramUserDialogsDetailedApi(targetAccId).then((res) => {
+          if (selectAccountSeqRef.current !== seq) {
+            return;
+          }
+          if (!isMounted || activeAccountIdRef.current !== targetAccId) return;
           if (!res.ok) {
             if (res.code === 'TELEGRAM_SESSION_EXPIRED') {
-              setAccounts((prev) =>
-                prev.map((a) =>
-                  a.id === activeAccountId
-                    ? { ...a, status: 'expired', bio: '会话已失效，请重新登录' }
-                    : a
-                )
-              );
-              if (!notifiedExpiredRef.current.has(activeAccountId)) {
-                notifiedExpiredRef.current.add(activeAccountId);
-                showCloudError(res.error || 'Telegram 登录会话已失效，请重新扫码或验证码登录');
-              }
+              markAccountExpiredUi(targetAccId, res.error);
+            } else if (pendingAutoSelectAccountRef.current === targetAccId && !activeChatIdRef.current) {
+              pendingAutoSelectAccountRef.current = null;
+              const existingChat = chatsRef.current.find((c) => c.accountId === targetAccId);
+              if (existingChat) setActiveChatId(existingChat.id);
             }
             return;
           }
           const realDialogs = res.dialogs;
           setChats((prev) => {
-            const otherChats = prev.filter((c) => c.accountId !== activeAccountId);
-            const prevAccountChats = prev.filter((c) => c.accountId === activeAccountId);
+            const otherChats = prev.filter((c) => c.accountId !== targetAccId);
+            const prevAccountChats = prev.filter((c) => c.accountId === targetAccId);
             const prevMap = new Map<string, Chat>();
             prevAccountChats.forEach((c) => prevMap.set(c.id, c));
 
             const nextAccountChats: Chat[] = realDialogs.map((d: any) =>
-              mapCloudDialogToChat(d, activeAccountId, prevMap.get(d.id))
+              mapCloudDialogToChat(d, targetAccId, prevMap.get(d.id))
             );
-            // Retain non-tg custom/local contacts if any exist
             const cloudIds = new Set(nextAccountChats.map((c) => c.id));
             prevAccountChats.forEach((c) => {
               if (!c.id.startsWith('tg_') && !cloudIds.has(c.id)) {
@@ -893,7 +979,18 @@ export default function App() {
             });
             return [...nextAccountChats, ...otherChats];
           });
-          if (realDialogs.length > 0 && activeAccountIdRef.current === activeAccountId) {
+
+          if (pendingAutoSelectAccountRef.current === targetAccId && !activeChatIdRef.current) {
+            pendingAutoSelectAccountRef.current = null;
+            if (realDialogs.length > 0) {
+              setActiveChatId(realDialogs[0].id);
+            } else {
+              const existingChat = chatsRef.current.find((c) => c.accountId === targetAccId);
+              if (existingChat) setActiveChatId(existingChat.id);
+            }
+          }
+
+          if (realDialogs.length > 0 && activeAccountIdRef.current === targetAccId) {
             const dialogById = new Map<string, any>();
             realDialogs.forEach((d: any) => {
               if (d && d.id && !d.isGroup && !d.isChannel) {
@@ -921,7 +1018,7 @@ export default function App() {
                   return ct;
                 });
                 if (changed) {
-                  saveScopedContacts(next, activeAccountId);
+                  saveScopedContacts(next, targetAccId);
                 }
                 return changed ? next : prev;
               });
@@ -934,104 +1031,117 @@ export default function App() {
     syncChats();
     const chatInterval = setInterval(syncChats, 8000);
 
-    if (activeChatId) {
-      const bucketKey = msgBucketKey(activeAccountId, activeChatId);
-      const localMsgs = getLocalMessages(activeChatId, activeAccountId);
-      if (localMsgs && localMsgs.length > 0) {
-        setMessagesMap((prev) => ({
-          ...prev,
-          [bucketKey]: localMsgs.filter((m) => !isMessageDeleted(m.id)),
-        }));
-      } else if (INITIAL_MESSAGES[activeChatId] && (!activeAccountId || activeAccountId === 'acc_1')) {
-        setMessagesMap((prev) => ({
-          ...prev,
-          [bucketKey]: INITIAL_MESSAGES[activeChatId].filter((m) => !isMessageDeleted(m.id)),
-        }));
-      }
-
-      if (!localMsgs || localMsgs.length === 0 || activeAccountId === 'acc_telegram_bot') {
-        // Sync server-persisted messages (Bot webhook / unified store) and merge with local cache
-        fetchMessagesFromDb(activeChatId, activeAccountId).then((cloudMsgs) => {
-          if (isMounted && cloudMsgs && cloudMsgs.length > 0) {
-            setMessagesMap((prev) => {
-              const base = getBucketMessages(prev, activeAccountId, activeChatId);
-              const merged = mergeCloudMessagesWithLocal(
-                base.length > 0 ? base : getLocalMessages(activeChatId, activeAccountId),
-                cloudMsgs
-              );
-              setLocalMessages(activeChatId, merged, activeAccountId);
-              return { ...prev, [bucketKey]: merged };
-            });
-          }
-        }).catch(() => {});
-      }
-
-      if (activeChatId.startsWith('tg_') && activeAccountId !== 'acc_telegram_bot') {
-        fetchTelegramCloudMessagesApi(activeChatId, activeAccountId, { limit: 40 }).then((cloudRes) => {
-          if (!isMounted || !cloudRes.ok) return;
-          setChatHasMoreMap((prev) => ({ ...prev, [bucketKey]: cloudRes.hasMore }));
-          if (typeof cloudRes.readOutboxMaxId === 'number') {
-            setChats((prev) =>
-              prev.map((c) =>
-                c.id === activeChatId && (!activeAccountId || c.accountId === activeAccountId)
-                  ? { ...c, readOutboxMaxId: Math.max(c.readOutboxMaxId || 0, cloudRes.readOutboxMaxId || 0) }
-                  : c
-              )
-            );
-          }
-          const cloudMsgs = cloudRes.messages;
-          if (!cloudMsgs || cloudMsgs.length === 0) return;
-          setMessagesMap((prev) => {
-            const base = getBucketMessages(prev, activeAccountId, activeChatId);
-            const merged = mergeCloudMessagesWithLocal(
-              base.length > 0 ? base : getLocalMessages(activeChatId, activeAccountId),
-              cloudMsgs
-            );
-            setLocalMessages(activeChatId, merged, activeAccountId);
-            return { ...prev, [bucketKey]: merged };
-          });
-        }).catch(() => {});
-
-        fetchTelegramChatFullInfoApi(activeChatId, activeAccountId).then((info) => {
-          if (!isMounted || !info.ok) return;
-          setChats((prev) =>
-            prev.map((c) =>
-              c.id === activeChatId && (!activeAccountId || c.accountId === activeAccountId)
-                ? {
-                    ...c,
-                    ...(typeof info.memberCount === 'number' ? { memberCount: info.memberCount } : {}),
-                    ...(typeof info.onlineCount === 'number' ? { onlineCount: info.onlineCount } : {}),
-                    ...(typeof info.isOnline === 'boolean' ? { isOnline: info.isOnline } : {}),
-                    ...(info.statusText ? { statusText: info.statusText } : {}),
-                    ...(info.description !== undefined ? { description: info.description } : {}),
-                    ...(info.username !== undefined ? { username: info.username } : {}),
-                    ...(info.inviteLink !== undefined ? { inviteLink: info.inviteLink } : {}),
-                    ...(typeof info.isVerified === 'boolean' ? { isVerified: info.isVerified } : {}),
-                  }
-                : c
-            )
-          );
-        }).catch(() => {});
-      }
-
-      const localProf = getLocalCustomerProfile(activeChatId, activeAccountId);
-      if (localProf) {
-        setCustomerProfile(localProf);
-      }
-      // Always fetch fresh profile from server in background to avoid stale cached persona
-      fetchCustomerProfile(activeChatId, activeAccountId).then((prof) => {
-        if (isMounted && prof) {
-          setCustomerProfile(prof);
-          saveLocalCustomerProfile(activeChatId, prof, activeAccountId);
-        }
-      }).catch(() => {
-        // Keep currently rendered localProf if offline or network error
-      });
-    }
-
     return () => {
       isMounted = false;
       clearInterval(chatInterval);
+    };
+  }, [activeAccountId, isMemberAuthenticated]);
+
+  // Chat-level syncing: load local encrypted messages, MTProto cloud messages, fullInfo, and customer memory for activeChatId
+  useEffect(() => {
+    if (!activeAccountId || !activeChatId || !isMemberAuthenticated) return;
+    let isMounted = true;
+    const targetAccId = activeAccountId;
+    const targetChatId = activeChatId;
+    const bucketKey = msgBucketKey(targetAccId, targetChatId);
+
+    const localMsgs = getLocalMessages(targetChatId, targetAccId);
+    if (localMsgs && localMsgs.length > 0) {
+      setMessagesMap((prev) => ({
+        ...prev,
+        [bucketKey]: localMsgs.filter((m) => !isMessageDeleted(m.id)),
+      }));
+    }
+
+    if (!localMsgs || localMsgs.length === 0 || targetAccId === 'acc_telegram_bot') {
+      fetchMessagesFromDb(targetChatId, targetAccId).then((cloudMsgs) => {
+        if (isMounted && cloudMsgs && cloudMsgs.length > 0) {
+          setMessagesMap((prev) => {
+            const base = getBucketMessages(prev, targetAccId, targetChatId);
+            const merged = mergeCloudMessagesWithLocal(
+              base.length > 0 ? base : getLocalMessages(targetChatId, targetAccId),
+              cloudMsgs
+            );
+            setLocalMessages(targetChatId, merged, targetAccId);
+            return { ...prev, [bucketKey]: merged };
+          });
+        }
+      }).catch(() => {});
+    }
+
+    if (targetChatId.startsWith('tg_') && targetAccId !== 'acc_telegram_bot') {
+      fetchTelegramCloudMessagesApi(targetChatId, targetAccId, { limit: 40 }).then((cloudRes) => {
+        if (!isMounted) return;
+        if (!cloudRes.ok) {
+          if (cloudRes.code === 'TELEGRAM_SESSION_EXPIRED') {
+            markAccountExpiredUi(targetAccId, cloudRes.error);
+          }
+          return;
+        }
+        setChatHasMoreMap((prev) => ({ ...prev, [bucketKey]: cloudRes.hasMore }));
+        if (typeof cloudRes.readOutboxMaxId === 'number') {
+          setChats((prev) =>
+            prev.map((c) =>
+              c.id === targetChatId && (!targetAccId || c.accountId === targetAccId)
+                ? { ...c, readOutboxMaxId: Math.max(c.readOutboxMaxId || 0, cloudRes.readOutboxMaxId || 0) }
+                : c
+            )
+          );
+        }
+        const cloudMsgs = cloudRes.messages;
+        if (!cloudMsgs || cloudMsgs.length === 0) return;
+        setMessagesMap((prev) => {
+          const base = getBucketMessages(prev, targetAccId, targetChatId);
+          const merged = mergeCloudMessagesWithLocal(
+            base.length > 0 ? base : getLocalMessages(targetChatId, targetAccId),
+            cloudMsgs
+          );
+          setLocalMessages(targetChatId, merged, targetAccId);
+          return { ...prev, [bucketKey]: merged };
+        });
+      }).catch(() => {});
+
+      fetchTelegramChatFullInfoApi(targetChatId, targetAccId).then((info) => {
+        if (!isMounted) return;
+        if (!info.ok) {
+          if (info.code === 'TELEGRAM_SESSION_EXPIRED') {
+            markAccountExpiredUi(targetAccId, info.error);
+          }
+          return;
+        }
+        setChats((prev) =>
+          prev.map((c) =>
+            c.id === targetChatId && (!targetAccId || c.accountId === targetAccId)
+              ? {
+                  ...c,
+                  ...(typeof info.memberCount === 'number' ? { memberCount: info.memberCount } : {}),
+                  ...(typeof info.onlineCount === 'number' ? { onlineCount: info.onlineCount } : {}),
+                  ...(typeof info.isOnline === 'boolean' ? { isOnline: info.isOnline } : {}),
+                  ...(info.statusText ? { statusText: info.statusText } : {}),
+                  ...(info.description !== undefined ? { description: info.description } : {}),
+                  ...(info.username !== undefined ? { username: info.username } : {}),
+                  ...(info.inviteLink !== undefined ? { inviteLink: info.inviteLink } : {}),
+                  ...(typeof info.isVerified === 'boolean' ? { isVerified: info.isVerified } : {}),
+                }
+              : c
+          )
+        );
+      }).catch(() => {});
+    }
+
+    const localProf = getLocalCustomerProfile(targetChatId, targetAccId);
+    if (localProf) {
+      setCustomerProfile(localProf);
+    }
+    fetchCustomerProfile(targetChatId, targetAccId).then((prof) => {
+      if (isMounted && prof) {
+        setCustomerProfile(prof);
+        saveLocalCustomerProfile(targetChatId, prof, targetAccId);
+      }
+    }).catch(() => {});
+
+    return () => {
+      isMounted = false;
     };
   }, [activeChatId, activeAccountId, isMemberAuthenticated]);
 
@@ -1077,7 +1187,8 @@ export default function App() {
         const currentTransSettings = translationSettingsRef.current;
         const currentLLMConfig = customLLMConfigRef.current;
 
-        const updates = await pollIncomingTelegramUpdates(currentAccId);
+        // Poll updates globally across ALL active Telegram accounts so background accounts receive real-time messages & unread badges
+        const updates = await pollIncomingTelegramUpdates();
         if (isMounted && updates && updates.length > 0) {
           const processedIds: string[] = [];
           updates.forEach((upd: any) => {
@@ -1229,24 +1340,26 @@ export default function App() {
                     : c
                 )
               );
-              setContacts((prev) => {
-                let changed = false;
-                const next = prev.map((ct) => {
-                  if (ct.id === targetChatId) {
-                    changed = true;
-                    return {
-                      ...ct,
-                      status: nextOnline ? ('online' as const) : ('offline' as const),
-                      ...(nextStatusText ? { statusText: nextStatusText } : {}),
-                    };
+              if (targetAccountId === activeAccountIdRef.current) {
+                setContacts((prev) => {
+                  let changed = false;
+                  const next = prev.map((ct) => {
+                    if (ct.id === targetChatId) {
+                      changed = true;
+                      return {
+                        ...ct,
+                        status: nextOnline ? ('online' as const) : ('offline' as const),
+                        ...(nextStatusText ? { statusText: nextStatusText } : {}),
+                      };
+                    }
+                    return ct;
+                  });
+                  if (changed) {
+                    saveScopedContacts(next, targetAccountId);
                   }
-                  return ct;
+                  return changed ? next : prev;
                 });
-                if (changed && targetAccountId === activeAccountIdRef.current) {
-                  saveScopedContacts(next, targetAccountId);
-                }
-                return changed ? next : prev;
-              });
+              }
               return;
             }
 
@@ -1259,20 +1372,22 @@ export default function App() {
                     : c
                 )
               );
-              setContacts((prev) => {
-                let changed = false;
-                const next = prev.map((ct) => {
-                  if (ct.id === targetChatId) {
-                    changed = true;
-                    return { ...ct, isBlocked: nextBlocked };
+              if (targetAccountId === activeAccountIdRef.current) {
+                setContacts((prev) => {
+                  let changed = false;
+                  const next = prev.map((ct) => {
+                    if (ct.id === targetChatId) {
+                      changed = true;
+                      return { ...ct, isBlocked: nextBlocked };
+                    }
+                    return ct;
+                  });
+                  if (changed) {
+                    saveScopedContacts(next, targetAccountId);
                   }
-                  return ct;
+                  return changed ? next : prev;
                 });
-                if (changed && targetAccountId === activeAccountIdRef.current) {
-                  saveScopedContacts(next, targetAccountId);
-                }
-                return changed ? next : prev;
-              });
+              }
               return;
             }
 
@@ -1511,7 +1626,7 @@ export default function App() {
           });
 
           if (processedIds.length > 0) {
-            await ackIncomingTelegramUpdates(processedIds, currentAccId);
+            await ackIncomingTelegramUpdates(processedIds);
           }
         }
       } catch (err) {
@@ -1525,7 +1640,7 @@ export default function App() {
       isMounted = false;
       clearInterval(pollInterval);
     };
-  }, [activeAccountId, activeChatId, isMemberAuthenticated]);
+  }, [isMemberAuthenticated]);
 
   // Active Chats for currently selected account strictly isolated
   const currentAccountChats = chats.filter((c) => {
@@ -1814,53 +1929,14 @@ export default function App() {
 
   const selectAccountSeqRef = useRef(0);
 
-  // Switch Active Telegram Account & Sync Real Dialogs (race-guarded)
+  // Switch Active Telegram Account (account-level useEffect handles real dialog sync & auto-selection cleanly without duplicate calls)
   const handleSelectAccount = (accountId: string) => {
-    const seq = ++selectAccountSeqRef.current;
+    selectAccountSeqRef.current += 1;
+    pendingAutoSelectAccountRef.current = accountId;
     setActiveAccountId(accountId);
     setActiveApiAccount(accountId);
     setActiveChatId(null);
     setCustomerProfile(null);
-
-    fetchTelegramUserDialogsDetailedApi(accountId).then((res) => {
-      if (selectAccountSeqRef.current !== seq) {
-        return;
-      }
-      if (!res.ok && res.code === 'TELEGRAM_SESSION_EXPIRED') {
-        setAccounts((prev) =>
-          prev.map((a) =>
-            a.id === accountId
-              ? { ...a, status: 'expired', bio: '会话已失效，请重新登录' }
-              : a
-          )
-        );
-        if (!notifiedExpiredRef.current.has(accountId)) {
-          notifiedExpiredRef.current.add(accountId);
-          showCloudError(res.error || 'Telegram 登录会话已失效，请重新扫码或验证码登录');
-        }
-        return;
-      }
-      if (res.ok && res.dialogs.length > 0) {
-        const realDialogs = res.dialogs;
-        setChats((prev) => {
-          const prevAccountMap = new Map<string, Chat>();
-          prev.filter((c) => c.accountId === accountId).forEach((c) => prevAccountMap.set(c.id, c));
-          const mappedChats: Chat[] = realDialogs.map((d: any) =>
-            mapCloudDialogToChat(d, accountId, prevAccountMap.get(d.id))
-          );
-          const filtered = prev.filter((c) => c.accountId !== accountId);
-          return [...mappedChats, ...filtered];
-        });
-        setActiveChatId(realDialogs[0].id);
-      } else {
-        const existingChat = chatsRef.current.find((c) => c.accountId === accountId);
-        if (existingChat) {
-          setActiveChatId(existingChat.id);
-        } else {
-          setActiveChatId(null);
-        }
-      }
-    });
   };
 
   // Add new account and sync its real dialogs strictly isolated by accountId
@@ -1885,25 +1961,6 @@ export default function App() {
       return [...filtered, newAcc];
     });
     handleSelectAccount(id);
-
-    fetchTelegramUserDialogsDetailedApi(id, newAcc.phone).then((res) => {
-      if (res.ok && res.dialogs.length > 0) {
-        const realDialogs = res.dialogs;
-        setChats((prev) => {
-          const prevAccountMap = new Map<string, Chat>();
-          prev.filter((c) => c.accountId === id).forEach((c) => prevAccountMap.set(c.id, c));
-          const mappedChats: Chat[] = realDialogs.map((d: any) =>
-            mapCloudDialogToChat(d, id, prevAccountMap.get(d.id))
-          );
-          const otherChats = prev.filter((c) => c.accountId !== id);
-          return [...mappedChats, ...otherChats];
-        });
-
-        if (activeAccountIdRef.current === id) {
-          setActiveChatId(realDialogs[0].id);
-        }
-      }
-    });
   };
 
   // Delete account and clean up associated chats, messagesMap entries, and scoped encrypted caches
@@ -1962,10 +2019,14 @@ export default function App() {
     }
   };
 
-  // Update per-chat translation language pair
+  // Update per-chat translation language pair strictly scoped to activeAccountId
   const handleUpdateChatLanguage = (chatId: string, sourceLang: string, targetLang: string) => {
     setChats((prev) =>
-      prev.map((c) => (c.id === chatId ? { ...c, sourceLang, targetLang } : c))
+      prev.map((c) =>
+        c.id === chatId && (!activeAccountId || c.accountId === activeAccountId)
+          ? { ...c, sourceLang, targetLang }
+          : c
+      )
     );
     if (chatId === activeChatId) {
       setTranslationSettings((prev) => ({
@@ -1997,7 +2058,7 @@ export default function App() {
     if (activeChatId) {
       setChats((prev) =>
         prev.map((c) =>
-          c.id === activeChatId
+          c.id === activeChatId && (!activeAccountId || c.accountId === activeAccountId)
             ? {
                 ...c,
                 sourceLang:
@@ -2526,7 +2587,10 @@ export default function App() {
       ...newChat,
       accountId: activeAccountId || newChat.accountId || '',
     };
-    setChats((prev) => [chatToSave, ...prev.filter((c) => c.id !== chatToSave.id)]);
+    setChats((prev) => [
+      chatToSave,
+      ...prev.filter((c) => !(c.id === chatToSave.id && (!chatToSave.accountId || c.accountId === chatToSave.accountId))),
+    ]);
     setActiveChatId(chatToSave.id);
   };
 
@@ -2535,7 +2599,10 @@ export default function App() {
       ...newChat,
       accountId: activeAccountId || newChat.accountId || '',
     };
-    setChats((prev) => [chatToSave, ...prev.filter((c) => c.id !== chatToSave.id)]);
+    setChats((prev) => [
+      chatToSave,
+      ...prev.filter((c) => !(c.id === chatToSave.id && (!chatToSave.accountId || c.accountId === chatToSave.accountId))),
+    ]);
     setActiveChatId(chatToSave.id);
   };
 
@@ -2660,15 +2727,18 @@ export default function App() {
   };
 
   const handleStartCall = (contactName: string) => {
+    const recId = `call_${Date.now()}`;
     const newRecord: TelegramCallRecord = {
-      id: `call_${Date.now()}`,
+      id: recId,
+      accountId: activeAccountId,
       contactName,
       avatarBg: '#2ba0ff',
       avatarInitial: contactName.slice(0, 2).toUpperCase(),
       type: 'outgoing',
       duration: '00:00',
-      timestamp: '刚刚',
+      timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false }),
     };
+    activeCallRecordIdRef.current = recId;
     setCallRecords((prev) => [newRecord, ...prev]);
     setIsCallsOpen(false);
     setVoiceCallTargetName(contactName);
@@ -2734,6 +2804,9 @@ export default function App() {
           onDeleteChat={handleDeleteChat}
           onNewChatClick={() => setIsContactsOpen(true)}
           currentAccountStatus={currentAccount?.status}
+          currentAccountOfflineReason={currentAccount ? offlineReasonByAccount[currentAccount.id] : null}
+          isReconnecting={isReconnectingAccount}
+          onReconnectAccount={handleReconnectTelegram}
           onReloginCurrentAccount={() => {
             if (currentAccount) {
               setReloginAccount(currentAccount);
@@ -2810,7 +2883,23 @@ export default function App() {
           }}
           sendWithEnter={clientPrefs.sendWithEnter}
           onOpenVoiceCall={() => {
-            setVoiceCallTargetName(currentChat?.title || '');
+            const targetName = currentChat?.title || 'Telegram 用户';
+            const recId = `call_${Date.now()}`;
+            activeCallRecordIdRef.current = recId;
+            setCallRecords((prev) => [
+              {
+                id: recId,
+                accountId: activeAccountId,
+                contactName: targetName,
+                avatarBg: currentChat?.avatarBg || '#2481cc',
+                avatarInitial: currentChat?.avatarInitial || targetName.slice(0, 2).toUpperCase(),
+                type: 'outgoing',
+                duration: '00:00',
+                timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false }),
+              },
+              ...prev,
+            ]);
+            setVoiceCallTargetName(targetName);
             setIsVoiceCallOpen(true);
           }}
           onMessagesSynced={(synced, meta) => {
@@ -2964,11 +3053,11 @@ export default function App() {
         onStartChatWithContact={handleStartChatWithContact}
       />
 
-      {/* 17. Telegram Call Records & Dialing Modal */}
+      {/* 17. Telegram Call Records & Dialing Modal (strictly scoped by active account) */}
       <TelegramCallsModal
         isOpen={isCallsOpen}
         onClose={() => setIsCallsOpen(false)}
-        callRecords={callRecords}
+        callRecords={callRecords.filter((rec) => !rec.accountId || !activeAccountId || rec.accountId === activeAccountId)}
         onStartCall={handleStartCall}
       />
 
@@ -2989,19 +3078,43 @@ export default function App() {
       {/* 19. Telegram Voice Call Modal */}
       <TelegramVoiceCallModal
         isOpen={isVoiceCallOpen}
-        onClose={() => setIsVoiceCallOpen(false)}
+        onClose={() => {
+          setIsVoiceCallOpen(false);
+          activeCallRecordIdRef.current = null;
+        }}
         chat={voiceCallTargetName && currentChat?.title !== voiceCallTargetName ? null : currentChat}
         currentAccountId={activeAccountId}
         contactName={voiceCallTargetName || currentChat?.title}
         avatarBg={currentChat?.avatarBg}
         avatarInitial={currentChat?.avatarInitial}
+        onCallEnded={(durationSeconds, outcome) => {
+          const targetRecId = activeCallRecordIdRef.current;
+          if (!targetRecId) return;
+          const mins = Math.floor(durationSeconds / 60);
+          const secs = durationSeconds % 60;
+          const formatted = `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+          setCallRecords((prev) =>
+            prev.map((rec) =>
+              rec.id === targetRecId
+                ? {
+                    ...rec,
+                    duration: formatted,
+                    type: outcome === 'missed' && durationSeconds === 0 ? 'missed' : rec.type,
+                  }
+                : rec
+            )
+          );
+        }}
       />
 
       {/* 22. Member Authentication Gate Modal */}
       <MemberAuthModal
         isOpen={!isAuthChecking && !isMemberAuthenticated}
         totalMembers={totalMembersCount}
-        onSuccess={(user) => {
+        initialTab={authPromptState.initialTab}
+        initialError={authPromptState.initialError}
+        onSuccess={async (user) => {
+          setAuthPromptState({});
           setCurrentMember(user);
           setIsMemberAuthenticated(true);
           setCustomLLMConfig((prev) =>
@@ -3014,6 +3127,10 @@ export default function App() {
                 }
               : prev
           );
+          try {
+            await initSessionHandshake();
+            await syncTelegramAccountStatus();
+          } catch {}
           fetchAuthStatus()
             .then((s) => setTotalMembersCount(s.totalMembers || 0))
             .catch(() => {});

@@ -15,6 +15,7 @@ interface TelegramVoiceCallModalProps {
   contactName?: string;
   avatarBg?: string;
   avatarInitial?: string;
+  onCallEnded?: (durationSeconds: number, outcome: 'ended' | 'missed') => void;
 }
 
 export const TelegramVoiceCallModal: React.FC<TelegramVoiceCallModalProps> = ({
@@ -25,6 +26,7 @@ export const TelegramVoiceCallModal: React.FC<TelegramVoiceCallModalProps> = ({
   contactName,
   avatarBg,
   avatarInitial,
+  onCallEnded,
 }) => {
   const [callStatus, setCallStatus] = useState<'calling' | 'ringing' | 'connected' | 'ended'>('calling');
   const [duration, setDuration] = useState(0);
@@ -36,6 +38,7 @@ export const TelegramVoiceCallModal: React.FC<TelegramVoiceCallModalProps> = ({
   const pollRef = useRef<any>(null);
   const callIdRef = useRef<string>('');
   const durationRef = useRef<number>(0);
+  const reportedEndRef = useRef<boolean>(false);
 
   useEffect(() => {
     durationRef.current = duration;
@@ -48,6 +51,7 @@ export const TelegramVoiceCallModal: React.FC<TelegramVoiceCallModalProps> = ({
       setStatusNotice('');
       setErrorMsg('');
       callIdRef.current = '';
+      reportedEndRef.current = false;
       clearInterval(timerRef.current);
       clearInterval(pollRef.current);
       return;
@@ -93,6 +97,10 @@ export const TelegramVoiceCallModal: React.FC<TelegramVoiceCallModalProps> = ({
           clearInterval(pollRef.current);
           setCallStatus('ended');
           setStatusNotice(st.endedReason || '对方已挂断或未接听');
+          if (!reportedEndRef.current) {
+            reportedEndRef.current = true;
+            onCallEnded?.(durationRef.current, durationRef.current > 0 ? 'ended' : 'missed');
+          }
           setTimeout(() => {
             if (!cancelled) onClose();
           }, 1400);
@@ -108,6 +116,10 @@ export const TelegramVoiceCallModal: React.FC<TelegramVoiceCallModalProps> = ({
         void endTelegramVoiceCallApi(callIdRef.current, durationRef.current, currentAccountId);
         callIdRef.current = '';
       }
+      if (!reportedEndRef.current) {
+        reportedEndRef.current = true;
+        onCallEnded?.(durationRef.current, durationRef.current > 0 ? 'ended' : 'missed');
+      }
     };
   }, [isOpen, currentAccountId, chat?.id, chat?.username]);
 
@@ -119,6 +131,10 @@ export const TelegramVoiceCallModal: React.FC<TelegramVoiceCallModalProps> = ({
       const activeId = callIdRef.current;
       callIdRef.current = '';
       await endTelegramVoiceCallApi(activeId, durationRef.current, currentAccountId);
+    }
+    if (!reportedEndRef.current) {
+      reportedEndRef.current = true;
+      onCallEnded?.(durationRef.current, durationRef.current > 0 ? 'ended' : 'missed');
     }
     setTimeout(() => {
       onClose();

@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   Lock,
   User,
@@ -23,21 +23,33 @@ interface MemberAuthModalProps {
   isOpen: boolean;
   onSuccess: (user: MemberUser) => void;
   totalMembers?: number;
+  initialTab?: 'login' | 'register' | 'redeem';
+  initialError?: string | null;
 }
 
 export const MemberAuthModal: React.FC<MemberAuthModalProps> = ({
   isOpen,
   onSuccess,
   totalMembers = 0,
+  initialTab,
+  initialError,
 }) => {
-  const [activeTab, setActiveTab] = useState<'login' | 'register' | 'redeem'>('login');
+  const [activeTab, setActiveTab] = useState<'login' | 'register' | 'redeem'>(initialTab || 'login');
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
   const [cardKey, setCardKey] = useState('');
   const [isLoading, setIsLoading] = useState(false);
-  const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [errorMsg, setErrorMsg] = useState<string | null>(initialError || null);
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (isOpen) {
+      if (initialTab) setActiveTab(initialTab);
+      if (initialError) setErrorMsg(initialError);
+      setSuccessMsg(null);
+    }
+  }, [isOpen, initialTab, initialError]);
 
   if (!isOpen) return null;
 

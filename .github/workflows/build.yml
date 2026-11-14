@@ -42,13 +42,13 @@ jobs:
       - name: Run Packaged Desktop Smoke Test
         run: |
           Write-Host "Verifying packaged executable via automated smoke test..."
-          $preferredExe = "dist-electron/win-unpacked/灵犀语境.exe"
+          $preferredExe = "dist-electron/win-unpacked/HumanSense.exe"
           if (Test-Path $preferredExe) {
             $exePath = (Resolve-Path $preferredExe).Path
           } else {
             $foundExe = Get-ChildItem -Path "dist-electron/win-unpacked" -Filter "*.exe" -ErrorAction SilentlyContinue | Where-Object { $_.Name -notmatch "^Uninstall" } | Select-Object -First 1
             if (-not $foundExe) {
-              Write-Host "::error::Executable not found in dist-electron/win-unpacked (expected 灵犀语境.exe)"
+              Write-Host "::error::Executable not found in dist-electron/win-unpacked (expected HumanSense.exe)"
               exit 1
             }
             $exePath = $foundExe.FullName
@@ -88,7 +88,7 @@ jobs:
       - name: Upload Artifacts (Downloadable Exe)
         uses: actions/upload-artifact@v4
         with:
-          name: Telegram-Pro-Windows-Installer
+          name: HumanSense-Windows-Installer
           path: |
             dist-electron/*.exe
 

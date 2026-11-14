@@ -13,6 +13,7 @@ import {
   TelegramStickerPack,
   TelegramStickerItem,
   TranslationSettings,
+  SystemProxyConfig,
 } from '../types';
 
 // ==================== SESSION TOKEN & TENANT AUTHENTICATION HELPERS ====================
@@ -47,15 +48,19 @@ let currentSessionToken: string = (() => {
 
 let currentActiveAccountId: string = (() => {
   if (typeof window !== 'undefined') {
-    return localStorage.getItem(ACTIVE_ACCOUNT_STORAGE_KEY) || 'acc_1';
+    return localStorage.getItem(ACTIVE_ACCOUNT_STORAGE_KEY) || '';
   }
-  return 'acc_1';
+  return '';
 })();
 
 export function setActiveApiAccount(accountId: string) {
   currentActiveAccountId = accountId;
   if (typeof window !== 'undefined') {
-    localStorage.setItem(ACTIVE_ACCOUNT_STORAGE_KEY, accountId);
+    if (accountId) {
+      localStorage.setItem(ACTIVE_ACCOUNT_STORAGE_KEY, accountId);
+    } else {
+      localStorage.removeItem(ACTIVE_ACCOUNT_STORAGE_KEY);
+    }
   }
 }
 
@@ -153,10 +158,13 @@ export async function initSessionHandshake(): Promise<{
 }
 
 export function getAuthHeaders(accountId?: string): Record<string, string> {
+  const effectiveAcc = accountId || currentActiveAccountId;
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
-    'X-Account-Id': accountId || currentActiveAccountId,
   };
+  if (effectiveAcc) {
+    headers['X-Account-Id'] = effectiveAcc;
+  }
   if (currentSessionToken) {
     headers['Authorization'] = `Bearer ${currentSessionToken}`;
   }
@@ -256,7 +264,11 @@ export async function memberRegister(
       user: normalizedUser,
     };
   } catch (err: any) {
-    return { ok: false, error: err.message || '云端认证服务连接异常' };
+    const rawMsg = String(err?.message || '');
+    const friendly = /failed to fetch|network/i.test(rawMsg)
+      ? '无法连接云端会员授权中心，请检查本机网络或系统代理设置后重试'
+      : rawMsg || '云端认证服务连接异常';
+    return { ok: false, error: friendly };
   }
 }
 
@@ -291,7 +303,11 @@ export async function memberLogin(
       user: normalizedUser,
     };
   } catch (err: any) {
-    return { ok: false, error: err.message || '云端认证服务连接异常' };
+    const rawMsg = String(err?.message || '');
+    const friendly = /failed to fetch|network/i.test(rawMsg)
+      ? '无法连接云端会员授权中心，请检查本机网络或系统代理设置后重试'
+      : rawMsg || '云端认证服务连接异常';
+    return { ok: false, error: friendly };
   }
 }
 
@@ -336,12 +352,45 @@ export async function memberRedeemCardKey(
       user: normalizedUser,
     };
   } catch (err: any) {
-    return { ok: false, error: err.message || '云端认证服务连接异常' };
+    const rawMsg = String(err?.message || '');
+    const friendly = /failed to fetch|network/i.test(rawMsg)
+      ? '无法连接云端会员授权中心，请检查本机网络或系统代理设置后重试'
+      : rawMsg || '云端认证服务连接异常';
+    return { ok: false, error: friendly };
   }
 }
 
 export async function adminLogin(password: string): Promise<{ ok: boolean; message?: string; error?: string; user?: any }> {
   return memberLogin('admin', password);
+}
+
+let lastMemberAuthExpiredEventAt = 0;
+
+export function notifyIfMemberAuthExpired(res: Response, parsedBody?: any): void {
+  if (typeof window === 'undefined') return;
+  if (res.status !== 401 && res.status !== 403) return;
+  const code = String(parsedBody?.code || '');
+  const isMemberAuthError =
+    code === 'VIP_EXPIRED' ||
+    code === 'AUTH_SESSION_REQUIRED' ||
+    code === 'AUTH_SESSION_REVOKED' ||
+    code === 'DEVICE_MISMATCH';
+  if (!isMemberAuthError) return;
+
+  const now = Date.now();
+  if (now - lastMemberAuthExpiredEventAt < 1500) return;
+  lastMemberAuthExpiredEventAt = now;
+
+  setSessionToken('');
+  setStoredMemberUser(null);
+  window.dispatchEvent(
+    new CustomEvent('hs_member_auth_expired', {
+      detail: {
+        code,
+        message: parsedBody?.message || parsedBody?.error || '会员会话已失效，请重新登录或续费卡密',
+      },
+    })
+  );
 }
 
 export async function fetchWithTimeout(
@@ -352,7 +401,15 @@ export async function fetchWithTimeout(
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    return await fetch(input, { ...init, signal: controller.signal });
+    const res = await fetch(input, { ...init, signal: controller.signal });
+    if ((res.status === 401 || res.status === 403) && typeof input === 'string' && input.startsWith('/api/')) {
+      try {
+        const cloned = res.clone();
+        const errData = await cloned.json().catch(() => ({}));
+        notifyIfMemberAuthExpired(res, errData);
+      } catch {}
+    }
+    return res;
   } catch (err: any) {
     if (err?.name === 'AbortError') {
       throw new Error('请求超时，请检查网络连接后重试');
@@ -658,9 +715,9 @@ export async function generateTTSVoice(
 export async function pollIncomingTelegramUpdates(accountId?: string): Promise<any[]> {
   try {
     const query = accountId ? `?accountId=${encodeURIComponent(accountId)}` : '';
-    const res = await fetch(`/api/telegram/user/poll-updates${query}`, {
+    const res = await fetchWithTimeout(`/api/telegram/user/poll-updates${query}`, {
       headers: getAuthHeaders(accountId),
-    });
+    }, 10000);
     if (res.ok) {
       const data = await res.json();
       return data.updates || [];
@@ -891,9 +948,9 @@ export async function submitTrainingFeedbackApi(payload: {
 
 export async function fetchChatsFromDb(accountId?: string): Promise<any[]> {
   try {
-    const res = await fetch('/api/chats', {
+    const res = await fetchWithTimeout('/api/chats', {
       headers: getAuthHeaders(accountId),
-    });
+    }, 10000);
     if (res.ok) {
       return await res.json();
     }
@@ -905,9 +962,9 @@ export async function fetchChatsFromDb(accountId?: string): Promise<any[]> {
 
 export async function fetchMessagesFromDb(chatId: string, accountId?: string): Promise<Message[]> {
   try {
-    const res = await fetch(`/api/messages/${chatId}`, {
+    const res = await fetchWithTimeout(`/api/messages/${chatId}`, {
       headers: getAuthHeaders(accountId),
-    });
+    }, 10000);
     if (res.ok) {
       return await res.json();
     }
@@ -1144,6 +1201,7 @@ export async function fetchTelegramUserStatusApi(): Promise<{
     isInMemoryConnected?: boolean;
     isConnected?: boolean;
     status?: 'online' | 'away' | 'offline' | 'expired';
+    offlineReason?: string;
   }>;
   expiredAccounts: Array<{
     accountId: string;
@@ -1152,6 +1210,10 @@ export async function fetchTelegramUserStatusApi(): Promise<{
     reason: string;
     expiredAt: number;
   }>;
+  credentialsConfigured?: boolean;
+  credentialsError?: string | null;
+  isRestoringSessions?: boolean;
+  restoreError?: string | null;
 }> {
   try {
     const res = await fetchWithTimeout('/api/telegram/user/status', {
@@ -1163,12 +1225,139 @@ export async function fetchTelegramUserStatusApi(): Promise<{
         ok: Boolean(data?.ok),
         activeUsers: Array.isArray(data?.activeUsers) ? data.activeUsers : [],
         expiredAccounts: Array.isArray(data?.expiredAccounts) ? data.expiredAccounts : [],
+        credentialsConfigured: typeof data?.credentialsConfigured === 'boolean' ? data.credentialsConfigured : undefined,
+        credentialsError: data?.credentialsError ?? null,
+        isRestoringSessions: Boolean(data?.isRestoringSessions),
+        restoreError: data?.restoreError ?? null,
       };
     }
   } catch (err) {
     console.warn('Failed to fetch Telegram user status:', err);
   }
   return { ok: false, activeUsers: [], expiredAccounts: [] };
+}
+
+export async function reconnectTelegramSessionsApi(
+  forceCredsRefresh = false,
+  forceReconnect = false
+): Promise<{
+  ok: boolean;
+  restoredCount?: number;
+  hasActiveSession?: boolean;
+  message?: string;
+  error?: string;
+  code?: string;
+}> {
+  try {
+    const res = await fetchWithTimeout('/api/telegram/user/reconnect', {
+      method: 'POST',
+      headers: getAuthHeaders(),
+      body: JSON.stringify({ forceCredsRefresh, forceReconnect }),
+    }, 25000);
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || !data?.ok) {
+      return {
+        ok: false,
+        code: data?.code,
+        error: data?.error || `重连失败 (HTTP ${res.status})`,
+      };
+    }
+    return data;
+  } catch (err: any) {
+    return { ok: false, error: err?.message || '网络连接异常，无法重连 Telegram' };
+  }
+}
+
+export async function fetchTelegramCredsStatusApi(refresh = false): Promise<{
+  ok: boolean;
+  configured: boolean;
+  source?: string;
+  cloudSyncError?: string;
+}> {
+  try {
+    const res = await fetchWithTimeout(`/api/telegram/credentials/status${refresh ? '?refresh=1' : ''}`, {
+      headers: getAuthHeaders(),
+    }, 14000);
+    const data = await res.json().catch(() => ({}));
+    if (res.ok && data?.ok) {
+      return {
+        ok: true,
+        configured: Boolean(data.configured),
+        source: data.source,
+        cloudSyncError: data.cloudSyncError,
+      };
+    }
+    return {
+      ok: false,
+      configured: false,
+      cloudSyncError: data?.error || data?.cloudSyncError || `检测接入凭据失败 (HTTP ${res.status})`,
+    };
+  } catch (err: any) {
+    return { ok: false, configured: false, cloudSyncError: err?.message || '检测接入凭据超时' };
+  }
+}
+
+export async function syncCloudTelegramCredsApi(): Promise<{
+  ok: boolean;
+  configured?: boolean;
+  message?: string;
+  error?: string;
+}> {
+  try {
+    const res = await fetchWithTimeout('/api/telegram/credentials/sync-cloud', {
+      method: 'POST',
+      headers: getAuthHeaders(),
+      body: JSON.stringify({}),
+    }, 15000);
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || !data?.ok) {
+      return { ok: false, error: data?.error || `同步云端凭据失败 (HTTP ${res.status})` };
+    }
+    return data;
+  } catch (err: any) {
+    return { ok: false, error: err?.message || '连接授权中心超时，同步失败' };
+  }
+}
+
+export async function getSystemProxyApi(): Promise<{
+  ok: boolean;
+  config?: SystemProxyConfig;
+  error?: string;
+}> {
+  try {
+    const res = await fetchWithTimeout('/api/system/proxy', {
+      headers: getAuthHeaders(),
+    }, 8000);
+    const data = await res.json().catch(() => ({}));
+    if (res.ok && data?.ok && data.config) {
+      return { ok: true, config: data.config };
+    }
+    return { ok: false, error: data?.error || `读取代理配置失败 (HTTP ${res.status})` };
+  } catch (err: any) {
+    return { ok: false, error: err?.message || '读取代理配置失败' };
+  }
+}
+
+export async function saveSystemProxyApi(payload: SystemProxyConfig & { preservePassword?: boolean }): Promise<{
+  ok: boolean;
+  config?: SystemProxyConfig;
+  message?: string;
+  error?: string;
+}> {
+  try {
+    const res = await fetchWithTimeout('/api/system/proxy', {
+      method: 'POST',
+      headers: getAuthHeaders(),
+      body: JSON.stringify(payload),
+    }, 10000);
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || !data?.ok) {
+      return { ok: false, error: data?.error || `保存代理设置失败 (HTTP ${res.status})` };
+    }
+    return data;
+  } catch (err: any) {
+    return { ok: false, error: err?.message || '保存代理设置失败' };
+  }
 }
 
 export async function downloadDatabaseBackup(): Promise<any> {
@@ -1232,12 +1421,16 @@ export function isMessageDeleted(messageId: string): boolean {
   }
 }
 
+const MAX_DELETED_MESSAGE_IDS = 5000;
+
 export function recordDeletedMessageId(messageId: string): void {
   try {
     const raw = localStorage.getItem('tg_deleted_message_ids');
     const set = new Set<string>(raw ? JSON.parse(raw) : []);
     set.add(messageId);
-    localStorage.setItem('tg_deleted_message_ids', JSON.stringify(Array.from(set)));
+    const arr = Array.from(set);
+    const trimmed = arr.length > MAX_DELETED_MESSAGE_IDS ? arr.slice(-MAX_DELETED_MESSAGE_IDS) : arr;
+    localStorage.setItem('tg_deleted_message_ids', JSON.stringify(trimmed));
   } catch {}
 }
 
@@ -1281,11 +1474,7 @@ export function getLocalMessages(chatId: string, accountId?: string): Message[] 
       // Safe fallback to legacy unscoped key: filter strictly by accountId to avoid cross-account leakage
       const legacyList = secureGetItemSync<Message[]>(`tg_desktop_msgs_${chatId}`);
       if (Array.isArray(legacyList)) {
-        list = legacyList.filter((m) =>
-          acc && acc !== 'acc_1'
-            ? m.accountId === acc
-            : !m.accountId || m.accountId === acc
-        );
+        list = acc ? legacyList.filter((m) => m.accountId === acc) : legacyList;
       }
     }
     if (Array.isArray(list)) {
@@ -1293,7 +1482,7 @@ export function getLocalMessages(chatId: string, accountId?: string): Message[] 
         list.filter(
           (m) =>
             !isMessageDeleted(m.id) &&
-            (!acc || !m.accountId || m.accountId === acc)
+            (!acc || m.accountId === acc || (!m.accountId && !acc))
         )
       );
     }
@@ -1338,7 +1527,9 @@ export function clearLocalMessages(chatId: string, existingMessages: Message[] =
       allToRecord.forEach((m) => {
         if (m?.id) set.add(m.id);
       });
-      localStorage.setItem('tg_deleted_message_ids', JSON.stringify(Array.from(set)));
+      const arr = Array.from(set);
+      const trimmed = arr.length > MAX_DELETED_MESSAGE_IDS ? arr.slice(-MAX_DELETED_MESSAGE_IDS) : arr;
+      localStorage.setItem('tg_deleted_message_ids', JSON.stringify(trimmed));
     }
     if (acc) {
       localStorage.removeItem(`tg_desktop_msgs_${acc}_${chatId}`);
@@ -1444,7 +1635,7 @@ export function getLocalCustomerProfile(chatId: string, accountId?: string): Cus
     let prof = scopedKey ? secureGetItemSync<CustomerProfile>(scopedKey) : null;
     if (!prof) {
       const legacy = secureGetItemSync<CustomerProfile>(`tg_desktop_profile_${chatId}`);
-      if (legacy && (!acc || acc === 'acc_1' || legacy.accountId === acc)) {
+      if (legacy && (!acc || legacy.accountId === acc)) {
         prof = legacy;
       }
     }
@@ -2563,10 +2754,17 @@ export async function endTelegramVoiceCallApi(
   }
 }
 
-export async function fetchAutopilotStatus(chatId?: string): Promise<{ ok: boolean; activeChats: string[]; isChatEnabled: boolean }> {
+export async function fetchAutopilotStatus(
+  chatId?: string,
+  accountId?: string
+): Promise<{ ok: boolean; activeChats: string[]; isChatEnabled: boolean }> {
   try {
-    const res = await fetch(`/api/telegram/autopilot/status${chatId ? `?chatId=${chatId}` : ''}`, {
-      headers: getAuthHeaders(),
+    const query = new URLSearchParams();
+    if (chatId) query.set('chatId', chatId);
+    if (accountId) query.set('accountId', accountId);
+    const qs = query.toString() ? `?${query.toString()}` : '';
+    const res = await fetch(`/api/telegram/autopilot/status${qs}`, {
+      headers: getAuthHeaders(accountId),
     });
     return await res.json();
   } catch {
@@ -2574,12 +2772,16 @@ export async function fetchAutopilotStatus(chatId?: string): Promise<{ ok: boole
   }
 }
 
-export async function toggleAutopilot(chatId: string, enabled: boolean): Promise<{ ok: boolean; enabled: boolean; activeCount: number }> {
+export async function toggleAutopilot(
+  chatId: string,
+  enabled: boolean,
+  accountId?: string
+): Promise<{ ok: boolean; enabled: boolean; activeCount: number }> {
   try {
     const res = await fetch('/api/telegram/autopilot/toggle', {
       method: 'POST',
-      headers: getAuthHeaders(),
-      body: JSON.stringify({ chatId, enabled }),
+      headers: getAuthHeaders(accountId),
+      body: JSON.stringify({ chatId, enabled, accountId: accountId || currentActiveAccountId || undefined }),
     });
     return await res.json();
   } catch {
@@ -3015,6 +3217,7 @@ export async function fetchTelegramChatFullInfoApi(
     return {
       ok: false,
       chatId,
+      code: data?.code,
       error: data?.error || `获取详情失败 (HTTP ${res.status})`,
     };
   } catch (err: any) {

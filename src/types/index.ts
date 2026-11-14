@@ -76,6 +76,7 @@ export interface TelegramChatFullInfo {
   inviteLink?: string;
   participants?: TelegramChatParticipant[];
   participantsError?: string;
+  code?: string;
   error?: string;
 }
 
@@ -249,6 +250,7 @@ export interface TelegramContact {
 
 export interface TelegramCallRecord {
   id: string;
+  accountId?: string;
   contactName: string;
   avatarBg: string;
   avatarInitial: string;
@@ -257,6 +259,16 @@ export interface TelegramCallRecord {
   duration: string;
   timestamp: string;
   isVideo?: boolean;
+}
+
+export interface SystemProxyConfig {
+  enabled: boolean;
+  type: 'socks5' | 'socks4';
+  host: string;
+  port: number;
+  username?: string;
+  password?: string;
+  hasPassword?: boolean;
 }
 
 export type StagedPromptKey = 'icebreaker' | 'dailyFriend' | 'emotionalLove' | 'wealthDiscussion' | 'trustDefense';

@@ -65,7 +65,7 @@ export const CustomerMemoryDrawer: React.FC<CustomerMemoryDrawerProps> = ({
 
   const currentProfile: CustomerProfile = profile || {
     chatId: chatId || 'current',
-    accountId: currentAccountId || 'acc_1',
+    accountId: currentAccountId || '',
     clientName: chatTitle || '当前联系人',
     relationshipStage: '沟通中',
     ageEstimate: '待分析',

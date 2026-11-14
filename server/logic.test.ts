@@ -2501,6 +2501,182 @@ test('Round 3 audit fixes: persistent JWT revocation, snapshot key scrubbing, pe
   assert.equal(chatListSrc.includes("currentAccountStatus === 'expired'"), true);
 });
 
+test('Round 4 audit fixes: multi-account autopilot/echo isolation, SOCKS4/5 proxy validation, zero-fake-data & desktop stability contracts', async () => {
+  const { readFileSync } = await import('node:fs');
+  const { resolve } = await import('node:path');
+  const { db, initDatabase } = await import('./db.ts');
+  const {
+    activeAutonomousChats,
+    normalizeAutopilotAccountScope,
+    isAutopilotEnabledForChat,
+    setAutopilotEnabledForChat,
+    markOutboundMessageSent,
+    isRecentOutboundEcho,
+    parseSocksProxyEnvString,
+    normalizeAndValidateProxyConfig,
+    saveSystemProxyConfigToDb,
+    loadSystemProxyConfigFromDb,
+    getConfiguredTelegramProxy,
+  } = await import('../server.ts');
+
+  await initDatabase();
+
+  // 1. Autopilot state is strictly isolated by accountId::chatId
+  activeAutonomousChats.clear();
+  try {
+    assert.equal(normalizeAutopilotAccountScope('1001'), 'acc_tg_1001');
+    assert.equal(normalizeAutopilotAccountScope('acc_tg_2002'), 'acc_tg_2002');
+    assert.equal(normalizeAutopilotAccountScope(''), 'default');
+
+    setAutopilotEnabledForChat('acc_tg_1001', 'tg_999', true);
+    assert.equal(isAutopilotEnabledForChat('acc_tg_1001', 'tg_999'), true);
+    assert.equal(isAutopilotEnabledForChat('1001', '999'), true);
+    assert.equal(isAutopilotEnabledForChat('acc_tg_2002', 'tg_999'), false);
+
+    setAutopilotEnabledForChat('acc_tg_2002', 'tg_999', true);
+    setAutopilotEnabledForChat('acc_tg_1001', 'tg_999', false);
+    assert.equal(isAutopilotEnabledForChat('acc_tg_1001', 'tg_999'), false);
+    assert.equal(isAutopilotEnabledForChat('acc_tg_2002', 'tg_999'), true);
+  } finally {
+    activeAutonomousChats.clear();
+  }
+
+  // 2. Outbound echo dedup is strictly isolated by accountId on the same peer chatId
+  markOutboundMessageSent('tg_88888', 'hello client', 'acc_tg_1001');
+  assert.equal(isRecentOutboundEcho('tg_88888', 'hello client', 'acc_tg_2002'), false);
+  assert.equal(isRecentOutboundEcho('tg_88888', 'hello client', 'acc_tg_1001'), true);
+  assert.equal(isRecentOutboundEcho('tg_88888', 'hello client', 'acc_tg_1001'), false);
+
+  // 3. SOCKS4/5 proxy parsing, validation, and DB persistence
+  const parsedSocks5 = parseSocksProxyEnvString('socks5://user%401:pass%232@127.0.0.1:7890');
+  assert.deepEqual(parsedSocks5, {
+    enabled: true,
+    type: 'socks5',
+    host: '127.0.0.1',
+    port: 7890,
+    username: 'user@1',
+    password: 'pass#2',
+  });
+  assert.equal(parseSocksProxyEnvString('http://127.0.0.1:8080'), null);
+  assert.equal(normalizeAndValidateProxyConfig({ enabled: true, type: 'http', host: '127.0.0.1', port: 8080 }).ok, false);
+  assert.equal(normalizeAndValidateProxyConfig({ enabled: true, type: 'socks5', host: '127.0.0.1', port: 70000 }).ok, false);
+  assert.equal(normalizeAndValidateProxyConfig({ enabled: true, type: 'socks5', host: '', port: 1080 }).ok, false);
+
+  const prevProxy = (await db.prepare("SELECT value FROM system_config WHERE key = 'network_proxy'").get()) as any;
+  try {
+    const validSocks4 = normalizeAndValidateProxyConfig({ enabled: true, type: 'socks4', host: '127.0.0.1', port: 10808 });
+    assert.equal(validSocks4.ok, true);
+    if (validSocks4.ok) {
+      await saveSystemProxyConfigToDb(validSocks4.config);
+      const loaded = await loadSystemProxyConfigFromDb();
+      assert.equal(loaded?.enabled, true);
+      assert.equal(loaded?.type, 'socks4');
+      assert.equal(loaded?.port, 10808);
+      assert.deepEqual(getConfiguredTelegramProxy(), {
+        ip: '127.0.0.1',
+        port: 10808,
+        socksType: 4,
+        timeout: 15,
+      });
+    }
+    await saveSystemProxyConfigToDb({ enabled: false, type: 'socks5', host: '', port: 7890 });
+    assert.equal(getConfiguredTelegramProxy(), undefined);
+  } finally {
+    if (prevProxy?.value) {
+      await db.prepare("INSERT OR REPLACE INTO system_config (key, value, updated_at) VALUES ('network_proxy', ?, ?)").run(prevProxy.value, Date.now());
+      await loadSystemProxyConfigFromDb();
+    } else {
+      await db.prepare("DELETE FROM system_config WHERE key = 'network_proxy'").run();
+      await loadSystemProxyConfigFromDb();
+    }
+  }
+
+  // 4. Desktop launcher, startup non-blocking & /api/* 404 guard contracts
+  const mainCjsSrc = readFileSync(resolve(process.cwd(), 'main.cjs'), 'utf8');
+  assert.equal(mainCjsSrc.includes('ensureFixedPortAvailable'), true);
+  assert.equal(mainCjsSrc.includes('findAvailablePort'), false);
+  assert.equal(mainCjsSrc.includes('__humansenseGracefulShutdown'), true);
+  assert.equal(mainCjsSrc.includes('setWindowOpenHandler'), true);
+
+  const serverSrc = readFileSync(resolve(process.cwd(), 'server.ts'), 'utf8');
+  assert.equal(serverSrc.includes("app.post('/api/telegram/user/reconnect'"), true);
+  assert.equal(serverSrc.includes("app.get('/api/system/proxy'"), true);
+  assert.equal(serverSrc.includes("app.post('/api/system/proxy'"), true);
+  assert.equal(serverSrc.includes("if (req.path === '/api' || req.path.startsWith('/api/'))"), true);
+  assert.equal(serverSrc.includes('export async function gracefulShutdownServer'), true);
+
+  // 5. Frontend zero-fake-data & global multi-account polling contracts
+  const appSrc = readFileSync(resolve(process.cwd(), 'src/App.tsx'), 'utf8');
+  assert.equal(appSrc.includes('INITIAL_MESSAGES'), false);
+  assert.equal(appSrc.includes('DEFAULT_CALL_RECORDS'), false);
+  assert.equal(appSrc.includes('Elena Rostova'), false);
+  assert.equal(appSrc.includes('pollIncomingTelegramUpdates()'), true);
+  assert.equal(appSrc.includes('handleReconnectTelegram'), true);
+
+  const apiServiceSrc = readFileSync(resolve(process.cwd(), 'src/services/apiService.ts'), 'utf8');
+  assert.equal(apiServiceSrc.includes("localStorage.getItem(ACTIVE_ACCOUNT_STORAGE_KEY) || ''"), true);
+  assert.equal(apiServiceSrc.includes("|| 'acc_1'"), false);
+  assert.equal(apiServiceSrc.includes('reconnectTelegramSessionsApi'), true);
+  assert.equal(apiServiceSrc.includes('syncCloudTelegramCredsApi'), true);
+  assert.equal(apiServiceSrc.includes('saveSystemProxyApi'), true);
+});
+
+test('Module 1 Desktop Foundation: LibSQL Windows file URL formatting, DB health 503, asarUnpack, QR phone parity, and strict multi-account isolation', async () => {
+  const { readFileSync } = await import('node:fs');
+  const { resolve } = await import('node:path');
+  const { formatLibsqlFileUrl } = await import('../server/db.ts');
+  const { parseUri } = await import('@libsql/core/uri');
+
+  // 1. LibSQL Windows file URL formatting preserves drive path and special characters (#, ?, %) without leading slash
+  const winLike = 'C:\\Users\\Alice #1\\AppData\\Roaming\\HumanSense\\data\\100%real?v=1\\telegram_pro.db';
+  const formattedWin = formatLibsqlFileUrl(winLike);
+  assert.equal(formattedWin.startsWith('file:///'), false);
+  const parsedWin = parseUri(formattedWin);
+  assert.equal(parsedWin.scheme, 'file');
+  assert.equal(parsedWin.authority, undefined);
+  assert.ok(parsedWin.path.includes('Alice #1'));
+  assert.ok(parsedWin.path.includes('100%real?v=1'));
+
+  const posixLike = '/tmp/user #2/test%db?/app.db';
+  const parsedPosix = parseUri(formatLibsqlFileUrl(posixLike));
+  assert.equal(parsedPosix.scheme, 'file');
+  assert.equal(parsedPosix.path, '/tmp/user #2/test%db?/app.db');
+
+  // 2. Electron packaging & startup lifecycle contracts
+  const pkgSrc = JSON.parse(readFileSync(resolve(process.cwd(), 'package.json'), 'utf8'));
+  assert.ok(Array.isArray(pkgSrc.build?.asarUnpack));
+  assert.equal(pkgSrc.build.asarUnpack.includes('node_modules/@libsql*/**/*'), true);
+  assert.equal(pkgSrc.build.asarUnpack.includes('node_modules/libsql/**/*'), true);
+
+  const mainCjsSrc = readFileSync(resolve(process.cwd(), 'main.cjs'), 'utf8');
+  assert.equal(mainCjsSrc.includes('res.statusCode === 503'), true);
+  assert.equal(mainCjsSrc.includes('req.setTimeout(2000'), true);
+
+  // 3. Server stability, SOCKS proxy cloud-fetch support, QR phone normalization, and multi-account route isolation
+  const serverSrc = readFileSync(resolve(process.cwd(), 'server.ts'), 'utf8');
+  assert.equal(serverSrc.includes('closeAllConnections?.()'), true);
+  assert.equal(serverSrc.includes('let dbInitError: string | null = null;'), true);
+  assert.equal(serverSrc.includes('fetchWithSystemProxySupport'), true);
+  assert.equal(serverSrc.includes('SocksClient.createConnection'), true);
+  assert.equal(serverSrc.includes('DELETE FROM telegram_user_sessions WHERE user_id = ? AND phone != ?'), true);
+  assert.equal(serverSrc.includes('options?: { forceReconnect?: boolean }'), true);
+  assert.equal(serverSrc.includes('多账号模式下必须指定 accountId'), true);
+  assert.equal(serverSrc.includes('accountId is required in multi-account mode'), true);
+
+  // 4. Frontend auth expiry event, QR relogin race guard, and bounded deleted-id cache
+  const appSrc = readFileSync(resolve(process.cwd(), 'src/App.tsx'), 'utf8');
+  assert.equal(appSrc.includes('hs_member_auth_expired'), true);
+  assert.equal(appSrc.includes('pendingAutoSelectAccountRef'), true);
+  assert.equal(appSrc.includes('c.id === chatId && (!activeAccountId || c.accountId === activeAccountId)'), true);
+
+  const multiModalSrc = readFileSync(resolve(process.cwd(), 'src/components/MultiAccountModal.tsx'), 'utf8');
+  assert.equal(multiModalSrc.includes('willSwitchToPhoneRelogin'), true);
+
+  const apiServiceSrc = readFileSync(resolve(process.cwd(), 'src/services/apiService.ts'), 'utf8');
+  assert.equal(apiServiceSrc.includes('notifyIfMemberAuthExpired'), true);
+  assert.equal(apiServiceSrc.includes('MAX_DELETED_MESSAGE_IDS = 5000'), true);
+});
+
 process.on('beforeExit', () => {
   process.exit(0);
 });

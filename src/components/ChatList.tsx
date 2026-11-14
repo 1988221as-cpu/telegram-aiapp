@@ -18,7 +18,9 @@ import {
   ExternalLink,
   ChevronLeft,
   Bot,
-  AlertTriangle
+  AlertTriangle,
+  WifiOff,
+  RefreshCw
 } from 'lucide-react';
 import { Chat } from '../types';
 
@@ -36,6 +38,9 @@ interface ChatListProps {
   onDeleteChat?: (chatId: string, options?: { revoke?: boolean }) => void;
   onNewChatClick?: () => void;
   currentAccountStatus?: string;
+  currentAccountOfflineReason?: string | null;
+  isReconnecting?: boolean;
+  onReconnectAccount?: () => void;
   onReloginCurrentAccount?: () => void;
 }
 
@@ -59,6 +64,9 @@ export const ChatList: React.FC<ChatListProps> = ({
   onDeleteChat,
   onNewChatClick,
   currentAccountStatus,
+  currentAccountOfflineReason,
+  isReconnecting,
+  onReconnectAccount,
   onReloginCurrentAccount,
 }) => {
   // 1. Resizable Width State with Persistence
@@ -259,6 +267,29 @@ export const ChatList: React.FC<ChatListProps> = ({
               className="px-2.5 py-1 rounded-lg bg-rose-500 hover:bg-rose-600 text-white text-[11px] font-semibold shrink-0 cursor-pointer transition-colors"
             >
               重新登录
+            </button>
+          )}
+        </div>
+      )}
+
+      {/* Offline / Reconnecting Banner with explicit reason and Reconnect button */}
+      {(currentAccountStatus === 'offline' || currentAccountStatus === 'away') && (
+        <div className="mx-2 mt-2 px-3 py-2 rounded-xl bg-amber-500/10 border border-amber-500/30 flex items-center justify-between gap-2 shrink-0">
+          <div className="flex items-center gap-2 min-w-0" title={currentAccountOfflineReason || undefined}>
+            <WifiOff className="w-3.5 h-3.5 text-amber-500 shrink-0" />
+            <span className="text-[11px] font-medium text-amber-700 dark:text-amber-300 truncate">
+              {currentAccountOfflineReason || (currentAccountStatus === 'away' ? 'MTProto 连接断开，正在重连...' : '当前账号未连接 MTProto')}
+            </span>
+          </div>
+          {onReconnectAccount && (
+            <button
+              type="button"
+              disabled={isReconnecting}
+              onClick={onReconnectAccount}
+              className="px-2.5 py-1 rounded-lg bg-amber-500 hover:bg-amber-600 disabled:opacity-50 text-white text-[11px] font-semibold shrink-0 cursor-pointer transition-colors flex items-center gap-1"
+            >
+              <RefreshCw className={`w-3 h-3 ${isReconnecting ? 'animate-spin' : ''}`} />
+              <span>{isReconnecting ? '重连中' : '重连'}</span>
             </button>
           )}
         </div>

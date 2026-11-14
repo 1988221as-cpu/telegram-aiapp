@@ -1,11 +1,15 @@
 import express from 'express';
 import type { Request, Response, NextFunction } from 'express';
 import http from 'http';
+import https from 'https';
+import net from 'net';
+import tls from 'tls';
 import os from 'os';
 import path from 'path';
 import fs from 'fs';
 import crypto from 'crypto';
 import { spawn } from 'child_process';
+import { SocksClient } from 'socks';
 import { fileURLToPath } from 'url';
 import dotenv from 'dotenv';
 
@@ -1840,6 +1844,30 @@ export async function safeSsrfFetch(url: string, options: RequestInit = {}): Pro
     });
   }
 
+  // If a local SOCKS4/SOCKS5 proxy is enabled, allow proxy-tunneled HTTPS/HTTP while still blocking private/reserved targets
+  const proxy = getConfiguredTelegramProxy();
+  if (proxy) {
+    if (net.isIP(hostname) && isPrivateOrReservedIp(hostname)) {
+      throw new Error(`SSRF 安全拦截：禁止访问内网或保留 IP 地址 (${hostname})`);
+    }
+    try {
+      const lookupResult = await dns.lookup(hostname, { all: true });
+      for (const address of lookupResult) {
+        if (isPrivateOrReservedIp(address.address)) {
+          throw new Error(`SSRF 安全拦截：禁止访问内网或保留 IP 地址 (${hostname} -> ${address.address})，保护内部云元数据与内网资产`);
+        }
+      }
+    } catch (err: any) {
+      if (err.message.includes('SSRF 安全拦截')) {
+        throw err;
+      }
+      if (proxy.socksType !== 5) {
+        throw new Error(`SSRF 安全拦截：域名无法解析 (${hostname}): ${err.message}`);
+      }
+    }
+    return await fetchWithSystemProxySupport(url, { ...options, redirect: 'error' }, 20000);
+  }
+
   // Resolve DNS to verify the destination IP address for remote hosts
   try {
     const lookupResult = await dns.lookup(hostname, { all: true });
@@ -2449,7 +2477,9 @@ app.post('/api/auth/session-init', (req: Request, res: Response) => {
   if (bearerToken && process.env.NODE_ENV !== 'test' && process.env.AIS_TEST_IMPORT !== 'true') {
     void ensureCloudTelegramCredentialsIfNeeded(bearerToken)
       .then(() => restoreTelegramUserSessionsOnStartup(bearerToken))
-      .catch(() => {});
+      .catch((err) => {
+        console.warn('[Session Init Sync Warning]:', err?.message || err);
+      });
   }
 
   return res.json({
@@ -2462,8 +2492,18 @@ app.post('/api/auth/session-init', (req: Request, res: Response) => {
   });
 });
 
-// Health check endpoint
+let dbInitError: string | null = null;
+
+// Health check endpoint (returns 503 if local database initialization failed so desktop launcher never opens a broken shell)
 app.get('/api/health', (_req: Request, res: Response) => {
+  if (dbInitError) {
+    return res.status(503).json({
+      status: 'error',
+      error: dbInitError,
+      uptime: process.uptime(),
+      timestamp: new Date().toISOString(),
+    });
+  }
   res.json({
     status: 'ok',
     uptime: process.uptime(),
@@ -3805,7 +3845,7 @@ async function deliverOutboundTelegramMessage(
     }
 
     console.log(`[MTProto Outbound] Personal account sending text message to ${rawTgId}: "${outText.slice(0, 30)}..."`);
-    markOutboundMessageSent(chatId, outText);
+    markOutboundMessageSent(chatId, outText, effectiveAccountId);
     const sentMsg: any = await personalAccount.client.sendMessage(rawPeer, {
       message: outText,
       ...(resolvedReplyToTgId ? { replyTo: resolvedReplyToTgId } : {}),
@@ -10687,6 +10727,149 @@ interface InMemoryCloudTelegramCredentials {
 }
 const CLOUD_CREDS_RAM_TTL_MS = 12 * 60 * 60 * 1000;
 const inMemoryCloudTelegramCreds = new Map<string, InMemoryCloudTelegramCredentials>();
+let lastCloudCredsError: { code?: string; error: string; at: number } | null = null;
+
+export interface TelegramSessionRestoreState {
+  inProgress: boolean;
+  lastAttemptAt: number | null;
+  lastSuccessAt: number | null;
+  restoredCount: number;
+  lastError: string | null;
+}
+
+export const telegramSessionRestoreState: TelegramSessionRestoreState = {
+  inProgress: false,
+  lastAttemptAt: null,
+  lastSuccessAt: null,
+  restoredCount: 0,
+  lastError: null,
+};
+let activeRestorePromise: Promise<number> | null = null;
+
+export interface SystemProxyConfig {
+  enabled: boolean;
+  type: 'socks5' | 'socks4';
+  host: string;
+  port: number;
+  username?: string;
+  password?: string;
+}
+
+let cachedSystemProxyConfig: SystemProxyConfig | null = null;
+
+export function parseSocksProxyEnvString(raw?: string | null): SystemProxyConfig | null {
+  const val = String(raw || '').trim();
+  if (!val) return null;
+  try {
+    const parsed = new URL(val);
+    const proto = parsed.protocol.replace(':', '').toLowerCase();
+    if (proto !== 'socks5' && proto !== 'socks4') return null;
+    const host = parsed.hostname;
+    const port = Number(parsed.port);
+    if (!host || !Number.isInteger(port) || port < 1 || port > 65535) return null;
+    return {
+      enabled: true,
+      type: proto,
+      host,
+      port,
+      ...(parsed.username ? { username: decodeURIComponent(parsed.username) } : {}),
+      ...(parsed.password ? { password: decodeURIComponent(parsed.password) } : {}),
+    };
+  } catch {
+    return null;
+  }
+}
+
+export function normalizeAndValidateProxyConfig(input: any): { ok: true; config: SystemProxyConfig } | { ok: false; error: string } {
+  const enabled = Boolean(input?.enabled);
+  const rawType = String(input?.type || 'socks5').toLowerCase().trim();
+  const type = rawType === 'socks4' ? 'socks4' : 'socks5';
+  const host = String(input?.host || '').trim();
+  const port = Number(input?.port);
+  const username = typeof input?.username === 'string' && input.username.trim() ? input.username.trim() : undefined;
+  const password = typeof input?.password === 'string' && input.password.trim() ? input.password.trim() : undefined;
+
+  if (!enabled) {
+    return {
+      ok: true,
+      config: {
+        enabled: false,
+        type,
+        host,
+        port: Number.isInteger(port) && port >= 1 && port <= 65535 ? port : 1080,
+        username,
+        password,
+      },
+    };
+  }
+
+  if (rawType !== 'socks5' && rawType !== 'socks4') {
+    return { ok: false, error: '当前仅支持 SOCKS5 / SOCKS4 代理协议' };
+  }
+  if (!host || /\s/.test(host)) {
+    return { ok: false, error: '请输入有效的代理服务器地址（如 127.0.0.1）' };
+  }
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    return { ok: false, error: '请输入有效的代理端口（1 - 65535）' };
+  }
+
+  return {
+    ok: true,
+    config: {
+      enabled: true,
+      type,
+      host,
+      port,
+      username,
+      password,
+    },
+  };
+}
+
+export async function loadSystemProxyConfigFromDb(): Promise<SystemProxyConfig | null> {
+  try {
+    const row = (await db.prepare("SELECT value FROM system_config WHERE key = 'network_proxy'").get()) as any;
+    if (row?.value) {
+      const parsed = JSON.parse(String(row.value));
+      const validated = normalizeAndValidateProxyConfig(parsed);
+      if (validated.ok) {
+        cachedSystemProxyConfig = validated.config;
+        return cachedSystemProxyConfig;
+      }
+    }
+  } catch {}
+  const envProxy = parseSocksProxyEnvString(process.env.TG_SOCKS_PROXY);
+  if (envProxy) {
+    cachedSystemProxyConfig = envProxy;
+    return envProxy;
+  }
+  cachedSystemProxyConfig = null;
+  return null;
+}
+
+export async function saveSystemProxyConfigToDb(config: SystemProxyConfig): Promise<void> {
+  await db
+    .prepare("INSERT OR REPLACE INTO system_config (key, value, updated_at) VALUES ('network_proxy', ?, ?)")
+    .run(JSON.stringify(config), Date.now());
+  cachedSystemProxyConfig = config;
+}
+
+export function getConfiguredTelegramProxy():
+  | { ip: string; port: number; socksType: 4 | 5; timeout?: number; username?: string; password?: string }
+  | undefined {
+  const active = cachedSystemProxyConfig || parseSocksProxyEnvString(process.env.TG_SOCKS_PROXY);
+  if (!active || !active.enabled || !active.host || !active.port) {
+    return undefined;
+  }
+  return {
+    ip: active.host,
+    port: active.port,
+    socksType: active.type === 'socks4' ? 4 : 5,
+    timeout: 15,
+    ...(active.username ? { username: active.username } : {}),
+    ...(active.password ? { password: active.password } : {}),
+  };
+}
 
 function getCloudCredsCacheKey(bearerToken?: string): string {
   if (!bearerToken || !bearerToken.trim()) return '__default__';
@@ -10724,38 +10907,205 @@ export async function purgePersistedTelegramApiCredentialsFromDb(): Promise<void
   } catch {}
 }
 
+export async function fetchWithSystemProxySupport(
+  urlStr: string,
+  options: RequestInit = {},
+  timeoutMs = 12000
+): Promise<globalThis.Response> {
+  const parsedUrl = new URL(urlStr);
+  const hostname = parsedUrl.hostname;
+  const proxy = getConfiguredTelegramProxy();
+
+  // Never route local loopback traffic through external SOCKS proxy
+  if (!proxy || isAllowedLocalhostEndpoint(hostname)) {
+    return await fetch(urlStr, {
+      ...options,
+      signal: options.signal || AbortSignal.timeout(timeoutMs),
+    });
+  }
+
+  const targetPort = parsedUrl.port
+    ? Number(parsedUrl.port)
+    : parsedUrl.protocol === 'https:'
+      ? 443
+      : 80;
+  const isHttps = parsedUrl.protocol === 'https:';
+
+  const { socket: rawSocket } = await SocksClient.createConnection({
+    proxy: {
+      host: proxy.ip,
+      port: proxy.port,
+      type: proxy.socksType,
+      ...(proxy.username ? { userId: proxy.username } : {}),
+      ...(proxy.password ? { password: proxy.password } : {}),
+    },
+    command: 'connect',
+    destination: {
+      host: hostname,
+      port: targetPort,
+    },
+    timeout: timeoutMs,
+  });
+
+  const reqHeaders: Record<string, string> = {};
+  if (options.headers) {
+    const h = new Headers(options.headers);
+    h.forEach((v, k) => {
+      reqHeaders[k] = v;
+    });
+  }
+  const bodyRaw =
+    typeof options.body === 'string'
+      ? Buffer.from(options.body, 'utf8')
+      : Buffer.isBuffer(options.body)
+        ? options.body
+        : options.body instanceof Uint8Array
+          ? Buffer.from(options.body)
+          : undefined;
+  if (bodyRaw && !Object.keys(reqHeaders).some((k) => k.toLowerCase() === 'content-length')) {
+    reqHeaders['Content-Length'] = String(bodyRaw.length);
+  }
+  reqHeaders['Connection'] = 'close';
+
+  return await new Promise<globalThis.Response>((resolve, reject) => {
+    let settled = false;
+    let activeSocket: net.Socket | tls.TLSSocket = rawSocket;
+    const finishErr = (err: any) => {
+      if (settled) return;
+      settled = true;
+      try {
+        activeSocket.destroy();
+      } catch {}
+      try {
+        rawSocket.destroy();
+      } catch {}
+      reject(err);
+    };
+
+    const signal = options.signal;
+    const onAbort = () => {
+      const abortErr: any = new Error('The operation was aborted due to timeout');
+      abortErr.name = 'TimeoutError';
+      finishErr(abortErr);
+    };
+    if (signal) {
+      if (signal.aborted) {
+        onAbort();
+        return;
+      }
+      signal.addEventListener('abort', onAbort, { once: true });
+    }
+
+    const reqTimer = setTimeout(() => {
+      const tErr: any = new Error(`Request timeout (${timeoutMs}ms)`);
+      tErr.name = 'TimeoutError';
+      finishErr(tErr);
+    }, timeoutMs);
+
+    const mod = isHttps ? https : http;
+    const req = mod.request(
+      {
+        hostname,
+        port: targetPort,
+        path: `${parsedUrl.pathname}${parsedUrl.search}`,
+        method: options.method || 'GET',
+        headers: reqHeaders,
+        agent: false,
+        createConnection: () => {
+          activeSocket = isHttps
+            ? tls.connect({ socket: rawSocket, servername: hostname })
+            : rawSocket;
+          return activeSocket;
+        },
+      },
+      (res) => {
+        const chunks: Buffer[] = [];
+        res.on('data', (chunk: Buffer) => chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)));
+        res.on('end', () => {
+          clearTimeout(reqTimer);
+          if (signal) signal.removeEventListener('abort', onAbort);
+          if (settled) return;
+          settled = true;
+          const respHeaders = new Headers();
+          for (const [k, v] of Object.entries(res.headers)) {
+            if (Array.isArray(v)) {
+              v.forEach((item) => respHeaders.append(k, item));
+            } else if (typeof v === 'string') {
+              respHeaders.set(k, v);
+            }
+          }
+          const fullBuf = Buffer.concat(chunks);
+          const status = res.statusCode || 502;
+          const responseBody = status === 204 || status === 304 ? null : fullBuf;
+          resolve(
+            new Response(responseBody, {
+              status,
+              statusText: res.statusMessage || '',
+              headers: respHeaders,
+            })
+          );
+        });
+        res.on('error', (err) => {
+          clearTimeout(reqTimer);
+          if (signal) signal.removeEventListener('abort', onAbort);
+          finishErr(err);
+        });
+      }
+    );
+
+    req.on('error', (err) => {
+      clearTimeout(reqTimer);
+      if (signal) signal.removeEventListener('abort', onAbort);
+      finishErr(err);
+    });
+
+    if (bodyRaw) {
+      req.write(bodyRaw);
+    }
+    req.end();
+  });
+}
+
 export async function fetchCloudAuthorizedTelegramCredentials(
   bearerToken: string
 ): Promise<ResolvedTelegramCredentials> {
   if (!bearerToken) {
-    return {
-      ok: false,
-      source: 'none',
+    const errObj = {
+      ok: false as const,
+      source: 'none' as const,
       code: 'TELEGRAM_API_CREDENTIALS_REQUIRED',
       error: '尚未登录会员，无法自动分发 Telegram 接入凭据',
     };
+    lastCloudCredsError = { code: errObj.code, error: errObj.error, at: Date.now() };
+    return errObj;
   }
   try {
-    const res = await fetch(`${CLOUD_AUTH_BASE_URL}/api/auth/telegram-credentials`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${bearerToken}`,
+    const res = await fetchWithSystemProxySupport(
+      `${CLOUD_AUTH_BASE_URL}/api/auth/telegram-credentials`,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${bearerToken}`,
+        },
+        body: JSON.stringify({
+          deviceId: getLocalMachineDeviceId(),
+        }),
       },
-      body: JSON.stringify({
-        deviceId: getLocalMachineDeviceId(),
-      }),
-    });
+      12000
+    );
     const data = (await res.json().catch(() => ({}))) as any;
     const apiId = Number(data?.apiId);
     const apiHash = String(data?.apiHash || '').trim();
     if (!res.ok || !data?.ok || !Number.isInteger(apiId) || apiId <= 0 || !apiHash) {
-      return {
-        ok: false,
-        source: 'none',
+      const errObj = {
+        ok: false as const,
+        source: 'none' as const,
         code: data?.code || 'CLOUD_CREDENTIALS_UNAVAILABLE',
         error: data?.error || `云端授权分配接入凭据失败 (HTTP ${res.status})`,
       };
+      lastCloudCredsError = { code: errObj.code, error: errObj.error, at: Date.now() };
+      return errObj;
     }
 
     // Store strictly in process memory ONLY — never persist to local SQLite/disk or return to browser
@@ -10768,6 +11118,7 @@ export async function fetchCloudAuthorizedTelegramCredentials(
     };
     inMemoryCloudTelegramCreds.set(getCloudCredsCacheKey(bearerToken), record);
     inMemoryCloudTelegramCreds.set('__default__', record);
+    lastCloudCredsError = null;
 
     return {
       ok: true,
@@ -10777,12 +11128,17 @@ export async function fetchCloudAuthorizedTelegramCredentials(
       poolLabel: record.poolLabel,
     };
   } catch (err: any) {
-    return {
-      ok: false,
-      source: 'none',
+    const isTimeout = err?.name === 'TimeoutError' || /aborted|timeout/i.test(String(err?.message || ''));
+    const errObj = {
+      ok: false as const,
+      source: 'none' as const,
       code: 'CLOUD_CREDENTIALS_UNAVAILABLE',
-      error: `连接云端授权中心获取接入凭据失败: ${err?.message || '网络异常'}`,
+      error: isTimeout
+        ? '连接云端授权中心超时（12s），请检查本机网络或代理后重试'
+        : `连接云端授权中心获取接入凭据失败: ${err?.message || '网络异常'}`,
     };
+    lastCloudCredsError = { code: errObj.code, error: errObj.error, at: Date.now() };
+    return errObj;
   }
 }
 
@@ -10869,7 +11225,7 @@ app.get('/api/telegram/credentials/status', requireTenantAuth, async (req: Reque
       ok: true,
       configured: Boolean(resolved.ok && resolved.apiId && resolved.apiHash),
       source: resolved.ok ? resolved.source : 'none',
-      cloudSyncError: !resolved.ok ? resolved.error : undefined,
+      cloudSyncError: !resolved.ok ? resolved.error : lastCloudCredsError?.error || undefined,
     });
   } catch (err: any) {
     return res.status(500).json({ ok: false, error: err?.message || '读取凭据状态失败' });
@@ -10891,6 +11247,8 @@ app.post('/api/telegram/credentials/sync-cloud', requireTenantAuth, async (req: 
         error: cloudRes.error,
       });
     }
+    // Automatically restore persisted DB sessions once cloud credentials succeed
+    void restoreTelegramUserSessionsOnStartup(bearerToken);
     return res.json({
       ok: true,
       configured: true,
@@ -10899,6 +11257,73 @@ app.post('/api/telegram/credentials/sync-cloud', requireTenantAuth, async (req: 
     });
   } catch (err: any) {
     return res.status(500).json({ ok: false, error: err?.message || '同步云端凭据失败' });
+  }
+});
+
+// Desktop MTProto Network Proxy Settings (SOCKS5 / SOCKS4)
+app.get('/api/system/proxy', requireTenantAuth, async (_req: Request, res: Response) => {
+  try {
+    const config = await loadSystemProxyConfigFromDb();
+    return res.json({
+      ok: true,
+      config: config
+        ? {
+            enabled: config.enabled,
+            type: config.type,
+            host: config.host,
+            port: config.port,
+            username: config.username || '',
+            hasPassword: Boolean(config.password),
+          }
+        : {
+            enabled: false,
+            type: 'socks5',
+            host: '',
+            port: 1080,
+            username: '',
+            hasPassword: false,
+          },
+    });
+  } catch (err: any) {
+    return res.status(500).json({ ok: false, error: err?.message || '读取代理设置失败' });
+  }
+});
+
+app.post('/api/system/proxy', requireTenantAuth, async (req: Request, res: Response) => {
+  try {
+    const existing = await loadSystemProxyConfigFromDb();
+    const incomingPassword = typeof req.body?.password === 'string' ? req.body.password : undefined;
+    const preserveExistingPassword =
+      req.body?.preservePassword !== false && incomingPassword === undefined && existing?.password;
+
+    const validated = normalizeAndValidateProxyConfig({
+      enabled: req.body?.enabled,
+      type: req.body?.type,
+      host: req.body?.host,
+      port: req.body?.port,
+      username: req.body?.username,
+      password: preserveExistingPassword ? existing?.password : incomingPassword,
+    });
+    if (!validated.ok) {
+      return res.status(400).json({ ok: false, error: validated.error });
+    }
+    await saveSystemProxyConfigToDb(validated.config);
+    return res.json({
+      ok: true,
+      config: {
+        enabled: validated.config.enabled,
+        type: validated.config.type,
+        host: validated.config.host,
+        port: validated.config.port,
+        username: validated.config.username || '',
+        hasPassword: Boolean(validated.config.password),
+      },
+      message: validated.config.enabled
+        ? `已保存 ${validated.config.type.toUpperCase()} 代理 (${validated.config.host}:${validated.config.port})，重连或新登录时生效`
+        : '已关闭内置代理并恢复直连',
+    });
+  } catch (err: any) {
+    return res.status(500).json({ ok: false, error: err?.message || '保存代理设置失败' });
   }
 });
 
@@ -11207,6 +11632,7 @@ app.post('/api/telegram/user/send-code', requireTenantAuth, async (req: Request,
     await cleanupPendingUserClient(cleanPhone);
 
     const stringSession = new StringSession('');
+    const telegramProxy = getConfiguredTelegramProxy();
     const client = new TelegramClient(stringSession, useApiId, useApiHash, {
       connectionRetries: 5,
       useWSS: false,
@@ -11216,6 +11642,7 @@ app.post('/api/telegram/user/send-code', requireTenantAuth, async (req: Request,
       appVersion: '4.16.8',
       langCode: 'zh-CN',
       systemLangCode: 'zh-CN',
+      ...(telegramProxy ? { proxy: telegramProxy } : {}),
     });
 
     configureTelegramClientErrorGuard(client, cleanPhone);
@@ -11435,7 +11862,8 @@ const activeQrSessions = new Map<string, QrSessionContext>();
 async function finishQrLogin(sessionObj: QrSessionContext, user: any) {
   console.log(`[Telegram QR Auth] User confirmed scan and authorized: ${user.firstName} (@${user.username || user.id})`);
   const sessionString = sessionObj.client.session.save() as unknown as string;
-  const cleanPhone = user.phone ? String(user.phone) : (user.username || String(user.id));
+  const rawPhone = user.phone ? String(user.phone).trim() : '';
+  const cleanPhone = rawPhone ? normalizePhoneNumber(rawPhone) : (user.username ? String(user.username).trim() : String(user.id));
   const now = Date.now();
 
   try {
@@ -11453,6 +11881,13 @@ async function finishQrLogin(sessionObj: QrSessionContext, user: any) {
         updated_at INTEGER NOT NULL
       )
     `);
+  } catch {}
+
+  // Deduplicate any stale row for the same Telegram user_id (e.g. un-normalized phone from earlier QR login)
+  try {
+    await db
+      .prepare('DELETE FROM telegram_user_sessions WHERE user_id = ? AND phone != ?')
+      .run(String(user.id), cleanPhone);
   } catch {}
 
   await db.prepare(`
@@ -11565,6 +12000,7 @@ app.post('/api/telegram/user/qr-token', requireTenantAuth, async (req: Request, 
     }
 
     const stringSession = new StringSession('');
+    const telegramProxy = getConfiguredTelegramProxy();
     const client = new TelegramClient(stringSession, useApiId, useApiHash, {
       connectionRetries: 5,
       useWSS: false,
@@ -11574,6 +12010,7 @@ app.post('/api/telegram/user/qr-token', requireTenantAuth, async (req: Request, 
       appVersion: '10.14.0',
       langCode: 'zh-CN',
       systemLangCode: 'zh-CN',
+      ...(telegramProxy ? { proxy: telegramProxy } : {}),
     });
     configureTelegramClientErrorGuard(client, sessionId);
     let exportRes: any;
@@ -11962,6 +12399,12 @@ app.post('/api/telegram/user/verify-code', requireTenantAuth, authAttemptLimiter
       `);
     } catch {}
 
+    try {
+      await db
+        .prepare('DELETE FROM telegram_user_sessions WHERE user_id = ? AND phone != ?')
+        .run(String(me.id), cleanPhone);
+    } catch {}
+
     await db.prepare(`
       INSERT OR REPLACE INTO telegram_user_sessions (
         phone, session_string, user_id, username, first_name, api_id, api_hash, is_active, created_at, updated_at
@@ -12045,8 +12488,11 @@ app.post('/api/telegram/user/verify-code', requireTenantAuth, authAttemptLimiter
 });
 
 // 20. Check Real Telegram Personal Account Login Status
-app.get('/api/telegram/user/status', requireTenantAuth, async (_req: Request, res: Response) => {
+app.get('/api/telegram/user/status', requireTenantAuth, async (req: Request, res: Response) => {
   try {
+    const bearerToken = extractBearerToken(req);
+    const hasCredsInMemory = Boolean(getInMemoryTelegramApiCredentials(bearerToken) || getEnvTelegramApiCredentials());
+
     let sessionRows: any[] = [];
     try {
       sessionRows = (await db.prepare(`
@@ -12082,6 +12528,12 @@ app.get('/api/telegram/user/status', requireTenantAuth, async (_req: Request, re
       }
     }
 
+    const defaultOfflineReason = !hasCredsInMemory
+      ? lastCloudCredsError?.error || '云端 Telegram 接入凭据尚未同步，请检查网络或代理后重试同步'
+      : telegramSessionRestoreState.inProgress
+        ? '正在后台恢复本地加密会话，请稍候...'
+        : telegramSessionRestoreState.lastError || 'MTProto 连接尚未建立，请点击重新连接';
+
     for (const r of sessionRows) {
       if (!seenUserIds.has(r.user_id)) {
         seenUserIds.add(r.user_id);
@@ -12096,6 +12548,7 @@ app.get('/api/telegram/user/status', requireTenantAuth, async (_req: Request, re
           isInMemoryConnected: false,
           isConnected: false,
           status: 'offline',
+          offlineReason: defaultOfflineReason,
         });
       }
     }
@@ -12138,9 +12591,60 @@ app.get('/api/telegram/user/status', requireTenantAuth, async (_req: Request, re
       hasActiveSession: inMemoryActiveList.some((u) => u.isConnected),
       activeUsers: inMemoryActiveList,
       expiredAccounts: Array.from(expiredMap.values()),
+      credentialsConfigured: hasCredsInMemory,
+      credentialsError: !hasCredsInMemory ? lastCloudCredsError?.error || null : null,
+      isRestoringSessions: telegramSessionRestoreState.inProgress,
+      restoreError: telegramSessionRestoreState.lastError,
     });
   } catch (err: any) {
     res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// 20.0.1 On-demand Reconnect for Persisted / Offline Telegram Sessions (and sync cloud creds if missing)
+app.post('/api/telegram/user/reconnect', requireTenantAuth, async (req: Request, res: Response) => {
+  try {
+    const bearerToken = extractBearerToken(req);
+    const forceCredsRefresh = Boolean(req.body?.forceCredsRefresh);
+    const forceReconnect = Boolean(req.body?.forceReconnect);
+    const creds = await resolveTelegramApiCredentials({
+      bearerToken,
+      forceCloudRefresh: forceCredsRefresh,
+    });
+    if (!creds.ok || !creds.apiId || !creds.apiHash) {
+      return res.status(400).json({
+        ok: false,
+        code: creds.code || 'CLOUD_CREDENTIALS_UNAVAILABLE',
+        error: creds.error || '未能从云端获取 Telegram 接入凭据，请检查网络后重试',
+      });
+    }
+
+    await loadSystemProxyConfigFromDb();
+    const restoredCount = await restoreTelegramUserSessionsOnStartup(bearerToken, { forceReconnect });
+    const activeOnlineCount = Array.from(connectedUserClients.values()).filter((u) => Boolean(u.client?.connected)).length;
+
+    if (telegramSessionRestoreState.lastError && restoredCount === 0 && activeOnlineCount === 0) {
+      return res.status(502).json({
+        ok: false,
+        restoredCount,
+        error: telegramSessionRestoreState.lastError,
+      });
+    }
+
+    return res.json({
+      ok: true,
+      restoredCount,
+      hasActiveSession: activeOnlineCount > 0,
+      restoreError: telegramSessionRestoreState.lastError,
+      message:
+        restoredCount > 0
+          ? `已成功恢复 ${restoredCount} 个 Telegram 账号连接`
+          : activeOnlineCount > 0
+            ? '所有已登录 Telegram 账号均处于在线状态'
+            : '当前没有可恢复的离线账号',
+    });
+  } catch (err: any) {
+    return res.status(500).json({ ok: false, error: err?.message || '重连 Telegram 会话失败' });
   }
 });
 
@@ -12173,9 +12677,19 @@ app.get('/api/telegram/user/dialogs', requireTenantAuth, async (req: Request, re
       );
     }
 
-    // Only fallback to first connected account if neither accountId nor phone was explicitly requested
+    // Strict multi-account isolation: only allow default fallback when neither accountId nor phone was requested AND strictly 1 account is connected
     if (!connected && !accountId && !phone && connectedUserClients.size > 0) {
-      connected = Array.from(connectedUserClients.values())[0];
+      const uniqueConnected = Array.from(
+        new Map(Array.from(connectedUserClients.values()).map((u) => [u.userId, u])).values()
+      );
+      if (uniqueConnected.length > 1) {
+        return res.status(400).json({
+          ok: false,
+          dialogs: [],
+          error: '多账号模式下必须指定 accountId',
+        });
+      }
+      connected = uniqueConnected[0];
     }
 
     if (!connected || !connected.client) {
@@ -12232,31 +12746,38 @@ app.get('/api/telegram/user/avatar/:chatId', async (req: Request, res: Response)
     const { chatId } = req.params;
     const cleanId = chatId.replace(/^tg_/, '');
     const accountId = (req.query.accountId as string) || (req.headers['x-account-id'] as string) || '';
-    const cacheKey = `${accountId || 'shared'}:${cleanId}`;
-    const now = Date.now();
 
-    // 1. Check in-memory avatar cache scoped by accountId
-    const cached = telegramAvatarCache.get(cacheKey);
-    if (cached && cached.expiresAt > now) {
-      res.setHeader('Content-Type', cached.mime);
-      res.setHeader('Cache-Control', 'private, max-age=3600');
-      return res.send(cached.buffer);
-    }
-
-    // 2. Look for matching active Telegram user client (prioritize/isolate by accountId if specified)
+    // 1. Resolve matching active Telegram user client strictly isolated by accountId
     const peer: any = /^-?\d+$/.test(cleanId) ? Number(cleanId) : cleanId;
     const primaryConnected = accountId ? resolveConnectedTelegramUser(accountId) : undefined;
     const candidates: ConnectedTelegramUser[] = [];
     if (primaryConnected) {
       candidates.push(primaryConnected);
     } else if (!accountId) {
-      const seen = new Set<string>();
-      for (const c of connectedUserClients.values()) {
-        if (!seen.has(c.userId)) {
-          seen.add(c.userId);
-          candidates.push(c);
-        }
+      const uniqueConnected = Array.from(
+        new Map(Array.from(connectedUserClients.values()).map((u) => [u.userId, u])).values()
+      );
+      if (uniqueConnected.length > 1) {
+        return res.status(400).send('accountId is required in multi-account mode');
       }
+      if (uniqueConnected.length === 1) {
+        candidates.push(uniqueConnected[0]);
+      }
+    }
+    if (candidates.length === 0) {
+      return res.status(404).send('Avatar not found');
+    }
+
+    const cacheAccountScope = accountId || `acc_tg_${candidates[0].userId}`;
+    const cacheKey = `${cacheAccountScope}:${cleanId}`;
+    const now = Date.now();
+
+    // 2. Check in-memory avatar cache strictly scoped by account
+    const cached = telegramAvatarCache.get(cacheKey);
+    if (cached && cached.expiresAt > now) {
+      res.setHeader('Content-Type', cached.mime);
+      res.setHeader('Cache-Control', 'private, max-age=3600');
+      return res.send(cached.buffer);
     }
 
     for (const connected of candidates) {
@@ -12341,28 +12862,34 @@ app.get('/api/telegram/user/media/:chatId/:msgId', async (req: Request, res: Res
     const forceDownload = req.query.download === '1' || req.query.download === 'true';
     const wantThumb = req.query.thumb === '1' || req.query.thumb === 'true';
     const cleanChatId = String(chatId || '').replace(/^tg_/, '');
-    const cacheKey = `${accountId || 'shared'}:${cleanChatId}:${tgMsgId}${wantThumb ? ':thumb' : ''}`;
-    const now = Date.now();
-
-    const cached = telegramMediaCache.get(cacheKey);
-    if (cached && cached.expiresAt > now) {
-      return sendMediaBufferResponse(req, res, cached, forceDownload);
-    }
 
     const primaryConnected = accountId ? resolveConnectedTelegramUser(accountId) : undefined;
     const candidates: ConnectedTelegramUser[] = [];
     if (primaryConnected) {
       candidates.push(primaryConnected);
     } else if (!accountId) {
-      for (const c of connectedUserClients.values()) {
-        if (!candidates.some((u) => u.userId === c.userId)) {
-          candidates.push(c);
-        }
+      const uniqueConnected = Array.from(
+        new Map(Array.from(connectedUserClients.values()).map((u) => [u.userId, u])).values()
+      );
+      if (uniqueConnected.length > 1) {
+        return res.status(400).send('accountId is required in multi-account mode');
+      }
+      if (uniqueConnected.length === 1) {
+        candidates.push(uniqueConnected[0]);
       }
     }
 
     if (candidates.length === 0) {
       return res.status(404).send('No active Telegram client connected');
+    }
+
+    const cacheAccountScope = accountId || `acc_tg_${candidates[0].userId}`;
+    const cacheKey = `${cacheAccountScope}:${cleanChatId}:${tgMsgId}${wantThumb ? ':thumb' : ''}`;
+    const now = Date.now();
+
+    const cached = telegramMediaCache.get(cacheKey);
+    if (cached && cached.expiresAt > now) {
+      return sendMediaBufferResponse(req, res, cached, forceDownload);
     }
 
     for (const candidate of candidates) {
@@ -12524,8 +13051,10 @@ app.post('/api/telegram/user/disconnect', requireTenantAuth, async (req: Request
           const decrypted = decryptSensitiveData(storedRow.session_string);
           const creds = await resolveTelegramApiCredentials({ bearerToken: extractBearerToken(req) });
           if (decrypted && creds.ok && creds.apiId && creds.apiHash) {
+            const telegramProxy = getConfiguredTelegramProxy();
             const tempClient = new TelegramClient(new StringSession(decrypted), creds.apiId, creds.apiHash, {
               connectionRetries: 2,
+              ...(telegramProxy ? { proxy: telegramProxy } : {}),
             });
             configureTelegramClientErrorGuard(tempClient, `logout_${storedRow.phone || uid}`);
             try {
@@ -14921,7 +15450,28 @@ app.get('/api/telegram/user/sticker/:setId/:docId', async (req: Request, res: Re
     const { setId, docId } = req.params;
     const setAccessHash = String(req.query.setAccessHash || '');
     const accountId = (req.query.accountId as string) || (req.headers['x-account-id'] as string) || '';
-    const cacheKey = `${accountId || 'shared'}:${setId}:${docId}`;
+
+    const primaryConnected = accountId ? resolveConnectedTelegramUser(accountId) : undefined;
+    const candidates: ConnectedTelegramUser[] = [];
+    if (primaryConnected) {
+      candidates.push(primaryConnected);
+    } else if (!accountId) {
+      const uniqueConnected = Array.from(
+        new Map(Array.from(connectedUserClients.values()).map((u) => [u.userId, u])).values()
+      );
+      if (uniqueConnected.length > 1) {
+        return res.status(400).send('accountId is required in multi-account mode');
+      }
+      if (uniqueConnected.length === 1) {
+        candidates.push(uniqueConnected[0]);
+      }
+    }
+    if (candidates.length === 0) {
+      return res.status(404).send('No active Telegram client connected');
+    }
+
+    const cacheAccountScope = accountId || `acc_tg_${candidates[0].userId}`;
+    const cacheKey = `${cacheAccountScope}:${setId}:${docId}`;
     const now = Date.now();
 
     const cached = telegramStickerThumbCache.get(cacheKey);
@@ -14929,19 +15479,6 @@ app.get('/api/telegram/user/sticker/:setId/:docId', async (req: Request, res: Re
       res.setHeader('Content-Type', cached.mime);
       res.setHeader('Cache-Control', 'private, max-age=3600');
       return res.send(cached.buffer);
-    }
-
-    const primaryConnected = accountId ? resolveConnectedTelegramUser(accountId) : undefined;
-    const candidates: ConnectedTelegramUser[] = [];
-    if (primaryConnected) {
-      candidates.push(primaryConnected);
-    } else if (!accountId) {
-      for (const c of connectedUserClients.values()) {
-        if (!candidates.some((u) => u.userId === c.userId)) candidates.push(c);
-      }
-    }
-    if (candidates.length === 0) {
-      return res.status(404).send('No active Telegram client connected');
     }
 
     for (const candidate of candidates) {
@@ -16394,38 +16931,80 @@ app.get('/api/telegram/user/messages/:chatId', requireTenantAuth, async (req: Re
   }
 });
 
-// Autopilot state storage
+// Autopilot state storage (strictly isolated per accountId::chatId)
 export const activeAutonomousChats = new Set<string>();
 
-// 20.5 Autopilot Status & Toggle Endpoints
+export function normalizeAutopilotAccountScope(accountId?: string): string {
+  const clean = String(accountId || '').trim();
+  if (!clean) return 'default';
+  if (/^\d+$/.test(clean)) return `acc_tg_${clean}`;
+  return clean;
+}
+
+function buildAutopilotScopedKeys(accountId: string | undefined, chatId: string): string[] {
+  const scope = normalizeAutopilotAccountScope(accountId);
+  const raw = String(chatId || '').trim();
+  const bare = raw.replace(/^tg_/, '');
+  if (!bare) return [];
+  const prefixed = `tg_${bare}`;
+  return [`${scope}::${prefixed}`, `${scope}::${bare}`];
+}
+
+export function isAutopilotEnabledForChat(accountId: string | undefined, chatId: string): boolean {
+  const keys = buildAutopilotScopedKeys(accountId, chatId);
+  return keys.some((k) => activeAutonomousChats.has(k));
+}
+
+export function setAutopilotEnabledForChat(accountId: string | undefined, chatId: string, enabled: boolean): boolean {
+  const keys = buildAutopilotScopedKeys(accountId, chatId);
+  if (keys.length === 0) return false;
+  for (const k of keys) {
+    if (enabled) activeAutonomousChats.add(k);
+    else activeAutonomousChats.delete(k);
+  }
+  return isAutopilotEnabledForChat(accountId, chatId);
+}
+
+// 20.5 Autopilot Status & Toggle Endpoints (strictly scoped per accountId)
 app.get('/api/telegram/autopilot/status', requireTenantAuth, (req: Request, res: Response) => {
-  const chatId = req.query.chatId as string;
+  const chatId = String(req.query.chatId || '').trim();
+  const accountId =
+    (req.query.accountId as string) ||
+    (req as any).auth?.effectiveAccountId ||
+    (req.headers['x-account-id'] as string) ||
+    undefined;
+  const scopePrefix = `${normalizeAutopilotAccountScope(accountId)}::`;
+  const scopedActiveChats = Array.from(activeAutonomousChats)
+    .filter((k) => k.startsWith(scopePrefix))
+    .map((k) => k.slice(scopePrefix.length));
+
   res.json({
     ok: true,
-    activeChats: Array.from(activeAutonomousChats),
-    isChatEnabled: chatId ? activeAutonomousChats.has(chatId) : false,
+    accountId: normalizeAutopilotAccountScope(accountId),
+    activeChats: scopedActiveChats,
+    isChatEnabled: chatId ? isAutopilotEnabledForChat(accountId, chatId) : false,
   });
 });
 
 app.post('/api/telegram/autopilot/toggle', requireTenantAuth, (req: Request, res: Response) => {
-  const { chatId, enabled } = req.body;
+  const { chatId, enabled, accountId: bodyAccountId } = req.body || {};
   if (!chatId) return res.status(400).json({ ok: false, error: 'chatId is required' });
+  const accountId =
+    bodyAccountId ||
+    (req as any).auth?.effectiveAccountId ||
+    (req.headers['x-account-id'] as string) ||
+    undefined;
 
-  if (enabled) {
-    activeAutonomousChats.add(chatId);
-    activeAutonomousChats.add(chatId.replace('tg_', ''));
-    activeAutonomousChats.add(`tg_${chatId}`);
-  } else {
-    activeAutonomousChats.delete(chatId);
-    activeAutonomousChats.delete(chatId.replace('tg_', ''));
-    activeAutonomousChats.delete(`tg_${chatId}`);
-  }
+  const currentEnabled = setAutopilotEnabledForChat(accountId, String(chatId), Boolean(enabled));
+  const scopePrefix = `${normalizeAutopilotAccountScope(accountId)}::`;
+  const scopedCount = Array.from(activeAutonomousChats).filter((k) => k.startsWith(scopePrefix)).length;
 
   res.json({
     ok: true,
+    accountId: normalizeAutopilotAccountScope(accountId),
     chatId,
-    enabled: activeAutonomousChats.has(chatId),
-    activeCount: activeAutonomousChats.size,
+    enabled: currentEnabled,
+    activeCount: scopedCount,
   });
 });
 
@@ -16533,9 +17112,14 @@ app.post('/api/telegram/user/ack-updates', (req: Request, res: Response) => {
 const recentlySentOutboundCache = new Map<string, { count: number; expiresAt: number }>();
 const processedMtprotoMsgIds = new Map<string, number>();
 
-export function markOutboundMessageSent(chatId: string, text: string) {
+function buildOutboundEchoKey(chatId: string, text: string, accountId?: string): string {
+  const scope = accountId ? normalizeAutopilotAccountScope(accountId) : 'shared';
+  return `${scope}:${chatId.replace(/^tg_/, '')}:${text.trim()}`;
+}
+
+export function markOutboundMessageSent(chatId: string, text: string, accountId?: string) {
   if (!text) return;
-  const key = `${chatId.replace(/^tg_/, '')}:${text.trim()}`;
+  const key = buildOutboundEchoKey(chatId, text, accountId);
   const now = Date.now();
   const prev = recentlySentOutboundCache.get(key);
   const nextCount = prev && now < prev.expiresAt ? prev.count + 1 : 1;
@@ -16547,9 +17131,9 @@ export function markOutboundMessageSent(chatId: string, text: string) {
   }
 }
 
-export function isRecentOutboundEcho(chatId: string, text: string): boolean {
+export function isRecentOutboundEcho(chatId: string, text: string, accountId?: string): boolean {
   if (!text) return false;
-  const key = `${chatId.replace(/^tg_/, '')}:${text.trim()}`;
+  const key = buildOutboundEchoKey(chatId, text, accountId);
   const entry = recentlySentOutboundCache.get(key);
   if (!entry) return false;
   if (Date.now() < entry.expiresAt && entry.count > 0) {
@@ -16626,8 +17210,8 @@ export function attachTelegramClientMessageListener(client: TelegramClient, phon
 
         const text = parsedMedia.text || '';
 
-        // Filter out echo duplicates for outbound messages already sent by this applet
-        if (isOut && isRecentOutboundEcho(canonicalChatId, text)) {
+        // Filter out echo duplicates for outbound messages already sent by this applet (scoped per account)
+        if (isOut && isRecentOutboundEcho(canonicalChatId, text, accountId)) {
           return;
         }
 
@@ -16685,13 +17269,10 @@ export function attachTelegramClientMessageListener(client: TelegramClient, phon
         // Persist real-time MTProto message into unified conversation store so customer analysis/evolution/transcripts never read stale empty tables
         void upsertSyncedMessageToDb(realtimeUpdate, canonicalChatId, accountId);
 
-        // Check if Autopilot is enabled for this chat (NEVER run Autopilot on official notifications)
+        // Check if Autopilot is enabled for this chat strictly scoped by accountId (NEVER run Autopilot on official notifications)
         const isAutopilotOn =
           !isOfficialService &&
-          (activeAutonomousChats.has(canonicalChatId) ||
-          activeAutonomousChats.has(rawChatId) ||
-          activeAutonomousChats.has(`tg_${rawChatId}`) ||
-          activeAutonomousChats.has(rawChatId.replace(/^tg_/, '')));
+          (isAutopilotEnabledForChat(accountId, canonicalChatId) || isAutopilotEnabledForChat(accountId, rawChatId));
 
         if (!isOut && isAutopilotOn) {
           console.log(`[HumanSense Autopilot] Auto-generating holographic memory reply for chat ${canonicalChatId}...`);
@@ -16841,7 +17422,7 @@ ${kbContext}${langConstraint}
                 if (replyText) {
                   const cleanPeer = rawChatId.replace(/^tg_/, '');
                   const rawPeer: any = /^-?\d+$/.test(cleanPeer) ? Number(cleanPeer) : cleanPeer;
-                  markOutboundMessageSent(canonicalChatId, replyText);
+                  markOutboundMessageSent(canonicalChatId, replyText, accountId);
                   await client.sendMessage(rawPeer, { message: replyText });
                   void incrementEvolutionHabitUsage(autoHabitIds);
                   const replyMsgId = `msg_auto_${Date.now()}`;
@@ -17094,139 +17675,275 @@ ${kbContext}${langConstraint}
   }
 }
 
-// On-demand/startup restoration of encrypted Telegram user sessions (uses RAM-only cloud credentials, never stored api_id/api_hash on disk)
-export async function restoreTelegramUserSessionsOnStartup(bearerToken?: string): Promise<number> {
-  try {
-    await purgePersistedTelegramApiCredentialsFromDb();
+// On-demand/startup restoration of encrypted Telegram user sessions (uses RAM-only cloud credentials, deduplicated & bounded-concurrent)
+export async function restoreTelegramUserSessionsOnStartup(
+  bearerToken?: string,
+  options?: { forceReconnect?: boolean }
+): Promise<number> {
+  if (activeRestorePromise) {
+    return activeRestorePromise;
+  }
 
-    let rows: any[] = [];
+  activeRestorePromise = (async () => {
+    telegramSessionRestoreState.inProgress = true;
+    telegramSessionRestoreState.lastAttemptAt = Date.now();
+    telegramSessionRestoreState.lastError = null;
+
     try {
-      rows = (await db.prepare(`
-        SELECT phone, session_string, user_id, username, first_name
-        FROM telegram_user_sessions
-        WHERE is_active = 1
-        ORDER BY updated_at DESC
-        LIMIT ${MAX_TELEGRAM_ACCOUNTS}
-      `).all()) as any[];
-    } catch {
-      return 0;
-    }
+      await purgePersistedTelegramApiCredentialsFromDb();
+      await loadSystemProxyConfigFromDb();
 
-    if (!rows || rows.length === 0) return 0;
-    const creds = await resolveTelegramApiCredentials({ bearerToken });
-    if (!creds.ok || !creds.apiId || !creds.apiHash) {
-      return 0;
-    }
-    const useApiId = creds.apiId;
-    const useApiHash = creds.apiHash;
-    let restoredCount = 0;
-
-    for (const row of rows) {
-      const cleanPhone = row.phone;
-      if (connectedUserClients.has(cleanPhone) || (row.user_id && connectedUserClients.has(String(row.user_id)))) {
-        continue;
-      }
-      const rawEncryptedSession = row.session_string;
-      const decryptedSession = decryptSensitiveData(rawEncryptedSession);
-      if (!decryptedSession) continue;
-
-      let client: TelegramClient | null = null;
+      let rows: any[] = [];
       try {
-        client = new TelegramClient(
-          new StringSession(decryptedSession),
-          useApiId,
-          useApiHash,
-          { connectionRetries: 3 }
-        );
-        configureTelegramClientErrorGuard(client, cleanPhone, {
-          userId: row.user_id ? String(row.user_id) : undefined,
-          phone: cleanPhone,
-          accountId: row.user_id ? `acc_tg_${row.user_id}` : undefined,
-        });
-        await withTelegramTimeout(client.connect(), 15000, '启动恢复 Telegram 连接超时');
-        const isAuth = await withTelegramTimeout(client.isUserAuthorized(), 10000, '校验 Telegram 会话超时');
-        if (isAuth) {
-          // Auto-upgrade legacy unencrypted session strings to AES-256-GCM
-          if (typeof rawEncryptedSession === 'string' && !rawEncryptedSession.startsWith('enc:gcm:')) {
+        rows = (await db.prepare(`
+          SELECT phone, session_string, user_id, username, first_name
+          FROM telegram_user_sessions
+          WHERE is_active = 1
+          ORDER BY updated_at DESC
+          LIMIT ${MAX_TELEGRAM_ACCOUNTS * 2}
+        `).all()) as any[];
+      } catch (dbErr: any) {
+        telegramSessionRestoreState.lastError = dbErr?.message || '读取本地 Telegram 会话表失败';
+        return 0;
+      }
+
+      if (!rows || rows.length === 0) {
+        telegramSessionRestoreState.restoredCount = 0;
+        return 0;
+      }
+
+      // Deduplicate rows by user_id (keep newest updated_at row, clean up stale duplicate keys)
+      const dedupedRows: any[] = [];
+      const seenDbUserIds = new Set<string>();
+      for (const r of rows) {
+        const uid = r.user_id ? String(r.user_id).trim() : '';
+        if (uid) {
+          if (seenDbUserIds.has(uid)) {
             try {
               await db
-                .prepare('UPDATE telegram_user_sessions SET session_string = ?, updated_at = ? WHERE phone = ?')
-                .run(encryptSensitiveData(decryptedSession), Date.now(), cleanPhone);
+                .prepare('DELETE FROM telegram_user_sessions WHERE user_id = ? AND phone = ?')
+                .run(uid, r.phone);
             } catch {}
+            continue;
           }
-
-          const userObj: ConnectedTelegramUser = {
-            client,
-            phone: cleanPhone,
-            userId: String(row.user_id),
-            username: row.username ? (row.username.startsWith('@') ? row.username : `@${row.username}`) : '',
-            firstName: row.first_name || 'Telegram 用户',
-            avatarInitial: (row.first_name || 'TG').slice(0, 2).toUpperCase(),
-            avatarBg: '#2481cc',
-            apiId: useApiId,
-            apiHash: useApiHash,
-            connectedAt: Date.now(),
-            dialogs: [],
-          };
-          connectedUserClients.set(String(row.user_id), userObj);
-          connectedUserClients.set(cleanPhone, userObj);
-          connectedUserClients.set(`acc_tg_${row.user_id}`, userObj);
-          clearExpiredAccountRecord(String(row.user_id), cleanPhone);
-
-          // Attach real-time MTProto message listener
-          attachTelegramClientMessageListener(client, cleanPhone, String(row.user_id));
-
-          // Asynchronously sync dialogs
-          fetchTelegramUserDialogs(client, 150, String(row.user_id))
-            .then((dialogs) => {
-              userObj.dialogs = dialogs;
-            })
-            .catch(() => {});
-
-          restoredCount++;
-        } else {
-          await destroyTelegramClientSafely(client);
-          await markTelegramSessionExpired({
-            accountId: row.user_id ? `acc_tg_${row.user_id}` : cleanPhone,
-            userId: row.user_id ? String(row.user_id) : undefined,
-            phone: cleanPhone,
-            reason: '启动恢复时检测到 Telegram 会话已失效，请重新登录',
-          });
-          console.log(`[Telegram User Auth Recovery] Session expired or logged out on phone for ${cleanPhone}, marked inactive.`);
+          seenDbUserIds.add(uid);
         }
-      } catch (clientErr: any) {
-        await destroyTelegramClientSafely(client);
-        console.warn(`[Telegram User Auth Recovery] Could not restore session for ${cleanPhone}:`, clientErr.message);
-        if (isTelegramSessionExpiredError(clientErr)) {
-          await markTelegramSessionExpired({
-            accountId: row.user_id ? `acc_tg_${row.user_id}` : cleanPhone,
-            userId: row.user_id ? String(row.user_id) : undefined,
-            phone: cleanPhone,
-            reason: formatTelegramError(clientErr),
-          });
-        }
+        dedupedRows.push(r);
+        if (dedupedRows.length >= MAX_TELEGRAM_ACCOUNTS) break;
       }
+
+      const creds = await resolveTelegramApiCredentials({ bearerToken });
+      if (!creds.ok || !creds.apiId || !creds.apiHash) {
+        telegramSessionRestoreState.lastError = creds.error || '云端 Telegram 接入凭据暂不可用，请检查会员登录或网络连接';
+        return 0;
+      }
+
+      const useApiId = creds.apiId;
+      const useApiHash = creds.apiHash;
+      const telegramProxy = getConfiguredTelegramProxy();
+      const forceReconnect = Boolean(options?.forceReconnect);
+      let restoredCount = 0;
+      let lastFailureMsg: string | null = null;
+
+      const restoreSingleRow = async (row: any) => {
+        const cleanPhone = row.phone;
+        const uidStr = row.user_id ? String(row.user_id) : '';
+        const existingConn =
+          connectedUserClients.get(cleanPhone) ||
+          (uidStr ? connectedUserClients.get(uidStr) : undefined) ||
+          (uidStr ? connectedUserClients.get(`acc_tg_${uidStr}`) : undefined);
+
+        if (existingConn) {
+          if (!forceReconnect && existingConn.client?.connected) {
+            return;
+          }
+          // Tear down disconnected or proxy-stale client cleanly before reconnecting
+          if (existingConn.phone) connectedUserClients.delete(existingConn.phone);
+          if (existingConn.userId) {
+            connectedUserClients.delete(existingConn.userId);
+            connectedUserClients.delete(`acc_tg_${existingConn.userId}`);
+          }
+          connectedUserClients.delete(cleanPhone);
+          await destroyTelegramClientSafely(existingConn.client);
+        }
+
+        const rawEncryptedSession = row.session_string;
+        const decryptedSession = decryptSensitiveData(rawEncryptedSession);
+        if (!decryptedSession) return;
+
+        let client: TelegramClient | null = null;
+        try {
+          client = new TelegramClient(
+            new StringSession(decryptedSession),
+            useApiId,
+            useApiHash,
+            {
+              connectionRetries: 3,
+              ...(telegramProxy ? { proxy: telegramProxy } : {}),
+            }
+          );
+          configureTelegramClientErrorGuard(client, cleanPhone, {
+            userId: uidStr || undefined,
+            phone: cleanPhone,
+            accountId: uidStr ? `acc_tg_${uidStr}` : undefined,
+          });
+          await withTelegramTimeout(client.connect(), 15000, '启动恢复 Telegram 连接超时');
+          const isAuth = await withTelegramTimeout(client.isUserAuthorized(), 10000, '校验 Telegram 会话超时');
+          if (isAuth) {
+            if (typeof rawEncryptedSession === 'string' && !rawEncryptedSession.startsWith('enc:gcm:')) {
+              try {
+                await db
+                  .prepare('UPDATE telegram_user_sessions SET session_string = ?, updated_at = ? WHERE phone = ?')
+                  .run(encryptSensitiveData(decryptedSession), Date.now(), cleanPhone);
+              } catch {}
+            }
+
+            const userObj: ConnectedTelegramUser = {
+              client,
+              phone: cleanPhone,
+              userId: uidStr,
+              username: row.username ? (row.username.startsWith('@') ? row.username : `@${row.username}`) : '',
+              firstName: row.first_name || 'Telegram 用户',
+              avatarInitial: (row.first_name || 'TG').slice(0, 2).toUpperCase(),
+              avatarBg: '#2481cc',
+              apiId: useApiId,
+              apiHash: useApiHash,
+              connectedAt: Date.now(),
+              dialogs: [],
+            };
+            if (uidStr) {
+              connectedUserClients.set(uidStr, userObj);
+              connectedUserClients.set(`acc_tg_${uidStr}`, userObj);
+            }
+            connectedUserClients.set(cleanPhone, userObj);
+            clearExpiredAccountRecord(uidStr, cleanPhone);
+
+            attachTelegramClientMessageListener(client, cleanPhone, uidStr);
+
+            fetchTelegramUserDialogs(client, 150, uidStr)
+              .then((dialogs) => {
+                userObj.dialogs = dialogs;
+              })
+              .catch(() => {});
+
+            restoredCount++;
+          } else {
+            await destroyTelegramClientSafely(client);
+            await markTelegramSessionExpired({
+              accountId: uidStr ? `acc_tg_${uidStr}` : cleanPhone,
+              userId: uidStr || undefined,
+              phone: cleanPhone,
+              reason: '启动恢复时检测到 Telegram 会话已失效，请重新登录',
+            });
+            lastFailureMsg = `账号 ${cleanPhone} 会话已失效，请重新登录`;
+          }
+        } catch (clientErr: any) {
+          await destroyTelegramClientSafely(client);
+          const formatted = formatTelegramError(clientErr);
+          lastFailureMsg = formatted || '连接 Telegram MTProto 超时';
+          console.warn(`[Telegram User Auth Recovery] Could not restore session for ${cleanPhone}:`, clientErr.message);
+          if (isTelegramSessionExpiredError(clientErr)) {
+            await markTelegramSessionExpired({
+              accountId: uidStr ? `acc_tg_${uidStr}` : cleanPhone,
+              userId: uidStr || undefined,
+              phone: cleanPhone,
+              reason: formatted,
+            });
+          }
+        }
+      };
+
+      // Restore accounts with bounded concurrency (3) so multiple accounts don't serialize startup
+      const CONCURRENCY = 3;
+      for (let i = 0; i < dedupedRows.length; i += CONCURRENCY) {
+        const batch = dedupedRows.slice(i, i + CONCURRENCY);
+        await Promise.allSettled(batch.map((r) => restoreSingleRow(r)));
+      }
+
+      telegramSessionRestoreState.restoredCount = restoredCount;
+      if (restoredCount > 0) {
+        telegramSessionRestoreState.lastSuccessAt = Date.now();
+        telegramSessionRestoreState.lastError = null;
+        console.log(`[Telegram User Auth Recovery] Successfully restored ${restoredCount} active personal user session(s) from encrypted storage.`);
+      } else if (lastFailureMsg) {
+        telegramSessionRestoreState.lastError = lastFailureMsg;
+      }
+      return restoredCount;
+    } catch (err: any) {
+      telegramSessionRestoreState.lastError = err?.message || '恢复 Telegram 会话失败';
+      console.warn('[Telegram User Auth Recovery Exception]:', err.message);
+      return 0;
+    } finally {
+      telegramSessionRestoreState.inProgress = false;
+      activeRestorePromise = null;
     }
-    if (restoredCount > 0) {
-      console.log(`[Telegram User Auth Recovery] Successfully restored ${restoredCount} active personal user session(s) from encrypted storage.`);
+  })();
+
+  return activeRestorePromise;
+}
+
+let activeHttpServer: http.Server | null = null;
+
+export async function gracefulShutdownServer(reason = 'shutdown'): Promise<void> {
+  console.log(`[Server Shutdown] Initiating graceful cleanup (${reason})...`);
+  try {
+    for (const qrSession of activeQrSessions.values()) {
+      try {
+        if (qrSession.pollTimer) clearTimeout(qrSession.pollTimer);
+        qrSession.isStopped = true;
+        await destroyTelegramClientSafely(qrSession.client);
+      } catch {}
     }
-    return restoredCount;
-  } catch (err: any) {
-    console.warn('[Telegram User Auth Recovery Exception]:', err.message);
-    return 0;
+    activeQrSessions.clear();
+
+    for (const pending of activeUserClients.values()) {
+      try {
+        await destroyTelegramClientSafely(pending.client);
+      } catch {}
+    }
+    activeUserClients.clear();
+
+    const uniqueClients = new Set<TelegramClient>();
+    for (const conn of connectedUserClients.values()) {
+      if (conn?.client) uniqueClients.add(conn.client);
+    }
+    await Promise.allSettled(Array.from(uniqueClients).map((c) => destroyTelegramClientSafely(c)));
+    connectedUserClients.clear();
+  } catch {}
+
+  if (activeHttpServer) {
+    const srv = activeHttpServer;
+    activeHttpServer = null;
+    await new Promise<void>((resolve) => {
+      try {
+        srv.close(() => resolve());
+        try {
+          (srv as any).closeIdleConnections?.();
+          (srv as any).closeAllConnections?.();
+        } catch {}
+        setTimeout(resolve, 1500).unref();
+      } catch {
+        resolve();
+      }
+    });
   }
 }
+
+// Expose graceful cleanup hook for Electron in-process main.cjs before-quit handler
+(globalThis as any).__humansenseGracefulShutdown = gracefulShutdownServer;
 
 // Start server
 async function startServer() {
   try {
+    dbInitError = null;
     await initDatabase();
     await loadRevokedJwtTokensFromDb();
     await purgePersistedTelegramApiCredentialsFromDb();
+    await loadSystemProxyConfigFromDb();
     await seedDatabaseIfEmpty();
-    await restoreTelegramUserSessionsOnStartup();
   } catch (err: any) {
-    console.error('[Database Init Error]:', err.message);
+    dbInitError = err?.message || '本地 SQLite 数据库初始化失败';
+    console.error('[Database Init Error]:', dbInitError);
   }
 
   // Automatic webhook registration on server startup if configured
@@ -17258,6 +17975,7 @@ async function startServer() {
   }
 
   const httpServer = http.createServer(app);
+  activeHttpServer = httpServer;
 
   if (!isProduction) {
     const isHmrDisabled = process.env.DISABLE_HMR === 'true';
@@ -17297,7 +18015,10 @@ async function startServer() {
       : __dirname;
     app.use(express.static(staticDir));
     app.get('*', (req: Request, res: Response) => {
-      res.sendFile(path.resolve(staticDir, 'index.html'));
+      if (req.path === '/api' || req.path.startsWith('/api/')) {
+        return res.status(404).json({ ok: false, error: '请求的 API 接口不存在' });
+      }
+      return res.sendFile(path.resolve(staticDir, 'index.html'));
     });
   }
 
@@ -17308,19 +18029,17 @@ async function startServer() {
     }
   });
 
-  const onShutdown = () => {
-    try {
-      httpServer.close(() => process.exit(0));
-    } catch {
-      process.exit(0);
-    }
-    setTimeout(() => process.exit(0), 1000).unref();
+  const onShutdown = (sig: string) => {
+    void gracefulShutdownServer(sig).finally(() => process.exit(0));
+    setTimeout(() => process.exit(0), 2500).unref();
   };
-  process.on('SIGTERM', onShutdown);
-  process.on('SIGINT', onShutdown);
+  process.on('SIGTERM', () => onShutdown('SIGTERM'));
+  process.on('SIGINT', () => onShutdown('SIGINT'));
 
   httpServer.listen(PORT, HOST, () => {
     console.log(`HumanSense Server running at http://${HOST}:${PORT}`);
+    // Run Telegram MTProto session recovery asynchronously AFTER HTTP port is bound so /api/health responds immediately
+    void restoreTelegramUserSessionsOnStartup();
   });
 }
 

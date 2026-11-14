@@ -15,7 +15,13 @@ import {
 } from 'lucide-react';
 import QRCode from 'qrcode';
 import { Account } from '../types';
-import { getAuthHeaders, disconnectTelegramAccount, fetchWithTimeout } from '../services/apiService';
+import {
+  getAuthHeaders,
+  disconnectTelegramAccount,
+  fetchWithTimeout,
+  fetchTelegramCredsStatusApi,
+  syncCloudTelegramCredsApi,
+} from '../services/apiService';
 import { COMMON_COUNTRY_CODES, CountryPreset } from '../data/countryCodes';
 
 export type { CountryPreset };
@@ -126,15 +132,34 @@ export const MultiAccountModal: React.FC<MultiAccountModalProps> = ({
     setLocalPhone(sanitized);
   };
 
+  const [credsStatus, setCredsStatus] = useState<{
+    checked: boolean;
+    configured: boolean;
+    error: string | null;
+  }>({ checked: false, configured: true, error: null });
+  const [isSyncingCreds, setIsSyncingCreds] = useState(false);
+
+  const checkCloudCredentials = async (forceRefresh = false) => {
+    const res = await fetchTelegramCredsStatusApi(forceRefresh);
+    setCredsStatus({
+      checked: true,
+      configured: res.configured,
+      error: res.configured ? null : res.cloudSyncError || '云端 Telegram 接入凭据暂未就绪，请重试同步',
+    });
+  };
+
   useEffect(() => {
     if (!isOpen) {
       resetState();
-    } else if (reloginAccount) {
-      if (reloginAccount.phone && /\d/.test(reloginAccount.phone)) {
-        prefillPhoneNumber(reloginAccount.phone);
-        setLoginMethod('phone');
-      } else {
-        setLoginMethod('qr');
+    } else {
+      void checkCloudCredentials(false);
+      if (reloginAccount) {
+        if (reloginAccount.phone && /\d/.test(reloginAccount.phone)) {
+          prefillPhoneNumber(reloginAccount.phone);
+          setLoginMethod('phone');
+        } else {
+          setLoginMethod('qr');
+        }
       }
     }
   }, [isOpen, reloginAccount]);
@@ -332,14 +357,15 @@ export const MultiAccountModal: React.FC<MultiAccountModalProps> = ({
     }
   };
 
-  // Auto fetch QR code when switching to QR view
+  // Auto fetch QR code when switching to QR view (skip when reloginAccount is redirecting into phone login)
   useEffect(() => {
-    if (loginMethod === 'qr' && isOpen) {
+    const willSwitchToPhoneRelogin = Boolean(reloginAccount?.phone && /\d/.test(reloginAccount.phone));
+    if (loginMethod === 'qr' && isOpen && !willSwitchToPhoneRelogin) {
       if (!qrUrl) {
         fetchQrToken();
       }
     }
-  }, [loginMethod, isOpen]);
+  }, [loginMethod, isOpen, reloginAccount]);
 
   // 30-second countdown timer with automatic silent background refresh
   useEffect(() => {
@@ -922,6 +948,42 @@ export const MultiAccountModal: React.FC<MultiAccountModalProps> = ({
             <span className="truncate">
               正在重新登录已失效账号：{reloginAccount.name} ({reloginAccount.phone || reloginAccount.username || reloginAccount.id})
             </span>
+          </div>
+        )}
+
+        {credsStatus.checked && !credsStatus.configured && (
+          <div className="w-full max-w-[340px] mb-5 flex flex-col gap-2 p-3 rounded-xl bg-amber-500/10 border border-amber-500/30 text-amber-200 text-xs">
+            <div className="flex items-start gap-2">
+              <AlertCircle className="w-4 h-4 shrink-0 mt-0.5 text-amber-400" />
+              <div className="flex-1 leading-relaxed">
+                {credsStatus.error || '云端 Telegram 接入凭据未同步，无法发起扫码或验证码登录。'}
+              </div>
+            </div>
+            <button
+              type="button"
+              disabled={isSyncingCreds}
+              onClick={async () => {
+                setIsSyncingCreds(true);
+                const syncRes = await syncCloudTelegramCredsApi();
+                setIsSyncingCreds(false);
+                if (syncRes.ok) {
+                  setCredsStatus({ checked: true, configured: true, error: null });
+                  if (loginMethod === 'qr') {
+                    void fetchQrToken(false);
+                  }
+                } else {
+                  setCredsStatus({
+                    checked: true,
+                    configured: false,
+                    error: syncRes.error || '同步云端授权凭据失败',
+                  });
+                }
+              }}
+              className="self-end px-3 py-1 rounded-lg bg-amber-500 hover:bg-amber-600 disabled:opacity-50 text-white text-[11px] font-semibold flex items-center gap-1.5 cursor-pointer"
+            >
+              <RefreshCw className={`w-3 h-3 ${isSyncingCreds ? 'animate-spin' : ''}`} />
+              <span>{isSyncingCreds ? '同步中...' : '重新同步授权凭据'}</span>
+            </button>
           </div>
         )}
 
