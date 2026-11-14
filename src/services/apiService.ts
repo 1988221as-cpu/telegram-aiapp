@@ -594,8 +594,27 @@ export async function fetchWithTimeout(
   init: RequestInit = {},
   timeoutMs = 15000
 ): Promise<Response> {
+  const callerSignal = init.signal;
+  if (callerSignal?.aborted) {
+    const abortErr = new Error('请求已取消');
+    abortErr.name = 'AbortError';
+    throw abortErr;
+  }
+
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  let timedOut = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, timeoutMs);
+
+  const onCallerAbort = () => {
+    controller.abort();
+  };
+  if (callerSignal) {
+    callerSignal.addEventListener('abort', onCallerAbort, { once: true });
+  }
+
   try {
     const res = await fetch(input, { ...init, signal: controller.signal });
     const urlStr = typeof input === 'string' ? input : '';
@@ -613,11 +632,19 @@ export async function fetchWithTimeout(
     return res;
   } catch (err: any) {
     if (err?.name === 'AbortError') {
-      throw new Error('请求超时，请检查网络连接后重试');
+      if (timedOut && !callerSignal?.aborted) {
+        throw new Error('请求超时，请检查网络连接后重试');
+      }
+      const abortErr = new Error('请求已取消');
+      abortErr.name = 'AbortError';
+      throw abortErr;
     }
     throw err;
   } finally {
     clearTimeout(timer);
+    if (callerSignal) {
+      callerSignal.removeEventListener('abort', onCallerAbort);
+    }
   }
 }
 
@@ -733,6 +760,97 @@ export function inferGatewayProtocolFromUrlAndModel(
   return 'openai';
 }
 
+const MAX_TRANSLATE_CACHE = 300;
+const TRANSLATE_CACHE_TTL_MS = 10 * 60 * 1000;
+const MAX_TRANSLATE_CONCURRENCY = 3;
+
+const translateCache = new Map<string, { value: string; expiresAt: number }>();
+const inFlightTranslations = new Map<string, Promise<string>>();
+let activeTranslationRequests = 0;
+const translationWaitQueue: Array<() => void> = [];
+
+function getTranslateCache(key: string): string | null {
+  const hit = translateCache.get(key);
+  if (!hit) return null;
+  if (Date.now() > hit.expiresAt) {
+    translateCache.delete(key);
+    return null;
+  }
+  translateCache.delete(key);
+  translateCache.set(key, hit);
+  return hit.value;
+}
+
+function setTranslateCache(key: string, value: string): void {
+  if (!value) return;
+  if (translateCache.has(key)) translateCache.delete(key);
+  while (translateCache.size >= MAX_TRANSLATE_CACHE) {
+    const oldestKey = translateCache.keys().next().value;
+    if (oldestKey === undefined) break;
+    translateCache.delete(oldestKey);
+  }
+  translateCache.set(key, { value, expiresAt: Date.now() + TRANSLATE_CACHE_TTL_MS });
+}
+
+function normalizeClientLangCode(lang?: string): string {
+  const raw = (lang || '').trim();
+  if (!raw) return 'auto';
+  const low = raw.toLowerCase();
+  if (low === 'auto') return 'auto';
+  if (low === 'chinese' || low === 'zh' || low === 'zh-cn' || low === 'zh-hans') return 'zh-cn';
+  if (low === 'traditional chinese' || low === 'zh-tw' || low === 'zh-hant' || low === 'zh-hk') return 'zh-tw';
+  if (low === 'english' || low === 'en' || low === 'en-us' || low === 'en-gb') return 'en';
+  if (low === 'japanese' || low === 'ja' || low === 'jp') return 'ja';
+  if (low === 'korean' || low === 'ko' || low === 'kr') return 'ko';
+  if (low === 'russian' || low === 'ru') return 'ru';
+  if (low === 'spanish' || low === 'es') return 'es';
+  if (low === 'french' || low === 'fr') return 'fr';
+  if (low === 'german' || low === 'de') return 'de';
+  if (low === 'portuguese' || low === 'pt' || low === 'pt-br') return 'pt';
+  if (low === 'italian' || low === 'it') return 'it';
+  if (low === 'arabic' || low === 'ar') return 'ar';
+  if (low === 'turkish' || low === 'türkçe' || low === 'tr') return 'tr';
+  if (low === 'vietnamese' || low === 'vi') return 'vi';
+  if (low === 'thai' || low === 'th') return 'th';
+  if (low === 'indonesian' || low === 'id') return 'id';
+  return low;
+}
+
+async function runQueuedTranslation<T>(fn: () => Promise<T>, signal?: AbortSignal): Promise<T> {
+  if (signal?.aborted) {
+    const abortErr = new Error('请求已取消');
+    abortErr.name = 'AbortError';
+    throw abortErr;
+  }
+  if (activeTranslationRequests >= MAX_TRANSLATE_CONCURRENCY) {
+    await new Promise<void>((resolve, reject) => {
+      const release = () => {
+        if (signal) signal.removeEventListener('abort', onAbort);
+        resolve();
+      };
+      const onAbort = () => {
+        const idx = translationWaitQueue.indexOf(release);
+        if (idx >= 0) translationWaitQueue.splice(idx, 1);
+        const abortErr = new Error('请求已取消');
+        abortErr.name = 'AbortError';
+        reject(abortErr);
+      };
+      if (signal) {
+        signal.addEventListener('abort', onAbort, { once: true });
+      }
+      translationWaitQueue.push(release);
+    });
+  }
+  activeTranslationRequests++;
+  try {
+    return await fn();
+  } finally {
+    activeTranslationRequests = Math.max(0, activeTranslationRequests - 1);
+    const next = translationWaitQueue.shift();
+    if (next) next();
+  }
+}
+
 export async function translateText(
   text: string,
   sourceLang: string = 'Auto',
@@ -742,26 +860,43 @@ export async function translateText(
   googleApiKey?: string,
   geminiModel?: string,
   geminiApiKey?: string,
-  customModelName?: string
+  customModelName?: string,
+  options?: { signal?: AbortSignal; bypassCache?: boolean }
 ): Promise<string> {
-  const isPriorityCustom = Boolean(customConfig?.enabled && customConfig?.engineMode === 'custom');
-  const strictEngine: 'gemini' | 'google' | 'custom_llm' = isPriorityCustom
-    ? 'custom_llm'
-    : engine === 'google' || engine === 'custom_llm' || engine === 'gemini'
-    ? engine
-    : 'gemini';
+  const trimmedText = typeof text === 'string' ? text.trim() : '';
+  if (!trimmedText) return '';
+
+  const normSrc = normalizeClientLangCode(sourceLang);
+  const normTarget = normalizeClientLangCode(targetLang);
+  if (normSrc !== 'auto' && normTarget !== 'auto' && normSrc === normTarget) {
+    return text;
+  }
+
+  const isDualOff = Boolean(
+    customConfig && (customConfig.enabled === false || customConfig.explicitlyDisabled)
+  );
+  const isPriorityCustom = Boolean(
+    !isDualOff && customConfig?.enabled && customConfig?.engineMode === 'custom'
+  );
+  const strictEngine: 'gemini' | 'google' | 'custom_llm' =
+    engine === 'google' || engine === 'custom_llm' || engine === 'gemini' ? engine : 'gemini';
+
+  if (isDualOff && strictEngine !== 'google') {
+    throw new Error('当前处于双关状态（云端与自有大模型均已关闭），仅支持「谷歌机翻」；如需使用大模型翻译，请前往「模型」开启对应引擎');
+  }
+  if (isPriorityCustom && strictEngine !== 'custom_llm') {
+    throw new Error('已开启「优先自有密钥回复」，当前仅允许使用「自定义模型」翻译；请切换为自定义模型或切回云端主引擎');
+  }
+  if (!isPriorityCustom && strictEngine === 'custom_llm') {
+    throw new Error('当前未开启「优先自有密钥回复」，不可选择自定义模型翻译；请前往「模型」开启「启用优先自有密钥回复」');
+  }
 
   const cleanBaseUrl = (customConfig?.baseUrl || '').trim();
   const cleanApiKey = (customConfig?.apiKey || '').trim();
   const effectiveCustomModel =
-    isPriorityCustom && engine !== 'custom_llm'
-      ? (customConfig?.modelName || '').trim() || (customModelName || '').trim() || 'gpt-4o-mini'
-      : (customModelName || '').trim() || (customConfig?.modelName || '').trim() || 'gpt-4o-mini';
+    (customModelName || '').trim() || (customConfig?.modelName || '').trim() || 'gpt-4o-mini';
 
   if (strictEngine === 'custom_llm') {
-    if (!isPriorityCustom) {
-      throw new Error('请开启自定义优先回复');
-    }
     if (!customConfig || !cleanBaseUrl || isBuiltInCloudGatewayUrl(cleanBaseUrl)) {
       throw new Error(
         '已开启「优先自有密钥回复」，请先在「模型 → 接入自有模型网关」填写大模型接入网址 (Base URL) 与 API 密钥'
@@ -782,6 +917,7 @@ export async function translateText(
       ? {
           ...customConfig,
           enabled: true,
+          explicitlyDisabled: false,
           engineMode: 'custom' as const,
           protocol: inferredProtocol,
           modelName: effectiveCustomModel,
@@ -791,36 +927,68 @@ export async function translateText(
         }
       : undefined;
 
-  const res = await fetchWithTimeout(
-    '/api/translate',
-    {
-      method: 'POST',
-      headers: getAuthHeaders(),
-      body: JSON.stringify({
-        text,
-        sourceLang,
-        targetLang,
-        engine: strictEngine,
-        googleApiKey,
-        geminiModel: strictEngine === 'gemini' ? geminiModel : undefined,
-        geminiApiKey: strictEngine === 'gemini' ? geminiApiKey : undefined,
-        customModelName: strictEngine === 'custom_llm' ? effectiveCustomModel : undefined,
-        engineLicenseKey: strictEngine === 'gemini' ? customConfig?.engineLicenseKey : undefined,
-        customConfig: safeCustomConfigForTranslation,
-      }),
-    },
-    30000
-  );
+  const modelCacheTag =
+    strictEngine === 'gemini'
+      ? geminiModel || ''
+      : strictEngine === 'custom_llm'
+      ? `${cleanBaseUrl}|${effectiveCustomModel}`
+      : '';
+  const cacheKey = `${strictEngine}|${normSrc}|${normTarget}|${modelCacheTag}|${trimmedText}`;
 
-  if (!res.ok) {
-    const errData = await res.json().catch(() => null);
-    throw new Error(errData?.error || `当前翻译通道不可用 (${res.status})`);
+  if (!options?.bypassCache) {
+    const cached = getTranslateCache(cacheKey);
+    if (cached !== null) {
+      return cached;
+    }
   }
-  const data = await res.json();
-  if (typeof data?.translatedText !== 'string' || !data.translatedText.trim()) {
-    throw new Error(data?.error || '翻译服务未返回有效译文');
+
+  const executeRequest = async (): Promise<string> => {
+    const res = await fetchWithTimeout(
+      '/api/translate',
+      {
+        method: 'POST',
+        headers: getAuthHeaders(),
+        signal: options?.signal,
+        body: JSON.stringify({
+          text,
+          sourceLang,
+          targetLang,
+          engine: strictEngine,
+          googleApiKey,
+          geminiModel: strictEngine === 'gemini' ? geminiModel : undefined,
+          geminiApiKey: strictEngine === 'gemini' ? geminiApiKey : undefined,
+          customModelName: strictEngine === 'custom_llm' ? effectiveCustomModel : undefined,
+          engineLicenseKey: strictEngine === 'gemini' ? customConfig?.engineLicenseKey : undefined,
+          customConfig: safeCustomConfigForTranslation,
+        }),
+      },
+      30000
+    );
+
+    if (!res.ok) {
+      const errData = await res.json().catch(() => null);
+      throw new Error(errData?.error || `当前翻译通道不可用 (${res.status})`);
+    }
+    const data = await res.json();
+    if (typeof data?.translatedText !== 'string' || !data.translatedText.trim()) {
+      throw new Error(data?.error || '翻译服务未返回有效译文');
+    }
+    const decoded = decodeHtmlEntities(data.translatedText);
+    setTranslateCache(cacheKey, decoded);
+    return decoded;
+  };
+
+  if (!options?.signal && !options?.bypassCache) {
+    const inFlight = inFlightTranslations.get(cacheKey);
+    if (inFlight) return inFlight;
+    const promise = runQueuedTranslation(executeRequest).finally(() => {
+      inFlightTranslations.delete(cacheKey);
+    });
+    inFlightTranslations.set(cacheKey, promise);
+    return promise;
   }
-  return decodeHtmlEntities(data.translatedText);
+
+  return await runQueuedTranslation(executeRequest, options?.signal);
 }
 
 export async function transcribeAudio(audioBase64: string, mimeType: string = 'audio/webm', customConfig?: CustomLLMConfig): Promise<string> {
@@ -912,6 +1080,41 @@ export async function syncCustomLLMConfigApi(config: CustomLLMConfig): Promise<b
   }
 }
 
+export async function fetchCustomLLMConfigApi(): Promise<CustomLLMConfig | null> {
+  try {
+    const res = await fetchWithTimeout(
+      '/api/llm/config',
+      {
+        headers: getAuthHeaders(),
+      },
+      10000
+    );
+    if (res.ok) {
+      const raw = await res.json().catch(() => null);
+      const candidate =
+        raw && typeof raw === 'object' && raw.config && typeof raw.config === 'object'
+          ? raw.config
+          : raw;
+      if (
+        candidate &&
+        typeof candidate === 'object' &&
+        !Array.isArray(candidate) &&
+        ('enabled' in candidate ||
+          'engineMode' in candidate ||
+          'modelName' in candidate ||
+          'baseUrl' in candidate ||
+          'protocol' in candidate)
+      ) {
+        const { success: _s, config: _c, settings: _st, ...cleanConfig } = candidate as any;
+        return cleanConfig as CustomLLMConfig;
+      }
+    }
+  } catch (err) {
+    console.warn('Failed to fetch custom LLM config from server:', err);
+  }
+  return null;
+}
+
 export async function syncTranslationSettingsApi(settings: TranslationSettings): Promise<boolean> {
   try {
     const res = await fetchWithTimeout(
@@ -928,6 +1131,41 @@ export async function syncTranslationSettingsApi(settings: TranslationSettings):
     console.warn('Failed to sync translation settings to server:', err);
     return false;
   }
+}
+
+export async function fetchTranslationSettingsApi(): Promise<TranslationSettings | null> {
+  try {
+    const res = await fetchWithTimeout(
+      '/api/translate/settings',
+      {
+        headers: getAuthHeaders(),
+      },
+      10000
+    );
+    if (res.ok) {
+      const raw = await res.json().catch(() => null);
+      const candidate =
+        raw && typeof raw === 'object' && raw.settings && typeof raw.settings === 'object'
+          ? raw.settings
+          : raw;
+      if (
+        candidate &&
+        typeof candidate === 'object' &&
+        !Array.isArray(candidate) &&
+        ('preferredEngine' in candidate ||
+          'defaultTargetLang' in candidate ||
+          'defaultSourceLang' in candidate ||
+          'autoTranslateInbound' in candidate ||
+          'geminiModel' in candidate)
+      ) {
+        const { success: _s, config: _c, settings: _st, ...cleanSettings } = candidate as any;
+        return cleanSettings as TranslationSettings;
+      }
+    }
+  } catch (err) {
+    console.warn('Failed to fetch translation settings from server:', err);
+  }
+  return null;
 }
 
 export async function generateTTSVoice(
@@ -1252,6 +1490,34 @@ export async function fetchChatsFromDb(accountId?: string): Promise<any[]> {
   return [];
 }
 
+export async function saveChatLanguagePrefApi(
+  chatId: string,
+  sourceLang: string,
+  targetLang: string,
+  accountId?: string
+): Promise<boolean> {
+  try {
+    const effectiveAcc = accountId || currentActiveAccountId;
+    const res = await fetchWithTimeout(
+      `/api/chats/${encodeURIComponent(chatId)}/language`,
+      {
+        method: 'POST',
+        headers: getAuthHeaders(effectiveAcc),
+        body: JSON.stringify({
+          sourceLang,
+          targetLang,
+          accountId: effectiveAcc,
+        }),
+      },
+      10000
+    );
+    return res.ok;
+  } catch (err) {
+    console.warn('Failed to save chat language pref:', err);
+    return false;
+  }
+}
+
 export async function fetchMessagesFromDb(
   chatId: string,
   accountId?: string,
@@ -1274,6 +1540,34 @@ export async function fetchMessagesFromDb(
     console.warn('Failed to load messages from DB:', err);
   }
   return [];
+}
+
+export async function updateMessageTranslationInDb(
+  messageId: string,
+  translatedText: string,
+  meta?: { chatId?: string; telegramMessageId?: number; accountId?: string }
+): Promise<boolean> {
+  try {
+    const effectiveAcc = meta?.accountId || currentActiveAccountId;
+    const res = await fetchWithTimeout(
+      `/api/messages/${encodeURIComponent(messageId)}/translation`,
+      {
+        method: 'PATCH',
+        headers: getAuthHeaders(effectiveAcc),
+        body: JSON.stringify({
+          translatedText,
+          chatId: meta?.chatId,
+          telegramMessageId: meta?.telegramMessageId,
+          accountId: effectiveAcc,
+        }),
+      },
+      10000
+    );
+    return res.ok;
+  } catch (err) {
+    console.warn('Failed to update message translation in DB:', err);
+    return false;
+  }
 }
 
 function dataUrlToBlob(dataUrl: string): Blob | null {
@@ -2205,8 +2499,15 @@ export function saveLocalMessage(chatId: string, message: Message, accountId?: s
       secureSetItemSync(scopedKey, capMessagesForLocalCache(existing));
     } else {
       let changed = false;
-      if (message.translatedText && !existing[existingIdx].translatedText) {
+      if (
+        message.translatedText !== undefined &&
+        message.translatedText !== existing[existingIdx].translatedText
+      ) {
         existing[existingIdx].translatedText = message.translatedText;
+        changed = true;
+      }
+      if ('translationError' in message && message.translationError !== existing[existingIdx].translationError) {
+        existing[existingIdx].translationError = message.translationError;
         changed = true;
       }
       if (incomingTgId !== undefined && !existing[existingIdx].telegramMessageId) {

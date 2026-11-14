@@ -43,11 +43,15 @@ export const TranslationDrawer: React.FC<TranslationDrawerProps> = ({
   settings,
   onUpdateSettings,
   customLlmConfig,
+  onUpdateCustomLlmConfig,
   onGoToModelSettings,
   embedded = false,
 }) => {
   const [langSearch, setLangSearch] = useState('');
-  const [customPriorityNotice, setCustomPriorityNotice] = useState(false);
+  const [modeGuardNotice, setModeGuardNotice] = useState<{
+    type: 'need_custom' | 'locked_custom' | 'dual_off';
+    message: string;
+  } | null>(null);
 
   const filteredSourceLanguages = useMemo(() => {
     const q = langSearch.trim().toLowerCase();
@@ -74,9 +78,18 @@ export const TranslationDrawer: React.FC<TranslationDrawerProps> = ({
 
   if (!isOpen && !embedded) return null;
 
-  const isCustomPriorityEnabled = Boolean(
-    customLlmConfig?.enabled && customLlmConfig?.engineMode === 'custom'
+  const isDualOff = Boolean(
+    customLlmConfig && (customLlmConfig.enabled === false || customLlmConfig.explicitlyDisabled)
   );
+  const isCustomPriorityEnabled = Boolean(
+    !isDualOff && customLlmConfig?.enabled && customLlmConfig?.engineMode === 'custom'
+  );
+  const masterMode: 'cloud' | 'custom' | 'dual_off' = isDualOff
+    ? 'dual_off'
+    : isCustomPriorityEnabled
+    ? 'custom'
+    : 'cloud';
+
   const currentCustomModel =
     (settings.customModelName ?? '').trim() ||
     (customLlmConfig?.modelName && customLlmConfig.engineMode === 'custom' ? customLlmConfig.modelName : '') ||
@@ -278,119 +291,211 @@ export const TranslationDrawer: React.FC<TranslationDrawerProps> = ({
 
         {/* Engine Selection */}
         <div className="bg-[#f8fafc] dark:bg-[#0e1726]/85 p-3.5 rounded-xl border border-[#e2e8f0] dark:border-[#18273a] space-y-3">
-          <div className="text-xs font-semibold text-[#0f172a] dark:text-[#eef4fb]">翻译计算引擎</div>
-          {isCustomPriorityEnabled && (
-            <div className="p-2.5 rounded-lg bg-amber-500/10 border border-amber-500/30 text-[11px] text-amber-700 dark:text-amber-300 leading-relaxed">
-              已开启「优先自有密钥回复」：当前所有聊天翻译统一走「接入自有模型网关」的密钥（型号：{settings.preferredEngine === 'custom_llm' ? currentCustomModel : customLlmConfig?.modelName || currentCustomModel}）；切回云端引擎开关后自动恢复下方引擎设置。
-            </div>
-          )}
-
-          <div className="grid grid-cols-3 gap-2">
-            {/* Option 1: Google Machine Translate (Keyless) */}
-            <button
-              type="button"
-              onClick={() => {
-                setCustomPriorityNotice(false);
-                onUpdateSettings({ ...settings, preferredEngine: 'google', googleApiKey: '' });
-              }}
-              className={`p-2.5 rounded-lg border text-xs text-left cursor-pointer transition-colors ${
-                settings.preferredEngine === 'google'
-                  ? 'border-[#2ba0ff] bg-[#2ba0ff]/12 text-[#0f172a] dark:text-white'
-                  : 'border-[#cbd5e1] dark:border-[#1e3148] bg-white dark:bg-[#090f19] text-[#64748b] dark:text-[#7f95ab] hover:border-[#2ba0ff]/40'
-              }`}
-            >
-              <div className="font-semibold text-[#0f172a] dark:text-[#eef4fb] flex items-center gap-1.5 text-[11px]">
-                <Languages className="w-3.5 h-3.5 text-blue-500 dark:text-blue-400 shrink-0" />
-                <span className="truncate">谷歌机翻</span>
-              </div>
-              <p className="text-[10px] text-[#64748b] dark:text-[#7f95ab] mt-1 leading-tight">
-                免密钥直译
-              </p>
-            </button>
-
-            {/* Option 2: Google Gemma LLM via Cloud Knowledge Base */}
-            <button
-              type="button"
-              onClick={() => {
-                setCustomPriorityNotice(false);
-                onUpdateSettings({
-                  ...settings,
-                  preferredEngine: 'gemini',
-                  geminiApiKey: '',
-                  geminiModel:
-                    settings.geminiModel === 'gemma-4-31b-it'
-                      ? 'gemma-4-31b-it'
-                      : 'gemma-4-26b-a4b-it',
-                });
-              }}
-              className={`p-2.5 rounded-lg border text-xs text-left cursor-pointer transition-colors ${
-                settings.preferredEngine === 'gemini'
-                  ? 'border-[#2ba0ff] bg-[#2ba0ff]/12 text-[#0f172a] dark:text-white'
-                  : 'border-[#cbd5e1] dark:border-[#1e3148] bg-white dark:bg-[#090f19] text-[#64748b] dark:text-[#7f95ab] hover:border-[#2ba0ff]/40'
-              }`}
-            >
-              <div className="font-semibold text-[#0f172a] dark:text-[#eef4fb] flex items-center gap-1.5 text-[11px]">
-                <Sparkles className="w-3.5 h-3.5 text-[#2ba0ff] shrink-0" />
-                <span className="truncate">谷歌大模型</span>
-              </div>
-              <p className="text-[10px] text-[#64748b] dark:text-[#7f95ab] mt-1 leading-tight">
-                Gemma 4 直译
-              </p>
-            </button>
-
-            {/* Option 3: Custom LLM (Only selectable when Custom Priority Reply is enabled) */}
-            <button
-              type="button"
-              onClick={() => {
-                if (!isCustomPriorityEnabled) {
-                  setCustomPriorityNotice(true);
-                  return;
-                }
-                setCustomPriorityNotice(false);
-                onUpdateSettings({
-                  ...settings,
-                  preferredEngine: 'custom_llm',
-                  customModelName: currentCustomModel,
-                });
-              }}
-              className={`p-2.5 rounded-lg border text-xs text-left cursor-pointer transition-colors ${
-                settings.preferredEngine === 'custom_llm' && isCustomPriorityEnabled
-                  ? 'border-[#2ba0ff] bg-[#2ba0ff]/12 text-[#0f172a] dark:text-white'
-                  : 'border-[#cbd5e1] dark:border-[#1e3148] bg-white dark:bg-[#090f19] text-[#64748b] dark:text-[#7f95ab] hover:border-[#2ba0ff]/40'
-              }`}
-            >
-              <div className="font-semibold text-[#0f172a] dark:text-[#eef4fb] flex items-center gap-1.5 text-[11px]">
-                <Cpu className="w-3.5 h-3.5 text-emerald-500 dark:text-emerald-400 shrink-0" />
-                <span className="truncate">自定义模型</span>
-              </div>
-              <p className="text-[10px] text-[#64748b] dark:text-[#7f95ab] mt-1 leading-tight truncate">
-                {!isCustomPriorityEnabled
-                  ? '需开启自定义优先回复'
-                  : isGatewayReady
-                  ? `已就绪 (${currentCustomModel})`
-                  : '待配置网关'}
-              </p>
-            </button>
+          <div className="flex items-center justify-between gap-2">
+            <div className="text-xs font-semibold text-[#0f172a] dark:text-[#eef4fb]">翻译计算引擎</div>
+            {onGoToModelSettings && (
+              <button
+                type="button"
+                onClick={onGoToModelSettings}
+                className="text-[11px] font-medium text-[#2481cc] dark:text-[#2ba0ff] hover:underline cursor-pointer"
+              >
+                切换主引擎 →
+              </button>
+            )}
           </div>
 
-          {/* Prompt when user tries to pick custom translation / other LLMs without enabling Custom Priority Reply */}
-          {!isCustomPriorityEnabled && (customPriorityNotice || settings.preferredEngine === 'custom_llm') && (
-            <div className="p-2.5 rounded-lg bg-amber-500/10 border border-amber-500/30 text-[11px] text-amber-700 dark:text-amber-300 leading-relaxed flex items-center justify-between gap-2">
-              <span>请开启自定义优先回复（开启后方可使用自定义翻译并选择其他大模型）</span>
-              {onGoToModelSettings && (
+          {/* Master Mode Banner */}
+          <div
+            className={`p-2.5 rounded-lg border text-[11px] leading-relaxed ${
+              masterMode === 'custom'
+                ? 'bg-amber-500/10 border-amber-500/30 text-amber-700 dark:text-amber-300'
+                : masterMode === 'dual_off'
+                ? 'bg-slate-500/10 border-slate-400/30 text-slate-700 dark:text-slate-300'
+                : 'bg-[#e8f3ff] dark:bg-[#2ba0ff]/10 border-[#bfdbfe] dark:border-[#2ba0ff]/25 text-[#1e40af] dark:text-[#93c5fd]'
+            }`}
+          >
+            {masterMode === 'custom'
+              ? `当前主引擎：优先自有密钥回复（仅允许使用「自定义模型」，型号：${currentCustomModel}）`
+              : masterMode === 'dual_off'
+              ? '当前主引擎：双关状态（官方与自有大模型均已关闭，仅允许使用「谷歌机翻」）'
+              : '当前主引擎：官方大模型优先（仅支持「谷歌机翻」或「谷歌大模型 Gemma 4」，不可选自定义模型）'}
+          </div>
+
+          <div className="grid grid-cols-3 gap-2">
+            {/* Option 1: Google Machine Translate (Allowed in 'cloud' and 'dual_off') */}
+            {(() => {
+              const allowed = masterMode !== 'custom';
+              const active = settings.preferredEngine === 'google' && allowed;
+              return (
                 <button
                   type="button"
-                  onClick={onGoToModelSettings}
-                  className="px-2 py-1 rounded-md bg-amber-500/20 hover:bg-amber-500/30 text-amber-800 dark:text-amber-200 font-semibold shrink-0 cursor-pointer transition-colors"
+                  onClick={() => {
+                    if (!allowed) {
+                      setModeGuardNotice({
+                        type: 'locked_custom',
+                        message: '已开启「优先自有密钥回复」，当前仅可使用「自定义模型」翻译；如需使用谷歌机翻，请先切回云端主引擎或双关状态。',
+                      });
+                      return;
+                    }
+                    setModeGuardNotice(null);
+                    onUpdateSettings({ ...settings, preferredEngine: 'google', googleApiKey: '' });
+                  }}
+                  className={`p-2.5 rounded-lg border text-xs text-left transition-colors ${
+                    !allowed
+                      ? 'opacity-45 cursor-not-allowed border-[#e2e8f0] dark:border-[#18273a] bg-[#f1f5f9] dark:bg-[#090f19]/60 text-[#64748b] dark:text-[#64748b]'
+                      : active
+                      ? 'cursor-pointer border-[#2ba0ff] bg-[#2ba0ff]/12 text-[#0f172a] dark:text-white'
+                      : 'cursor-pointer border-[#cbd5e1] dark:border-[#1e3148] bg-white dark:bg-[#090f19] text-[#64748b] dark:text-[#7f95ab] hover:border-[#2ba0ff]/40'
+                  }`}
                 >
-                  去开启
+                  <div className="font-semibold text-[#0f172a] dark:text-[#eef4fb] flex items-center gap-1.5 text-[11px]">
+                    <Languages className="w-3.5 h-3.5 text-blue-500 dark:text-blue-400 shrink-0" />
+                    <span className="truncate">谷歌机翻</span>
+                  </div>
+                  <p className="text-[10px] text-[#64748b] dark:text-[#7f95ab] mt-1 leading-tight">
+                    {allowed ? '免密钥直译' : '自有模式锁定'}
+                  </p>
                 </button>
-              )}
+              );
+            })()}
+
+            {/* Option 2: Google Gemma LLM (Allowed ONLY in 'cloud') */}
+            {(() => {
+              const allowed = masterMode === 'cloud';
+              const active = settings.preferredEngine === 'gemini' && allowed;
+              return (
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (!allowed) {
+                      setModeGuardNotice({
+                        type: masterMode === 'dual_off' ? 'dual_off' : 'locked_custom',
+                        message:
+                          masterMode === 'dual_off'
+                            ? '当前处于双关状态，谷歌大模型已禁用，仅支持「谷歌机翻」；请前往「模型」开启官方大模型或优先自有密钥。'
+                            : '已开启「优先自有密钥回复」，官方谷歌大模型已关闭，当前仅支持「自定义模型」翻译。',
+                      });
+                      return;
+                    }
+                    setModeGuardNotice(null);
+                    onUpdateSettings({
+                      ...settings,
+                      preferredEngine: 'gemini',
+                      geminiApiKey: '',
+                      geminiModel:
+                        settings.geminiModel === 'gemma-4-31b-it'
+                          ? 'gemma-4-31b-it'
+                          : 'gemma-4-26b-a4b-it',
+                    });
+                  }}
+                  className={`p-2.5 rounded-lg border text-xs text-left transition-colors ${
+                    !allowed
+                      ? 'opacity-45 cursor-not-allowed border-[#e2e8f0] dark:border-[#18273a] bg-[#f1f5f9] dark:bg-[#090f19]/60 text-[#64748b] dark:text-[#64748b]'
+                      : active
+                      ? 'cursor-pointer border-[#2ba0ff] bg-[#2ba0ff]/12 text-[#0f172a] dark:text-white'
+                      : 'cursor-pointer border-[#cbd5e1] dark:border-[#1e3148] bg-white dark:bg-[#090f19] text-[#64748b] dark:text-[#7f95ab] hover:border-[#2ba0ff]/40'
+                  }`}
+                >
+                  <div className="font-semibold text-[#0f172a] dark:text-[#eef4fb] flex items-center gap-1.5 text-[11px]">
+                    <Sparkles className="w-3.5 h-3.5 text-[#2ba0ff] shrink-0" />
+                    <span className="truncate">谷歌大模型</span>
+                  </div>
+                  <p className="text-[10px] text-[#64748b] dark:text-[#7f95ab] mt-1 leading-tight">
+                    {allowed ? 'Gemma 4 直译' : masterMode === 'dual_off' ? '双关已禁用' : '自有模式已关闭'}
+                  </p>
+                </button>
+              );
+            })()}
+
+            {/* Option 3: Custom LLM (Allowed ONLY in 'custom') */}
+            {(() => {
+              const allowed = masterMode === 'custom';
+              const active = settings.preferredEngine === 'custom_llm' && allowed;
+              return (
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (!allowed) {
+                      setModeGuardNotice({
+                        type: 'need_custom',
+                        message: '使用「自定义模型」翻译将强制关闭官方大模型与云端话术检索，所有回复/人设/全息记忆同步改走您的自有密钥。',
+                      });
+                      return;
+                    }
+                    setModeGuardNotice(null);
+                    onUpdateSettings({
+                      ...settings,
+                      preferredEngine: 'custom_llm',
+                      customModelName: currentCustomModel,
+                    });
+                  }}
+                  className={`p-2.5 rounded-lg border text-xs text-left transition-colors ${
+                    !allowed
+                      ? 'opacity-50 cursor-not-allowed border-[#e2e8f0] dark:border-[#18273a] bg-[#f1f5f9] dark:bg-[#090f19]/60 text-[#64748b] dark:text-[#64748b]'
+                      : active
+                      ? 'cursor-pointer border-[#2ba0ff] bg-[#2ba0ff]/12 text-[#0f172a] dark:text-white'
+                      : 'cursor-pointer border-[#cbd5e1] dark:border-[#1e3148] bg-white dark:bg-[#090f19] text-[#64748b] dark:text-[#7f95ab] hover:border-[#2ba0ff]/40'
+                  }`}
+                >
+                  <div className="font-semibold text-[#0f172a] dark:text-[#eef4fb] flex items-center gap-1.5 text-[11px]">
+                    <Cpu className="w-3.5 h-3.5 text-emerald-500 dark:text-emerald-400 shrink-0" />
+                    <span className="truncate">自定义模型</span>
+                  </div>
+                  <p className="text-[10px] text-[#64748b] dark:text-[#7f95ab] mt-1 leading-tight truncate">
+                    {!allowed
+                      ? '需开启自有密钥'
+                      : isGatewayReady
+                      ? `已就绪 (${currentCustomModel})`
+                      : '待配置网关'}
+                  </p>
+                </button>
+              );
+            })()}
+          </div>
+
+          {/* Prompt when user tries to pick a locked engine */}
+          {modeGuardNotice && (
+            <div className="p-2.5 rounded-lg bg-amber-500/10 border border-amber-500/30 text-[11px] text-amber-700 dark:text-amber-300 leading-relaxed space-y-2">
+              <div>{modeGuardNotice.message}</div>
+              <div className="flex items-center justify-end gap-2">
+                {modeGuardNotice.type === 'need_custom' && isGatewayReady && onUpdateCustomLlmConfig && customLlmConfig && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      onUpdateCustomLlmConfig({
+                        ...customLlmConfig,
+                        enabled: true,
+                        explicitlyDisabled: false,
+                        engineMode: 'custom',
+                        enableKnowledgeBaseRAG: false,
+                      });
+                      onUpdateSettings({
+                        ...settings,
+                        preferredEngine: 'custom_llm',
+                        customModelName: currentCustomModel,
+                      });
+                      setModeGuardNotice(null);
+                    }}
+                    className="px-2.5 py-1 rounded-md bg-amber-500/25 hover:bg-amber-500/35 text-amber-900 dark:text-amber-100 font-semibold cursor-pointer transition-colors"
+                  >
+                    确认开启优先自有密钥并切换
+                  </button>
+                )}
+                {onGoToModelSettings && (
+                  <button
+                    type="button"
+                    onClick={onGoToModelSettings}
+                    className="px-2.5 py-1 rounded-md bg-white/70 dark:bg-[#090f19]/80 border border-amber-500/30 hover:bg-white text-amber-800 dark:text-amber-200 font-semibold cursor-pointer transition-colors"
+                  >
+                    前往模型页配置
+                  </button>
+                )}
+              </div>
             </div>
           )}
 
-          {/* Google Knowledge Base LLM Model Selector (Gemma 4 26B / 31B, keyless) */}
-          {settings.preferredEngine === 'gemini' && (
+          {/* Google Knowledge Base LLM Model Selector (Gemma 4 26B / 31B, keyless, Cloud Priority Only) */}
+          {masterMode === 'cloud' && settings.preferredEngine === 'gemini' && (
             <div className="mt-3 pt-3 border-t border-[#e2e8f0] dark:border-[#152234] space-y-1.5">
               <label className="text-[11px] text-[#64748b] dark:text-[#7f95ab] block">
                 选择谷歌大模型翻译型号
@@ -417,7 +522,7 @@ export const TranslationDrawer: React.FC<TranslationDrawerProps> = ({
           )}
 
           {/* Custom Translation Model Selector Only (Strictly enabled when Custom Priority Reply is ON) */}
-          {settings.preferredEngine === 'custom_llm' && isCustomPriorityEnabled && (
+          {settings.preferredEngine === 'custom_llm' && masterMode === 'custom' && (
             <div className="mt-3 pt-3 border-t border-[#e2e8f0] dark:border-[#152234] space-y-2.5">
               <div className="space-y-1.5">
                 <div className="flex items-center justify-between">
@@ -428,8 +533,11 @@ export const TranslationDrawer: React.FC<TranslationDrawerProps> = ({
                 <select
                   value={isPresetModelValue ? (settings.customModelName ?? currentCustomModel) : '__custom__'}
                   onChange={(e) => {
-                    if (!isCustomPriorityEnabled) {
-                      setCustomPriorityNotice(true);
+                    if (masterMode !== 'custom') {
+                      setModeGuardNotice({
+                        type: 'need_custom',
+                        message: '使用「自定义模型」翻译将强制关闭官方大模型与云端话术检索。',
+                      });
                       return;
                     }
                     if (e.target.value !== '__custom__') {
@@ -451,8 +559,11 @@ export const TranslationDrawer: React.FC<TranslationDrawerProps> = ({
                   type="text"
                   value={settings.customModelName ?? currentCustomModel}
                   onChange={(e) => {
-                    if (!isCustomPriorityEnabled) {
-                      setCustomPriorityNotice(true);
+                    if (masterMode !== 'custom') {
+                      setModeGuardNotice({
+                        type: 'need_custom',
+                        message: '使用「自定义模型」翻译将强制关闭官方大模型与云端话术检索。',
+                      });
                       return;
                     }
                     onUpdateSettings({ ...settings, customModelName: e.target.value });

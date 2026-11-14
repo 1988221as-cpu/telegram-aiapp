@@ -159,6 +159,7 @@ export interface MemberUser {
 
 export interface CustomLLMConfig {
   enabled: boolean;
+  explicitlyDisabled?: boolean;
   engineMode?: 'cloud' | 'custom';
   engineLicenseKey?: string;
   protocol: 'openai' | 'gemini' | 'anthropic';

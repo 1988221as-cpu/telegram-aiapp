@@ -2114,10 +2114,12 @@ test('Priority Custom Key mode: mutually exclusive with Cloud RAG and routes cha
   assert.match(customLlmSrc, /engineMode:\s*'custom'[\s\S]*?enableKnowledgeBaseRAG:\s*false/);
   assert.match(customLlmSrc, /engineMode:\s*'cloud'[\s\S]*?enableKnowledgeBaseRAG:\s*true/);
 
-  // 3. Verify apiService & server routing contracts for priority custom mode
+  // 3. Verify apiService & server routing contracts for priority custom mode (zero silent hijacking)
   const apiServiceSrc = readFileSync(resolve(process.cwd(), 'src/services/apiService.ts'), 'utf8');
-  assert.match(apiServiceSrc, /isPriorityCustom\s*=\s*Boolean\(customConfig\?\.enabled && customConfig\?\.engineMode === 'custom'\)/);
-  assert.match(apiServiceSrc, /isPriorityCustom\s*\?\s*'custom_llm'/);
+  assert.match(apiServiceSrc, /isDualOff\s*=\s*Boolean\(/);
+  assert.match(apiServiceSrc, /isPriorityCustom\s*=\s*Boolean\(/);
+  assert.match(apiServiceSrc, /if\s*\(isPriorityCustom && strictEngine !== 'custom_llm'\)\s*\{\s*throw new Error/);
+  assert.match(apiServiceSrc, /if\s*\(isDualOff && strictEngine !== 'google'\)\s*\{\s*throw new Error/);
 
   const serverSrc = readFileSync(resolve(process.cwd(), 'server.ts'), 'utf8');
   assert.match(serverSrc, /app\.post\('\/api\/customer\/analyze\/:chatId'[\s\S]*?useCustomPriorityMemory[\s\S]*?engineMode:\s*'custom'[\s\S]*?analysisPrompt/);
@@ -3944,6 +3946,242 @@ test('P1/P2 #6: handleSyncContacts title sync, group read tooltip, drawer add-to
     assert.equal(body.ok, false);
     assert.match(String(body.error), /未在线连接/);
   } finally {
+    await new Promise<void>((r) => srv.close(() => r()));
+    if (prevJwtSecret === undefined) delete process.env.JWT_SECRET;
+    else process.env.JWT_SECRET = prevJwtSecret;
+  }
+});
+
+test('3-state LLM & Translation mutual exclusion, Dual-Off LLM refusal, 130+ languages, and chat/message persistence', async () => {
+  const { readFileSync } = await import('node:fs');
+  const { resolve } = await import('node:path');
+  const http = await import('node:http');
+  const { createHmac } = await import('node:crypto');
+  const {
+    db,
+    initDatabase,
+    exportDatabaseSnapshot,
+    restoreDatabaseSnapshot,
+  } = await import('./db.ts');
+  const {
+    app,
+    isCloudKnowledgeBaseEnabled,
+    syncServerCustomLlmConfig,
+    getServerCustomLlmConfig,
+    invokeEvolutionOrAnalysisLlm,
+    mapLanguageCode,
+    resolvePromptLanguageName,
+  } = await import('../server.ts');
+  const { SUPPORTED_LANGUAGES } = await import('../src/data/mockData.ts');
+
+  await initDatabase();
+
+  // 1. State 3 (Dual-Off) disables Cloud RAG even if enableKnowledgeBaseRAG is passed true
+  assert.equal(
+    isCloudKnowledgeBaseEnabled({
+      enabled: false,
+      explicitlyDisabled: true,
+      engineMode: 'cloud',
+      enableKnowledgeBaseRAG: true,
+    }),
+    false
+  );
+
+  // 2. Full 130+ SUPPORTED_LANGUAGES coverage in mapLanguageCode & resolvePromptLanguageName
+  assert.ok(SUPPORTED_LANGUAGES.length > 100);
+  for (const lang of SUPPORTED_LANGUAGES) {
+    if (lang.code === 'Auto') continue;
+    const mapped = mapLanguageCode(lang.code);
+    assert.ok(mapped && mapped.length >= 2, `mapLanguageCode failed for ${lang.code}`);
+    const promptName = resolvePromptLanguageName(lang.code);
+    assert.ok(promptName && promptName.trim().length > 0, `resolvePromptLanguageName empty for ${lang.code}`);
+  }
+  assert.equal(resolvePromptLanguageName('uk'), 'Ukrainian');
+  assert.equal(resolvePromptLanguageName('fa'), 'Persian (Farsi)');
+  assert.equal(resolvePromptLanguageName('yue'), 'Cantonese (粵語)');
+
+  // 3. Verify deploy/railway-brain-server.ts does not rewrite gemma-* translation model to gemini-4-hydrogen
+  const brainSrc = readFileSync(resolve(process.cwd(), 'deploy/railway-brain-server.ts'), 'utf8');
+  assert.match(brainSrc, /isNativeGeminiOrGemmaModel/);
+  assert.match(brainSrc, /const geminiModel = isNativeGeminiOrGemmaModel \? upstreamModel : 'gemini-4-hydrogen'/);
+
+  // 4. Live Express HTTP tests for 3-state /api/translate, Dual-Off LLM refusal, and language/translation persistence
+  const prevJwtSecret = process.env.JWT_SECRET;
+  const prevCfg = await getServerCustomLlmConfig();
+  process.env.JWT_SECRET = 'three_state_test_secret';
+  const srv = http.createServer(app);
+  await new Promise<void>((r) => srv.listen(0, '127.0.0.1', () => r()));
+  const port = (srv.address() as any).port;
+
+  const headerB64 = Buffer.from(JSON.stringify({ alg: 'HS256', typ: 'JWT' })).toString('base64url');
+  const payloadB64 = Buffer.from(
+    JSON.stringify({ sub: 'three_state_tester', username: 'tester', role: 'admin', exp: Math.floor(Date.now() / 1000) + 3600 })
+  ).toString('base64url');
+  const sigB64 = createHmac('sha256', process.env.JWT_SECRET).update(`${headerB64}.${payloadB64}`).digest('base64url');
+  const token = `${headerB64}.${payloadB64}.${sigB64}`;
+
+  const testChatId = `tg_lang_persist_${Date.now()}`;
+  const testAccId = 'acc_tg_lang_test';
+  const testMsgId = `msg_retrans_${Date.now()}`;
+
+  try {
+    // 4a. Unauthenticated /api/translate must return 401
+    const unauthRes = await fetch(`http://127.0.0.1:${port}/api/translate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text: 'Hello', targetLang: 'Chinese', engine: 'google' }),
+    });
+    assert.equal(unauthRes.status, 401);
+
+    // 4b. State 1 (Cloud Priority): /api/translate rejects custom_llm with 400
+    await syncServerCustomLlmConfig({
+      enabled: true,
+      explicitlyDisabled: false,
+      engineMode: 'cloud',
+      enableKnowledgeBaseRAG: true,
+    });
+    const state1CustomRes = await fetch(`http://127.0.0.1:${port}/api/translate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      body: JSON.stringify({ text: 'Hello', targetLang: 'Chinese', engine: 'custom_llm' }),
+    });
+    assert.equal(state1CustomRes.status, 400);
+
+    // 4c. State 2 (Custom Priority): /api/translate rejects google and gemini with 400
+    await syncServerCustomLlmConfig({
+      enabled: true,
+      explicitlyDisabled: false,
+      engineMode: 'custom',
+      enableKnowledgeBaseRAG: false,
+      baseUrl: 'https://api.openai.com/v1',
+      apiKey: 'sk-test-custom-only',
+      modelName: 'gpt-4o-mini',
+    });
+    for (const forbiddenEngine of ['google', 'gemini']) {
+      const state2Res = await fetch(`http://127.0.0.1:${port}/api/translate`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ text: 'Hello', targetLang: 'Chinese', engine: forbiddenEngine }),
+      });
+      assert.equal(state2Res.status, 400, `State 2 must reject ${forbiddenEngine}`);
+    }
+
+    // 4d. State 3 (Dual-Off): /api/translate rejects gemini & custom_llm with 400
+    await syncServerCustomLlmConfig({
+      enabled: false,
+      explicitlyDisabled: true,
+      engineMode: 'cloud',
+      enableKnowledgeBaseRAG: false,
+    });
+    for (const forbiddenEngine of ['gemini', 'custom_llm']) {
+      const state3Res = await fetch(`http://127.0.0.1:${port}/api/translate`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ text: 'Hello', targetLang: 'Chinese', engine: forbiddenEngine }),
+      });
+      assert.equal(state3Res.status, 400, `State 3 Dual-Off must reject ${forbiddenEngine}`);
+    }
+
+    // 4e. State 3 (Dual-Off): All LLM endpoints & invokeEvolutionOrAnalysisLlm strictly refuse (no silent fallback)
+    await assert.rejects(
+      async () => {
+        await invokeEvolutionOrAnalysisLlm({
+          prompt: 'usr',
+        });
+      },
+      /双关状态/
+    );
+
+    const dualChatRes = await fetch(`http://127.0.0.1:${port}/api/llm/chat`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      body: JSON.stringify({
+        chatId: testChatId,
+        accountId: testAccId,
+        messages: [{ role: 'user', text: 'hi' }],
+        customConfig: { enabled: false, explicitlyDisabled: true, engineMode: 'cloud' },
+      }),
+    });
+    assert.equal(dualChatRes.status, 400);
+
+    const dualAnalyzeRes = await fetch(`http://127.0.0.1:${port}/api/customer/analyze/${testChatId}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      body: JSON.stringify({
+        accountId: testAccId,
+        messages: [{ sender: 'peer', text: 'hi' }],
+        customConfig: { enabled: false, explicitlyDisabled: true, engineMode: 'cloud' },
+      }),
+    });
+    assert.equal(dualAnalyzeRes.status, 400);
+
+    const dualPersonaRes = await fetch(`http://127.0.0.1:${port}/api/persona/test-reply`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      body: JSON.stringify({
+        draftText: 'hello',
+        customConfig: { enabled: false, explicitlyDisabled: true, engineMode: 'cloud' },
+      }),
+    });
+    assert.equal(dualPersonaRes.status, 400);
+
+    // 5. Per-chat language persistence + snapshot export/restore + message translation patch
+    const saveLangRes = await fetch(`http://127.0.0.1:${port}/api/chats/${testChatId}/language`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      body: JSON.stringify({ accountId: testAccId, sourceLang: 'Japanese', targetLang: 'Traditional Chinese' }),
+    });
+    assert.equal(saveLangRes.status, 200);
+
+    await db
+      .prepare(
+        `INSERT OR IGNORE INTO account_customer_profiles (account_id, chat_id, client_name, relationship_stage, total_messages_count, updated_at) VALUES (?, ?, ?, ?, ?, ?)`
+      )
+      .run(testAccId, testChatId, 'Tokyo Client', '活跃联系人', 1, Date.now());
+
+    const getChatsRes = await fetch(`http://127.0.0.1:${port}/api/chats`, {
+      headers: { Authorization: `Bearer ${token}`, 'x-account-id': testAccId },
+    });
+    assert.equal(getChatsRes.status, 200);
+    const chatsPayload: any[] = await getChatsRes.json();
+    const matchedChat = chatsPayload.find((c) => c.id === testChatId);
+    assert.ok(matchedChat);
+    assert.equal(matchedChat.sourceLang, 'Japanese');
+    assert.equal(matchedChat.targetLang, 'Traditional Chinese');
+
+    const snapshot = await exportDatabaseSnapshot();
+    assert.ok(Array.isArray(snapshot.tables.chat_language_prefs));
+    assert.ok(
+      snapshot.tables.chat_language_prefs.some(
+        (r: any) => r.chat_id === testChatId && r.account_id === testAccId && r.source_lang === 'Japanese'
+      )
+    );
+    await db.prepare('DELETE FROM chat_language_prefs WHERE chat_id = ? AND account_id = ?').run(testChatId, testAccId);
+    await restoreDatabaseSnapshot(snapshot);
+    const restoredPref = (await db
+      .prepare('SELECT source_lang, target_lang FROM chat_language_prefs WHERE chat_id = ? AND account_id = ?')
+      .get(testChatId, testAccId)) as any;
+    assert.equal(restoredPref?.source_lang, 'Japanese');
+    assert.equal(restoredPref?.target_lang, 'Traditional Chinese');
+
+    await db.prepare(
+      `INSERT INTO messages (id, chat_id, account_id, sender, text, translated_text, timestamp, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+    ).run(testMsgId, testChatId, testAccId, 'peer', 'Bonjour', '', '12:01', Date.now());
+
+    const patchTransRes = await fetch(`http://127.0.0.1:${port}/api/messages/${testMsgId}/translation`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      body: JSON.stringify({ accountId: testAccId, chatId: testChatId, translatedText: '你好（重译）' }),
+    });
+    assert.equal(patchTransRes.status, 200);
+    const patchedMsg = (await db.prepare('SELECT translated_text FROM messages WHERE id = ?').get(testMsgId)) as any;
+    assert.equal(patchedMsg?.translated_text, '你好（重译）');
+  } finally {
+    await db.prepare('DELETE FROM messages WHERE id = ?').run(testMsgId);
+    await db.prepare('DELETE FROM account_customer_profiles WHERE chat_id = ? AND account_id = ?').run(testChatId, testAccId);
+    await db.prepare('DELETE FROM chat_language_prefs WHERE chat_id = ? AND account_id = ?').run(testChatId, testAccId);
+    await syncServerCustomLlmConfig(prevCfg || { enabled: true, explicitlyDisabled: false, engineMode: 'cloud', enableKnowledgeBaseRAG: true });
+    srv.closeAllConnections?.();
     await new Promise<void>((r) => srv.close(() => r()));
     if (prevJwtSecret === undefined) delete process.env.JWT_SECRET;
     else process.env.JWT_SECRET = prevJwtSecret;

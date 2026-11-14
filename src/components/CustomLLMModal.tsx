@@ -54,6 +54,7 @@ function sanitizeConfigForUi(cfg: CustomLLMConfig): CustomLLMConfig {
   return {
     ...cfg,
     enabled,
+    explicitlyDisabled: enabled ? false : Boolean(cfg.explicitlyDisabled || cfg.enabled === false),
     engineMode,
     modelName,
     protocol: inferGatewayProtocolFromUrlAndModel(baseUrl, modelName),
@@ -312,6 +313,7 @@ export const CustomLLMModal: React.FC<CustomLLMModalProps> = ({
       ...formData,
       engineMode: savingCustomPriority ? 'custom' : 'cloud',
       enabled: Boolean(formData.enabled),
+      explicitlyDisabled: !Boolean(formData.enabled),
       baseUrl: cleanBaseUrl,
       apiKey: cleanApiKey,
       modelName: cleanModelName || 'gpt-4o-mini',
@@ -431,6 +433,7 @@ export const CustomLLMModal: React.FC<CustomLLMModalProps> = ({
                         ...formData,
                         engineMode: 'cloud',
                         enabled: nextEnabled,
+                        explicitlyDisabled: !nextEnabled,
                         enableKnowledgeBaseRAG: nextEnabled,
                       });
                       setFormData(nextConfig);
@@ -446,6 +449,12 @@ export const CustomLLMModal: React.FC<CustomLLMModalProps> = ({
               {isCustomPriorityEnabled && (
                 <div className="p-2.5 rounded-lg bg-amber-500/10 border border-amber-500/30 text-[11px] text-amber-700 dark:text-amber-300 leading-relaxed">
                   当前已开启「优先自有密钥回复」，云端话术检索已自动关闭；开启此开关将自动关闭优先自有密钥并恢复云端主引擎。
+                </div>
+              )}
+
+              {!isCloudModeEnabled && !isCustomPriorityEnabled && (
+                <div className="p-2.5 rounded-lg bg-slate-500/10 border border-slate-400/30 text-[11px] text-slate-700 dark:text-slate-300 leading-relaxed">
+                  当前处于「双关状态」（官方大模型与优先自有密钥均已关闭）：AI 自动回复、客户全息记忆提炼与角色试聊已暂停，聊天翻译仅支持「谷歌机翻」；如需恢复，请开启云端引擎或优先自有密钥。
                 </div>
               )}
 
@@ -533,6 +542,7 @@ export const CustomLLMModal: React.FC<CustomLLMModalProps> = ({
                           ...formData,
                           engineMode: 'custom',
                           enabled: true,
+                          explicitlyDisabled: false,
                           enableKnowledgeBaseRAG: false,
                           baseUrl: cleanBaseUrl,
                           apiKey: cleanApiKey,
@@ -564,6 +574,7 @@ export const CustomLLMModal: React.FC<CustomLLMModalProps> = ({
                           ...formData,
                           engineMode: 'cloud',
                           enabled: false,
+                          explicitlyDisabled: true,
                           enableKnowledgeBaseRAG: false,
                         });
                         setFormData(nextConfig);
@@ -579,6 +590,11 @@ export const CustomLLMModal: React.FC<CustomLLMModalProps> = ({
               <p className="text-[11px] text-[#64748b] dark:text-[#7b93ad] leading-relaxed">
                 开启后将自动关闭云端话术检索，所有<span className="font-medium text-[#0f172a] dark:text-[#eef4fb]">聊天 AI 回复（沿用原人设与提示词）、客户记忆提炼及聊天翻译</span>统一改走下方自有密钥；开启云端开关则自动切回云端。
               </p>
+              {!isCloudModeEnabled && !isCustomPriorityEnabled && (
+                <div className="p-2.5 rounded-lg bg-slate-500/10 border border-slate-400/30 text-[11px] text-slate-700 dark:text-slate-300 leading-relaxed">
+                  当前处于「双关状态」：官方大模型与优先自有密钥均已关闭，翻译仅支持「谷歌机翻」。
+                </div>
+              )}
             </div>
 
             <div className="bg-[#f8fafc] dark:bg-[#0e1726]/85 rounded-xl border border-[#e2e8f0] dark:border-[#18273a] p-3.5 space-y-3.5">

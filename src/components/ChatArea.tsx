@@ -212,15 +212,39 @@ export function getOutboundTargetLanguage(
   return 'English';
 }
 
+function normalizeChatLangCode(lang?: string): string {
+  const raw = (lang || '').trim();
+  if (!raw) return 'auto';
+  const low = raw.toLowerCase();
+  if (low === 'auto') return 'auto';
+  if (low === 'chinese' || low === 'zh' || low === 'zh-cn' || low === 'zh-hans') return 'zh-cn';
+  if (low === 'traditional chinese' || low === 'zh-tw' || low === 'zh-hant' || low === 'zh-hk') return 'zh-tw';
+  if (low === 'english' || low === 'en' || low === 'en-us' || low === 'en-gb') return 'en';
+  if (low === 'japanese' || low === 'ja' || low === 'jp') return 'ja';
+  if (low === 'korean' || low === 'ko' || low === 'kr') return 'ko';
+  if (low === 'russian' || low === 'ru') return 'ru';
+  if (low === 'spanish' || low === 'es') return 'es';
+  if (low === 'french' || low === 'fr') return 'fr';
+  if (low === 'german' || low === 'de') return 'de';
+  if (low === 'portuguese' || low === 'pt' || low === 'pt-br') return 'pt';
+  if (low === 'italian' || low === 'it') return 'it';
+  if (low === 'arabic' || low === 'ar') return 'ar';
+  if (low === 'turkish' || low === 'türkçe' || low === 'tr') return 'tr';
+  if (low === 'vietnamese' || low === 'vi') return 'vi';
+  if (low === 'thai' || low === 'th') return 'th';
+  if (low === 'indonesian' || low === 'id') return 'id';
+  return low;
+}
+
 export function getInboundTargetLanguage(
   chat?: Chat | null,
   settings?: TranslationSettings | null
 ): string {
-  if (settings?.defaultTargetLang && settings.defaultTargetLang !== 'Auto') {
-    return settings.defaultTargetLang;
-  }
   if (chat?.targetLang && chat.targetLang !== 'Auto') {
     return chat.targetLang;
+  }
+  if (settings?.defaultTargetLang && settings.defaultTargetLang !== 'Auto') {
+    return settings.defaultTargetLang;
   }
   return 'Chinese';
 }
@@ -244,6 +268,7 @@ interface ChatAreaProps {
   onForwardMessages?: (payload: { messageIds: string[]; telegramMessageIds: number[]; toChatId: string; dropAuthor?: boolean }) => Promise<{ ok: boolean; error?: string }>;
   onEditMessage?: (messageId: string, newText: string, options?: { translatedText?: string }) => void | Promise<{ ok: boolean; error?: string } | void>;
   onUpdateMessage?: (messageId: string, patch: Partial<Message>) => void;
+  onRetranslateMessage?: (messageId: string) => void | Promise<void>;
   onRetryMessage?: (messageId: string) => Promise<{ ok: boolean; error?: string }>;
   onToggleReaction?: (messageId: string, emoji: string) => void | Promise<any>;
   onTogglePinMessage?: (messageId: string) => void | Promise<any>;
@@ -327,6 +352,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
   onForwardMessages,
   onEditMessage,
   onUpdateMessage,
+  onRetranslateMessage,
   onRetryMessage,
   onToggleReaction,
   onTogglePinMessage,
@@ -350,7 +376,11 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
   const [inputText, setInputText] = useState('');
   const [translatedPreview, setTranslatedPreview] = useState('');
   const [translatedPreviewSource, setTranslatedPreviewSource] = useState('');
+  const [previewError, setPreviewError] = useState('');
+  const [previewRetryNonce, setPreviewRetryNonce] = useState(0);
   const [isTranslatingPreview, setIsTranslatingPreview] = useState(false);
+  const previewAbortRef = useRef<AbortController | null>(null);
+  const [showOriginalMsgIds, setShowOriginalMsgIds] = useState<Set<string>>(new Set());
   const [isTranslateBarVisible, setIsTranslateBarVisible] = useState(true);
   const [isLangMenuOpen, setIsLangMenuOpen] = useState(false);
   const [langMenuSearch, setLangMenuSearch] = useState('');
@@ -1053,8 +1083,15 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
 
   // Reset translation preview & historical AI suggestion state when switching chats
   useEffect(() => {
+    if (previewAbortRef.current) {
+      previewAbortRef.current.abort();
+      previewAbortRef.current = null;
+    }
     setTranslatedPreview('');
     setTranslatedPreviewSource('');
+    setPreviewError('');
+    setIsTranslatingPreview(false);
+    setShowOriginalMsgIds(new Set());
     setAiSuggestion(null);
     setAiSuggestionTranslation(null);
     setIsTranslatingSuggestion(false);
@@ -1074,18 +1111,40 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
     setSyncNotice(null);
   }, [chat?.id]);
 
-  // Real-time input translation preview
+  // Real-time input translation preview (debounced, abortable, same-language skip)
   useEffect(() => {
-    if (!inputText.trim() || translationSettings?.autoTranslateOutbound === false || (editingMessage && !translateOnEdit)) {
+    if (previewAbortRef.current) {
+      previewAbortRef.current.abort();
+      previewAbortRef.current = null;
+    }
+
+    const queryText = inputText.trim();
+    if (!queryText || translationSettings?.autoTranslateOutbound === false || (editingMessage && !translateOnEdit)) {
       setTranslatedPreview('');
       setTranslatedPreviewSource('');
+      setPreviewError('');
+      setIsTranslatingPreview(false);
+      return;
+    }
+
+    const detectedCode = normalizeChatLangCode(detectClientLangCode(queryText));
+    const targetNormCode = normalizeChatLangCode(outboundTargetLang);
+    if (detectedCode && targetNormCode !== 'auto' && detectedCode === targetNormCode) {
+      setTranslatedPreview('');
+      setTranslatedPreviewSource('');
+      setPreviewError('');
+      setIsTranslatingPreview(false);
       return;
     }
 
     let isCurrent = true;
+    const controller = new AbortController();
+    previewAbortRef.current = controller;
+
     const timer = setTimeout(async () => {
+      if (!isCurrent || controller.signal.aborted) return;
       setIsTranslatingPreview(true);
-      const queryText = inputText.trim();
+      setPreviewError('');
       try {
         const trans = await translateText(
           queryText,
@@ -1096,17 +1155,21 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
           undefined,
           translationSettings?.geminiModel,
           translationSettings?.geminiApiKey,
-          translationSettings?.customModelName
+          translationSettings?.customModelName,
+          { signal: controller.signal }
         );
-        if (isCurrent) {
+        if (isCurrent && !controller.signal.aborted) {
           setTranslatedPreview(trans);
           setTranslatedPreviewSource(queryText);
+          setPreviewError('');
         }
       } catch (err: any) {
-        if (isCurrent) {
-          setTranslatedPreview(`⚠️ 当前通道不可用: ${err?.message || '请求失败'}`);
-          setTranslatedPreviewSource(queryText);
+        if (err?.name === 'AbortError' || controller.signal.aborted || !isCurrent) {
+          return;
         }
+        setTranslatedPreview('');
+        setTranslatedPreviewSource(queryText);
+        setPreviewError(err?.message || '请求失败');
       } finally {
         if (isCurrent) {
           setIsTranslatingPreview(false);
@@ -1117,11 +1180,23 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
     return () => {
       isCurrent = false;
       clearTimeout(timer);
+      controller.abort();
+      if (previewAbortRef.current === controller) {
+        previewAbortRef.current = null;
+      }
     };
-  }, [inputText, outboundTargetLang, translationSettings, customLLMConfig, editingMessage, translateOnEdit]);
+  }, [
+    inputText,
+    outboundTargetLang,
+    translationSettings,
+    customLLMConfig,
+    editingMessage,
+    translateOnEdit,
+    previewRetryNonce,
+  ]);
 
   // Send message
-  const handleSendText = async () => {
+  const handleSendText = async (bypassTranslation = false) => {
     if (isSending) return;
     const textToSend = inputText.trim();
     if (!textToSend || !chat) return;
@@ -1129,62 +1204,71 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
     setIsSending(true);
     try {
       const shouldAutoTranslate =
-        translationSettings?.autoTranslateOutbound !== false && (!editingMessage || translateOnEdit);
+        !bypassTranslation &&
+        translationSettings?.autoTranslateOutbound !== false &&
+        (!editingMessage || translateOnEdit);
       let targetText = textToSend;
       let translationOfTarget = '';
 
       if (shouldAutoTranslate) {
-        if (translatedPreview && translatedPreview.startsWith('⚠️ 当前通道不可用')) {
-          setSyncNotice('当前翻译通道不可用，请在顶栏设置中切换可用通道后再发送');
-          setTimeout(() => setSyncNotice(null), 4000);
-          return;
-        }
+        const inputNormCode = normalizeChatLangCode(detectClientLangCode(textToSend));
+        const targetNormCode = normalizeChatLangCode(outboundTargetLang);
+        const inboundNormCode = normalizeChatLangCode(inboundTargetLang);
+        const isAlreadyTargetLang = targetNormCode !== 'auto' && inputNormCode === targetNormCode;
 
-        // Anti-race condition protection: verify preview text matches current textToSend
-        const isPreviewFresh = translatedPreview && translatedPreviewSource === textToSend;
-        targetText = isPreviewFresh ? translatedPreview : '';
-        translationOfTarget = textToSend;
-
-        if (!targetText) {
-          try {
-            targetText = await translateText(
-              textToSend,
-              'Auto',
-              outboundTargetLang,
-              customLLMConfig,
-              translationSettings?.preferredEngine,
-              undefined,
-              translationSettings?.geminiModel,
-              translationSettings?.geminiApiKey,
-              translationSettings?.customModelName
-            );
-          } catch (err: any) {
-            setSyncNotice(`当前翻译通道不可用: ${err?.message || '请求失败'}`);
-            setTimeout(() => setSyncNotice(null), 4000);
+        if (!isAlreadyTargetLang) {
+          if (previewError && translatedPreviewSource === textToSend) {
+            showSyncNotice('翻译预览失败，可点击输入框上方「重试」或「直接发送原文」', 5000);
             return;
           }
-        }
 
-        if (detectClientLangCode(textToSend) !== 'zh-CN') {
+          // Anti-race condition protection: verify preview text matches current textToSend
+          const isPreviewFresh = Boolean(translatedPreview && translatedPreviewSource === textToSend);
+          targetText = isPreviewFresh ? translatedPreview : '';
+          translationOfTarget = textToSend;
+
+          if (!targetText) {
+            try {
+              targetText = await translateText(
+                textToSend,
+                'Auto',
+                outboundTargetLang,
+                customLLMConfig,
+                translationSettings?.preferredEngine,
+                undefined,
+                translationSettings?.geminiModel,
+                translationSettings?.geminiApiKey,
+                translationSettings?.customModelName
+              );
+            } catch (err: any) {
+              const errMsg = err?.message || '请求失败';
+              setPreviewError(errMsg);
+              setTranslatedPreview('');
+              setTranslatedPreviewSource(textToSend);
+              showSyncNotice(`翻译失败（可点击「直接发送原文」）：${errMsg}`, 5000);
+              return;
+            }
+          }
+        } else {
+          // Operator typed in target language directly -> keep targetText as typed, optionally provide inbound reading translation
           targetText = textToSend;
-          // When input text is already non-Chinese, translatedPreview was generated in the foreign target language, not Chinese.
-          // We translate the typed foreign text strictly into Chinese for operator reference.
-          try {
-            translationOfTarget = await translateText(
-              textToSend,
-              'Auto',
-              'Chinese',
-              customLLMConfig,
-              translationSettings?.preferredEngine,
-              undefined,
-              translationSettings?.geminiModel,
-              translationSettings?.geminiApiKey,
-              translationSettings?.customModelName
-            );
-          } catch (err: any) {
-            translationOfTarget = '';
-            setSyncNotice(`中文对照翻译失败: ${err?.message || '请检查翻译通道配置'}`);
-            setTimeout(() => setSyncNotice(null), 4000);
+          if (inboundNormCode !== 'auto' && inputNormCode !== inboundNormCode) {
+            try {
+              translationOfTarget = await translateText(
+                textToSend,
+                'Auto',
+                inboundTargetLang,
+                customLLMConfig,
+                translationSettings?.preferredEngine,
+                undefined,
+                translationSettings?.geminiModel,
+                translationSettings?.geminiApiKey,
+                translationSettings?.customModelName
+              );
+            } catch (err: any) {
+              translationOfTarget = '';
+              showSyncNotice(`对照翻译失败: ${err?.message || '请检查翻译通道配置'}`, 4000);
+            }
           }
         }
       } else {
@@ -1205,6 +1289,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
         setInputText('');
         setTranslatedPreview('');
         setTranslatedPreviewSource('');
+        setPreviewError('');
         return;
       }
 
@@ -1220,6 +1305,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
       setInputText('');
       setTranslatedPreview('');
       setTranslatedPreviewSource('');
+      setPreviewError('');
     } finally {
       setIsSending(false);
     }
@@ -2389,7 +2475,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                         key={lang.code}
                         type="button"
                         onClick={() => {
-                          onUpdateChatLanguage?.(chat.id, lang.code, inboundTargetLang);
+                          onUpdateChatLanguage?.(chat.id, lang.code, chat.targetLang || 'Auto');
                           setIsLangMenuOpen(false);
                           setLangMenuSearch('');
                         }}
@@ -2537,6 +2623,25 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                     >
                       <Forward className="w-3.5 h-3.5" />
                     </button>
+
+                    {/* Manual Translate / Retranslate Button */}
+                    {onRetranslateMessage &&
+                      (!msg.isAudio || msg.sttText) &&
+                      Boolean((msg.sttText || msg.text || msg.imageCaption || '').trim()) && (
+                      <button
+                        type="button"
+                        disabled={Boolean(msg.isTranslating)}
+                        onClick={() => void onRetranslateMessage(msg.id)}
+                        className="p-1 text-[#707579] hover:text-[#2481cc] dark:text-[#7f93a5] dark:hover:text-[#2ba0ff] cursor-pointer disabled:opacity-50"
+                        title={msg.translatedText ? '重新翻译' : '翻译此消息'}
+                      >
+                        {msg.isTranslating ? (
+                          <RotateCw className="w-3.5 h-3.5 animate-spin text-[#2481cc]" />
+                        ) : (
+                          <Languages className="w-3.5 h-3.5" />
+                        )}
+                      </button>
+                    )}
 
                     {/* Pin Button */}
                     <button
@@ -2852,73 +2957,169 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                 ) : (
                   /* Standard Text Message or Photo Caption */
                   <div>
-                    {!msg.isImage && !msg.isFile && !msg.isVideo && (
-                      <p className="text-[13.5px] leading-relaxed whitespace-pre-wrap break-words select-text cursor-text">
-                        {msg.text}
-                      </p>
-                    )}
-                    {msg.isImage && msg.text && msg.text.trim() && !msg.text.startsWith('[照片]') && !/\.(jpg|jpeg|png|gif|webp|bmp|svg|heic)$/i.test(msg.text.trim()) && (
-                      <p className="text-[13.5px] leading-relaxed whitespace-pre-wrap break-words select-text cursor-text mt-1">
-                        {msg.text}
-                      </p>
-                    )}
-                    {msg.isVideo && msg.text && msg.text.trim() && !msg.text.startsWith('[视频]') && !/\.(mp4|mov|webm|mkv|avi|m4v)$/i.test(msg.text.trim()) && (
-                      <p className="text-[13.5px] leading-relaxed whitespace-pre-wrap break-words select-text cursor-text mt-1">
-                        {msg.text}
-                      </p>
-                    )}
+                    {(() => {
+                      const showOriginalAndTranslation =
+                        translationSettings?.showOriginalAndTranslation !== false;
+                      const isTranslationOnlyPeer =
+                        !isMe &&
+                        !showOriginalAndTranslation &&
+                        Boolean(msg.translatedText) &&
+                        !msg.isImage &&
+                        !msg.isFile &&
+                        !msg.isVideo;
+                      const isShowingOriginalOverlay = showOriginalMsgIds.has(msg.id);
 
-                    {/* Official Telegram Inline Translation Card */}
-                    {msg.translatedText ? (
-                      <div
-                        className={`mt-2 p-2.5 rounded-xl border text-xs select-text cursor-text ${
-                          isMe
-                            ? 'bg-white/12 border-white/20 text-white/95'
-                            : 'bg-[#f8fafc] dark:bg-[#101b26]/75 border-[#e2e8f0] dark:border-white/10 text-[#1e293b] dark:text-[#e2e8f0]'
-                        }`}
-                      >
-                        <div className="flex items-center justify-between gap-2 mb-1 select-none">
-                          <span
-                            className={`inline-flex items-center gap-1 text-[10.5px] font-medium ${
-                              isMe ? 'text-white/80' : 'text-[#2481cc] dark:text-[#2ba0ff]'
-                            }`}
-                          >
-                            <Languages className="w-3 h-3" />
-                            <span>{isMe ? '已发送对照译文' : 'AI 实时译文'}</span>
-                          </span>
-                          <button
-                            type="button"
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              copyToClipboard(msg.translatedText || '', `${msg.id}_tr`);
-                            }}
-                            title="复制译文"
-                            className={`p-0.5 rounded transition-colors cursor-pointer ${
-                              isMe
-                                ? 'text-white/75 hover:text-white hover:bg-white/10'
-                                : 'text-[#64748b] hover:text-[#2481cc] hover:bg-black/5 dark:text-[#7f93a5] dark:hover:text-white'
-                            }`}
-                          >
-                            {copiedId === `${msg.id}_tr` ? (
-                              <Check className="w-3 h-3 text-emerald-400" />
-                            ) : (
-                              <Copy className="w-3 h-3" />
+                      if (isTranslationOnlyPeer) {
+                        return (
+                          <div>
+                            <p className="text-[13.5px] leading-relaxed whitespace-pre-wrap break-words select-text cursor-text">
+                              {msg.translatedText}
+                            </p>
+                            <div className="mt-1.5 flex items-center gap-2 select-none">
+                              <span className="inline-flex items-center gap-1 text-[10px] font-medium text-[#2481cc] dark:text-[#2ba0ff]">
+                                <Languages className="w-3 h-3" />
+                                <span>仅显示译文</span>
+                              </span>
+                              <button
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setShowOriginalMsgIds((prev) => {
+                                    const next = new Set(prev);
+                                    if (next.has(msg.id)) next.delete(msg.id);
+                                    else next.add(msg.id);
+                                    return next;
+                                  });
+                                }}
+                                className="text-[10.5px] text-[#64748b] dark:text-[#7f93a5] hover:text-[#2481cc] dark:hover:text-[#2ba0ff] hover:underline cursor-pointer"
+                              >
+                                {isShowingOriginalOverlay ? '收起原文' : '查看原文'}
+                              </button>
+                            </div>
+                            {isShowingOriginalOverlay && msg.text && (
+                              <div className="mt-1.5 p-2 rounded-lg bg-[#f8fafc] dark:bg-[#101b26]/75 border border-[#e2e8f0] dark:border-white/10 text-xs text-[#475569] dark:text-[#cbd5e1] select-text">
+                                <div className="text-[10px] opacity-70 mb-0.5 select-none">原文：</div>
+                                <p className="whitespace-pre-wrap break-words">{msg.text}</p>
+                              </div>
                             )}
-                          </button>
-                        </div>
-                        <p className="leading-relaxed font-normal select-text cursor-text">{msg.translatedText}</p>
-                      </div>
-                    ) : msg.translationError ? (
-                      <div
-                        className={`mt-2 pt-1.5 border-t text-[11px] select-text cursor-text ${
-                          isMe
-                            ? 'border-white/20 text-amber-200'
-                            : 'border-rose-500/20 text-rose-500 dark:text-rose-400'
-                        }`}
-                      >
-                        译文失败：{msg.translationError}
-                      </div>
-                    ) : null}
+                          </div>
+                        );
+                      }
+
+                      return (
+                        <>
+                          {!msg.isImage && !msg.isFile && !msg.isVideo && (
+                            <p className="text-[13.5px] leading-relaxed whitespace-pre-wrap break-words select-text cursor-text">
+                              {msg.text}
+                            </p>
+                          )}
+                          {msg.isImage && msg.text && msg.text.trim() && !msg.text.startsWith('[照片]') && !/\.(jpg|jpeg|png|gif|webp|bmp|svg|heic)$/i.test(msg.text.trim()) && (
+                            <p className="text-[13.5px] leading-relaxed whitespace-pre-wrap break-words select-text cursor-text mt-1">
+                              {msg.text}
+                            </p>
+                          )}
+                          {msg.isVideo && msg.text && msg.text.trim() && !msg.text.startsWith('[视频]') && !/\.(mp4|mov|webm|mkv|avi|m4v)$/i.test(msg.text.trim()) && (
+                            <p className="text-[13.5px] leading-relaxed whitespace-pre-wrap break-words select-text cursor-text mt-1">
+                              {msg.text}
+                            </p>
+                          )}
+
+                          {/* Official Telegram Inline Translation Card */}
+                          {msg.isTranslating ? (
+                            <div
+                              className={`mt-2 p-2 rounded-xl border text-[11px] flex items-center gap-1.5 ${
+                                isMe
+                                  ? 'bg-white/10 border-white/20 text-white/85'
+                                  : 'bg-[#f8fafc] dark:bg-[#101b26]/75 border-[#e2e8f0] dark:border-white/10 text-[#2481cc] dark:text-[#2ba0ff]'
+                              }`}
+                            >
+                              <RotateCw className="w-3 h-3 animate-spin shrink-0" />
+                              <span>正在翻译中...</span>
+                            </div>
+                          ) : msg.translatedText ? (
+                            <div
+                              className={`mt-2 p-2.5 rounded-xl border text-xs select-text cursor-text ${
+                                isMe
+                                  ? 'bg-white/12 border-white/20 text-white/95'
+                                  : 'bg-[#f8fafc] dark:bg-[#101b26]/75 border-[#e2e8f0] dark:border-white/10 text-[#1e293b] dark:text-[#e2e8f0]'
+                              }`}
+                            >
+                              <div className="flex items-center justify-between gap-2 mb-1 select-none">
+                                <span
+                                  className={`inline-flex items-center gap-1 text-[10.5px] font-medium ${
+                                    isMe ? 'text-white/80' : 'text-[#2481cc] dark:text-[#2ba0ff]'
+                                  }`}
+                                >
+                                  <Languages className="w-3 h-3" />
+                                  <span>{isMe ? '已发送对照译文' : 'AI 实时译文'}</span>
+                                </span>
+                                <div className="flex items-center gap-1">
+                                  {onRetranslateMessage && (
+                                    <button
+                                      type="button"
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        void onRetranslateMessage(msg.id);
+                                      }}
+                                      title="重新翻译"
+                                      className={`p-0.5 rounded transition-colors cursor-pointer ${
+                                        isMe
+                                          ? 'text-white/75 hover:text-white hover:bg-white/10'
+                                          : 'text-[#64748b] hover:text-[#2481cc] hover:bg-black/5 dark:text-[#7f93a5] dark:hover:text-white'
+                                      }`}
+                                    >
+                                      <RotateCw className="w-3 h-3" />
+                                    </button>
+                                  )}
+                                  <button
+                                    type="button"
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      copyToClipboard(msg.translatedText || '', `${msg.id}_tr`);
+                                    }}
+                                    title="复制译文"
+                                    className={`p-0.5 rounded transition-colors cursor-pointer ${
+                                      isMe
+                                        ? 'text-white/75 hover:text-white hover:bg-white/10'
+                                        : 'text-[#64748b] hover:text-[#2481cc] hover:bg-black/5 dark:text-[#7f93a5] dark:hover:text-white'
+                                    }`}
+                                  >
+                                    {copiedId === `${msg.id}_tr` ? (
+                                      <Check className="w-3 h-3 text-emerald-400" />
+                                    ) : (
+                                      <Copy className="w-3 h-3" />
+                                    )}
+                                  </button>
+                                </div>
+                              </div>
+                              <p className="leading-relaxed font-normal select-text cursor-text">{msg.translatedText}</p>
+                            </div>
+                          ) : msg.translationError ? (
+                            <div
+                              className={`mt-2 pt-1.5 border-t text-[11px] flex items-center justify-between gap-2 select-text cursor-text ${
+                                isMe
+                                  ? 'border-white/20 text-amber-200'
+                                  : 'border-rose-500/20 text-rose-500 dark:text-rose-400'
+                              }`}
+                            >
+                              <span className="min-w-0 break-words">译文失败：{msg.translationError}</span>
+                              {onRetranslateMessage && (
+                                <button
+                                  type="button"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    void onRetranslateMessage(msg.id);
+                                  }}
+                                  className="shrink-0 px-2 py-0.5 rounded bg-rose-500/15 hover:bg-rose-500/25 text-rose-600 dark:text-rose-300 font-semibold text-[10.5px] cursor-pointer"
+                                >
+                                  重试翻译
+                                </button>
+                              )}
+                            </div>
+                          ) : null}
+                        </>
+                      );
+                    })()}
                   </div>
                 )}
 
@@ -3177,12 +3378,16 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                   setAiSuggestionTranslation(null);
                   try {
                     let cnTranslation = targetTranslation || '';
-                    if (!cnTranslation && outboundTargetLang && outboundTargetLang !== 'Chinese' && outboundTargetLang !== 'zh-CN') {
+                    if (
+                      !cnTranslation &&
+                      outboundTargetLang &&
+                      normalizeChatLangCode(outboundTargetLang) !== normalizeChatLangCode(inboundTargetLang)
+                    ) {
                       try {
                         cnTranslation = await translateText(
                           targetSuggestion,
                           outboundTargetLang,
-                          'Chinese',
+                          inboundTargetLang,
                           customLLMConfig,
                           translationSettings?.preferredEngine || 'gemini',
                           undefined,
@@ -3191,7 +3396,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                           translationSettings?.customModelName
                         );
                       } catch (transErr: any) {
-                        setSyncNotice(`中文对照翻译失败: ${transErr?.message || '请检查翻译通道配置'}`);
+                        setSyncNotice(`对照翻译失败: ${transErr?.message || '请检查翻译通道配置'}`);
                         setTimeout(() => setSyncNotice(null), 4000);
                       }
                     }
@@ -3224,37 +3429,71 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
           </div>
         )}
 
-        {/* Real-time Translation Preview Strip */}
-        {Boolean(inputText.trim() && translatedPreview) && (
-          <div className="mb-2 px-3 py-1.5 bg-[#f0f7ff] dark:bg-[#1a2530] border border-[#dbeafe] dark:border-[#242f3d] rounded-xl flex items-center justify-between text-xs animate-in fade-in duration-150">
-            <div className="flex items-center gap-2 min-w-0">
-              <Languages className="w-3.5 h-3.5 text-[#2481cc] dark:text-[#2ba0ff] shrink-0" />
-              <div className="min-w-0">
-                <span className="text-[10px] text-[#64748b] dark:text-[#7f93a5] block">
-                  译文预览：
-                </span>
-                <span className="text-xs font-medium text-[#0f172a] dark:text-[#f5f7fa] truncate block">
-                  {translatedPreview}
-                </span>
+        {/* Real-time Translation Preview / Failure Recovery Strip */}
+        {Boolean(inputText.trim() && (translatedPreview || previewError)) && (
+          previewError ? (
+            <div className="mb-2 px-3 py-2 bg-rose-500/10 dark:bg-rose-500/15 border border-rose-500/30 rounded-xl flex items-center justify-between gap-2 text-xs animate-in fade-in duration-150">
+              <div className="flex items-center gap-2 min-w-0">
+                <ShieldAlert className="w-4 h-4 text-rose-500 shrink-0" />
+                <div className="min-w-0">
+                  <span className="text-[10.5px] font-semibold text-rose-600 dark:text-rose-300 block">
+                    翻译预览失败（发送未受阻，可直接发送原文）
+                  </span>
+                  <span className="text-[11px] text-rose-700 dark:text-rose-200 truncate block">
+                    {previewError}
+                  </span>
+                </div>
+              </div>
+              <div className="flex items-center gap-1.5 shrink-0">
+                <button
+                  type="button"
+                  onClick={() => setPreviewRetryNonce((n) => n + 1)}
+                  className="px-2 py-1 rounded-md bg-white/80 dark:bg-[#162333] border border-rose-500/30 hover:bg-white text-rose-600 dark:text-rose-300 text-[11px] font-semibold cursor-pointer"
+                >
+                  重试
+                </button>
+                <button
+                  type="button"
+                  disabled={isSending}
+                  onClick={() => void handleSendText(true)}
+                  className="px-2.5 py-1 rounded-md bg-rose-600 hover:bg-rose-700 text-white text-[11px] font-semibold cursor-pointer disabled:opacity-50"
+                >
+                  直接发送原文
+                </button>
               </div>
             </div>
-            <div className="flex items-center gap-1.5 shrink-0 ml-2">
-              <span className="text-[10px] text-[#64748b] dark:text-[#7f93a5]">
-                {sendWithEnter ? 'Enter' : 'Ctrl+Enter'} 发送
-              </span>
-              <button
-                type="button"
-                onClick={() => {
-                  setTranslatedPreview('');
-                  setTranslatedPreviewSource('');
-                }}
-                className="p-1 text-[#64748b] hover:text-[#0f172a] dark:hover:text-white rounded hover:bg-black/5 dark:hover:bg-white/10 cursor-pointer transition-colors"
-                title="取消此译文预览 (Esc)"
-              >
-                <X className="w-3.5 h-3.5" />
-              </button>
+          ) : (
+            <div className="mb-2 px-3 py-1.5 bg-[#f0f7ff] dark:bg-[#1a2530] border border-[#dbeafe] dark:border-[#242f3d] rounded-xl flex items-center justify-between text-xs animate-in fade-in duration-150">
+              <div className="flex items-center gap-2 min-w-0">
+                <Languages className="w-3.5 h-3.5 text-[#2481cc] dark:text-[#2ba0ff] shrink-0" />
+                <div className="min-w-0">
+                  <span className="text-[10px] text-[#64748b] dark:text-[#7f93a5] block">
+                    译文预览：
+                  </span>
+                  <span className="text-xs font-medium text-[#0f172a] dark:text-[#f5f7fa] truncate block">
+                    {translatedPreview}
+                  </span>
+                </div>
+              </div>
+              <div className="flex items-center gap-1.5 shrink-0 ml-2">
+                <span className="text-[10px] text-[#64748b] dark:text-[#7f93a5]">
+                  {sendWithEnter ? 'Enter' : 'Ctrl+Enter'} 发送
+                </span>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setTranslatedPreview('');
+                    setTranslatedPreviewSource('');
+                    setPreviewError('');
+                  }}
+                  className="p-1 text-[#64748b] hover:text-[#0f172a] dark:hover:text-white rounded hover:bg-black/5 dark:hover:bg-white/10 cursor-pointer transition-colors"
+                  title="取消此译文预览 (Esc)"
+                >
+                  <X className="w-3.5 h-3.5" />
+                </button>
+              </div>
             </div>
-          </div>
+          )
         )}
 
         {/* Reply Quote Banner above Input */}
@@ -3577,7 +3816,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                 <button
                   type="button"
                   disabled={isSending}
-                  onClick={pastedImage ? handleSendPastedImage : handleSendText}
+                  onClick={pastedImage ? handleSendPastedImage : () => void handleSendText()}
                   title={editingMessage ? '保存修改' : pastedImage ? '发送照片' : '发送消息'}
                   className={`h-8 px-3.5 rounded-lg bg-[#2481cc] hover:bg-[#1d6fb3] text-white text-xs font-medium flex items-center gap-1.5 transition-all cursor-pointer shadow-xs shrink-0 ${
                     isSending ? 'opacity-50 pointer-events-none' : ''
@@ -3727,6 +3966,30 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
             <Copy className="w-4 h-4 text-[#707579] dark:text-[#a0acb8]" />
             <span>{messageContextMenu.message.isImage ? '复制照片' : messageContextMenu.message.isVideo ? '复制视频说明' : '复制文字'}</span>
           </button>
+
+          {onRetranslateMessage &&
+            (!messageContextMenu.message.isAudio || messageContextMenu.message.sttText) &&
+            Boolean(
+              (
+                messageContextMenu.message.sttText ||
+                messageContextMenu.message.text ||
+                messageContextMenu.message.imageCaption ||
+                ''
+              ).trim()
+            ) && (
+            <button
+              type="button"
+              onClick={() => {
+                const target = messageContextMenu.message;
+                setMessageContextMenu(null);
+                void onRetranslateMessage(target.id);
+              }}
+              className="w-full flex items-center gap-2.5 px-3 py-2 rounded-xl hover:bg-black/5 dark:hover:bg-[#202b36] text-[#111827] dark:text-white cursor-pointer font-medium"
+            >
+              <Languages className="w-4 h-4 text-[#2481cc] dark:text-[#2ba0ff]" />
+              <span>{messageContextMenu.message.translatedText ? '重新翻译' : '翻译此消息'}</span>
+            </button>
+          )}
 
           <button
             type="button"

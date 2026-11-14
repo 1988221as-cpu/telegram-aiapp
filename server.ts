@@ -199,6 +199,21 @@ export const aiGenerationLimiter = rateLimit({
   statusCode: 429,
 });
 
+// Dedicated high-throughput rate limiter for translation requests (chat scroll/preview/manual retranslate)
+export const translationLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 240,
+  standardHeaders: true,
+  legacyHeaders: false,
+  validate: { trustProxy: false },
+  message: {
+    error: 'Too Many Requests',
+    message: '翻译请求频率过高，触发速率保护限制（单 IP 每分钟最多 240 次）。请稍后再试。',
+    retryAfterSeconds: 60,
+  },
+  statusCode: 429,
+});
+
 // ==================== GEMINI API & CIRCUIT BREAKER ====================
 let geminiQuotaBlockedUntil = 0;
 let geminiQuotaBlockReason = '';
@@ -575,13 +590,23 @@ function buildRailwayAuthHeaders(
 
 function sanitizePublicCustomLlmConfig(config: any): any {
   if (!config || typeof config !== 'object') return config;
-  const clean = { ...config };
+  const unwrapped =
+    config.config && typeof config.config === 'object' && 'success' in config
+      ? config.config
+      : config;
+  const { success: _s, config: _c, settings: _st, ...clean } = unwrapped as any;
   if (typeof clean.baseUrl === 'string' && isBuiltInCloudGatewayUrl(clean.baseUrl)) {
     clean.baseUrl = '';
     if (!clean.engineMode) clean.engineMode = 'cloud';
   }
   if (typeof clean.knowledgeBaseApiUrl === 'string' && isBuiltInCloudGatewayUrl(clean.knowledgeBaseApiUrl)) {
     clean.knowledgeBaseApiUrl = '';
+  }
+  if (clean.enabled === true) {
+    clean.explicitlyDisabled = false;
+  } else if (clean.enabled === false) {
+    clean.explicitlyDisabled = true;
+    clean.enableKnowledgeBaseRAG = false;
   }
   if (clean.engineMode === 'custom' && clean.enabled) {
     clean.enableKnowledgeBaseRAG = false;
@@ -627,18 +652,22 @@ export function normalizeStrictTranslationEngine(engine?: string): 'google' | 'g
 
 export async function syncServerTranslationSettings(settings: any) {
   if (!settings || typeof settings !== 'object') return;
-  const normalizedEngine = normalizeStrictTranslationEngine(settings.preferredEngine) || 'gemini';
+  const raw =
+    settings.settings && typeof settings.settings === 'object' && 'success' in settings
+      ? settings.settings
+      : settings;
+  const normalizedEngine = normalizeStrictTranslationEngine(raw.preferredEngine) || 'gemini';
   const clean = {
-    defaultSourceLang: typeof settings.defaultSourceLang === 'string' ? settings.defaultSourceLang : 'Auto',
-    defaultTargetLang: typeof settings.defaultTargetLang === 'string' ? settings.defaultTargetLang : 'Chinese',
-    autoTranslateInbound: settings.autoTranslateInbound !== false,
-    autoTranslateOutbound: settings.autoTranslateOutbound !== false,
-    showOriginalAndTranslation: settings.showOriginalAndTranslation !== false,
+    defaultSourceLang: typeof raw.defaultSourceLang === 'string' ? raw.defaultSourceLang : 'Auto',
+    defaultTargetLang: typeof raw.defaultTargetLang === 'string' ? raw.defaultTargetLang : 'Chinese',
+    autoTranslateInbound: raw.autoTranslateInbound !== false,
+    autoTranslateOutbound: raw.autoTranslateOutbound !== false,
+    showOriginalAndTranslation: raw.showOriginalAndTranslation !== false,
     preferredEngine: normalizedEngine,
-    geminiModel: typeof settings.geminiModel === 'string' ? settings.geminiModel.trim() : '',
-    geminiApiKey: typeof settings.geminiApiKey === 'string' ? settings.geminiApiKey.trim() : '',
-    googleApiKey: typeof settings.googleApiKey === 'string' ? settings.googleApiKey.trim() : '',
-    customModelName: typeof settings.customModelName === 'string' ? settings.customModelName.trim() : '',
+    geminiModel: typeof raw.geminiModel === 'string' ? raw.geminiModel.trim() : '',
+    geminiApiKey: typeof raw.geminiApiKey === 'string' ? raw.geminiApiKey.trim() : '',
+    googleApiKey: typeof raw.googleApiKey === 'string' ? raw.googleApiKey.trim() : '',
+    customModelName: typeof raw.customModelName === 'string' ? raw.customModelName.trim() : '',
   };
   activeServerTranslationSettings = { ...clean };
   try {
@@ -655,9 +684,14 @@ export async function getServerTranslationSettings(): Promise<any> {
   try {
     const row = (await db.prepare("SELECT value FROM system_config WHERE key = 'translation_settings'").get()) as any;
     if (row && row.value) {
-      const parsed = JSON.parse(row.value);
-      const normalizedEngine = normalizeStrictTranslationEngine(parsed?.preferredEngine) || 'gemini';
-      activeServerTranslationSettings = { ...parsed, preferredEngine: normalizedEngine };
+      const parsedRaw = JSON.parse(row.value);
+      const parsed =
+        parsedRaw && typeof parsedRaw === 'object' && parsedRaw.settings && typeof parsedRaw.settings === 'object' && 'success' in parsedRaw
+          ? parsedRaw.settings
+          : parsedRaw;
+      const { success: _s, config: _c, settings: _st, ...cleanParsed } = parsed || {};
+      const normalizedEngine = normalizeStrictTranslationEngine(cleanParsed?.preferredEngine) || 'gemini';
+      activeServerTranslationSettings = { ...cleanParsed, preferredEngine: normalizedEngine };
       return activeServerTranslationSettings;
     }
   } catch {}
@@ -4237,6 +4271,30 @@ app.get('/api/chats', requireTenantAuth, async (req: Request, res: Response) => 
       (a, b) => Number(b?.updated_at || 0) - Number(a?.updated_at || 0)
     );
 
+    // Load persisted per-chat language preferences scoped to this account
+    const langPrefsMap = new Map<string, { sourceLang: string; targetLang: string }>();
+    try {
+      const langRows = (await db.prepare(`
+        SELECT account_id, chat_id, source_lang, target_lang
+        FROM chat_language_prefs
+        WHERE account_id IN (${accPlaceholders})
+           OR (account_id = 'acc_telegram_bot' AND ? IN ('acc_telegram_bot', 'acc_1'))
+      `).all(...accVariants, effectiveAccountId)) as any[];
+      for (const lr of langRows || []) {
+        const scKey = `${lr.account_id}::${lr.chat_id}`;
+        langPrefsMap.set(scKey, {
+          sourceLang: lr.source_lang || 'Auto',
+          targetLang: lr.target_lang || 'Chinese',
+        });
+        if (!langPrefsMap.has(lr.chat_id)) {
+          langPrefsMap.set(lr.chat_id, {
+            sourceLang: lr.source_lang || 'Auto',
+            targetLang: lr.target_lang || 'Chinese',
+          });
+        }
+      }
+    } catch {}
+
     // Retrieve latest message for each chat strictly scoped to this account
     const chatsData = await Promise.all(
       profiles.map(async (p: any) => {
@@ -4249,6 +4307,7 @@ app.get('/api/chats', requireTenantAuth, async (req: Request, res: Response) => 
         `).get(p.chat_id, p.account_id)) as any;
 
         const isTgOfficial = p.chat_id.startsWith('tg_');
+        const langPref = langPrefsMap.get(`${p.account_id}::${p.chat_id}`) || langPrefsMap.get(p.chat_id);
         return {
           id: p.chat_id,
           accountId: p.account_id,
@@ -4260,8 +4319,8 @@ app.get('/api/chats', requireTenantAuth, async (req: Request, res: Response) => 
           lastMessage: lastMsg?.is_audio ? '🎤 语音消息' : (lastMsg?.translated_text || lastMsg?.text || '暂无消息'),
           lastTime: lastMsg?.timestamp || '刚刚',
           unreadCount: 0,
-          sourceLang: 'Auto',
-          targetLang: 'Chinese',
+          sourceLang: langPref?.sourceLang || 'Auto',
+          targetLang: langPref?.targetLang || 'Chinese',
           aiEnabled: true,
           aiMode: 'adaptive',
           typingDelayMin: 2,
@@ -4273,6 +4332,45 @@ app.get('/api/chats', requireTenantAuth, async (req: Request, res: Response) => 
     res.json(chatsData);
   } catch (err: any) {
     res.status(500).json({ error: err.message });
+  }
+});
+
+// 1.4 Persist per-chat translation language preferences scoped to account + chatId
+app.post('/api/chats/:chatId/language', requireTenantAuth, async (req: Request, res: Response) => {
+  try {
+    const { chatId } = req.params;
+    const authContext = (req as any).auth;
+    const bodyAccId = typeof req.body?.accountId === 'string' ? req.body.accountId.trim() : '';
+    const effectiveAccountId = bodyAccId || authContext?.effectiveAccountId || 'acc_1';
+    const sourceLang = typeof req.body?.sourceLang === 'string' && req.body.sourceLang.trim()
+      ? req.body.sourceLang.trim()
+      : 'Auto';
+    const targetLang = typeof req.body?.targetLang === 'string' && req.body.targetLang.trim()
+      ? req.body.targetLang.trim()
+      : 'Chinese';
+    if (!chatId || !chatId.trim()) {
+      return res.status(400).json({ ok: false, error: '缺少有效的会话 chatId' });
+    }
+    const now = Date.now();
+    await db.prepare(`
+      INSERT INTO chat_language_prefs (account_id, chat_id, source_lang, target_lang, updated_at)
+      VALUES (?, ?, ?, ?, ?)
+      ON CONFLICT(account_id, chat_id) DO UPDATE SET
+        source_lang = excluded.source_lang,
+        target_lang = excluded.target_lang,
+        updated_at = excluded.updated_at
+    `).run(effectiveAccountId, chatId.trim(), sourceLang, targetLang, now);
+
+    res.json({
+      ok: true,
+      accountId: effectiveAccountId,
+      chatId: chatId.trim(),
+      sourceLang,
+      targetLang,
+      updatedAt: now,
+    });
+  } catch (err: any) {
+    res.status(500).json({ ok: false, error: err?.message || '保存会话语言配置失败' });
   }
 });
 
@@ -5422,6 +5520,63 @@ app.delete('/api/messages/:id', requireTenantAuth, async (req: Request, res: Res
   }
 });
 
+// 3.5 Persist translatedText update (for inbound auto-translation & manual retranslation)
+app.patch('/api/messages/:id/translation', requireTenantAuth, async (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+    const { translatedText, chatId: rawChatId, telegramMessageId: rawTgId, accountId: rawAccountId } = req.body || {};
+    if (typeof translatedText !== 'string') {
+      return res.status(400).json({ ok: false, error: 'translatedText 必须为字符串' });
+    }
+    const authContext = (req as any).auth;
+    const effectiveAccountId =
+      (typeof rawAccountId === 'string' && rawAccountId.trim()) ||
+      authContext?.effectiveAccountId ||
+      'acc_1';
+    const isMaster = Boolean(authContext?.session?.isMaster);
+    const accVariants = getScopedAccountIdVariants(effectiveAccountId);
+    if ((effectiveAccountId === 'acc_telegram_bot' || effectiveAccountId === 'acc_1') && !accVariants.includes('acc_telegram_bot')) {
+      accVariants.push('acc_telegram_bot');
+    }
+    const accPlaceholders = accVariants.map(() => '?').join(', ');
+    const chatId = typeof rawChatId === 'string' ? rawChatId.trim() : '';
+    const altChatId = chatId ? (chatId.startsWith('tg_') ? chatId.replace(/^tg_/, '') : `tg_${chatId}`) : '';
+    const tgMsgId =
+      typeof rawTgId === 'number' && Number.isFinite(rawTgId)
+        ? rawTgId
+        : resolveTelegramMessageNumericId(id);
+
+    let totalChanges = 0;
+    const idWhere = ['id = ?'];
+    const idParams: any[] = [translatedText, id];
+    if (chatId) {
+      idWhere.push('(chat_id = ? OR chat_id = ?)');
+      idParams.push(chatId, altChatId);
+    }
+    if (!isMaster) {
+      idWhere.push(`account_id IN (${accPlaceholders})`);
+      idParams.push(...accVariants);
+    }
+    const idRes = await db.prepare(`UPDATE messages SET translated_text = ? WHERE ${idWhere.join(' AND ')}`).run(...idParams);
+    totalChanges += Number((idRes as any)?.changes || 0);
+
+    if (tgMsgId && chatId) {
+      const tgWhere = ['(chat_id = ? OR chat_id = ?)', 'telegram_message_id = ?'];
+      const tgParams: any[] = [translatedText, chatId, altChatId, tgMsgId];
+      if (!isMaster) {
+        tgWhere.push(`account_id IN (${accPlaceholders})`);
+        tgParams.push(...accVariants);
+      }
+      const tgRes = await db.prepare(`UPDATE messages SET translated_text = ? WHERE ${tgWhere.join(' AND ')}`).run(...tgParams);
+      totalChanges += Number((tgRes as any)?.changes || 0);
+    }
+
+    res.json({ ok: true, updated: totalChanges > 0, changes: totalChanges });
+  } catch (err: any) {
+    res.status(500).json({ ok: false, error: err?.message || '更新译文失败' });
+  }
+});
+
 // 4. Fetch Customer Profile & Long-Term Memory
 app.get('/api/customer/profile/:chatId', requireTenantAuth, async (req: Request, res: Response) => {
   try {
@@ -5520,6 +5675,36 @@ app.post('/api/customer/analyze/:chatId', requireTenantAuth, async (req: Request
     const { customConfig, messages: clientMessages, chatTitle } = req.body;
     const authContext = (req as any).auth;
     const effectiveAccountId = authContext?.effectiveAccountId || req.body?.accountId || 'acc_1';
+
+    const serverCustomCfg = await getServerCustomLlmConfig().catch(() => null);
+    const effectiveAnalyzeConfig =
+      customConfig && typeof customConfig === 'object'
+        ? {
+            ...(serverCustomCfg || {}),
+            ...customConfig,
+            enabled:
+              typeof customConfig.enabled === 'boolean'
+                ? customConfig.enabled
+                : serverCustomCfg?.enabled !== false,
+            explicitlyDisabled:
+              typeof customConfig.enabled === 'boolean'
+                ? !customConfig.enabled
+                : Boolean(customConfig.explicitlyDisabled ?? serverCustomCfg?.explicitlyDisabled),
+            baseUrl: (customConfig.baseUrl || serverCustomCfg?.baseUrl || '').trim(),
+            apiKey: (customConfig.apiKey || serverCustomCfg?.apiKey || '').trim(),
+            modelName: (customConfig.modelName || serverCustomCfg?.modelName || 'gpt-4o-mini').trim(),
+          }
+        : serverCustomCfg;
+
+    if (
+      effectiveAnalyzeConfig &&
+      (effectiveAnalyzeConfig.enabled === false || effectiveAnalyzeConfig.explicitlyDisabled)
+    ) {
+      return res.status(400).json({
+        success: false,
+        error: '未配置可用的大模型（当前处于双关状态：官方大模型与自有密钥均已关闭），请先在「模型」开启任一引擎后再提炼全息记忆。',
+      });
+    }
 
     // Unify messages from DB cache, Telegram Official Cloud, and client real-time local state
     const resolved = await resolveUnifiedChatMessages({
@@ -5664,17 +5849,6 @@ ${conversationTranscript}`;
     if (bearerJwt) {
       lastActiveUserJwt = bearerJwt;
     }
-    const serverCustomCfg = await getServerCustomLlmConfig().catch(() => null);
-    const effectiveAnalyzeConfig =
-      customConfig && typeof customConfig === 'object'
-        ? {
-            ...(serverCustomCfg || {}),
-            ...customConfig,
-            baseUrl: (customConfig.baseUrl || serverCustomCfg?.baseUrl || '').trim(),
-            apiKey: (customConfig.apiKey || serverCustomCfg?.apiKey || '').trim(),
-            modelName: (customConfig.modelName || serverCustomCfg?.modelName || 'gpt-4o-mini').trim(),
-          }
-        : serverCustomCfg;
 
     const useCustomPriorityMemory = Boolean(
       effectiveAnalyzeConfig?.enabled && effectiveAnalyzeConfig?.engineMode === 'custom'
@@ -6448,12 +6622,38 @@ ${rag.matchedCount > 0 && rag.context ? `【专属知识库命中参考（自然
     let reply = '';
     let replySource = '';
     const bearerJwt = extractBearerToken(req);
+    const serverPersonaCfg = await getServerCustomLlmConfig().catch(() => null);
+    const effectivePersonaConfig =
+      customConfig && typeof customConfig === 'object'
+        ? {
+            ...(serverPersonaCfg || {}),
+            ...customConfig,
+            enabled:
+              typeof customConfig.enabled === 'boolean'
+                ? customConfig.enabled
+                : serverPersonaCfg?.enabled !== false,
+            explicitlyDisabled:
+              typeof customConfig.enabled === 'boolean'
+                ? !customConfig.enabled
+                : Boolean(customConfig.explicitlyDisabled ?? serverPersonaCfg?.explicitlyDisabled),
+          }
+        : serverPersonaCfg;
+
+    if (
+      effectivePersonaConfig &&
+      (effectivePersonaConfig.enabled === false || effectivePersonaConfig.explicitlyDisabled)
+    ) {
+      return res.status(400).json({
+        success: false,
+        error: '未配置可用的大模型（当前处于双关状态：官方大模型与自有密钥均已关闭），无法执行人设试聊，请先在「模型」开启任一引擎。',
+      });
+    }
 
     // 1. Strictly enforce Custom LLM / Cloud Brain when enabled — NEVER fall back to Gemini or fake templates
-    if (customConfig?.enabled) {
+    if (effectivePersonaConfig?.enabled) {
       try {
         const customRes = await callCustomLlm({
-          customConfig,
+          customConfig: effectivePersonaConfig,
           systemInstruction,
           messages: [{ role: 'user', content: message }],
           temperature: 0.7,
@@ -6470,9 +6670,10 @@ ${rag.matchedCount > 0 && rag.context ? `【专属知识库命中参考（自然
         }
         reply = customRes.trim();
         replySource =
-          customConfig?.engineMode === 'cloud' || (customConfig?.engineMode !== 'custom' && !customConfig?.baseUrl?.trim())
+          effectivePersonaConfig?.engineMode === 'cloud' ||
+          (effectivePersonaConfig?.engineMode !== 'custom' && !effectivePersonaConfig?.baseUrl?.trim())
             ? 'lingxi_cloud_brain'
-            : `custom_llm:${customConfig.modelName || 'custom'}`;
+            : `custom_llm:${effectivePersonaConfig.modelName || 'custom'}`;
       } catch (err: any) {
         return res.status(503).json({
           success: false,
@@ -6568,7 +6769,16 @@ export async function invokeEvolutionOrAnalysisLlm({
   userJwt?: string;
   timeoutMs?: number;
 }): Promise<{ text: string; source: string; usedBackendCustomLlm: boolean }> {
-  const effectiveCustomConfig = customConfig?.enabled ? customConfig : await getServerCustomLlmConfig();
+  const serverCustomCfg = await getServerCustomLlmConfig().catch(() => null);
+  const isExplicitDualOff = Boolean(
+    (customConfig && (customConfig.enabled === false || customConfig.explicitlyDisabled)) ||
+      (!customConfig && serverCustomCfg && (serverCustomCfg.enabled === false || serverCustomCfg.explicitlyDisabled))
+  );
+  if (isExplicitDualOff) {
+    throw new Error('未配置可用的大模型（当前处于双关状态：官方大模型与自有密钥均已关闭，请在「模型」开启任一引擎）');
+  }
+
+  const effectiveCustomConfig = customConfig?.enabled ? customConfig : serverCustomCfg;
 
   if (effectiveCustomConfig?.enabled) {
     const reply = await callCustomLlm({
@@ -7022,6 +7232,9 @@ export function clearRailwayKbCache(): void {
 
 export function isCloudKnowledgeBaseEnabled(config?: any): boolean {
   if (config && typeof config === 'object') {
+    if (config.enabled === false || config.explicitlyDisabled) {
+      return false;
+    }
     if (config.engineMode === 'custom') {
       return false;
     }
@@ -7757,6 +7970,70 @@ export function mapLanguageCode(lang: string): string {
     'mni-Mtei': 'mni-Mtei',
     nso: 'nso',
     jw: 'jv',
+    Assamese: 'as',
+    as: 'as',
+    Aymara: 'ay',
+    ay: 'ay',
+    Bambara: 'bm',
+    bm: 'bm',
+    Basque: 'eu',
+    eu: 'eu',
+    Chichewa: 'ny',
+    ny: 'ny',
+    Corsican: 'co',
+    co: 'co',
+    Dhivehi: 'dv',
+    dv: 'dv',
+    Dogri: 'doi',
+    doi: 'doi',
+    Esperanto: 'eo',
+    eo: 'eo',
+    Ewe: 'ee',
+    ee: 'ee',
+    Frisian: 'fy',
+    fy: 'fy',
+    Guarani: 'gn',
+    gn: 'gn',
+    'Haitian Creole': 'ht',
+    ht: 'ht',
+    Kinyarwanda: 'rw',
+    rw: 'rw',
+    Latin: 'la',
+    la: 'la',
+    Lingala: 'ln',
+    ln: 'ln',
+    Luganda: 'lg',
+    lg: 'lg',
+    Luxembourgish: 'lb',
+    lb: 'lb',
+    Odia: 'or',
+    Oriya: 'or',
+    or: 'or',
+    Oromo: 'om',
+    om: 'om',
+    Quechua: 'qu',
+    qu: 'qu',
+    Samoan: 'sm',
+    sm: 'sm',
+    Sanskrit: 'sa',
+    sa: 'sa',
+    'Scots Gaelic': 'gd',
+    gd: 'gd',
+    Sesotho: 'st',
+    st: 'st',
+    Shona: 'sn',
+    sn: 'sn',
+    Sindhi: 'sd',
+    sd: 'sd',
+    Tsonga: 'ts',
+    ts: 'ts',
+    Twi: 'ak',
+    Akan: 'ak',
+    ak: 'ak',
+    Xhosa: 'xh',
+    xh: 'xh',
+    Yiddish: 'yi',
+    yi: 'yi',
   };
   if (map[clean]) return map[clean];
   // Preserve valid 2/3-letter ISO-639 codes or BCP-47 subtags (e.g. "mni-Mtei", "ceb", "pt-BR")
@@ -7769,6 +8046,32 @@ const PROMPT_LANGUAGE_NAMES: Record<string, string> = {
   'zh-CN': 'Simplified Chinese (简体中文)',
   'Traditional Chinese': 'Traditional Chinese (繁體中文)',
   'zh-TW': 'Traditional Chinese (繁體中文)',
+  English: 'English',
+  en: 'English',
+  Russian: 'Russian',
+  ru: 'Russian',
+  Spanish: 'Spanish',
+  es: 'Spanish',
+  Arabic: 'Arabic',
+  ar: 'Arabic',
+  Japanese: 'Japanese',
+  ja: 'Japanese',
+  Korean: 'Korean',
+  ko: 'Korean',
+  Portuguese: 'Portuguese',
+  pt: 'Portuguese',
+  Vietnamese: 'Vietnamese',
+  vi: 'Vietnamese',
+  French: 'French',
+  fr: 'French',
+  German: 'German',
+  de: 'German',
+  Indonesian: 'Indonesian',
+  id: 'Indonesian',
+  Thai: 'Thai',
+  th: 'Thai',
+  Turkish: 'Turkish',
+  tr: 'Turkish',
   yue: 'Cantonese (粵語)',
   it: 'Italian',
   nl: 'Dutch',
@@ -7816,44 +8119,86 @@ const PROMPT_LANGUAGE_NAMES: Record<string, string> = {
   af: 'Afrikaans',
   sq: 'Albanian',
   am: 'Amharic',
+  as: 'Assamese',
+  ay: 'Aymara',
+  bm: 'Bambara',
+  eu: 'Basque',
   be: 'Belarusian',
+  bho: 'Bhojpuri',
   bs: 'Bosnian',
   ca: 'Catalan',
   ceb: 'Cebuano',
-  ckb: 'Kurdish (Sorani)',
-  ku: 'Kurdish (Kurmanji)',
+  ny: 'Chichewa',
+  co: 'Corsican',
+  dv: 'Dhivehi',
+  doi: 'Dogri',
+  eo: 'Esperanto',
   et: 'Estonian',
+  ee: 'Ewe',
+  fy: 'Frisian',
   gl: 'Galician',
+  gn: 'Guarani',
+  ht: 'Haitian Creole',
   ha: 'Hausa',
+  haw: 'Hawaiian',
+  hmn: 'Hmong',
   is: 'Icelandic',
   ig: 'Igbo',
+  ilo: 'Ilocano',
   ga: 'Irish',
   jv: 'Javanese',
+  rw: 'Kinyarwanda',
+  gom: 'Konkani',
+  kri: 'Krio',
+  ckb: 'Kurdish (Sorani)',
+  ku: 'Kurdish (Kurmanji)',
   ky: 'Kyrgyz',
+  la: 'Latin',
   lv: 'Latvian',
+  ln: 'Lingala',
   lt: 'Lithuanian',
+  lg: 'Luganda',
+  lb: 'Luxembourgish',
   mk: 'Macedonian',
+  mai: 'Maithili',
   mg: 'Malagasy',
   mt: 'Maltese',
   mi: 'Māori',
   'mni-Mtei': 'Meiteilon (Manipuri)',
+  lus: 'Mizo',
+  or: 'Odia (Oriya)',
+  om: 'Oromo',
   ps: 'Pashto',
+  qu: 'Quechua',
+  sm: 'Samoan',
+  sa: 'Sanskrit',
+  gd: 'Scots Gaelic',
+  nso: 'Sepedi',
+  st: 'Sesotho',
+  sn: 'Shona',
+  sd: 'Sindhi',
   so: 'Somali',
   su: 'Sundanese',
   tg: 'Tajik',
   tt: 'Tatar',
   ti: 'Tigrinya',
+  ts: 'Tsonga',
   tk: 'Turkmen',
+  ak: 'Twi / Akan',
   ug: 'Uyghur',
   cy: 'Welsh',
+  xh: 'Xhosa',
+  yi: 'Yiddish',
   yo: 'Yoruba',
   zu: 'Zulu',
 };
 
-function resolvePromptLanguageName(lang: string): string {
+export function resolvePromptLanguageName(lang: string): string {
   const clean = (lang || '').trim();
   if (!clean) return 'English';
-  return PROMPT_LANGUAGE_NAMES[clean] || clean;
+  if (PROMPT_LANGUAGE_NAMES[clean]) return PROMPT_LANGUAGE_NAMES[clean];
+  const mapped = mapLanguageCode(clean);
+  return PROMPT_LANGUAGE_NAMES[mapped] || clean;
 }
 
 export function detectSourceLangCode(text: string): string {
@@ -8234,8 +8579,8 @@ export async function performStrictTranslation({
   };
 }
 
-// 7. Translation Endpoint (Strictly single selected engine, zero cascading or unofficial scraping)
-app.post('/api/translate', aiGenerationLimiter, async (req: Request, res: Response) => {
+// 7. Translation Endpoint (Strictly single selected engine + 3-state mutual exclusion, zero silent hijack)
+app.post('/api/translate', translationLimiter, requireTenantAuth, async (req: Request, res: Response) => {
   try {
     const {
       text,
@@ -8262,9 +8607,6 @@ app.post('/api/translate', aiGenerationLimiter, async (req: Request, res: Respon
     }
 
     const userJwt = extractBearerToken(req);
-    if (userJwt) {
-      lastActiveUserJwt = userJwt;
-    }
 
     // Resolve saved local user keys/gateways as fallback ONLY if not passed in body
     const savedTransSettings = await getServerTranslationSettings();
@@ -8295,23 +8637,54 @@ app.post('/api/translate', aiGenerationLimiter, async (req: Request, res: Respon
         ? {
             ...(savedCustomConfig || {}),
             ...customConfig,
+            enabled:
+              typeof customConfig.enabled === 'boolean'
+                ? customConfig.enabled
+                : savedCustomConfig?.enabled !== false,
+            explicitlyDisabled:
+              typeof customConfig.enabled === 'boolean'
+                ? !customConfig.enabled
+                : Boolean(customConfig.explicitlyDisabled ?? savedCustomConfig?.explicitlyDisabled),
             baseUrl: customConfig.baseUrl || savedCustomConfig?.baseUrl || '',
             apiKey: customConfig.apiKey || savedCustomConfig?.apiKey || '',
           }
         : savedCustomConfig;
 
-    const isPriorityCustomGateway = Boolean(
-      effectiveCustomConfig?.enabled && effectiveCustomConfig?.engineMode === 'custom'
+    const isDualOff = Boolean(
+      effectiveCustomConfig &&
+      (effectiveCustomConfig.enabled === false || effectiveCustomConfig.explicitlyDisabled)
     );
-    if (strictEngine === 'custom_llm' && !isPriorityCustomGateway) {
-      return res.status(400).json({ error: '请开启自定义优先回复' });
+    const isPriorityCustomGateway = Boolean(
+      !isDualOff && effectiveCustomConfig?.enabled && effectiveCustomConfig?.engineMode === 'custom'
+    );
+
+    if (isDualOff) {
+      if (strictEngine !== 'google') {
+        return res.status(400).json({
+          error:
+            strictEngine === 'gemini'
+              ? '当前处于双关状态（官方大模型与自有密钥均已关闭），仅支持「谷歌机翻」；如需使用谷歌大模型请先开启「启用 HumanSense 云端引擎与话术检索」。'
+              : '当前处于双关状态，禁止使用「自定义模型」翻译；请先开启「启用优先自有密钥回复」或改用「谷歌机翻」。',
+        });
+      }
+    } else if (isPriorityCustomGateway) {
+      if (strictEngine !== 'custom_llm') {
+        return res.status(400).json({
+          error:
+            '已开启「优先自有密钥回复」，官方大模型已强制关闭，当前仅允许使用「自定义模型」翻译；如需使用谷歌机翻或谷歌大模型，请先关闭优先自有密钥回复。',
+        });
+      }
+    } else {
+      if (strictEngine === 'custom_llm') {
+        return res.status(400).json({
+          error:
+            '当前处于「官方大模型优先」状态，不可选择自定义模型翻译；如需使用自定义翻译通道，请先前往「模型」开启「启用优先自有密钥回复」。',
+        });
+      }
     }
-    const resolvedTranslateEngine: 'google' | 'gemini' | 'custom_llm' = isPriorityCustomGateway
-      ? 'custom_llm'
-      : strictEngine;
-    const resolvedCustomModelName = isPriorityCustomGateway && strictEngine !== 'custom_llm'
-      ? (effectiveCustomConfig?.modelName || effectiveCustomModelName || 'gpt-4o-mini')
-      : effectiveCustomModelName;
+
+    const resolvedTranslateEngine: 'google' | 'gemini' | 'custom_llm' = strictEngine;
+    const resolvedCustomModelName = effectiveCustomModelName;
 
     const effectiveLicenseKey =
       (typeof engineLicenseKey === 'string' && engineLicenseKey.trim()) ||
@@ -8682,10 +9055,22 @@ async function getCnTranslationIfForeign(text: string, overrideCustomConfig?: an
   try {
     const transSettings = await getServerTranslationSettings();
     const customConfig = overrideCustomConfig || (await getServerCustomLlmConfig());
-    const isPriorityCustom = Boolean(customConfig?.enabled && customConfig?.engineMode === 'custom');
+    const isDualOff = Boolean(
+      customConfig && (customConfig.enabled === false || customConfig.explicitlyDisabled)
+    );
+    const isPriorityCustom = Boolean(
+      !isDualOff && customConfig?.enabled && customConfig?.engineMode === 'custom'
+    );
     const configuredEngine = normalizeStrictTranslationEngine(transSettings?.preferredEngine) || 'gemini';
-    const engine: 'google' | 'gemini' | 'custom_llm' = isPriorityCustom ? 'custom_llm' : configuredEngine;
-    const resolvedCustomModel = isPriorityCustom && configuredEngine !== 'custom_llm'
+    let engine: 'google' | 'gemini' | 'custom_llm';
+    if (isDualOff) {
+      engine = 'google';
+    } else if (isPriorityCustom) {
+      engine = 'custom_llm';
+    } else {
+      engine = configuredEngine === 'google' ? 'google' : 'gemini';
+    }
+    const resolvedCustomModel = isPriorityCustom
       ? (customConfig?.modelName || transSettings?.customModelName || 'gpt-4o-mini')
       : (transSettings?.customModelName || customConfig?.modelName);
     const result = await performStrictTranslation({
@@ -9018,6 +9403,34 @@ app.post('/api/llm/chat', aiGenerationLimiter, requireTenantAuth, async (req: Re
 
     const authContext = (req as any).auth;
 
+    // Enforce Dual-Off strict guard (when both Cloud & Custom engines are disabled, forbid all LLM generation)
+    const serverCustomCfgForChat = await getServerCustomLlmConfig().catch(() => null);
+    const effectiveChatConfig =
+      customConfig && typeof customConfig === 'object'
+        ? {
+            ...(serverCustomCfgForChat || {}),
+            ...customConfig,
+            enabled:
+              typeof customConfig.enabled === 'boolean'
+                ? customConfig.enabled
+                : serverCustomCfgForChat?.enabled !== false,
+            explicitlyDisabled:
+              typeof customConfig.enabled === 'boolean'
+                ? !customConfig.enabled
+                : Boolean(customConfig.explicitlyDisabled ?? serverCustomCfgForChat?.explicitlyDisabled),
+          }
+        : serverCustomCfgForChat;
+    if (
+      effectiveChatConfig &&
+      (effectiveChatConfig.enabled === false || effectiveChatConfig.explicitlyDisabled)
+    ) {
+      return res.status(400).json({
+        error: '未配置可用的大模型：当前处于双关状态（官方大模型与自有密钥均已关闭），请先在「模型」开启「官方大模型」或「优先自有密钥回复」。',
+        blocked: true,
+        source: 'llm_dual_off_guard',
+      });
+    }
+
     // Step 2: Read & normalize current Customer ID + Account ID
     const { customerId, altCustomerId, accountId } = resolveCanonicalChatIds(
       chatId,
@@ -9161,10 +9574,10 @@ ${memoryGuideline}`;
     const recentChatText = recent30Messages.slice(-4).map((m) => m.text).join(' ');
     const userJwt = extractBearerToken(req);
 
-    if (isCloudKnowledgeBaseEnabled(customConfig)) {
-      const kbUrl = customConfig?.knowledgeBaseApiUrl;
-      const kbApiKey = customConfig?.knowledgeBaseApiKey || customConfig?.apiKey;
-      const engineKey = customConfig?.engineLicenseKey;
+    if (isCloudKnowledgeBaseEnabled(effectiveChatConfig)) {
+      const kbUrl = effectiveChatConfig?.knowledgeBaseApiUrl;
+      const kbApiKey = effectiveChatConfig?.knowledgeBaseApiKey || effectiveChatConfig?.apiKey;
+      const engineKey = effectiveChatConfig?.engineLicenseKey;
       let kbResult: RemoteKbSearchResult;
       try {
         kbResult = await searchRailwayKnowledgeBase(recentChatText, kbUrl, kbApiKey, 5000, userJwt, engineKey);
@@ -9303,11 +9716,11 @@ ${transcriptContext}${langRequirement}`;
 
     // Step 8: Send to Cloud API / Custom LLM Gateway with HTTPS Timeout & Exponential Backoff Retry
     const isCloudBrainChat =
-      customConfig?.engineMode === 'cloud' ||
-      (customConfig?.enabled && customConfig?.engineMode !== 'custom' && !customConfig?.baseUrl?.trim());
-    if (customConfig?.enabled) {
+      effectiveChatConfig?.engineMode === 'cloud' ||
+      (effectiveChatConfig?.enabled && effectiveChatConfig?.engineMode !== 'custom' && !effectiveChatConfig?.baseUrl?.trim());
+    if (effectiveChatConfig?.enabled) {
       if (!isCloudBrainChat) {
-        const customUrl = (customConfig?.baseUrl || '').trim();
+        const customUrl = (effectiveChatConfig?.baseUrl || '').trim();
         if (!customUrl || isBuiltInCloudGatewayUrl(customUrl)) {
           return res.status(400).json({
             error: '已启用优先自有密钥回复，但 Base URL 未配置或无效，严禁降级自动回复。',
@@ -9325,7 +9738,7 @@ ${transcriptContext}${langRequirement}`;
             source: 'custom_llm_disconnection_guard',
           });
         }
-        if (!String(customConfig?.apiKey || '').trim() && !isLocalUrl) {
+        if (!String(effectiveChatConfig?.apiKey || '').trim() && !isLocalUrl) {
           return res.status(400).json({
             error: '已启用优先自有密钥回复，但缺少 API 密钥，严禁降级自动回复。',
             blocked: true,
@@ -9336,24 +9749,24 @@ ${transcriptContext}${langRequirement}`;
       try {
         const cleanBaseUrl = isCloudBrainChat
           ? `${getRailwayBrainBaseUrl()}/v1`
-          : customConfig.baseUrl.trim().replace(/\/+$/, '');
+          : effectiveChatConfig.baseUrl.trim().replace(/\/+$/, '');
         const effectiveChatProtocol = isCloudBrainChat
           ? 'openai'
-          : inferGatewayProtocol(cleanBaseUrl, customConfig.modelName, customConfig.protocol);
+          : inferGatewayProtocol(cleanBaseUrl, effectiveChatConfig.modelName, effectiveChatConfig.protocol);
         let extraHeaders: Record<string, string> = {};
-        if (customConfig.customHeaders) {
-          try { extraHeaders = JSON.parse(customConfig.customHeaders); } catch {}
+        if (effectiveChatConfig.customHeaders) {
+          try { extraHeaders = JSON.parse(effectiveChatConfig.customHeaders); } catch {}
         }
 
         if (!isCloudBrainChat && effectiveChatProtocol === 'gemini') {
-          const targetUrl = buildCustomGeminiUrl(cleanBaseUrl, customConfig.modelName);
+          const targetUrl = buildCustomGeminiUrl(cleanBaseUrl, effectiveChatConfig.modelName);
 
           const contents = recent30Messages.map((m) => ({
             role: m.sender === 'peer' ? 'user' : 'model',
             parts: [{ text: m.text }],
           }));
 
-          const cleanKey = sanitizeHttpHeaderValue(customConfig.apiKey);
+          const cleanKey = sanitizeHttpHeaderValue(effectiveChatConfig.apiKey);
           const headers: Record<string, string> = {
             'Content-Type': 'application/json',
             ...(cleanKey
@@ -9373,7 +9786,7 @@ ${transcriptContext}${langRequirement}`;
                 contents,
                 systemInstruction: { parts: [{ text: fullSystemInstruction }] },
                 generationConfig: {
-                  temperature: customConfig.temperature ?? 0.7,
+                  temperature: effectiveChatConfig.temperature ?? 0.7,
                   maxOutputTokens: 500,
                 },
               }),
@@ -9386,19 +9799,19 @@ ${transcriptContext}${langRequirement}`;
             const replyText = d?.candidates?.[0]?.content?.parts?.[0]?.text?.trim();
             if (replyText) {
               void incrementEvolutionHabitUsage(injectedHabitIds);
-              const cnTranslation = await getCnTranslationIfForeign(replyText, customConfig);
+              const cnTranslation = await getCnTranslationIfForeign(replyText, effectiveChatConfig);
               return res.json({
                 replyText,
                 cnTranslation,
                 source: 'custom_llm',
-                model: customConfig.modelName,
+                model: effectiveChatConfig.modelName,
                 pipeline: pipelineMeta,
               });
             }
           }
         } else if (!isCloudBrainChat && effectiveChatProtocol === 'anthropic') {
           const candidateUrls = buildCustomAnthropicUrls(cleanBaseUrl);
-          const cleanKey = sanitizeHttpHeaderValue(customConfig.apiKey);
+          const cleanKey = sanitizeHttpHeaderValue(effectiveChatConfig.apiKey);
           const headers: Record<string, string> = {
             'Content-Type': 'application/json',
             'anthropic-version': '2023-06-01',
@@ -9409,7 +9822,7 @@ ${transcriptContext}${langRequirement}`;
             recent30Messages,
             fullSystemInstruction
           );
-          const rawTemp = Number(customConfig.temperature ?? 0.7);
+          const rawTemp = Number(effectiveChatConfig.temperature ?? 0.7);
           const anthropicTemp = Number.isFinite(rawTemp) ? Math.min(Math.max(rawTemp, 0), 1) : 0.7;
 
           for (const targetUrl of candidateUrls) {
@@ -9420,7 +9833,7 @@ ${transcriptContext}${langRequirement}`;
                   method: 'POST',
                   headers,
                   body: JSON.stringify({
-                    model: customConfig.modelName || 'claude-3-5-sonnet-20241022',
+                    model: effectiveChatConfig.modelName || 'claude-3-5-sonnet-20241022',
                     max_tokens: 500,
                     temperature: anthropicTemp,
                     ...(anthropicSystem ? { system: anthropicSystem } : {}),
@@ -9441,12 +9854,12 @@ ${transcriptContext}${langRequirement}`;
                   : '';
                 if (replyText) {
                   void incrementEvolutionHabitUsage(injectedHabitIds);
-                  const cnTranslation = await getCnTranslationIfForeign(replyText, customConfig);
+                  const cnTranslation = await getCnTranslationIfForeign(replyText, effectiveChatConfig);
                   return res.json({
                     replyText,
                     cnTranslation,
                     source: 'custom_llm',
-                    model: customConfig.modelName,
+                    model: effectiveChatConfig.modelName,
                     pipeline: pipelineMeta,
                   });
                 }
@@ -9460,12 +9873,12 @@ ${transcriptContext}${langRequirement}`;
 
           const headers: Record<string, string> = isCloudBrainChat
             ? {
-                ...buildRailwayAuthHeaders(customConfig.apiKey, userJwt, customConfig.engineLicenseKey),
+                ...buildRailwayAuthHeaders(effectiveChatConfig.apiKey, userJwt, effectiveChatConfig.engineLicenseKey),
                 ...extraHeaders,
               }
             : {
                 'Content-Type': 'application/json',
-                ...(customConfig.apiKey ? { Authorization: `Bearer ${customConfig.apiKey}` } : {}),
+                ...(effectiveChatConfig.apiKey ? { Authorization: `Bearer ${effectiveChatConfig.apiKey}` } : {}),
                 ...extraHeaders,
               };
 
@@ -9478,9 +9891,9 @@ ${transcriptContext}${langRequirement}`;
           ];
 
           const requestBody: Record<string, any> = {
-            model: customConfig.modelName || (isCloudBrainChat ? 'gemini-4-hydrogen' : 'gpt-4o-mini'),
+            model: effectiveChatConfig.modelName || (isCloudBrainChat ? 'gemini-4-hydrogen' : 'gpt-4o-mini'),
             messages: formattedMessages,
-            temperature: customConfig.temperature ?? 0.7,
+            temperature: effectiveChatConfig.temperature ?? 0.7,
             max_tokens: 500,
             ...(isCloudBrainChat ? { contextPayload: structuredJsonRequest } : {}),
           };
@@ -9502,12 +9915,12 @@ ${transcriptContext}${langRequirement}`;
                 const replyText = data?.choices?.[0]?.message?.content?.trim();
                 if (replyText) {
                   void incrementEvolutionHabitUsage(injectedHabitIds);
-                  const cnTranslation = await getCnTranslationIfForeign(replyText, customConfig);
+                  const cnTranslation = await getCnTranslationIfForeign(replyText, effectiveChatConfig);
                   return res.json({
                     replyText,
                     cnTranslation,
                     source: isCloudBrainChat ? 'lingxi_cloud_brain' : 'custom_llm',
-                    model: data?.model || customConfig.modelName,
+                    model: data?.model || effectiveChatConfig.modelName,
                     pipeline: pipelineMeta,
                   });
                 }
@@ -9542,7 +9955,7 @@ ${transcriptContext}${langRequirement}`;
     const lastUserMsg = recent30Messages[recent30Messages.length - 1]?.text || '';
     const routeDecision = determineChatRouting(lastUserMsg, recent30Messages, matchedKnowledgeCount);
     const targetModel = resolveGeminiModel(
-      req.body.model || customConfig?.geminiModel || customConfig?.modelName || routeDecision.selectedModel,
+      req.body.model || effectiveChatConfig?.geminiModel || effectiveChatConfig?.modelName || routeDecision.selectedModel,
       'chat'
     );
     let chatErrorMsg = '';
@@ -9576,7 +9989,7 @@ ${transcriptContext}${langRequirement}`;
 
           if (rawText) {
             void incrementEvolutionHabitUsage(injectedHabitIds);
-            const cnTranslation = await getCnTranslationIfForeign(rawText);
+            const cnTranslation = await getCnTranslationIfForeign(rawText, effectiveChatConfig);
             return res.json({
               replyText: rawText,
               cnTranslation,
@@ -11505,7 +11918,7 @@ ${dialogueTranscript}
       } catch (err: any) {
         console.warn('[Telegram Webhook Custom LLM Guard]: 自定义大模型失败，严格保持静默（严禁切回 Gemini）:', err?.message || err);
       }
-    } else if (isGeminiAvailable()) {
+    } else if (!(serverCustomConfig && (serverCustomConfig.enabled === false || serverCustomConfig.explicitlyDisabled)) && isGeminiAvailable()) {
       const targetModel = resolveGeminiModel(serverCustomConfig?.geminiModel, 'chat');
       try {
         const ai = createGeminiClient();
@@ -14293,7 +14706,34 @@ app.get('/api/telegram/user/dialogs', requireTenantAuth, async (req: Request, re
     }
 
     // Refresh dialogs directly from Telegram MTProto
-    const dialogs = await fetchTelegramUserDialogs(connected.client, 150, connected.userId);
+    const rawDialogs = await fetchTelegramUserDialogs(connected.client, 150, connected.userId);
+    const effectiveAccId = accountId || (req as any).auth?.effectiveAccountId || `acc_tg_${connected.userId}`;
+    const dialogAccVariants = getScopedAccountIdVariants(effectiveAccId);
+    const tgPrefAcc = `acc_tg_${connected.userId}`;
+    if (!dialogAccVariants.includes(tgPrefAcc)) dialogAccVariants.push(tgPrefAcc);
+
+    const dialogLangPrefs = new Map<string, { sourceLang: string; targetLang: string }>();
+    try {
+      const ph = dialogAccVariants.map(() => '?').join(', ');
+      const prefRows = (await db.prepare(`
+        SELECT chat_id, source_lang, target_lang
+        FROM chat_language_prefs
+        WHERE account_id IN (${ph})
+      `).all(...dialogAccVariants)) as any[];
+      for (const r of prefRows || []) {
+        dialogLangPrefs.set(r.chat_id, {
+          sourceLang: r.source_lang || 'Auto',
+          targetLang: r.target_lang || 'Chinese',
+        });
+      }
+    } catch {}
+
+    const dialogs = rawDialogs.map((d: any) => {
+      const pref = dialogLangPrefs.get(d.id);
+      return pref
+        ? { ...d, sourceLang: pref.sourceLang, targetLang: pref.targetLang }
+        : d;
+    });
     connected.dialogs = dialogs;
 
     res.json({
@@ -19921,7 +20361,7 @@ ${kbContext}${langConstraint}
                 } catch (autoLlmErr: any) {
                   console.warn("[HumanSense Autopilot Custom LLM Guard]: 自定义大模型/云端引擎未连通，严格保持静默（严禁切回 Gemini）:", autoLlmErr.message);
                 }
-              } else if (isGeminiAvailable()) {
+              } else if (!(serverCustomConfig && (serverCustomConfig.enabled === false || serverCustomConfig.explicitlyDisabled)) && isGeminiAvailable()) {
                 const targetModel = resolveGeminiModel(serverCustomConfig?.geminiModel, 'chat');
                 try {
                   const ai = createGeminiClient();

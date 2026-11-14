@@ -367,6 +367,16 @@ export async function initDatabase() {
       created_at INTEGER NOT NULL,
       updated_at INTEGER NOT NULL
     );
+
+    -- 7. Per-chat Persistent Language Preferences
+    CREATE TABLE IF NOT EXISTS chat_language_prefs (
+      account_id TEXT NOT NULL,
+      chat_id TEXT NOT NULL,
+      source_lang TEXT NOT NULL DEFAULT 'Auto',
+      target_lang TEXT NOT NULL DEFAULT 'Chinese',
+      updated_at INTEGER NOT NULL,
+      PRIMARY KEY (account_id, chat_id)
+    );
   `);
 
   try {
@@ -625,13 +635,14 @@ export const snapshotFilePath = path.join(dbDir, 'telegram_pro_snapshot.json');
 
 // Export entire database contents into a portable JSON snapshot (Excludes sensitive telegram_user_sessions)
 export async function exportDatabaseSnapshot() {
-  const [messages, profiles, accountProfiles, knowledge, transcripts, config] = await Promise.all([
+  const [messages, profiles, accountProfiles, knowledge, transcripts, config, chatLangPrefs] = await Promise.all([
     turso.execute('SELECT * FROM messages'),
     turso.execute('SELECT * FROM customer_profiles'),
     turso.execute('SELECT * FROM account_customer_profiles'),
     turso.execute('SELECT * FROM knowledge_base'),
     turso.execute('SELECT * FROM chat_transcripts'),
     turso.execute('SELECT * FROM system_config'),
+    turso.execute('SELECT * FROM chat_language_prefs').catch(() => ({ rows: [] as any[] })),
   ]);
 
   const safeConfigRows = (config.rows || [])
@@ -663,6 +674,7 @@ export async function exportDatabaseSnapshot() {
       accountProfiles: accountProfiles.rows.length,
       knowledge: knowledge.rows.length,
       transcripts: transcripts.rows.length,
+      chatLanguagePrefs: (chatLangPrefs?.rows || []).length,
       userSessions: 0, // Explicitly excluded for security: sessions must never be exported
     },
     tables: {
@@ -672,6 +684,7 @@ export async function exportDatabaseSnapshot() {
       knowledge_base: knowledge.rows,
       chat_transcripts: transcripts.rows,
       system_config: safeConfigRows,
+      chat_language_prefs: chatLangPrefs?.rows || [],
       // telegram_user_sessions & sensitive credentials intentionally excluded to protect authentication credentials
     },
   };
@@ -872,6 +885,40 @@ export async function restoreDatabaseSnapshot(snapshot: any): Promise<{ success:
     }
   }
 
+  let restoredConfigCount = 0;
+  if (Array.isArray(tables.system_config)) {
+    for (const c of tables.system_config) {
+      const cfgKey = String(c?.key || '').trim();
+      if (!cfgKey || cfgKey === 'telegram_api_credentials' || cfgKey === 'custom_llm_config') {
+        continue;
+      }
+      if (typeof c?.value !== 'string') continue;
+      await db.prepare(`
+        INSERT OR REPLACE INTO system_config (key, value, updated_at)
+        VALUES (?, ?, ?)
+      `).run(cfgKey, c.value, Number(c.updated_at) || Date.now());
+      restoredConfigCount++;
+    }
+  }
+
+  let restoredLangPrefCount = 0;
+  if (Array.isArray(tables.chat_language_prefs)) {
+    for (const lp of tables.chat_language_prefs) {
+      if (!lp?.chat_id) continue;
+      await db.prepare(`
+        INSERT OR REPLACE INTO chat_language_prefs (account_id, chat_id, source_lang, target_lang, updated_at)
+        VALUES (?, ?, ?, ?, ?)
+      `).run(
+        String(lp.account_id || 'acc_1'),
+        String(lp.chat_id),
+        String(lp.source_lang || 'Auto'),
+        String(lp.target_lang || 'Chinese'),
+        Number(lp.updated_at) || Date.now()
+      );
+      restoredLangPrefCount++;
+    }
+  }
+
   return {
     success: true,
     restoredCounts: {
@@ -882,6 +929,8 @@ export async function restoreDatabaseSnapshot(snapshot: any): Promise<{ success:
       transcripts: tables.chat_transcripts?.length || 0,
       materials: tables.media_materials?.length || 0,
       personas: tables.persona_schedule_vault?.length || 0,
+      systemConfig: restoredConfigCount,
+      chatLanguagePrefs: restoredLangPrefCount,
       userSessions: tables.telegram_user_sessions?.length || 0,
     },
   };

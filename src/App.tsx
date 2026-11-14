@@ -69,7 +69,11 @@ import {
   saveLocalCustomerProfile,
   translateText,
   syncCustomLLMConfigApi,
+  fetchCustomLLMConfigApi,
   syncTranslationSettingsApi,
+  fetchTranslationSettingsApi,
+  saveChatLanguagePrefApi,
+  updateMessageTranslationInDb,
   isBuiltInCloudGatewayUrl,
   initSessionHandshake,
   fetchAuthStatus,
@@ -165,9 +169,27 @@ function mapCloudDialogToChat(d: any, accountId: string, existing?: Chat): Chat 
     unreadCount: typeof d.unreadCount === 'number' ? d.unreadCount : (existing?.unreadCount || 0),
     readOutboxMaxId: typeof d.readOutboxMaxId === 'number' ? d.readOutboxMaxId : existing?.readOutboxMaxId,
     readInboxMaxId: typeof d.readInboxMaxId === 'number' ? d.readInboxMaxId : existing?.readInboxMaxId,
-    sourceLang: existing?.sourceLang || 'Auto',
-    targetLang: existing?.targetLang || 'Chinese',
+    sourceLang: existing?.sourceLang || d.sourceLang || 'Auto',
+    targetLang: existing?.targetLang || d.targetLang || 'Auto',
   };
+}
+
+function enforceTranslationEngineForLlm(
+  cfg: Partial<CustomLLMConfig> | null | undefined,
+  trans: TranslationSettings
+): TranslationSettings {
+  const isDualOff = Boolean(cfg && (cfg.enabled === false || cfg.explicitlyDisabled));
+  const isCustomPriority = Boolean(!isDualOff && cfg?.enabled && cfg?.engineMode === 'custom');
+  if (isDualOff && trans.preferredEngine !== 'google') {
+    return { ...trans, preferredEngine: 'google' };
+  }
+  if (isCustomPriority && trans.preferredEngine !== 'custom_llm') {
+    return { ...trans, preferredEngine: 'custom_llm' };
+  }
+  if (!isDualOff && !isCustomPriority && trans.preferredEngine === 'custom_llm') {
+    return { ...trans, preferredEngine: 'gemini' };
+  }
+  return trans;
 }
 
 function formatChatMessageSummary(msg: Partial<Message>, emptyFallback = '暂无消息'): string {
@@ -623,26 +645,58 @@ export default function App() {
         setMessagesMap(reconstructed);
       }
 
-      if (savedTrans) {
-        const rawEngine = (savedTrans as any).preferredEngine;
+      const rawSavedLlm =
+        savedLLM && typeof savedLLM === 'object' && (savedLLM as any).config && typeof (savedLLM as any).config === 'object'
+          ? (savedLLM as any).config
+          : savedLLM;
+
+      const normalizedSavedLlm: CustomLLMConfig | null = rawSavedLlm
+        ? {
+            ...INITIAL_CUSTOM_LLM,
+            ...rawSavedLlm,
+            explicitlyDisabled: rawSavedLlm.enabled === false ? true : Boolean(rawSavedLlm.explicitlyDisabled),
+            engineMode:
+              rawSavedLlm.engineMode ||
+              (rawSavedLlm.baseUrl && !isBuiltInCloudGatewayUrl(rawSavedLlm.baseUrl) ? 'custom' : 'cloud'),
+            baseUrl: isBuiltInCloudGatewayUrl(rawSavedLlm.baseUrl) ? '' : rawSavedLlm.baseUrl,
+            knowledgeBaseApiUrl: isBuiltInCloudGatewayUrl(rawSavedLlm.knowledgeBaseApiUrl)
+              ? ''
+              : rawSavedLlm.knowledgeBaseApiUrl,
+          }
+        : null;
+
+      if (normalizedSavedLlm) {
+        delete (normalizedSavedLlm as any).success;
+        delete (normalizedSavedLlm as any).config;
+        delete (normalizedSavedLlm as any).settings;
+        setCustomLLMConfig(normalizedSavedLlm);
+      }
+
+      const rawSavedTrans =
+        savedTrans && typeof savedTrans === 'object' && (savedTrans as any).settings && typeof (savedTrans as any).settings === 'object'
+          ? (savedTrans as any).settings
+          : savedTrans;
+
+      if (rawSavedTrans) {
+        const rawEngine = (rawSavedTrans as any).preferredEngine;
         const normalizedEngine: 'gemini' | 'google' | 'custom_llm' =
           rawEngine === 'google' || rawEngine === 'custom_llm' || rawEngine === 'gemini' ? rawEngine : 'gemini';
-        const rawModel = String((savedTrans as any).geminiModel || '').toLowerCase();
+        const rawModel = String((rawSavedTrans as any).geminiModel || '').toLowerCase();
         const normalizedGemmaModel = rawModel.includes('31b') ? 'gemma-4-31b-it' : 'gemma-4-26b-a4b-it';
-        setTranslationSettings({
+        const mergedTrans: TranslationSettings = {
           ...INITIAL_TRANSLATION_SETTINGS,
-          ...savedTrans,
+          ...rawSavedTrans,
           preferredEngine: normalizedEngine,
           geminiModel: normalizedGemmaModel,
-        });
-      }
-      if (savedLLM) {
-        setCustomLLMConfig({
-          ...savedLLM,
-          engineMode: savedLLM.engineMode || (savedLLM.baseUrl && !isBuiltInCloudGatewayUrl(savedLLM.baseUrl) ? 'custom' : 'cloud'),
-          baseUrl: isBuiltInCloudGatewayUrl(savedLLM.baseUrl) ? '' : savedLLM.baseUrl,
-          knowledgeBaseApiUrl: isBuiltInCloudGatewayUrl(savedLLM.knowledgeBaseApiUrl) ? '' : savedLLM.knowledgeBaseApiUrl,
-        });
+        };
+        delete (mergedTrans as any).success;
+        delete (mergedTrans as any).config;
+        delete (mergedTrans as any).settings;
+        setTranslationSettings(
+          normalizedSavedLlm ? enforceTranslationEngineForLlm(normalizedSavedLlm, mergedTrans) : mergedTrans
+        );
+      } else if (normalizedSavedLlm) {
+        setTranslationSettings((prev) => enforceTranslationEngineForLlm(normalizedSavedLlm, prev));
       }
 
       if (isRestore) {
@@ -720,20 +774,69 @@ export default function App() {
         if (!active) return;
         const storedUser = getStoredMemberUser();
         setTotalMembersCount(status.totalMembers || 0);
-        if (handshake.authenticated && handshake.user) {
-          setCurrentMember(storedUser ? { ...storedUser, ...handshake.user } : handshake.user);
+        if ((handshake.authenticated && handshake.user) || (status.authenticated && status.user)) {
+          const authUser = (handshake.authenticated && handshake.user ? handshake.user : status.user) || null;
+          setCurrentMember(storedUser && authUser ? { ...storedUser, ...authUser } : authUser);
+          const hasLocalLlm = Boolean(secureGetItemSync<CustomLLMConfig>('tg_pro_llm_config'));
+          const hasLocalTrans = Boolean(secureGetItemSync<TranslationSettings>('tg_pro_trans_settings'));
+          let resolvedLlm: CustomLLMConfig | null = null;
+          if (!hasLocalLlm || !hasLocalTrans) {
+            const [serverLlm, serverTrans] = await Promise.all([
+              !hasLocalLlm ? fetchCustomLLMConfigApi() : Promise.resolve(null),
+              !hasLocalTrans ? fetchTranslationSettingsApi() : Promise.resolve(null),
+            ]);
+            if (!active) return;
+            if (serverLlm && !hasLocalLlm) {
+              const unwrappedLlm: any =
+                (serverLlm as any).config && typeof (serverLlm as any).config === 'object'
+                  ? (serverLlm as any).config
+                  : serverLlm;
+              const nextResolvedLlm: CustomLLMConfig = {
+                ...INITIAL_CUSTOM_LLM,
+                ...unwrappedLlm,
+                explicitlyDisabled: unwrappedLlm.enabled === false ? true : Boolean(unwrappedLlm.explicitlyDisabled),
+                engineMode:
+                  unwrappedLlm.engineMode ||
+                  (unwrappedLlm.baseUrl && !isBuiltInCloudGatewayUrl(unwrappedLlm.baseUrl) ? 'custom' : 'cloud'),
+                baseUrl: isBuiltInCloudGatewayUrl(unwrappedLlm.baseUrl) ? '' : (unwrappedLlm.baseUrl || ''),
+                knowledgeBaseApiUrl: '',
+              };
+              delete (nextResolvedLlm as any).success;
+              delete (nextResolvedLlm as any).config;
+              delete (nextResolvedLlm as any).settings;
+              resolvedLlm = nextResolvedLlm;
+              setCustomLLMConfig(nextResolvedLlm);
+            }
+            if (serverTrans && !hasLocalTrans) {
+              const unwrappedTrans: any =
+                (serverTrans as any).settings && typeof (serverTrans as any).settings === 'object'
+                  ? (serverTrans as any).settings
+                  : serverTrans;
+              const rawEngine = unwrappedTrans?.preferredEngine;
+              const normalizedEngine: 'gemini' | 'google' | 'custom_llm' =
+                rawEngine === 'google' || rawEngine === 'custom_llm' || rawEngine === 'gemini'
+                  ? rawEngine
+                  : 'gemini';
+              const rawModel = String(unwrappedTrans?.geminiModel || '').toLowerCase();
+              const normalizedGemmaModel = rawModel.includes('31b') ? 'gemma-4-31b-it' : 'gemma-4-26b-a4b-it';
+              const mergedServerTrans: TranslationSettings = {
+                ...INITIAL_TRANSLATION_SETTINGS,
+                ...unwrappedTrans,
+                preferredEngine: normalizedEngine,
+                geminiModel: normalizedGemmaModel,
+              };
+              delete (mergedServerTrans as any).success;
+              delete (mergedServerTrans as any).config;
+              delete (mergedServerTrans as any).settings;
+              setTranslationSettings((prev) =>
+                enforceTranslationEngineForLlm(resolvedLlm || customLLMConfigRef.current, { ...prev, ...mergedServerTrans })
+              );
+            }
+          }
           setIsMemberAuthenticated(true);
           setCustomLLMConfig((prev) =>
-            !prev.enabled && prev.engineMode !== 'custom' && !prev.baseUrl?.trim()
-              ? { ...prev, enabled: true, engineMode: 'cloud', enableKnowledgeBaseRAG: true }
-              : prev
-          );
-        } else if (status.authenticated && status.user) {
-          setCurrentMember(storedUser ? { ...storedUser, ...status.user } : status.user);
-          setIsMemberAuthenticated(true);
-          setCustomLLMConfig((prev) =>
-            !prev.enabled && prev.engineMode !== 'custom' && !prev.baseUrl?.trim()
-              ? { ...prev, enabled: true, engineMode: 'cloud', enableKnowledgeBaseRAG: true }
+            !prev.enabled && !prev.explicitlyDisabled && prev.engineMode !== 'custom' && !prev.baseUrl?.trim()
+              ? { ...prev, enabled: true, explicitlyDisabled: false, engineMode: 'cloud', enableKnowledgeBaseRAG: true }
               : prev
           );
         } else {
@@ -809,13 +912,14 @@ export default function App() {
 
   useEffect(() => {
     if (!isHydrated) return;
-    const isCustomPriority = Boolean(customLLMConfig.enabled && customLLMConfig.engineMode === 'custom');
-    if (!isCustomPriority && translationSettings.preferredEngine === 'custom_llm') {
-      setTranslationSettings((prev) =>
-        prev.preferredEngine === 'custom_llm' ? { ...prev, preferredEngine: 'gemini' } : prev
-      );
-    }
-  }, [isHydrated, customLLMConfig.enabled, customLLMConfig.engineMode, translationSettings.preferredEngine]);
+    setTranslationSettings((prev) => enforceTranslationEngineForLlm(customLLMConfig, prev));
+  }, [
+    isHydrated,
+    customLLMConfig.enabled,
+    customLLMConfig.explicitlyDisabled,
+    customLLMConfig.engineMode,
+    translationSettings.preferredEngine,
+  ]);
 
   const markAccountExpiredUi = (accId: string, errorReason?: string) => {
     if (!accId) return;
@@ -1002,7 +1106,13 @@ export default function App() {
               const bucketKey = msgBucketKey(dbc.accountId || targetAccId, dbc.id);
               const existing = map.get(bucketKey);
               if (existing) {
-                map.set(bucketKey, { ...existing, lastMessage: dbc.lastMessage, lastTime: dbc.lastTime });
+                map.set(bucketKey, {
+                  ...existing,
+                  lastMessage: dbc.lastMessage,
+                  lastTime: dbc.lastTime,
+                  sourceLang: existing.sourceLang || dbc.sourceLang || 'Auto',
+                  targetLang: existing.targetLang || dbc.targetLang || 'Chinese',
+                });
               } else {
                 map.set(bucketKey, dbc);
               }
@@ -1630,36 +1740,50 @@ export default function App() {
                 ? matchedChatForLang.targetLang
                 : currentTransSettings.defaultTargetLang) || 'Chinese';
 
+            const trimmedIncomingText = (incomingMsg.text || '').trim();
+            const isMediaPlaceholder =
+              !trimmedIncomingText ||
+              /^\[(语音|视频|图片|多媒体|文件)消息\]$/.test(trimmedIncomingText) ||
+              trimmedIncomingText.startsWith('🎤') ||
+              trimmedIncomingText.startsWith('🖼️') ||
+              trimmedIncomingText.startsWith('🎬') ||
+              trimmedIncomingText.startsWith('📁');
+
             if (
               currentTransSettings.autoTranslateInbound !== false &&
               incomingMsg.sender === 'peer' &&
-              incomingMsg.text &&
-              !incomingMsg.text.startsWith('🎤') &&
-              !incomingMsg.text.startsWith('🖼️') &&
+              !isMediaPlaceholder &&
               !incomingMsg.translatedText
             ) {
-              const strictEngine =
-                currentTransSettings.preferredEngine === 'google' ||
-                currentTransSettings.preferredEngine === 'custom_llm' ||
-                currentTransSettings.preferredEngine === 'gemini'
-                  ? currentTransSettings.preferredEngine
-                  : 'gemini';
+              const effectiveInboundEngine = enforceTranslationEngineForLlm(
+                currentLLMConfig,
+                currentTransSettings
+              ).preferredEngine;
+              const inboundSourceLang =
+                matchedChatForLang?.sourceLang && matchedChatForLang.sourceLang !== 'Auto'
+                  ? matchedChatForLang.sourceLang
+                  : 'Auto';
 
               translateText(
                 incomingMsg.text,
-                'Auto',
+                inboundSourceLang,
                 inboundTargetLang,
                 currentLLMConfig,
-                strictEngine,
+                effectiveInboundEngine,
                 undefined,
                 currentTransSettings.geminiModel,
                 currentTransSettings.geminiApiKey,
                 currentTransSettings.customModelName
               )
                 .then((trans) => {
-                  if (trans && trans !== incomingMsg.text) {
+                  if (trans && trans.trim() && trans.trim() !== trimmedIncomingText) {
                     const withTrans: Message = { ...incomingMsg, translatedText: trans, translationError: undefined };
                     saveLocalMessage(targetChatId, withTrans, targetAccountId);
+                    updateMessageTranslationInDb(incomingMsg.id, trans, {
+                      chatId: targetChatId,
+                      telegramMessageId: incomingMsg.telegramMessageId,
+                      accountId: targetAccountId,
+                    }).catch(() => {});
                     setMessagesMap((prevMap) => {
                       const list = getBucketMessages(prevMap, targetAccountId, targetChatId);
                       return {
@@ -1705,8 +1829,8 @@ export default function App() {
                   avatarBg: '#2481cc',
                   isGroup: false,
                   isVerified: isOfficialNotice,
-                  sourceLang: 'auto',
-                  targetLang: currentTransSettings.defaultTargetLang || 'zh-CN',
+                  sourceLang: 'Auto',
+                  targetLang: 'Auto',
                 };
                 return [newChat, ...prev];
               }
@@ -2207,42 +2331,37 @@ export default function App() {
       }
       return updated;
     });
+    if (isMemberAuthenticated) {
+      saveChatLanguagePrefApi(chatId, sourceLang, targetLang, activeAccountId).catch(() => {});
+    }
   };
 
   const handleSaveCustomLLMConfig = (nextConfig: CustomLLMConfig) => {
     setCustomLLMConfig(nextConfig);
-    const isCustomPriority = Boolean(nextConfig.enabled && nextConfig.engineMode === 'custom');
-    if (!isCustomPriority && translationSettings.preferredEngine === 'custom_llm') {
-      setTranslationSettings((prev) =>
-        prev.preferredEngine === 'custom_llm' ? { ...prev, preferredEngine: 'gemini' } : prev
-      );
-    }
+    setTranslationSettings((prev) => enforceTranslationEngineForLlm(nextConfig, prev));
   };
 
-  // Update global translation settings
+  // Update global translation settings (enforces strict 3-state mutual exclusion; preserves per-chat overrides)
   const handleUpdateTranslationSettings = (newSettings: TranslationSettings) => {
-    const isCustomPriority = Boolean(customLLMConfig.enabled && customLLMConfig.engineMode === 'custom');
-    if (newSettings.preferredEngine === 'custom_llm' && !isCustomPriority) {
-      showCloudError('请开启自定义优先回复');
+    const isDualOff = Boolean(
+      customLLMConfig.enabled === false || customLLMConfig.explicitlyDisabled
+    );
+    const isCustomPriority = Boolean(
+      !isDualOff && customLLMConfig.enabled && customLLMConfig.engineMode === 'custom'
+    );
+    if (isDualOff && newSettings.preferredEngine !== 'google') {
+      showCloudError('当前处于双关状态（云端与自有大模型均已关闭），仅支持使用「谷歌机翻」');
+      return;
+    }
+    if (isCustomPriority && newSettings.preferredEngine !== 'custom_llm') {
+      showCloudError('已开启「优先自有密钥回复」，翻译引擎锁定为「自定义模型」');
+      return;
+    }
+    if (!isDualOff && !isCustomPriority && newSettings.preferredEngine === 'custom_llm') {
+      showCloudError('当前处于「官方大模型优先」状态，不可选择自定义模型；请前往「模型」开启「启用优先自有密钥回复」');
       return;
     }
     setTranslationSettings(newSettings);
-    if (activeChatId) {
-      setChats((prev) =>
-        prev.map((c) =>
-          c.id === activeChatId && (!activeAccountId || c.accountId === activeAccountId)
-            ? {
-                ...c,
-                sourceLang:
-                  newSettings.defaultSourceLang !== 'Auto'
-                    ? newSettings.defaultSourceLang
-                    : c.sourceLang,
-                targetLang: newSettings.defaultTargetLang || c.targetLang,
-              }
-            : c
-        )
-      );
-    }
   };
 
   // Message actions: delete, batch delete, forward, edit, reaction, pin, patch, clear (Cloud-first, block local fake mutation on failure)
@@ -2631,6 +2750,97 @@ export default function App() {
       setLocalMessages(targetChatId, updated, targetAccountId);
       return { ...prev, [bucketKey]: updated };
     });
+  };
+
+  const handleRetranslateMessage = async (messageId: string): Promise<void> => {
+    const targetChatId = activeChatIdRef.current;
+    const targetAccountId = activeAccountIdRef.current;
+    if (!targetChatId) return;
+    const bucketKey = msgBucketKey(targetAccountId, targetChatId);
+    const currentList = getBucketMessages(messagesMapRef.current, targetAccountId, targetChatId);
+    const targetMsg = currentList.find((m) => m.id === messageId);
+    if (!targetMsg) return;
+
+    const rawText = (targetMsg.sttText || targetMsg.text || targetMsg.imageCaption || '').trim();
+    if (
+      !rawText ||
+      /^\[(语音|视频|图片|多媒体|文件)消息\]$/.test(rawText) ||
+      rawText.startsWith('🎤') ||
+      rawText.startsWith('🖼️') ||
+      rawText.startsWith('🎬') ||
+      rawText.startsWith('📁')
+    ) {
+      showCloudError('该消息暂无可翻译的文本内容');
+      return;
+    }
+
+    const activeChat = chatsRef.current.find(
+      (c) => c.id === targetChatId && (!targetAccountId || c.accountId === targetAccountId)
+    );
+    const currentLlm = customLLMConfigRef.current;
+    const currentTrans = translationSettingsRef.current;
+    const effectiveEngine = enforceTranslationEngineForLlm(currentLlm, currentTrans).preferredEngine;
+    const targetLang =
+      targetMsg.sender === 'me'
+        ? (activeChat?.targetLang && activeChat.targetLang !== 'Auto'
+            ? activeChat.targetLang
+            : currentTrans.defaultTargetLang) || 'Chinese'
+        : (activeChat?.targetLang && activeChat.targetLang !== 'Auto'
+            ? activeChat.targetLang
+            : currentTrans.defaultTargetLang) || 'Chinese';
+    const sourceLang =
+      activeChat?.sourceLang && activeChat.sourceLang !== 'Auto' ? activeChat.sourceLang : 'Auto';
+
+    setMessagesMap((prev) => {
+      const list = getBucketMessages(prev, targetAccountId, targetChatId);
+      return {
+        ...prev,
+        [bucketKey]: list.map((m) =>
+          m.id === messageId ? { ...m, isTranslating: true, translationError: undefined } : m
+        ),
+      };
+    });
+
+    try {
+      const translated = await translateText(
+        rawText,
+        sourceLang,
+        targetLang,
+        currentLlm,
+        effectiveEngine,
+        undefined,
+        currentTrans.geminiModel,
+        currentTrans.geminiApiKey,
+        currentTrans.customModelName,
+        { bypassCache: true }
+      );
+      setMessagesMap((prev) => {
+        const list = getBucketMessages(prev, targetAccountId, targetChatId);
+        const updated = list.map((m) =>
+          m.id === messageId
+            ? { ...m, translatedText: translated, isTranslating: false, translationError: undefined }
+            : m
+        );
+        setLocalMessages(targetChatId, updated, targetAccountId);
+        return { ...prev, [bucketKey]: updated };
+      });
+      await updateMessageTranslationInDb(messageId, translated, {
+        chatId: targetChatId,
+        telegramMessageId: targetMsg.telegramMessageId,
+        accountId: targetAccountId,
+      });
+    } catch (err: any) {
+      const errMsg = err?.message || '重新翻译失败';
+      setMessagesMap((prev) => {
+        const list = getBucketMessages(prev, targetAccountId, targetChatId);
+        const updated = list.map((m) =>
+          m.id === messageId ? { ...m, isTranslating: false, translationError: errMsg } : m
+        );
+        setLocalMessages(targetChatId, updated, targetAccountId);
+        return { ...prev, [bucketKey]: updated };
+      });
+      showCloudError(errMsg);
+    }
   };
 
   const handleRefreshMediaUrls = async (
@@ -3305,6 +3515,7 @@ export default function App() {
           onRefreshMediaUrls={handleRefreshMediaUrls}
           onEditMessage={handleEditMessage}
           onUpdateMessage={handleUpdateMessage}
+          onRetranslateMessage={handleRetranslateMessage}
           onRetryMessage={handleRetryMessage}
           onToggleReaction={handleToggleReaction}
           onTogglePinMessage={handleTogglePinMessage}
@@ -3585,10 +3796,11 @@ export default function App() {
           setCurrentMember(user);
           setIsMemberAuthenticated(true);
           setCustomLLMConfig((prev) =>
-            !prev.enabled && prev.engineMode !== 'custom' && !prev.baseUrl?.trim()
+            !prev.enabled && !prev.explicitlyDisabled && prev.engineMode !== 'custom' && !prev.baseUrl?.trim()
               ? {
                   ...prev,
                   enabled: true,
+                  explicitlyDisabled: false,
                   engineMode: 'cloud',
                   enableKnowledgeBaseRAG: true,
                 }

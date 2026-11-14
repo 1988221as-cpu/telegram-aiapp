@@ -127,13 +127,19 @@ export const UnifiedRightDock: React.FC<UnifiedRightDockProps> = ({
                   {activePanel === 'memory'
                     ? `${customerProfile?.relationshipStage || '沟通中'} · 右侧协同面板`
                     : activePanel === 'llm'
-                    ? customLLMConfig.enabled && customLLMConfig.engineMode === 'custom'
+                    ? customLLMConfig.enabled === false || customLLMConfig.explicitlyDisabled
+                      ? '双关状态 · 仅支持谷歌机翻'
+                      : customLLMConfig.enabled && customLLMConfig.engineMode === 'custom'
                       ? '优先自有密钥回复 · 全链路直连'
                       : customLLMConfig.baseUrl
                       ? '云端主引擎与自有模型网关'
                       : '云端引擎与话术检索'
                     : activePanel === 'translation'
-                    ? '双向实时译文与引擎配置'
+                    ? customLLMConfig.enabled === false || customLLMConfig.explicitlyDisabled
+                      ? '双关模式 · 仅支持谷歌机翻'
+                      : customLLMConfig.enabled && customLLMConfig.engineMode === 'custom'
+                      ? '自有密钥模式 · 锁定自定义模型'
+                      : '官方引擎模式 · 支持谷歌机翻 / Gemma 4'
                     : activePanel === 'voice'
                     ? '原声采样与音色参数微调'
                     : '人设档案、五阶提示词与试聊'}

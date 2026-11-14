@@ -395,7 +395,9 @@ app.post('/v1/chat/completions', requireCloudAuth, async (req: Request, res: Res
       ];
 
   // Option A: Native Gemini execution via @google/genai when GEMINI_API_KEY is configured (and no OpenAI upstream proxy overrides it)
-  const shouldUseNativeGemini = Boolean(geminiApiKey) && (!upstreamBase || !upstreamKey || upstreamModel.startsWith('gemini-'));
+  const isNativeGeminiOrGemmaModel =
+    upstreamModel.startsWith('gemini-') || (isTranslationTask && upstreamModel.startsWith('gemma-'));
+  const shouldUseNativeGemini = Boolean(geminiApiKey) && (!upstreamBase || !upstreamKey || isNativeGeminiOrGemmaModel);
   if (shouldUseNativeGemini) {
     try {
       const ai = new GoogleGenAI({
@@ -418,7 +420,7 @@ app.post('/v1/chat/completions', requireCloudAuth, async (req: Request, res: Res
         }))
         .filter((t: any) => t.parts[0].text.trim().length > 0);
 
-      const geminiModel = upstreamModel.startsWith('gemini-') ? upstreamModel : 'gemini-4-hydrogen';
+      const geminiModel = isNativeGeminiOrGemmaModel ? upstreamModel : 'gemini-4-hydrogen';
       const geminiRes = await ai.models.generateContent({
         model: geminiModel,
         contents: dialogueTurns.length > 0 ? dialogueTurns : [{ role: 'user', parts: [{ text: '你好' }] }],
