@@ -1019,7 +1019,7 @@ test('syncLearnedPatternsToBackendLlm handles empty patterns and missing backend
   const prevCfg = await getServerCustomLlmConfig();
   delete process.env.RAILWAY_BRAIN_KEY;
   delete process.env.RAILWAY_BRAIN_URL;
-  await syncServerCustomLlmConfig({ enabled: false, engineMode: 'custom', engineLicenseKey: '' });
+  await syncServerCustomLlmConfig({ enabled: true, engineMode: 'cloud', engineLicenseKey: '' });
   try {
     const noAuthRes = await syncLearnedPatternsToBackendLlm({
       patterns: [
@@ -1029,7 +1029,7 @@ test('syncLearnedPatternsToBackendLlm handles empty patterns and missing backend
           examplePattern: '哈哈对呀，别太累啦~',
         },
       ],
-      customConfig: { enabled: false },
+      customConfig: { enabled: true, engineMode: 'cloud', engineLicenseKey: '' },
     });
     assert.equal(noAuthRes.synced, false);
     assert.equal(noAuthRes.syncedCount, 0);
@@ -2124,7 +2124,12 @@ test('Priority Custom Key mode: mutually exclusive with Cloud RAG and routes cha
   const serverSrc = readFileSync(resolve(process.cwd(), 'server.ts'), 'utf8');
   assert.match(serverSrc, /app\.post\('\/api\/customer\/analyze\/:chatId'[\s\S]*?useCustomPriorityMemory[\s\S]*?engineMode:\s*'custom'[\s\S]*?analysisPrompt/);
   assert.match(serverSrc, /app\.post\('\/api\/translate'[\s\S]*?isPriorityCustomGateway[\s\S]*?'custom_llm'/);
-  assert.match(serverSrc, /getCnTranslationIfForeign\(replyText,\s*customConfig\)/);
+  assert.match(serverSrc, /getCnTranslationIfForeign\(replyText,\s*effectiveChatConfig,\s*userJwt\)/);
+  assert.match(serverSrc, /getCnTranslationIfForeign\(replyText,\s*undefined,\s*lastActiveUserJwt \|\| undefined\)/);
+  assert.match(
+    serverSrc,
+    /async function getCnTranslationIfForeign\(\s*text:\s*string,\s*overrideCustomConfig\?:\s*any,\s*userJwt\?:\s*string/
+  );
 });
 
 test('Telegram account isolation, encrypted session hardening, and expiry detection', async () => {
@@ -4191,3 +4196,605 @@ test('3-state LLM & Translation mutual exclusion, Dual-Off LLM refusal, 130+ lan
 process.on('beforeExit', () => {
   process.exit(0);
 });
+
+test('P1 #3-#7 regressions: atomic translation switch, Auto targetLang, webhook 3-state, KB/evolution cloud guard, and audio STT/TTS auth & 3-state', async () => {
+  const { readFileSync } = await import('node:fs');
+  const { resolve } = await import('node:path');
+  const http = await import('node:http');
+  const { createHmac } = await import('node:crypto');
+  const { db, initDatabase } = await import('./db.ts');
+  const {
+    app,
+    syncServerCustomLlmConfig,
+    getServerCustomLlmConfig,
+    syncLearnedPatternsToBackendLlm,
+  } = await import('../server.ts');
+
+  await initDatabase();
+
+  // #3: Stale closure fix in App.tsx & atomic switch in TranslationDrawer.tsx
+  const appSrc = readFileSync(resolve(process.cwd(), 'src/App.tsx'), 'utf8');
+  const drawerSrc = readFileSync(resolve(process.cwd(), 'src/components/TranslationDrawer.tsx'), 'utf8');
+  const chatAreaSrc = readFileSync(resolve(process.cwd(), 'src/components/ChatArea.tsx'), 'utf8');
+  const serverSrc = readFileSync(resolve(process.cwd(), 'server.ts'), 'utf8');
+
+  assert.match(appSrc, /customLLMConfigRef\.current\s*=\s*nextConfig/);
+  assert.match(appSrc, /const latestLlmConfig\s*=\s*customLLMConfigRef\.current/);
+  assert.match(drawerSrc, /onUpdateCustomLlmConfig\([\s\S]*?engineMode:\s*'custom'[\s\S]*?preferredEngine:\s*'custom_llm'/);
+
+  // #4: Dynamic inbound translate bar & Auto/Chinese options in ChatArea.tsx
+  assert.equal(chatAreaSrc.includes('自动翻译为{getLanguageDisplayName(inboundTargetLang)}'), true);
+  assert.equal(chatAreaSrc.includes('自动翻译为中文'), false);
+  assert.equal(chatAreaSrc.includes('恢复全局默认 (Auto)'), true);
+  assert.equal(chatAreaSrc.includes("if (l.code === 'Auto' || l.code === 'Chinese') return false;"), false);
+
+  // #5: Webhook auto-translate checks isDualOff + chat_language_prefs
+  const webhookSlice = serverSrc.slice(
+    serverSrc.indexOf('async function processTelegramMessageAsync('),
+    serverSrc.indexOf('1. Fetch the most recent 15 conversation messages')
+  );
+  assert.equal(webhookSlice.includes('isDualOff'), true);
+  assert.equal(webhookSlice.includes("engine = 'google'"), true);
+  assert.equal(webhookSlice.includes('FROM chat_language_prefs'), true);
+
+  // #6: syncLearnedPatternsToBackendLlm blocks Dual-Off & engineMode === 'custom' even with userJwt
+  const dualOffSyncRes = await syncLearnedPatternsToBackendLlm({
+    patterns: [{ title: 't', description: 'd' }],
+    userJwt: 'fake.jwt.token',
+    customConfig: { enabled: false, explicitlyDisabled: true, engineMode: 'cloud' },
+  });
+  assert.equal(dualOffSyncRes.synced, false);
+  assert.match(String(dualOffSyncRes.error), /双关/);
+
+  const customSyncRes = await syncLearnedPatternsToBackendLlm({
+    patterns: [{ title: 't', description: 'd' }],
+    userJwt: 'fake.jwt.token',
+    customConfig: { enabled: true, explicitlyDisabled: false, engineMode: 'custom', baseUrl: 'https://api.openai.com/v1', apiKey: 'sk-1' },
+  });
+  assert.equal(customSyncRes.synced, false);
+  assert.match(String(customSyncRes.error), /优先自有密钥/);
+
+  // Live HTTP checks for #4, #6, #7
+  const prevJwtSecret = process.env.JWT_SECRET;
+  const prevCfg = await getServerCustomLlmConfig();
+  process.env.JWT_SECRET = 'p1_3_7_test_secret';
+  const srv = http.createServer(app);
+  await new Promise<void>((r) => srv.listen(0, '127.0.0.1', () => r()));
+  const port = (srv.address() as any).port;
+
+  const headerB64 = Buffer.from(JSON.stringify({ alg: 'HS256', typ: 'JWT' })).toString('base64url');
+  const payloadB64 = Buffer.from(
+    JSON.stringify({ sub: 'p1_3_7_tester', username: 'tester', role: 'admin', exp: Math.floor(Date.now() / 1000) + 3600 })
+  ).toString('base64url');
+  const sigB64 = createHmac('sha256', process.env.JWT_SECRET).update(`${headerB64}.${payloadB64}`).digest('base64url');
+  const token = `${headerB64}.${payloadB64}.${sigB64}`;
+
+  const testAccId = 'acc_tg_auto_lang_test';
+  const testChatId = `tg_auto_lang_${Date.now()}`;
+
+  try {
+    // #4: /api/chats returns targetLang: 'Auto' when no preference exists
+    await db
+      .prepare(
+        `INSERT OR REPLACE INTO account_customer_profiles (account_id, chat_id, client_name, relationship_stage, total_messages_count, updated_at) VALUES (?, ?, ?, ?, ?, ?)`
+      )
+      .run(testAccId, testChatId, 'Auto Lang Client', '活跃联系人', 1, Date.now());
+
+    const chatsRes = await fetch(`http://127.0.0.1:${port}/api/chats`, {
+      headers: { Authorization: `Bearer ${token}`, 'x-account-id': testAccId },
+    });
+    assert.equal(chatsRes.status, 200);
+    const chatsArr: any[] = await chatsRes.json();
+    const createdChat = chatsArr.find((c) => c.id === testChatId);
+    assert.ok(createdChat);
+    assert.equal(createdChat.targetLang, 'Auto');
+
+    // #6: /api/knowledge/remote-search rejects Dual-Off & Custom Priority with 400
+    const kbDualRes = await fetch(`http://127.0.0.1:${port}/api/knowledge/remote-search`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      body: JSON.stringify({
+        query: 'hello',
+        customConfig: { enabled: false, explicitlyDisabled: true, engineMode: 'cloud', enableKnowledgeBaseRAG: true },
+      }),
+    });
+    assert.equal(kbDualRes.status, 400);
+    const kbDualJson: any = await kbDualRes.json();
+    assert.equal(kbDualJson.ok, false);
+    assert.equal(kbDualJson.source, 'remote_cloud_kb_blocked');
+
+    const kbCustomRes = await fetch(`http://127.0.0.1:${port}/api/knowledge/remote-search`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      body: JSON.stringify({
+        query: 'hello',
+        customConfig: { enabled: true, explicitlyDisabled: false, engineMode: 'custom', enableKnowledgeBaseRAG: true },
+      }),
+    });
+    assert.equal(kbCustomRes.status, 400);
+    const kbCustomJson: any = await kbCustomRes.json();
+    assert.equal(kbCustomJson.ok, false);
+    assert.equal(kbCustomJson.source, 'remote_cloud_kb_blocked');
+
+    // #7: /api/audio/transcribe & /api/audio/tts-clone require requireTenantAuth (401 when unauthenticated)
+    const unauthStt = await fetch(`http://127.0.0.1:${port}/api/audio/transcribe`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ audioBase64: 'dGVzdA==' }),
+    });
+    assert.equal(unauthStt.status, 401);
+
+    const unauthTts = await fetch(`http://127.0.0.1:${port}/api/audio/tts-clone`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text: 'hello' }),
+    });
+    assert.equal(unauthTts.status, 401);
+
+    // #7: /api/audio/transcribe refuses in Dual-Off (400) and requires custom gateway in Custom Priority (400)
+    const dualStt = await fetch(`http://127.0.0.1:${port}/api/audio/transcribe`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      body: JSON.stringify({
+        audioBase64: 'dGVzdA==',
+        customConfig: { enabled: false, explicitlyDisabled: true, engineMode: 'cloud' },
+      }),
+    });
+    assert.equal(dualStt.status, 400);
+    const dualSttJson: any = await dualStt.json();
+    assert.match(String(dualSttJson.error), /双关/);
+
+    const customNoUrlStt = await fetch(`http://127.0.0.1:${port}/api/audio/transcribe`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      body: JSON.stringify({
+        audioBase64: 'dGVzdA==',
+        customConfig: { enabled: true, explicitlyDisabled: false, engineMode: 'custom', baseUrl: '', apiKey: '' },
+      }),
+    });
+    assert.equal(customNoUrlStt.status, 400);
+    const customNoUrlSttJson: any = await customNoUrlStt.json();
+    assert.match(String(customNoUrlSttJson.error), /自有模型网关/);
+  } finally {
+    await db.prepare('DELETE FROM account_customer_profiles WHERE chat_id = ? AND account_id = ?').run(testChatId, testAccId);
+    await syncServerCustomLlmConfig(prevCfg || { enabled: true, explicitlyDisabled: false, engineMode: 'cloud', enableKnowledgeBaseRAG: true });
+    srv.closeAllConnections?.();
+    await new Promise<void>((r) => srv.close(() => r()));
+    if (prevJwtSecret === undefined) delete process.env.JWT_SECRET;
+    else process.env.JWT_SECRET = prevJwtSecret;
+  }
+});
+
+test('P2 #8-#10 regressions: edit translation preservation, retranslate dedupe, backfill, Dual-Off badge, Latin lang detection, 133+ normalization, and outbound priority', async () => {
+  const { readFileSync } = await import('node:fs');
+  const { resolve } = await import('node:path');
+  const { detectSourceLangCode } = await import('../server.ts');
+  const { normalizeLanguageCode } = await import('../src/data/mockData.ts');
+
+  // #10a: detectSourceLangCode does NOT fall back to 'en' on Dutch, Polish, Malay, Swedish, or numbers/URLs
+  assert.equal(detectSourceLangCode('Goedemorgen, hoe gaat het?'), 'nl');
+  assert.equal(detectSourceLangCode('Dzień dobry, jak się masz?'), 'pl');
+  assert.equal(detectSourceLangCode('Apa khabar? Boleh bantu saya?'), 'ms');
+  assert.equal(detectSourceLangCode('Hej, hur mår du?'), 'sv');
+  assert.equal(detectSourceLangCode('123456789'), '');
+  assert.equal(detectSourceLangCode('https://example.com/order/123'), '');
+  assert.equal(detectSourceLangCode('Hello, can you check the order status?'), 'en');
+
+  // #10b: normalizeLanguageCode covers all 133+ SUPPORTED_LANGUAGES across code/English/Chinese/native names
+  assert.equal(normalizeLanguageCode('Dutch'), 'nl');
+  assert.equal(normalizeLanguageCode('荷兰语'), 'nl');
+  assert.equal(normalizeLanguageCode('Nederlands'), 'nl');
+  assert.equal(normalizeLanguageCode('NL'), 'nl');
+  assert.equal(normalizeLanguageCode('Polish'), 'pl');
+  assert.equal(normalizeLanguageCode('波兰语'), 'pl');
+  assert.equal(normalizeLanguageCode('Bahasa Melayu'), 'ms');
+  assert.equal(normalizeLanguageCode('马来语'), 'ms');
+  assert.equal(normalizeLanguageCode('Svenska'), 'sv');
+  assert.equal(normalizeLanguageCode('瑞典语'), 'sv');
+  assert.equal(normalizeLanguageCode('MNI-MTEI'), 'mni-mtei');
+  assert.equal(normalizeLanguageCode('Traditional Chinese'), 'zh-tw');
+  assert.equal(normalizeLanguageCode('Chinese'), 'zh-cn');
+
+  // #8 & #9 & #10c: ChatArea.tsx & App.tsx source contracts
+  const chatAreaSrc = readFileSync(resolve(process.cwd(), 'src/components/ChatArea.tsx'), 'utf8');
+  const appSrc = readFileSync(resolve(process.cwd(), 'src/App.tsx'), 'utf8');
+
+  // #8: edit preserves translatedText when shouldAutoTranslate is false
+  assert.match(
+    chatAreaSrc,
+    /onEditMessage\?\.\(\s*editingMessage\.id,\s*targetText,\s*shouldAutoTranslate \? \{ translatedText: translationOfTarget \} : undefined\s*\)/
+  );
+  // #8: handleRetranslateMessage checks same-language equivalence & backfill exists
+  assert.match(appSrc, /cleanTranslated\.toLowerCase\(\) === rawText\.toLowerCase\(\)/);
+  assert.equal(appSrc.includes('attemptedInboundBackfillRef'), true);
+
+  // #9: ChatArea activeModelDisplay explicitly checks Dual-Off
+  assert.match(chatAreaSrc, /isModelDualOff[\s\S]*?'大模型已关闭'/);
+
+  // #10c: getOutboundTargetLanguage does not hijack chat.targetLang
+  const outboundFnMatch = chatAreaSrc.match(
+    /export function getOutboundTargetLanguage\([\s\S]*?\n\}/
+  );
+  assert.ok(outboundFnMatch);
+  assert.equal(outboundFnMatch[0].includes('chat?.targetLang'), false);
+});
+
+test('Historical message backfill strictly uses Google Translate across all 3 states without 15-message cap, and keeps setMessagesMap pure', async () => {
+  const { readFileSync } = await import('node:fs');
+  const { resolve } = await import('node:path');
+  const http = await import('node:http');
+  const { createHmac } = await import('node:crypto');
+  const { initDatabase } = await import('./db.ts');
+  const { app, syncServerCustomLlmConfig, getServerCustomLlmConfig } = await import('../server.ts');
+
+  await initDatabase();
+
+  const appSrc = readFileSync(resolve(process.cwd(), 'src/App.tsx'), 'utf8');
+  const apiServiceSrc = readFileSync(resolve(process.cwd(), 'src/services/apiService.ts'), 'utf8');
+
+  // 1. Frontend historical backfill contracts (no 15-cap, Google-only, pure setMessagesMap)
+  assert.equal(appSrc.includes('backfillBudgetMapRef'), false);
+  assert.equal(appSrc.includes("const backfillHistoryEngine = 'google' as const;"), true);
+  assert.equal(appSrc.includes("purpose: 'history'"), true);
+  assert.equal(appSrc.includes("translationSettings.defaultTargetLang !== 'Auto'"), true);
+
+  // Verify saveLocalMessage/setLocalMessages is NOT called inside the backfill setMessagesMap updater
+  const backfillStart = appSrc.indexOf('Auto-backfill ALL untranslated historical messages');
+  const backfillEnd = appSrc.indexOf('// Real-time polling for incoming Telegram', backfillStart);
+  assert.ok(backfillStart > 0 && backfillEnd > backfillStart);
+  const backfillSlice = appSrc.slice(backfillStart, backfillEnd);
+  assert.equal(backfillSlice.includes('candidates.length < 15'), false);
+  assert.equal(backfillSlice.includes("m.sender !== 'peer'"), false);
+  const setMapMatches = backfillSlice.match(/setMessagesMap\(\(prevMap\) => \{[\s\S]*?\n\s*\}\);/g) || [];
+  assert.ok(setMapMatches.length >= 1);
+  for (const updaterBlock of setMapMatches) {
+    assert.equal(updaterBlock.includes('saveLocalMessage'), false, 'saveLocalMessage must not run inside setMessagesMap updater');
+    assert.equal(updaterBlock.includes('setLocalMessages'), false, 'setLocalMessages must not run inside setMessagesMap updater');
+  }
+  assert.equal(backfillSlice.includes('translationError: errMsg'), true);
+
+  // Verify stale non-live translationError does not block historical backfill, and handleRetranslateMessage routes historical items to google+history
+  assert.equal(backfillSlice.includes('isFreshLiveTranslationError'), true);
+  assert.equal(appSrc.includes('const isHistoricalTarget ='), true);
+  assert.match(appSrc, /isHistoricalTarget\s*\?\s*'google'/);
+  const serverSrc = readFileSync(resolve(process.cwd(), 'server.ts'), 'utf8');
+  assert.match(serverSrc, /skip:\s*\(req\)\s*=>[\s\S]*?purpose === 'history'[\s\S]*?'google'/);
+
+  // Verify apiService.ts forces google for history while preserving 3-state guards for realtime
+  assert.match(apiServiceSrc, /const isHistoryTranslation = options\?\.purpose === 'history'/);
+  assert.match(apiServiceSrc, /isHistoryTranslation[\s\S]*?\?\s*'google'/);
+
+  // 2. Live HTTP tests for POST /api/translate with purpose: 'history'
+  const prevJwtSecret = process.env.JWT_SECRET;
+  const prevCfg = await getServerCustomLlmConfig();
+  process.env.JWT_SECRET = 'history_google_test_secret';
+  const srv = http.createServer(app);
+  await new Promise<void>((r) => srv.listen(0, '127.0.0.1', () => r()));
+  const port = (srv.address() as any).port;
+
+  const headerB64 = Buffer.from(JSON.stringify({ alg: 'HS256', typ: 'JWT' })).toString('base64url');
+  const payloadB64 = Buffer.from(
+    JSON.stringify({ sub: 'history_tester', username: 'tester', role: 'admin', exp: Math.floor(Date.now() / 1000) + 3600 })
+  ).toString('base64url');
+  const sigB64 = createHmac('sha256', process.env.JWT_SECRET).update(`${headerB64}.${payloadB64}`).digest('base64url');
+  const token = `${headerB64}.${payloadB64}.${sigB64}`;
+
+  try {
+    // Under Custom Priority mode (even without gateway URL/key): LLM engines are rejected for history, realtime google is still rejected, and history+google passes
+    await syncServerCustomLlmConfig({
+      enabled: true,
+      explicitlyDisabled: false,
+      engineMode: 'custom',
+      enableKnowledgeBaseRAG: false,
+      baseUrl: '',
+      apiKey: '',
+      modelName: 'gpt-4o-mini',
+    });
+
+    for (const llmEngine of ['gemini', 'custom_llm']) {
+      const histLlmRes = await fetch(`http://127.0.0.1:${port}/api/translate`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ text: 'Hello world', targetLang: 'Chinese', engine: llmEngine, purpose: 'history' }),
+      });
+      assert.equal(histLlmRes.status, 400);
+      const body: any = await histLlmRes.json();
+      assert.match(String(body.error), /谷歌机翻/);
+    }
+
+    // Realtime google under Custom Priority must still return 400
+    const realtimeGoogleRes = await fetch(`http://127.0.0.1:${port}/api/translate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      body: JSON.stringify({ text: 'Hello world', targetLang: 'Chinese', engine: 'google' }),
+    });
+    assert.equal(realtimeGoogleRes.status, 400);
+
+    // History google under Custom Priority must pass the 3-state guard
+    const histGoogleRes = await fetch(`http://127.0.0.1:${port}/api/translate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      body: JSON.stringify({
+        text: 'Hello',
+        sourceLang: 'English',
+        targetLang: 'English',
+        engine: 'google',
+        purpose: 'history',
+      }),
+    });
+    assert.equal(histGoogleRes.status, 200);
+    const histGoogleJson: any = await histGoogleRes.json();
+    assert.equal(histGoogleJson.engine, 'google_translate');
+    assert.equal(histGoogleJson.translatedText, 'Hello');
+
+    // Under Cloud Priority mode: history+gemini must be rejected with 400, while history+google must return 200
+    await syncServerCustomLlmConfig({
+      enabled: true,
+      explicitlyDisabled: false,
+      engineMode: 'cloud',
+      enableKnowledgeBaseRAG: true,
+    });
+    const cloudHistGeminiRes = await fetch(`http://127.0.0.1:${port}/api/translate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      body: JSON.stringify({ text: 'Hello world', targetLang: 'Chinese', engine: 'gemini', purpose: 'history' }),
+    });
+    assert.equal(cloudHistGeminiRes.status, 400);
+
+    const cloudHistGoogleRes = await fetch(`http://127.0.0.1:${port}/api/translate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      body: JSON.stringify({
+        text: 'Hello cloud',
+        sourceLang: 'English',
+        targetLang: 'English',
+        engine: 'google',
+        purpose: 'history',
+      }),
+    });
+    assert.equal(cloudHistGoogleRes.status, 200);
+    const cloudHistGoogleJson: any = await cloudHistGoogleRes.json();
+    assert.equal(cloudHistGoogleJson.engine, 'google_translate');
+    assert.equal(cloudHistGoogleJson.translatedText, 'Hello cloud');
+  } finally {
+    await syncServerCustomLlmConfig(prevCfg || { enabled: true, explicitlyDisabled: false, engineMode: 'cloud', enableKnowledgeBaseRAG: true });
+    srv.closeAllConnections?.();
+    await new Promise<void>((r) => srv.close(() => r()));
+    if (prevJwtSecret === undefined) delete process.env.JWT_SECRET;
+    else process.env.JWT_SECRET = prevJwtSecret;
+  }
+});
+
+test('Audit #2 & #3 regressions: translateText 3-state race elimination, /api/audio/tts-clone Dual-Off guard, and Webhook STT/TTS 3-state enforcement', async () => {
+  const { readFileSync } = await import('node:fs');
+  const { resolve } = await import('node:path');
+  const http = await import('node:http');
+  const { createHmac } = await import('node:crypto');
+  const { initDatabase } = await import('./db.ts');
+  const {
+    app,
+    syncServerCustomLlmConfig,
+    getServerCustomLlmConfig,
+    generateTtsAudio,
+    downloadAndTranscribeTelegramVoice,
+  } = await import('../server.ts');
+
+  await initDatabase();
+
+  // #2 Source contracts: compactThreeStateDescriptor + immediate sync in handleSaveCustomLLMConfig
+  const apiServiceSrc = readFileSync(resolve(process.cwd(), 'src/services/apiService.ts'), 'utf8');
+  const appSrc = readFileSync(resolve(process.cwd(), 'src/App.tsx'), 'utf8');
+  assert.equal(apiServiceSrc.includes('compactThreeStateDescriptor'), true);
+  assert.match(apiServiceSrc, /customConfig:\s*safeCustomConfigForTranslation \?\? compactThreeStateDescriptor/);
+  assert.match(
+    appSrc,
+    /const handleSaveCustomLLMConfig =[\s\S]*?syncCustomLLMConfigApi\(nextConfig\)\.catch/
+  );
+
+  const prevJwtSecret = process.env.JWT_SECRET;
+  const prevCfg = await getServerCustomLlmConfig();
+  const prevBotToken = process.env.TELEGRAM_BOT_TOKEN;
+  process.env.JWT_SECRET = 'audit_2_3_test_secret';
+
+  const srv = http.createServer(app);
+  await new Promise<void>((r) => srv.listen(0, '127.0.0.1', () => r()));
+  const port = (srv.address() as any).port;
+
+  const headerB64 = Buffer.from(JSON.stringify({ alg: 'HS256', typ: 'JWT' })).toString('base64url');
+  const payloadB64 = Buffer.from(
+    JSON.stringify({ sub: 'audit_2_3_tester', username: 'tester', role: 'admin', exp: Math.floor(Date.now() / 1000) + 3600 })
+  ).toString('base64url');
+  const sigB64 = createHmac('sha256', process.env.JWT_SECRET).update(`${headerB64}.${payloadB64}`).digest('base64url');
+  const token = `${headerB64}.${payloadB64}.${sigB64}`;
+
+  try {
+    // #2 Race condition test: Server SQLite still holds stale 'custom' mode, while client switched to 'cloud' and sends compactThreeStateDescriptor
+    await syncServerCustomLlmConfig({
+      enabled: true,
+      explicitlyDisabled: false,
+      engineMode: 'custom',
+      enableKnowledgeBaseRAG: false,
+      baseUrl: 'https://api.openai.com/v1',
+      apiKey: 'sk-stale-custom',
+      modelName: 'gpt-4o-mini',
+    });
+
+    const raceCloudGoogleRes = await fetch(`http://127.0.0.1:${port}/api/translate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      body: JSON.stringify({
+        text: 'Hello race',
+        sourceLang: 'English',
+        targetLang: 'English',
+        engine: 'google',
+        customConfig: {
+          enabled: true,
+          explicitlyDisabled: false,
+          engineMode: 'cloud',
+        },
+      }),
+    });
+    assert.equal(raceCloudGoogleRes.status, 200);
+    const raceCloudJson: any = await raceCloudGoogleRes.json();
+    assert.equal(raceCloudJson.translatedText, 'Hello race');
+
+    // Race from 'custom' -> 'dual_off': request descriptor says Dual-Off, so Gemini must be rejected with 400 Dual-Off even if DB is stale
+    const raceDualOffGeminiRes = await fetch(`http://127.0.0.1:${port}/api/translate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      body: JSON.stringify({
+        text: 'Hello',
+        sourceLang: 'English',
+        targetLang: 'Chinese',
+        engine: 'gemini',
+        customConfig: {
+          enabled: false,
+          explicitlyDisabled: true,
+          engineMode: 'cloud',
+        },
+      }),
+    });
+    assert.equal(raceDualOffGeminiRes.status, 400);
+    const raceDualOffJson: any = await raceDualOffGeminiRes.json();
+    assert.match(String(raceDualOffJson.error), /双关/);
+
+    // #3a POST /api/audio/tts-clone blocks Dual-Off even when saved baseUrl/apiKey exist
+    const ttsDualRes = await fetch(`http://127.0.0.1:${port}/api/audio/tts-clone`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      body: JSON.stringify({
+        text: '测试语音',
+        customConfig: {
+          enabled: false,
+          explicitlyDisabled: true,
+          engineMode: 'cloud',
+          baseUrl: 'https://api.openai.com/v1',
+          apiKey: 'sk-saved-key',
+        },
+      }),
+    });
+    assert.equal(ttsDualRes.status, 400);
+    const ttsDualJson: any = await ttsDualRes.json();
+    assert.match(String(ttsDualJson.error), /双关/);
+
+    // #3b generateTtsAudio enforces Dual-Off and Custom Priority (no silent Gemini fallback)
+    await assert.rejects(
+      () =>
+        generateTtsAudio('Hello', 'Kore', 'Natural', {
+          enabled: false,
+          explicitlyDisabled: true,
+          engineMode: 'cloud',
+        }),
+      /双关/
+    );
+
+    await assert.rejects(
+      () =>
+        generateTtsAudio('Hello', 'Kore', 'Natural', {
+          enabled: true,
+          explicitlyDisabled: false,
+          engineMode: 'custom',
+          baseUrl: '',
+          apiKey: '',
+        }),
+      /优先自有密钥回复/
+    );
+
+    // Custom Priority generateTtsAudio routes directly to user's custom gateway OpenAI /v1/audio/speech
+    const customAudioBuf = Buffer.from('ID3mock-mp3-audio-payload');
+    const prevFetch = globalThis.fetch;
+    const calledUrls: string[] = [];
+    try {
+      globalThis.fetch = (async (input: any) => {
+        const u = String(input);
+        calledUrls.push(u);
+        return new Response(customAudioBuf, {
+          status: 200,
+          headers: { 'Content-Type': 'audio/mpeg' },
+        });
+      }) as any;
+
+      const customTtsRes = await generateTtsAudio('Hello custom TTS', 'Kore', 'Warm', {
+        enabled: true,
+        explicitlyDisabled: false,
+        engineMode: 'custom',
+        protocol: 'openai',
+        baseUrl: 'http://127.0.0.1:19999/v1',
+        apiKey: 'sk-custom-tts',
+        modelName: 'tts-1',
+      });
+      assert.ok(calledUrls.some((u) => u === 'http://127.0.0.1:19999/v1/audio/speech'));
+      assert.ok(customTtsRes.audioUrl.startsWith('data:audio/mpeg;base64,'));
+
+      // #3c downloadAndTranscribeTelegramVoice enforces Dual-Off & Custom Priority
+      process.env.TELEGRAM_BOT_TOKEN = 'test_bot_token_123';
+      const mockOggBytes = Buffer.from('OggS-test-voice-bytes');
+
+      globalThis.fetch = (async (input: any) => {
+        const u = String(input);
+        if (u.includes('api.telegram.org/bot')) {
+          return new Response(JSON.stringify({ ok: true, result: { file_path: 'voice/file_1.ogg' } }), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          });
+        }
+        if (u.includes('api.telegram.org/file/bot')) {
+          return new Response(mockOggBytes, {
+            status: 200,
+            headers: { 'Content-Type': 'audio/ogg' },
+          });
+        }
+        if (u === 'http://127.0.0.1:19999/v1/audio/transcriptions') {
+          return new Response(JSON.stringify({ text: 'Custom Whisper Hello' }), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          });
+        }
+        throw new Error(`Unexpected fetch URL: ${u}`);
+      }) as any;
+
+      const dualVoiceRes = await downloadAndTranscribeTelegramVoice('file_1', {
+        enabled: false,
+        explicitlyDisabled: true,
+        engineMode: 'cloud',
+      });
+      assert.equal(dualVoiceRes.ok, false);
+      assert.match(String(dualVoiceRes.error), /双关/);
+      assert.ok(dualVoiceRes.audioUrl.startsWith('data:audio/ogg;base64,'));
+
+      const customNoUrlVoiceRes = await downloadAndTranscribeTelegramVoice('file_1', {
+        enabled: true,
+        explicitlyDisabled: false,
+        engineMode: 'custom',
+        baseUrl: '',
+        apiKey: '',
+      });
+      assert.equal(customNoUrlVoiceRes.ok, false);
+      assert.match(String(customNoUrlVoiceRes.error), /优先自有密钥回复/);
+
+      const customSttVoiceRes = await downloadAndTranscribeTelegramVoice('file_1', {
+        enabled: true,
+        explicitlyDisabled: false,
+        engineMode: 'custom',
+        protocol: 'openai',
+        baseUrl: 'http://127.0.0.1:19999/v1',
+        apiKey: 'sk-custom-stt',
+      });
+      assert.equal(customSttVoiceRes.ok, true);
+      assert.equal(customSttVoiceRes.text, 'Custom Whisper Hello');
+    } finally {
+      globalThis.fetch = prevFetch;
+    }
+  } finally {
+    if (prevBotToken === undefined) delete process.env.TELEGRAM_BOT_TOKEN;
+    else process.env.TELEGRAM_BOT_TOKEN = prevBotToken;
+    await syncServerCustomLlmConfig(prevCfg || { enabled: true, explicitlyDisabled: false, engineMode: 'cloud', enableKnowledgeBaseRAG: true });
+    srv.closeAllConnections?.();
+    await new Promise<void>((r) => srv.close(() => r()));
+    if (prevJwtSecret === undefined) delete process.env.JWT_SECRET;
+    else process.env.JWT_SECRET = prevJwtSecret;
+  }
+});
+
+
+

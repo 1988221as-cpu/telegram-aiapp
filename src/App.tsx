@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { LeftSidebar } from './components/LeftSidebar';
 import { ChatList } from './components/ChatList';
-import { ChatArea } from './components/ChatArea';
+import { ChatArea, detectClientLangCode } from './components/ChatArea';
 import { UnifiedRightDock, RightPanelTab } from './components/UnifiedRightDock';
 import { MultiAccountModal } from './components/MultiAccountModal';
 import { TelegramMenuDrawer } from './components/TelegramMenuDrawer';
@@ -23,7 +23,8 @@ import {
   INITIAL_ACCOUNTS,
   INITIAL_CHATS,
   INITIAL_TRANSLATION_SETTINGS,
-  INITIAL_CUSTOM_LLM
+  INITIAL_CUSTOM_LLM,
+  normalizeLanguageCode,
 } from './data/mockData';
 import {
   Account,
@@ -1111,7 +1112,7 @@ export default function App() {
                   lastMessage: dbc.lastMessage,
                   lastTime: dbc.lastTime,
                   sourceLang: existing.sourceLang || dbc.sourceLang || 'Auto',
-                  targetLang: existing.targetLang || dbc.targetLang || 'Chinese',
+                  targetLang: existing.targetLang || dbc.targetLang || 'Auto',
                 });
               } else {
                 map.set(bucketKey, dbc);
@@ -1360,6 +1361,219 @@ export default function App() {
   useEffect(() => {
     activeChatIdRef.current = activeChatId;
   }, [activeChatId]);
+
+  const attemptedInboundBackfillRef = useRef<Set<string>>(new Set());
+  const backfillAbortRef = useRef<AbortController | null>(null);
+  const backfillScopeKeyRef = useRef<string>('');
+
+  const activeChatForBackfill = chats.find(
+    (c) => c.id === activeChatId && (!activeAccountId || c.accountId === activeAccountId)
+  );
+  const resolvedGlobalTargetLangForBackfill =
+    translationSettings.defaultTargetLang && translationSettings.defaultTargetLang !== 'Auto'
+      ? translationSettings.defaultTargetLang
+      : 'Chinese';
+  const backfillTargetLang =
+    activeChatForBackfill?.targetLang && activeChatForBackfill.targetLang !== 'Auto'
+      ? activeChatForBackfill.targetLang
+      : resolvedGlobalTargetLangForBackfill;
+  const backfillSourceLang =
+    activeChatForBackfill?.sourceLang && activeChatForBackfill.sourceLang !== 'Auto'
+      ? activeChatForBackfill.sourceLang
+      : 'Auto';
+  const backfillHistoryEngine = 'google' as const;
+  const backfillScopeKey = `${activeAccountId}::${activeChatId || ''}::${backfillTargetLang}::${backfillSourceLang}::${backfillHistoryEngine}::${translationSettings.autoTranslateInbound !== false}::${translationSettings.googleApiKey || ''}`;
+
+  useEffect(() => {
+    return () => {
+      if (backfillAbortRef.current) {
+        backfillAbortRef.current.abort();
+        backfillAbortRef.current = null;
+      }
+    };
+  }, [backfillScopeKey]);
+
+  // Auto-backfill ALL untranslated historical messages (no count cap) strictly via Google Translate
+  useEffect(() => {
+    if (!isMemberAuthenticated || !activeChatId || !activeAccountId) return;
+    if (translationSettings.autoTranslateInbound === false) return;
+
+    if (backfillScopeKeyRef.current !== backfillScopeKey || !backfillAbortRef.current) {
+      if (backfillAbortRef.current) {
+        backfillAbortRef.current.abort();
+      }
+      backfillScopeKeyRef.current = backfillScopeKey;
+      backfillAbortRef.current = new AbortController();
+    }
+    const controller = backfillAbortRef.current;
+    const targetChatId = activeChatId;
+    const targetAccountId = activeAccountId;
+    const targetBucketKey = msgBucketKey(targetAccountId, targetChatId);
+    const currentMsgs = getBucketMessages(messagesMap, targetAccountId, targetChatId);
+    if (currentMsgs.length === 0) return;
+
+    const targetNorm = normalizeLanguageCode(backfillTargetLang);
+    const candidates: Array<{ msg: Message; rawText: string; dedupeKey: string }> = [];
+
+    for (let i = currentMsgs.length - 1; i >= 0; i--) {
+      const m = currentMsgs[i];
+      if (!m || m.deliveryStatus === 'pending') continue;
+      const isFreshLiveTranslationError =
+        Boolean(m.translationError) &&
+        !m.translationError!.includes('历史') &&
+        !m.translationError!.includes('谷歌') &&
+        typeof m.createdAt === 'number' &&
+        Date.now() - m.createdAt < 60_000;
+      if ((m.translatedText || '').trim() || m.isTranslating || isFreshLiveTranslationError) continue;
+      const rawText = (m.sttText || m.text || m.imageCaption || '').trim();
+      if (
+        !rawText ||
+        /^\[(语音|视频|图片|多媒体|文件)消息\]$/.test(rawText) ||
+        rawText.startsWith('🎤') ||
+        rawText.startsWith('🖼️') ||
+        rawText.startsWith('🎬') ||
+        rawText.startsWith('📁') ||
+        !/\p{L}/u.test(rawText)
+      ) {
+        continue;
+      }
+      const detectedNorm = normalizeLanguageCode(detectClientLangCode(rawText));
+      if (detectedNorm !== 'auto' && targetNorm !== 'auto' && detectedNorm === targetNorm) {
+        continue;
+      }
+      const dedupeKey = `${targetAccountId}::${targetChatId}::${m.id}::${backfillTargetLang}::${backfillHistoryEngine}`;
+      if (attemptedInboundBackfillRef.current.has(dedupeKey)) continue;
+      candidates.push({ msg: m, rawText, dedupeKey });
+    }
+
+    if (candidates.length === 0) return;
+
+    if (attemptedInboundBackfillRef.current.size > 10000) {
+      const keysIter = attemptedInboundBackfillRef.current.values();
+      for (let k = 0; k < 2000; k++) {
+        const next = keysIter.next();
+        if (next.done) break;
+        attemptedInboundBackfillRef.current.delete(next.value);
+      }
+    }
+    candidates.forEach((c) => attemptedInboundBackfillRef.current.add(c.dedupeKey));
+
+    const pendingUpdates = new Map<string, { msg: Message; translatedText?: string; translationError?: string }>();
+    let flushTimer: ReturnType<typeof setTimeout> | null = null;
+    let remaining = candidates.length;
+
+    const flushBatchUpdates = () => {
+      if (flushTimer) {
+        clearTimeout(flushTimer);
+        flushTimer = null;
+      }
+      if (controller.signal.aborted || pendingUpdates.size === 0) return;
+      const batch = new Map(pendingUpdates);
+      pendingUpdates.clear();
+
+      const latestBucket = getBucketMessages(messagesMapRef.current, targetAccountId, targetChatId);
+      let anyPersistChange = false;
+      const nextPersistList = latestBucket.map((item) => {
+        const patch = batch.get(item.id);
+        if (!patch || (item.translatedText || '').trim()) return item;
+        anyPersistChange = true;
+        if (patch.translatedText !== undefined) {
+          return { ...item, translatedText: patch.translatedText, translationError: undefined };
+        }
+        return { ...item, translationError: patch.translationError };
+      });
+      if (anyPersistChange) {
+        setLocalMessages(targetChatId, nextPersistList, targetAccountId);
+      }
+
+      setMessagesMap((prevMap) => {
+        const list = getBucketMessages(prevMap, targetAccountId, targetChatId);
+        let changed = false;
+        const updated = list.map((item) => {
+          const patch = batch.get(item.id);
+          if (!patch || (item.translatedText || '').trim()) return item;
+          changed = true;
+          if (patch.translatedText !== undefined) {
+            return { ...item, translatedText: patch.translatedText, translationError: undefined };
+          }
+          return { ...item, translationError: patch.translationError };
+        });
+        if (!changed) return prevMap;
+        return { ...prevMap, [targetBucketKey]: updated };
+      });
+
+      batch.forEach(({ msg, translatedText }) => {
+        if (translatedText !== undefined) {
+          updateMessageTranslationInDb(msg.id, translatedText, {
+            chatId: targetChatId,
+            telegramMessageId: msg.telegramMessageId,
+            accountId: targetAccountId,
+          }).catch(() => {});
+        }
+      });
+    };
+
+    const scheduleFlush = () => {
+      remaining = Math.max(0, remaining - 1);
+      if (remaining === 0 || pendingUpdates.size >= 5) {
+        flushBatchUpdates();
+      } else if (!flushTimer) {
+        flushTimer = setTimeout(flushBatchUpdates, 120);
+      }
+    };
+
+    const onAbort = () => {
+      if (flushTimer) {
+        clearTimeout(flushTimer);
+        flushTimer = null;
+      }
+      pendingUpdates.clear();
+    };
+    controller.signal.addEventListener('abort', onAbort, { once: true });
+
+    candidates.forEach(({ msg, rawText, dedupeKey }) => {
+      translateText(
+        rawText,
+        backfillSourceLang,
+        backfillTargetLang,
+        customLLMConfigRef.current,
+        backfillHistoryEngine,
+        translationSettings.googleApiKey,
+        undefined,
+        undefined,
+        undefined,
+        { signal: controller.signal, purpose: 'history' }
+      )
+        .then((trans) => {
+          if (controller.signal.aborted) return;
+          const cleanTrans = (trans || '').trim();
+          if (cleanTrans && cleanTrans.toLowerCase() !== rawText.toLowerCase()) {
+            pendingUpdates.set(msg.id, { msg, translatedText: trans });
+          }
+          scheduleFlush();
+        })
+        .catch((err: any) => {
+          if (err?.name === 'AbortError' || controller.signal.aborted) {
+            attemptedInboundBackfillRef.current.delete(dedupeKey);
+            remaining = Math.max(0, remaining - 1);
+            return;
+          }
+          const errMsg = err?.message || '历史消息谷歌机翻失败';
+          pendingUpdates.set(msg.id, { msg, translationError: errMsg });
+          scheduleFlush();
+        });
+    });
+  }, [
+    isMemberAuthenticated,
+    activeChatId,
+    activeAccountId,
+    messagesMap,
+    backfillScopeKey,
+    backfillTargetLang,
+    backfillSourceLang,
+    translationSettings.autoTranslateInbound,
+    translationSettings.googleApiKey,
+  ]);
 
   // Real-time polling for incoming Telegram MTProto / Bot updates into pure local storage
   useEffect(() => {
@@ -1735,10 +1949,14 @@ export default function App() {
             const matchedChatForLang = currentChats.find(
               (c) => c.id === targetChatId && c.accountId === targetAccountId
             );
+            const resolvedGlobalTargetLang =
+              currentTransSettings.defaultTargetLang && currentTransSettings.defaultTargetLang !== 'Auto'
+                ? currentTransSettings.defaultTargetLang
+                : 'Chinese';
             const inboundTargetLang =
-              (matchedChatForLang?.targetLang && matchedChatForLang.targetLang !== 'Auto'
+              matchedChatForLang?.targetLang && matchedChatForLang.targetLang !== 'Auto'
                 ? matchedChatForLang.targetLang
-                : currentTransSettings.defaultTargetLang) || 'Chinese';
+                : resolvedGlobalTargetLang;
 
             const trimmedIncomingText = (incomingMsg.text || '').trim();
             const isMediaPlaceholder =
@@ -1776,7 +1994,7 @@ export default function App() {
                 currentTransSettings.customModelName
               )
                 .then((trans) => {
-                  if (trans && trans.trim() && trans.trim() !== trimmedIncomingText) {
+                  if (trans && trans.trim() && trans.trim().toLowerCase() !== trimmedIncomingText.toLowerCase()) {
                     const withTrans: Message = { ...incomingMsg, translatedText: trans, translationError: undefined };
                     saveLocalMessage(targetChatId, withTrans, targetAccountId);
                     updateMessageTranslationInDb(incomingMsg.id, trans, {
@@ -1895,7 +2113,7 @@ export default function App() {
         ...res.chat,
         accountId: targetAccId,
         sourceLang: existingSaved?.sourceLang || res.chat.sourceLang || 'Auto',
-        targetLang: existingSaved?.targetLang || res.chat.targetLang || 'Chinese',
+        targetLang: existingSaved?.targetLang || res.chat.targetLang || 'Auto',
       };
       const cloudMsgs = Array.isArray(res.messages) ? res.messages : [];
       const bucketKey = msgBucketKey(targetAccId, realSavedChat.id);
@@ -2336,18 +2554,31 @@ export default function App() {
     }
   };
 
-  const handleSaveCustomLLMConfig = (nextConfig: CustomLLMConfig) => {
+  const handleSaveCustomLLMConfig = (
+    nextConfig: CustomLLMConfig,
+    nextTranslationSettings?: TranslationSettings
+  ) => {
+    customLLMConfigRef.current = nextConfig;
     setCustomLLMConfig(nextConfig);
-    setTranslationSettings((prev) => enforceTranslationEngineForLlm(nextConfig, prev));
+    setTranslationSettings((prev) =>
+      enforceTranslationEngineForLlm(
+        nextConfig,
+        nextTranslationSettings ? { ...prev, ...nextTranslationSettings } : prev
+      )
+    );
+    if (isMemberAuthenticated) {
+      syncCustomLLMConfigApi(nextConfig).catch(() => {});
+    }
   };
 
   // Update global translation settings (enforces strict 3-state mutual exclusion; preserves per-chat overrides)
   const handleUpdateTranslationSettings = (newSettings: TranslationSettings) => {
+    const latestLlmConfig = customLLMConfigRef.current;
     const isDualOff = Boolean(
-      customLLMConfig.enabled === false || customLLMConfig.explicitlyDisabled
+      latestLlmConfig.enabled === false || latestLlmConfig.explicitlyDisabled
     );
     const isCustomPriority = Boolean(
-      !isDualOff && customLLMConfig.enabled && customLLMConfig.engineMode === 'custom'
+      !isDualOff && latestLlmConfig.enabled && latestLlmConfig.engineMode === 'custom'
     );
     if (isDualOff && newSettings.preferredEngine !== 'google') {
       showCloudError('当前处于双关状态（云端与自有大模型均已关闭），仅支持使用「谷歌机翻」');
@@ -2774,20 +3005,30 @@ export default function App() {
       return;
     }
 
+    const isHistoricalTarget =
+      Boolean(
+        targetMsg.translationError &&
+          (targetMsg.translationError.includes('历史') || targetMsg.translationError.includes('谷歌'))
+      ) ||
+      typeof targetMsg.createdAt !== 'number' ||
+      Date.now() - targetMsg.createdAt > 120_000;
+
     const activeChat = chatsRef.current.find(
       (c) => c.id === targetChatId && (!targetAccountId || c.accountId === targetAccountId)
     );
     const currentLlm = customLLMConfigRef.current;
     const currentTrans = translationSettingsRef.current;
-    const effectiveEngine = enforceTranslationEngineForLlm(currentLlm, currentTrans).preferredEngine;
+    const effectiveEngine = isHistoricalTarget
+      ? 'google'
+      : enforceTranslationEngineForLlm(currentLlm, currentTrans).preferredEngine;
+    const resolvedGlobalTargetLang =
+      currentTrans.defaultTargetLang && currentTrans.defaultTargetLang !== 'Auto'
+        ? currentTrans.defaultTargetLang
+        : 'Chinese';
     const targetLang =
-      targetMsg.sender === 'me'
-        ? (activeChat?.targetLang && activeChat.targetLang !== 'Auto'
-            ? activeChat.targetLang
-            : currentTrans.defaultTargetLang) || 'Chinese'
-        : (activeChat?.targetLang && activeChat.targetLang !== 'Auto'
-            ? activeChat.targetLang
-            : currentTrans.defaultTargetLang) || 'Chinese';
+      activeChat?.targetLang && activeChat.targetLang !== 'Auto'
+        ? activeChat.targetLang
+        : resolvedGlobalTargetLang;
     const sourceLang =
       activeChat?.sourceLang && activeChat.sourceLang !== 'Auto' ? activeChat.sourceLang : 'Auto';
 
@@ -2808,23 +3049,33 @@ export default function App() {
         targetLang,
         currentLlm,
         effectiveEngine,
-        undefined,
-        currentTrans.geminiModel,
-        currentTrans.geminiApiKey,
-        currentTrans.customModelName,
-        { bypassCache: true }
+        isHistoricalTarget ? currentTrans.googleApiKey : undefined,
+        isHistoricalTarget ? undefined : currentTrans.geminiModel,
+        isHistoricalTarget ? undefined : currentTrans.geminiApiKey,
+        isHistoricalTarget ? undefined : currentTrans.customModelName,
+        { bypassCache: true, ...(isHistoricalTarget ? { purpose: 'history' as const } : {}) }
       );
+      const cleanTranslated = (translated || '').trim();
+      const isSameAsOriginal =
+        !cleanTranslated || cleanTranslated.toLowerCase() === rawText.toLowerCase();
+      const finalTranslatedText = isSameAsOriginal ? '' : translated;
+
       setMessagesMap((prev) => {
         const list = getBucketMessages(prev, targetAccountId, targetChatId);
         const updated = list.map((m) =>
           m.id === messageId
-            ? { ...m, translatedText: translated, isTranslating: false, translationError: undefined }
+            ? {
+                ...m,
+                translatedText: finalTranslatedText,
+                isTranslating: false,
+                translationError: undefined,
+              }
             : m
         );
         setLocalMessages(targetChatId, updated, targetAccountId);
         return { ...prev, [bucketKey]: updated };
       });
-      await updateMessageTranslationInDb(messageId, translated, {
+      await updateMessageTranslationInDb(messageId, finalTranslatedText, {
         chatId: targetChatId,
         telegramMessageId: targetMsg.telegramMessageId,
         accountId: targetAccountId,
@@ -3324,7 +3575,7 @@ export default function App() {
       lastTime: '刚刚',
       unreadCount: 0,
       sourceLang: 'Auto',
-      targetLang: 'Chinese',
+      targetLang: 'Auto',
     };
     setChats((prev) => [newChat, ...prev]);
     setActiveChatId(newChat.id);

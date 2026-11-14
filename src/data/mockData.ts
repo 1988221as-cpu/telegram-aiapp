@@ -170,3 +170,210 @@ export const SUPPORTED_LANGUAGES = [
   { code: 'yo', name: 'Yorùbá (约鲁巴语)' },
   { code: 'zu', name: 'isiZulu (祖鲁语)' },
 ];
+
+const EXTRA_LANGUAGE_ALIASES: Record<string, string> = {
+  auto: 'auto',
+  '自动识别语言': 'auto',
+  chinese: 'zh-cn',
+  zh: 'zh-cn',
+  'zh-cn': 'zh-cn',
+  'zh-hans': 'zh-cn',
+  '简体中文': 'zh-cn',
+  '中文': 'zh-cn',
+  'traditional chinese': 'zh-tw',
+  'zh-tw': 'zh-tw',
+  'zh-hant': 'zh-tw',
+  'zh-hk': 'zh-tw',
+  '繁体中文': 'zh-tw',
+  '繁體中文': 'zh-tw',
+  english: 'en',
+  'en-us': 'en',
+  'en-gb': 'en',
+  russian: 'ru',
+  spanish: 'es',
+  arabic: 'ar',
+  japanese: 'ja',
+  jp: 'ja',
+  korean: 'ko',
+  kr: 'ko',
+  portuguese: 'pt',
+  'pt-br': 'pt',
+  'pt-pt': 'pt',
+  vietnamese: 'vi',
+  french: 'fr',
+  german: 'de',
+  indonesian: 'id',
+  thai: 'th',
+  turkish: 'tr',
+  'türkçe': 'tr',
+  italian: 'it',
+  dutch: 'nl',
+  polish: 'pl',
+  ukrainian: 'uk',
+  hindi: 'hi',
+  malay: 'ms',
+  filipino: 'tl',
+  tagalog: 'tl',
+  fil: 'tl',
+  burmese: 'my',
+  myanmar: 'my',
+  khmer: 'km',
+  cambodian: 'km',
+  lao: 'lo',
+  persian: 'fa',
+  farsi: 'fa',
+  hebrew: 'he',
+  iw: 'he',
+  greek: 'el',
+  swedish: 'sv',
+  danish: 'da',
+  norwegian: 'no',
+  nb: 'no',
+  nn: 'no',
+  finnish: 'fi',
+  czech: 'cs',
+  hungarian: 'hu',
+  romanian: 'ro',
+  bulgarian: 'bg',
+  slovak: 'sk',
+  croatian: 'hr',
+  serbian: 'sr',
+  slovenian: 'sl',
+  bengali: 'bn',
+  urdu: 'ur',
+  tamil: 'ta',
+  telugu: 'te',
+  marathi: 'mr',
+  punjabi: 'pa',
+  gujarati: 'gu',
+  kannada: 'kn',
+  malayalam: 'ml',
+  nepali: 'ne',
+  sinhala: 'si',
+  kazakh: 'kk',
+  uzbek: 'uz',
+  azerbaijani: 'az',
+  georgian: 'ka',
+  armenian: 'hy',
+  mongolian: 'mn',
+  swahili: 'sw',
+  afrikaans: 'af',
+  albanian: 'sq',
+  amharic: 'am',
+  assamese: 'as',
+  aymara: 'ay',
+  bambara: 'bm',
+  basque: 'eu',
+  belarusian: 'be',
+  bhojpuri: 'bho',
+  bosnian: 'bs',
+  cantonese: 'yue',
+  catalan: 'ca',
+  cebuano: 'ceb',
+  chichewa: 'ny',
+  corsican: 'co',
+  dhivehi: 'dv',
+  dogri: 'doi',
+  esperanto: 'eo',
+  estonian: 'et',
+  ewe: 'ee',
+  frisian: 'fy',
+  galician: 'gl',
+  guarani: 'gn',
+  'haitian creole': 'ht',
+  hausa: 'ha',
+  hawaiian: 'haw',
+  hmong: 'hmn',
+  icelandic: 'is',
+  igbo: 'ig',
+  ilocano: 'ilo',
+  irish: 'ga',
+  javanese: 'jv',
+  jw: 'jv',
+  kinyarwanda: 'rw',
+  konkani: 'gom',
+  krio: 'kri',
+  kurdish: 'ku',
+  'kurdish (kurmanji)': 'ku',
+  'kurdish (sorani)': 'ckb',
+  kyrgyz: 'ky',
+  latin: 'la',
+  latvian: 'lv',
+  lingala: 'ln',
+  lithuanian: 'lt',
+  luganda: 'lg',
+  luxembourgish: 'lb',
+  macedonian: 'mk',
+  maithili: 'mai',
+  malagasy: 'mg',
+  maltese: 'mt',
+  maori: 'mi',
+  meiteilon: 'mni-Mtei',
+  manipuri: 'mni-Mtei',
+  mizo: 'lus',
+  odia: 'or',
+  oriya: 'or',
+  oromo: 'om',
+  pashto: 'ps',
+  quechua: 'qu',
+  samoan: 'sm',
+  sanskrit: 'sa',
+  'scots gaelic': 'gd',
+  sepedi: 'nso',
+  sesotho: 'st',
+  shona: 'sn',
+  sindhi: 'sd',
+  somali: 'so',
+  sundanese: 'su',
+  tajik: 'tg',
+  tatar: 'tt',
+  tigrinya: 'ti',
+  tsonga: 'ts',
+  turkmen: 'tk',
+  twi: 'ak',
+  akan: 'ak',
+  uyghur: 'ug',
+  welsh: 'cy',
+  xhosa: 'xh',
+  yiddish: 'yi',
+  yoruba: 'yo',
+  zulu: 'zu',
+};
+
+const CANONICAL_LANG_LOOKUP: Record<string, string> = (() => {
+  const map: Record<string, string> = { ...EXTRA_LANGUAGE_ALIASES };
+  for (const item of SUPPORTED_LANGUAGES) {
+    const rawCodeLower = item.code.toLowerCase();
+    const canonical = EXTRA_LANGUAGE_ALIASES[rawCodeLower] || rawCodeLower;
+    map[rawCodeLower] = canonical;
+    map[item.name.toLowerCase()] = canonical;
+    const parenMatch = item.name.match(/^([^()]+)\(([^()]+)\)$/);
+    if (parenMatch) {
+      const nativePart = parenMatch[1].trim().toLowerCase();
+      if (nativePart) map[nativePart] = canonical;
+      const innerParts = parenMatch[2].split(/[·/]/);
+      for (const part of innerParts) {
+        const cleaned = part.trim().toLowerCase();
+        if (cleaned && !map[cleaned]) {
+          map[cleaned] = canonical;
+        }
+      }
+    }
+  }
+  return map;
+})();
+
+export function normalizeLanguageCode(lang?: string): string {
+  const raw = (lang || '').trim();
+  if (!raw) return 'auto';
+  const low = raw.toLowerCase();
+  if (CANONICAL_LANG_LOOKUP[low]) return CANONICAL_LANG_LOOKUP[low];
+  const baseTag = low.split(/[-_]/)[0];
+  if (baseTag && CANONICAL_LANG_LOOKUP[baseTag]) {
+    if (low === 'zh-tw' || low === 'zh-hk' || low === 'zh-hant') return 'zh-tw';
+    if (low === 'zh-cn' || low === 'zh-sg' || low === 'zh-hans') return 'zh-cn';
+    return CANONICAL_LANG_LOOKUP[baseTag];
+  }
+  return low;
+}
+

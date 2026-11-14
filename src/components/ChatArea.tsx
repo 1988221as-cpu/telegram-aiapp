@@ -42,7 +42,7 @@ import { TelegramEmojiPicker } from './TelegramEmojiPicker';
 import { TelegramChatInfoDrawer } from './TelegramChatInfoDrawer';
 import type { RightPanelTab } from './UnifiedRightDock';
 import { getMasterVoiceprint } from '../services/voiceprintStorage';
-import { SUPPORTED_LANGUAGES } from '../data/mockData';
+import { SUPPORTED_LANGUAGES, normalizeLanguageCode } from '../data/mockData';
 import {
   translateText,
   transcribeAudio,
@@ -99,75 +99,146 @@ export function getLanguageDisplayName(code: string): string {
 }
 
 export function detectClientLangCode(text: string): string {
-  if (!text || typeof text !== 'string') return 'en';
+  if (!text || typeof text !== 'string') return '';
   const clean = text.trim();
-  if (/[\u4e00-\u9fa5]/.test(clean)) return 'zh-CN';
-  if (/[іїєґІЇЄҐ]/.test(clean) && /[\u0400-\u04FF]/.test(clean)) return 'uk';
-  if (/[\u0400-\u04FF]/.test(clean)) return 'ru';
-  if (/[\u3040-\u30ff]/.test(clean)) return 'ja';
-  if (/[\uac00-\ud7af]/.test(clean)) return 'ko';
-  if (/[پچژگک]/.test(clean) && /[\u0600-\u06FF]/.test(clean)) return 'fa';
-  if (/[\u0600-\u06FF]/.test(clean)) return 'ar';
-  if (/[\u0590-\u05FF]/.test(clean)) return 'he';
-  if (/[\u0370-\u03FF]/.test(clean)) return 'el';
-  if (/[\u0e00-\u0e7f]/.test(clean)) return 'th';
-  if (/[\u0900-\u097F]/.test(clean)) return 'hi';
-  if (/[\u0980-\u09FF]/.test(clean)) return 'bn';
-  if (/[\u0B80-\u0BFF]/.test(clean)) return 'ta';
-  if (/[\u0C00-\u0C7F]/.test(clean)) return 'te';
-  if (/[\u1000-\u109F]/.test(clean)) return 'my';
-  if (/[\u1780-\u17FF]/.test(clean)) return 'km';
-  if (/[\u0E80-\u0EFF]/.test(clean)) return 'lo';
-  if (/[\u10A0-\u10FF]/.test(clean)) return 'ka';
-  if (/[\u0530-\u058F]/.test(clean)) return 'hy';
-  if (/[\u1200-\u137F]/.test(clean)) return 'am';
+  if (!clean) return '';
+  const stripped = clean
+    .replace(/https?:\/\/\S+/gi, ' ')
+    .replace(/\bwww\.\S+/gi, ' ')
+    .replace(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi, ' ')
+    .replace(/@[a-zA-Z0-9_]+/g, ' ')
+    .trim();
+  if (!stripped || !/\p{L}/u.test(stripped)) return '';
+
+  if (/[\u4e00-\u9fa5]/.test(stripped)) return 'zh-CN';
+  if (/[іїєґІЇЄҐ]/.test(stripped) && /[\u0400-\u04FF]/.test(stripped)) return 'uk';
+  if (/[\u0400-\u04FF]/.test(stripped)) return 'ru';
+  if (/[\u3040-\u30ff]/.test(stripped)) return 'ja';
+  if (/[\uac00-\ud7af]/.test(stripped)) return 'ko';
+  if (/[پچژگک]/.test(stripped) && /[\u0600-\u06FF]/.test(stripped)) return 'fa';
+  if (/[\u0600-\u06FF]/.test(stripped)) return 'ar';
+  if (/[\u0590-\u05FF]/.test(stripped)) return 'he';
+  if (/[\u0370-\u03FF]/.test(stripped)) return 'el';
+  if (/[\u0e00-\u0e7f]/.test(stripped)) return 'th';
+  if (/[\u0900-\u097F]/.test(stripped)) return 'hi';
+  if (/[\u0980-\u09FF]/.test(stripped)) return 'bn';
+  if (/[\u0B80-\u0BFF]/.test(stripped)) return 'ta';
+  if (/[\u0C00-\u0C7F]/.test(stripped)) return 'te';
+  if (/[\u1000-\u109F]/.test(stripped)) return 'my';
+  if (/[\u1780-\u17FF]/.test(stripped)) return 'km';
+  if (/[\u0E80-\u0EFF]/.test(stripped)) return 'lo';
+  if (/[\u10A0-\u10FF]/.test(stripped)) return 'ka';
+  if (/[\u0530-\u058F]/.test(stripped)) return 'hy';
+  if (/[\u1200-\u137F]/.test(stripped)) return 'am';
+
   if (
-    /[ãõ]/i.test(clean) ||
-    /\b(olá|ola|bom dia|boa tarde|boa noite|obrigado|obrigada|você|voce|tudo bem)\b/i.test(clean)
+    /[ãõ]/i.test(stripped) ||
+    /\b(olá|ola|bom dia|boa tarde|boa noite|obrigado|obrigada|você|voce|tudo bem)\b/i.test(stripped)
   ) {
     return 'pt';
   }
   if (
-    /\b(ciao|buongiorno|buonasera|grazie|come stai|arrivederci|prego)\b/i.test(clean)
+    /\b(ciao|buongiorno|buonasera|grazie|come stai|arrivederci|prego)\b/i.test(stripped)
   ) {
     return 'it';
   }
   if (
-    /[¿¡ñÑ]/i.test(clean) ||
-    /\b(hola|buenos días|buenas noches|gracias|amigo|amiga|por favor|cómo estás|como estas|adiós|adios|qué tal|que tal)\b/i.test(clean)
+    /[¿¡ñÑ]/i.test(stripped) ||
+    /\b(hola|buenos días|buenas noches|gracias|amigo|amiga|por favor|cómo estás|como estas|adiós|adios|qué tal|que tal)\b/i.test(stripped)
   ) {
     return 'es';
   }
   if (
-    /[œæ]/i.test(clean) ||
-    /\b(bonjour|bonsoir|merci|salut|comment|s'il vous plaît|sil vous plait|oui|non|mon ami|mon amour|très bien|tres bien|ça va|ca va)\b/i.test(clean)
+    /[œæ]/i.test(stripped) ||
+    /\b(bonjour|bonsoir|merci|salut|comment|s'il vous plaît|sil vous plait|oui|non|mon ami|mon amour|très bien|tres bien|ça va|ca va)\b/i.test(stripped)
   ) {
     return 'fr';
   }
   if (
-    /[çÇğĞıİşŞ]/.test(clean) ||
-    /\b(merhaba|günaydın|gunaydin|nasılsın|nasilsin|teşekkür|tesekkur|evet|hayır|hayir|tamam|lütfen|lutfen|görüşürüz|gorusuruz|harika|canım|canim|iyiyim|selam|nasılsınız|nasilsiniz)\b/i.test(clean)
+    /[ğĞıİşŞ]/.test(stripped) ||
+    /\b(merhaba|günaydın|gunaydin|nasılsın|nasilsin|teşekkür|tesekkur|evet|hayır|hayir|tamam|lütfen|lutfen|görüşürüz|gorusuruz|harika|canım|canim|iyiyim|selam|nasılsınız|nasilsiniz)\b/i.test(stripped)
   ) {
     return 'tr';
   }
   if (
-    /[ăắằẳẵặâầấẩẫậêềếểễệôồốổỗộơờớởỡợưừứửữựđẢảẼẽĨĩÕõŨũỸỹẠạẸẹỊịỌọỤụỴỵẢảẺẻỈỉỎỏỦủỶỷàáèéìíòóùúỳý]/i.test(clean) ||
-    /\b(xin chào|cảm ơn|cam on|chào|bạn|ơi|vâng|không|tạm biệt|chúc)\b/i.test(clean)
+    /[ăắằẳẵặấầẩẫậếềểễệốồổỗộơờớởỡợưừứửữựđẢảẼẽĨĩÕõŨũỸỹẠạẸẹỊịỌọỤụỴỵẺẻỈỉỎỏỦủỶỷ]/i.test(stripped) ||
+    /\b(xin chào|cảm ơn|cam on|chào bạn|chào|tạm biệt|chúc|vâng|không)\b/i.test(stripped)
   ) {
     return 'vi';
   }
   if (
-    /[äöüß]/i.test(clean) ||
-    /\b(guten tag|guten morgen|danke|bitte|wie geht|hallo|tschüss|tschuess|auf wiedersehen)\b/i.test(clean)
+    /[ąćęłńśźżĄĆĘŁŃŚŹŻ]/.test(stripped) ||
+    /\b(dzień dobry|dzien dobry|dziękuję|dziekuje|proszę|prosze|cześć|czesc|jak się masz|jak sie masz|przepraszam|dobranoc)\b/i.test(stripped)
+  ) {
+    return 'pl';
+  }
+  if (
+    /ß/.test(stripped) ||
+    (/\b(guten tag|guten morgen|danke|bitte|wie geht|hallo|tschüss|tschuess|auf wiedersehen|ich bin|nicht|sehr gut)\b/i.test(stripped) &&
+      !/\b(goedemorgen|dank je|hoe gaat)\b/i.test(stripped))
   ) {
     return 'de';
   }
   if (
-    /\b(selamat pagi|selamat siang|terima kasih|apa kabar|sama-sama|tidak|iya|halo|bagaimana)\b/i.test(clean)
+    /\b(goedemorgen|goedemiddag|goedenavond|hoe gaat het|met jou|dank je|dank u|alsjeblieft|alstublieft|tot ziens|welkom|graag|vandaag|nederlands|ik ben|ik wil|jij bent|het is)\b/i.test(stripped)
+  ) {
+    return 'nl';
+  }
+  if (
+    /[åÅ]/.test(stripped) ||
+    /\b(hej|hur mår du|hur mar du|god morgon|god kväll|tack så mycket|tack sa mycket|varsågod|förlåt|jag är|det är|svenska)\b/i.test(stripped)
+  ) {
+    return 'sv';
+  }
+  if (
+    /[øØ]/.test(stripped) ||
+    /\b(hvordan har du det|hvordan går det|mange tak|tusen takk|ha det)\b/i.test(stripped)
+  ) {
+    return /\b(tusen takk|hvordan går det)\b/i.test(stripped) ? 'no' : 'da';
+  }
+  if (
+    /[řěůŘĚŮ]/.test(stripped) ||
+    /\b(dobrý den|děkuji|dekuji|prosím|prosim|jak se máš|jak se mas|ahoj)\b/i.test(stripped)
+  ) {
+    return 'cs';
+  }
+  if (
+    /[őűŐŰ]/.test(stripped) ||
+    /\b(köszönöm|koszonom|jó reggelt|hogy vagy|kérem|szia)\b/i.test(stripped)
+  ) {
+    return 'hu';
+  }
+  if (
+    /[șțȘȚ]/.test(stripped) ||
+    /\b(mulțumesc|multumesc|ce faci|te rog|la revedere|bună ziua)\b/i.test(stripped)
+  ) {
+    return 'ro';
+  }
+  if (
+    /\b(apa khabar|selamat petang|boleh|awak|hendak|tolonglah)\b/i.test(stripped)
+  ) {
+    return 'ms';
+  }
+  if (
+    /\b(selamat pagi|selamat siang|selamat sore|terima kasih|apa kabar|sama-sama|tidak|iya|halo|bagaimana|saya mau)\b/i.test(stripped)
   ) {
     return 'id';
   }
-  return 'en';
+  if (
+    /\b(kamusta|kumusta|salamat|magandang umaga|magandang gabi|mabuti|hindi)\b/i.test(stripped)
+  ) {
+    return 'tl';
+  }
+
+  if (
+    !/[à-öø-ÿąćęłńśźżšžčřěůőűăîșțğış]/i.test(stripped) &&
+    (/\b(the|is|are|am|was|were|be|been|have|has|had|do|does|did|will|would|can|could|should|may|might|this|that|these|those|there|here|what|which|who|when|where|why|how|you|your|yours|we|our|they|their|he|she|it|its|i|my|me|hi|hello|hey|thanks|thank|please|sorry|ok|okay|yes|no|not|and|or|but|for|with|from|about|order|price|status|check|help|need|want|good|great|nice|morning|evening|night|today|tomorrow|yesterday|send|sent|message|account|time|day|work|know|think|like|love|see|get|got|make|made|go|going|come|back|now|just|very|much|more|some|any|all|one|two|world|shipping|delivery|payment|confirm|update|reply|wait|sure)\b/i.test(stripped) ||
+      /\b(i'm|you're|we're|they're|it's|that's|don't|doesn't|didn't|can't|won't|wouldn't|shouldn't|isn't|aren't|haven't|hasn't|what's|who's|where's|how's)\b/i.test(stripped))
+  ) {
+    return 'en';
+  }
+
+  return '';
 }
 
 export function getOutboundTargetLanguage(
@@ -175,14 +246,11 @@ export function getOutboundTargetLanguage(
   settings?: TranslationSettings | null,
   recentMessages?: Message[]
 ): string {
-  // 1. Single-chat dedicated language has the absolute highest priority!
-  if (chat?.sourceLang && chat.sourceLang !== 'Auto' && chat.sourceLang !== 'Chinese') {
+  // 1. Single-chat dedicated outbound language (sourceLang) has the highest priority; never hijack with inbound targetLang
+  if (chat?.sourceLang && chat.sourceLang !== 'Auto') {
     return chat.sourceLang;
   }
-  if (chat?.targetLang && chat.targetLang !== 'Auto' && chat.targetLang !== 'Chinese') {
-    return chat.targetLang;
-  }
-  // 2. Global default language from settings
+  // 2. Global default outbound language from settings
   if (settings?.defaultSourceLang && settings.defaultSourceLang !== 'Auto') {
     return settings.defaultSourceLang;
   }
@@ -205,7 +273,7 @@ export function getOutboundTargetLanguage(
       if (code === 'th') return 'Thai';
       if (code === 'id') return 'Indonesian';
       if (code === 'en') return 'English';
-      return code;
+      if (code) return code;
     }
   }
 
@@ -213,27 +281,7 @@ export function getOutboundTargetLanguage(
 }
 
 function normalizeChatLangCode(lang?: string): string {
-  const raw = (lang || '').trim();
-  if (!raw) return 'auto';
-  const low = raw.toLowerCase();
-  if (low === 'auto') return 'auto';
-  if (low === 'chinese' || low === 'zh' || low === 'zh-cn' || low === 'zh-hans') return 'zh-cn';
-  if (low === 'traditional chinese' || low === 'zh-tw' || low === 'zh-hant' || low === 'zh-hk') return 'zh-tw';
-  if (low === 'english' || low === 'en' || low === 'en-us' || low === 'en-gb') return 'en';
-  if (low === 'japanese' || low === 'ja' || low === 'jp') return 'ja';
-  if (low === 'korean' || low === 'ko' || low === 'kr') return 'ko';
-  if (low === 'russian' || low === 'ru') return 'ru';
-  if (low === 'spanish' || low === 'es') return 'es';
-  if (low === 'french' || low === 'fr') return 'fr';
-  if (low === 'german' || low === 'de') return 'de';
-  if (low === 'portuguese' || low === 'pt' || low === 'pt-br') return 'pt';
-  if (low === 'italian' || low === 'it') return 'it';
-  if (low === 'arabic' || low === 'ar') return 'ar';
-  if (low === 'turkish' || low === 'türkçe' || low === 'tr') return 'tr';
-  if (low === 'vietnamese' || low === 'vi') return 'vi';
-  if (low === 'thai' || low === 'th') return 'th';
-  if (low === 'indonesian' || low === 'id') return 'id';
-  return low;
+  return normalizeLanguageCode(lang);
 }
 
 export function getInboundTargetLanguage(
@@ -1129,7 +1177,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
 
     const detectedCode = normalizeChatLangCode(detectClientLangCode(queryText));
     const targetNormCode = normalizeChatLangCode(outboundTargetLang);
-    if (detectedCode && targetNormCode !== 'auto' && detectedCode === targetNormCode) {
+    if (detectedCode !== 'auto' && targetNormCode !== 'auto' && detectedCode === targetNormCode) {
       setTranslatedPreview('');
       setTranslatedPreviewSource('');
       setPreviewError('');
@@ -1214,7 +1262,8 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
         const inputNormCode = normalizeChatLangCode(detectClientLangCode(textToSend));
         const targetNormCode = normalizeChatLangCode(outboundTargetLang);
         const inboundNormCode = normalizeChatLangCode(inboundTargetLang);
-        const isAlreadyTargetLang = targetNormCode !== 'auto' && inputNormCode === targetNormCode;
+        const isAlreadyTargetLang =
+          inputNormCode !== 'auto' && targetNormCode !== 'auto' && inputNormCode === targetNormCode;
 
         if (!isAlreadyTargetLang) {
           if (previewError && translatedPreviewSource === textToSend) {
@@ -1277,9 +1326,11 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
       }
 
       if (editingMessage) {
-        const editRes = await onEditMessage?.(editingMessage.id, targetText, {
-          translatedText: shouldAutoTranslate ? translationOfTarget : '',
-        });
+        const editRes = await onEditMessage?.(
+          editingMessage.id,
+          targetText,
+          shouldAutoTranslate ? { translatedText: translationOfTarget } : undefined
+        );
         if (editRes && typeof editRes === 'object' && editRes.ok === false) {
           showSyncNotice(`云端编辑失败：${editRes.error || '请检查 Telegram 在线状态'}`);
           return;
@@ -2073,9 +2124,13 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
   const safePinnedIndex = pinnedMessages.length > 0 ? pinnedBannerIndex % pinnedMessages.length : 0;
   const activePinnedMessage = pinnedMessages[safePinnedIndex] || null;
 
-  const activeModelDisplay =
-    customLLMConfig?.engineMode === 'custom' && customLLMConfig?.modelName
-      ? customLLMConfig.modelName
+  const isModelDualOff = Boolean(
+    customLLMConfig && (customLLMConfig.enabled === false || customLLMConfig.explicitlyDisabled)
+  );
+  const activeModelDisplay = isModelDualOff
+    ? '大模型已关闭'
+    : customLLMConfig?.engineMode === 'custom'
+      ? customLLMConfig.modelName || '自有模型网关'
       : 'HumanSense 云端引擎';
 
   return (
@@ -2178,14 +2233,16 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
             <button
               type="button"
               onClick={onOpenCustomLLM}
-              title="切换或配置大模型引擎"
+              title={isModelDualOff ? '大模型已关闭（双关状态）— 点击前往配置' : '切换或配置大模型引擎'}
               className={`hidden xl:flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[11.5px] font-medium border transition-colors cursor-pointer ${
                 activeRightPanel === 'llm'
                   ? 'bg-[#e8f3ff] border-[#bfdbfe] text-[#2481cc] dark:bg-[#132234] dark:border-[#2ba0ff]/40 dark:text-[#2ba0ff]'
+                  : isModelDualOff
+                  ? 'bg-amber-50/70 hover:bg-amber-50 dark:bg-amber-500/10 dark:hover:bg-amber-500/15 border-amber-200 dark:border-amber-500/30 text-amber-700 dark:text-amber-300'
                   : 'bg-[#f8fafc] hover:bg-[#f1f5f9] dark:bg-[#0e1726] dark:hover:bg-[#142236] border-[#e2e8f0] dark:border-[#1a2b40] text-[#334155] dark:text-[#dbe7f3]'
               }`}
             >
-              <Cpu className="w-3.5 h-3.5 text-[#2481cc] dark:text-[#2ba0ff]" />
+              <Cpu className={`w-3.5 h-3.5 ${isModelDualOff ? 'text-amber-500 dark:text-amber-400' : 'text-[#2481cc] dark:text-[#2ba0ff]'}`} />
               <span className="max-w-[140px] truncate">{activeModelDisplay}</span>
             </button>
           )}
@@ -2435,7 +2492,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
           <div className="flex items-center gap-2 min-w-0">
             <Languages className="w-3.5 h-3.5 text-[#2481cc] dark:text-[#2ba0ff] shrink-0" />
             <span className="font-medium whitespace-nowrap text-[#334155] dark:text-[#d3e2ef]">
-              自动翻译为中文
+              自动翻译为{getLanguageDisplayName(inboundTargetLang)}
             </span>
             <span className="text-[#94a3b8] dark:text-[#7f93a5]">·</span>
 
@@ -2466,29 +2523,44 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                   </div>
                   <div className="max-h-56 overflow-y-auto space-y-0.5">
                     {SUPPORTED_LANGUAGES.filter((l) => {
-                      if (l.code === 'Auto' || l.code === 'Chinese') return false;
                       const q = langMenuSearch.trim().toLowerCase();
                       if (!q) return true;
                       return l.code.toLowerCase().includes(q) || l.name.toLowerCase().includes(q);
-                    }).map((lang) => (
-                      <button
-                        key={lang.code}
-                        type="button"
-                        onClick={() => {
-                          onUpdateChatLanguage?.(chat.id, lang.code, chat.targetLang || 'Auto');
-                          setIsLangMenuOpen(false);
-                          setLangMenuSearch('');
-                        }}
-                        className={`w-full flex items-center justify-between px-2.5 py-1.5 rounded-lg text-xs cursor-pointer transition-colors ${
-                          outboundTargetLang === lang.code
-                            ? 'bg-[#2481cc] text-white font-medium'
-                            : 'text-[#111827] dark:text-[#f5f7fa] hover:bg-black/5 dark:hover:bg-[#202b36]'
-                        }`}
-                      >
-                        <span className="truncate text-left">{lang.name}</span>
-                        {outboundTargetLang === lang.code && <Check className="w-3.5 h-3.5 text-white shrink-0 ml-1" />}
-                      </button>
-                    ))}
+                    }).map((lang) => {
+                      const isAutoSelected =
+                        lang.code === 'Auto' &&
+                        (!chat.sourceLang || chat.sourceLang === 'Auto');
+                      const isLangSelected =
+                        lang.code !== 'Auto' &&
+                        Boolean(chat.sourceLang && chat.sourceLang !== 'Auto') &&
+                        outboundTargetLang === lang.code;
+                      const isSelected = isAutoSelected || isLangSelected;
+                      return (
+                        <button
+                          key={lang.code}
+                          type="button"
+                          onClick={() => {
+                            if (lang.code === 'Auto') {
+                              onUpdateChatLanguage?.(chat.id, 'Auto', 'Auto');
+                            } else {
+                              onUpdateChatLanguage?.(chat.id, lang.code, chat.targetLang || 'Auto');
+                            }
+                            setIsLangMenuOpen(false);
+                            setLangMenuSearch('');
+                          }}
+                          className={`w-full flex items-center justify-between px-2.5 py-1.5 rounded-lg text-xs cursor-pointer transition-colors ${
+                            isSelected
+                              ? 'bg-[#2481cc] text-white font-medium'
+                              : 'text-[#111827] dark:text-[#f5f7fa] hover:bg-black/5 dark:hover:bg-[#202b36]'
+                          }`}
+                        >
+                          <span className="truncate text-left">
+                            {lang.code === 'Auto' ? '恢复全局默认 (Auto)' : lang.name}
+                          </span>
+                          {isSelected && <Check className="w-3.5 h-3.5 text-white shrink-0 ml-1" />}
+                        </button>
+                      );
+                    })}
                   </div>
                 </div>
               )}

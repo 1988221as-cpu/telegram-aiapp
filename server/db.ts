@@ -373,7 +373,7 @@ export async function initDatabase() {
       account_id TEXT NOT NULL,
       chat_id TEXT NOT NULL,
       source_lang TEXT NOT NULL DEFAULT 'Auto',
-      target_lang TEXT NOT NULL DEFAULT 'Chinese',
+      target_lang TEXT NOT NULL DEFAULT 'Auto',
       updated_at INTEGER NOT NULL,
       PRIMARY KEY (account_id, chat_id)
     );
@@ -912,7 +912,7 @@ export async function restoreDatabaseSnapshot(snapshot: any): Promise<{ success:
         String(lp.account_id || 'acc_1'),
         String(lp.chat_id),
         String(lp.source_lang || 'Auto'),
-        String(lp.target_lang || 'Chinese'),
+        String(lp.target_lang || 'Auto'),
         Number(lp.updated_at) || Date.now()
       );
       restoredLangPrefCount++;

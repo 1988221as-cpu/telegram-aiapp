@@ -202,13 +202,16 @@ export const aiGenerationLimiter = rateLimit({
 // Dedicated high-throughput rate limiter for translation requests (chat scroll/preview/manual retranslate)
 export const translationLimiter = rateLimit({
   windowMs: 60 * 1000,
-  max: 240,
+  max: 600,
+  skip: (req) =>
+    req.body?.purpose === 'history' &&
+    String(req.body?.engine || '').trim().toLowerCase() === 'google',
   standardHeaders: true,
   legacyHeaders: false,
   validate: { trustProxy: false },
   message: {
     error: 'Too Many Requests',
-    message: '翻译请求频率过高，触发速率保护限制（单 IP 每分钟最多 240 次）。请稍后再试。',
+    message: '翻译请求频率过高，触发速率保护限制（单 IP 每分钟最多 600 次）。请稍后再试。',
     retryAfterSeconds: 60,
   },
   statusCode: 429,
@@ -4284,12 +4287,12 @@ app.get('/api/chats', requireTenantAuth, async (req: Request, res: Response) => 
         const scKey = `${lr.account_id}::${lr.chat_id}`;
         langPrefsMap.set(scKey, {
           sourceLang: lr.source_lang || 'Auto',
-          targetLang: lr.target_lang || 'Chinese',
+          targetLang: lr.target_lang || 'Auto',
         });
         if (!langPrefsMap.has(lr.chat_id)) {
           langPrefsMap.set(lr.chat_id, {
             sourceLang: lr.source_lang || 'Auto',
-            targetLang: lr.target_lang || 'Chinese',
+            targetLang: lr.target_lang || 'Auto',
           });
         }
       }
@@ -4320,7 +4323,7 @@ app.get('/api/chats', requireTenantAuth, async (req: Request, res: Response) => 
           lastTime: lastMsg?.timestamp || '刚刚',
           unreadCount: 0,
           sourceLang: langPref?.sourceLang || 'Auto',
-          targetLang: langPref?.targetLang || 'Chinese',
+          targetLang: langPref?.targetLang || 'Auto',
           aiEnabled: true,
           aiMode: 'adaptive',
           typingDelayMin: 2,
@@ -4347,7 +4350,7 @@ app.post('/api/chats/:chatId/language', requireTenantAuth, async (req: Request, 
       : 'Auto';
     const targetLang = typeof req.body?.targetLang === 'string' && req.body.targetLang.trim()
       ? req.body.targetLang.trim()
-      : 'Chinese';
+      : 'Auto';
     if (!chatId || !chatId.trim()) {
       return res.status(400).json({ ok: false, error: '缺少有效的会话 chatId' });
     }
@@ -5859,7 +5862,7 @@ ${conversationTranscript}`;
       (typeof serverCustomCfg?.engineLicenseKey === 'string' && serverCustomCfg.engineLicenseKey.trim()) ||
       (process.env.RAILWAY_BRAIN_KEY || '').trim() ||
       undefined;
-    const effectiveUserJwt = bearerJwt || lastActiveUserJwt || undefined;
+    const effectiveUserJwt = bearerJwt || undefined;
 
     if (useCustomPriorityMemory) {
       const cleanCustomUrl = (effectiveAnalyzeConfig?.baseUrl || '').trim().replace(/\/+$/, '');
@@ -6867,14 +6870,47 @@ export async function syncLearnedPatternsToBackendLlm({
     return { synced: false, syncedCount: 0, error: '没有可同步的习得模式' };
   }
 
-  const serverCfg = customConfig?.enabled ? customConfig : await getServerCustomLlmConfig();
+  const savedCfg = await getServerCustomLlmConfig().catch(() => null);
+  const effectiveCfg =
+    customConfig && typeof customConfig === 'object'
+      ? {
+          ...(savedCfg || {}),
+          ...customConfig,
+          enabled:
+            typeof customConfig.enabled === 'boolean'
+              ? customConfig.enabled
+              : savedCfg?.enabled !== false,
+          explicitlyDisabled:
+            typeof customConfig.enabled === 'boolean'
+              ? !customConfig.enabled
+              : Boolean(customConfig.explicitlyDisabled ?? savedCfg?.explicitlyDisabled),
+          engineMode: customConfig.engineMode || savedCfg?.engineMode || 'cloud',
+        }
+      : savedCfg;
+
+  const isDualOff = Boolean(
+    effectiveCfg && (effectiveCfg.enabled === false || effectiveCfg.explicitlyDisabled)
+  );
+  const isCustomPriority = Boolean(
+    !isDualOff && effectiveCfg?.enabled && effectiveCfg?.engineMode === 'custom'
+  );
+  if (isDualOff || isCustomPriority) {
+    return {
+      synced: false,
+      syncedCount: 0,
+      error: isDualOff
+        ? '当前处于双关状态，已阻断同步至官方云端后台（仅保存在本地进化库中）'
+        : '当前处于「优先自有密钥」模式，已阻断同步至官方云端后台（仅保存在本地进化库中）',
+    };
+  }
+
+  const serverCfg = effectiveCfg;
   const engineLicenseKey = customConfig?.engineLicenseKey || serverCfg?.engineLicenseKey || '';
   const hasExplicitBackendAuth = Boolean(
     userJwt ||
     engineLicenseKey ||
     process.env.RAILWAY_BRAIN_KEY ||
-    process.env.RAILWAY_BRAIN_URL ||
-    serverCfg?.engineMode === 'cloud'
+    process.env.RAILWAY_BRAIN_URL
   );
 
   if (!hasExplicitBackendAuth) {
@@ -7447,9 +7483,64 @@ export async function searchRailwayKnowledgeBase(
 // Private Cloud Knowledge Base Search Proxy (upstream URL strictly hidden from client)
 app.post('/api/knowledge/remote-search', aiGenerationLimiter, requireTenantAuth, async (req: Request, res: Response) => {
   try {
-    const { query, apiUrl, apiKey, customConfig } = req.body;
+    const { query, apiUrl, apiKey, customConfig } = req.body || {};
+    const savedCfg = await getServerCustomLlmConfig().catch(() => null);
+    const effectiveCfg =
+      customConfig && typeof customConfig === 'object'
+        ? {
+            ...(savedCfg || {}),
+            ...customConfig,
+            enabled:
+              typeof customConfig.enabled === 'boolean'
+                ? customConfig.enabled
+                : savedCfg?.enabled !== false,
+            explicitlyDisabled:
+              typeof customConfig.enabled === 'boolean'
+                ? !customConfig.enabled
+                : Boolean(customConfig.explicitlyDisabled ?? savedCfg?.explicitlyDisabled),
+            engineMode: customConfig.engineMode || savedCfg?.engineMode || 'cloud',
+          }
+        : savedCfg;
+
+    const isDualOff = Boolean(
+      effectiveCfg && (effectiveCfg.enabled === false || effectiveCfg.explicitlyDisabled)
+    );
+    const isCustomPriority = Boolean(
+      !isDualOff && effectiveCfg?.enabled && effectiveCfg?.engineMode === 'custom'
+    );
+    if (isDualOff) {
+      return res.status(400).json({
+        ok: false,
+        connected: false,
+        context: '',
+        matchedCount: 0,
+        source: 'remote_cloud_kb_blocked',
+        error: '当前处于双关状态（官方大模型与自有密钥均已关闭），已阻断官方云端知识库检索。',
+      });
+    }
+    if (isCustomPriority) {
+      return res.status(400).json({
+        ok: false,
+        connected: false,
+        context: '',
+        matchedCount: 0,
+        source: 'remote_cloud_kb_blocked',
+        error: '当前处于「优先自有密钥回复」模式，官方云端知识库检索 (Cloud RAG) 已强制关闭。',
+      });
+    }
+    if (!isCloudKnowledgeBaseEnabled(effectiveCfg)) {
+      return res.status(400).json({
+        ok: false,
+        connected: false,
+        context: '',
+        matchedCount: 0,
+        source: 'remote_cloud_kb_blocked',
+        error: '当前未启用云端知识库检索 (Cloud RAG)，已阻断官方云端请求。',
+      });
+    }
+
     const userJwt = extractBearerToken(req);
-    const engineKey = customConfig?.engineLicenseKey || req.body?.engineLicenseKey;
+    const engineKey = customConfig?.engineLicenseKey || req.body?.engineLicenseKey || savedCfg?.engineLicenseKey;
     const result = await searchRailwayKnowledgeBase(query, apiUrl, apiKey, 7000, userJwt, engineKey);
     if (!result.ok) {
       return res.status(result.statusCode && result.statusCode >= 400 && result.statusCode < 600 ? result.statusCode : 502).json(result);
@@ -7471,6 +7562,15 @@ app.post('/api/training/feedback', aiGenerationLimiter, requireTenantAuth, async
     const cleanCue = typeof peerCue === 'string' ? peerCue.trim().slice(0, 300) : '';
     const userJwt = extractBearerToken(req);
     const serverCfg = await getServerCustomLlmConfig();
+    const isDualOff = Boolean(
+      serverCfg && (serverCfg.enabled === false || serverCfg.explicitlyDisabled)
+    );
+    const isCustomPriority = Boolean(
+      !isDualOff && serverCfg?.enabled && serverCfg?.engineMode === 'custom'
+    );
+    if (isDualOff || isCustomPriority) {
+      return res.json({ ok: true, syncedToCloud: false, skipped: true });
+    }
     const effectiveEngineKey = engineLicenseKey || serverCfg?.engineLicenseKey || '';
     const targetUrl = `${getRailwayBrainBaseUrl()}/api/v1/training/feedback`;
 
@@ -8202,75 +8302,147 @@ export function resolvePromptLanguageName(lang: string): string {
 }
 
 export function detectSourceLangCode(text: string): string {
-  if (!text || typeof text !== 'string') return 'en';
+  if (!text || typeof text !== 'string') return '';
   const clean = text.trim();
-  if (/[\u4e00-\u9fa5]/.test(clean)) return 'zh-CN';
-  if (/[іїєґІЇЄҐ]/.test(clean) && /[\u0400-\u04FF]/.test(clean)) return 'uk';
-  if (/[\u0400-\u04FF]/.test(clean)) return 'ru';
-  if (/[\u3040-\u30ff]/.test(clean)) return 'ja';
-  if (/[\uac00-\ud7af]/.test(clean)) return 'ko';
-  if (/[پچژگک]/.test(clean) && /[\u0600-\u06FF]/.test(clean)) return 'fa';
-  if (/[\u0600-\u06FF]/.test(clean)) return 'ar';
-  if (/[\u0590-\u05FF]/.test(clean)) return 'he';
-  if (/[\u0370-\u03FF]/.test(clean)) return 'el';
-  if (/[\u0e00-\u0e7f]/.test(clean)) return 'th';
-  if (/[\u0900-\u097F]/.test(clean)) return 'hi';
-  if (/[\u0980-\u09FF]/.test(clean)) return 'bn';
-  if (/[\u0B80-\u0BFF]/.test(clean)) return 'ta';
-  if (/[\u0C00-\u0C7F]/.test(clean)) return 'te';
-  if (/[\u1000-\u109F]/.test(clean)) return 'my';
-  if (/[\u1780-\u17FF]/.test(clean)) return 'km';
-  if (/[\u0E80-\u0EFF]/.test(clean)) return 'lo';
-  if (/[\u10A0-\u10FF]/.test(clean)) return 'ka';
-  if (/[\u0530-\u058F]/.test(clean)) return 'hy';
-  if (/[\u1200-\u137F]/.test(clean)) return 'am';
+  if (!clean) return '';
+  const stripped = clean
+    .replace(/https?:\/\/\S+/gi, ' ')
+    .replace(/\bwww\.\S+/gi, ' ')
+    .replace(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi, ' ')
+    .replace(/@[a-zA-Z0-9_]+/g, ' ')
+    .trim();
+  if (!stripped || !/\p{L}/u.test(stripped)) return '';
+
+  if (/[\u4e00-\u9fa5]/.test(stripped)) return 'zh-CN';
+  if (/[іїєґІЇЄҐ]/.test(stripped) && /[\u0400-\u04FF]/.test(stripped)) return 'uk';
+  if (/[\u0400-\u04FF]/.test(stripped)) return 'ru';
+  if (/[\u3040-\u30ff]/.test(stripped)) return 'ja';
+  if (/[\uac00-\ud7af]/.test(stripped)) return 'ko';
+  if (/[پچژگک]/.test(stripped) && /[\u0600-\u06FF]/.test(stripped)) return 'fa';
+  if (/[\u0600-\u06FF]/.test(stripped)) return 'ar';
+  if (/[\u0590-\u05FF]/.test(stripped)) return 'he';
+  if (/[\u0370-\u03FF]/.test(stripped)) return 'el';
+  if (/[\u0e00-\u0e7f]/.test(stripped)) return 'th';
+  if (/[\u0900-\u097F]/.test(stripped)) return 'hi';
+  if (/[\u0980-\u09FF]/.test(stripped)) return 'bn';
+  if (/[\u0B80-\u0BFF]/.test(stripped)) return 'ta';
+  if (/[\u0C00-\u0C7F]/.test(stripped)) return 'te';
+  if (/[\u1000-\u109F]/.test(stripped)) return 'my';
+  if (/[\u1780-\u17FF]/.test(stripped)) return 'km';
+  if (/[\u0E80-\u0EFF]/.test(stripped)) return 'lo';
+  if (/[\u10A0-\u10FF]/.test(stripped)) return 'ka';
+  if (/[\u0530-\u058F]/.test(stripped)) return 'hy';
+  if (/[\u1200-\u137F]/.test(stripped)) return 'am';
+
   if (
-    /[ãõ]/i.test(clean) ||
-    /\b(olá|ola|bom dia|boa tarde|boa noite|obrigado|obrigada|você|voce|tudo bem)\b/i.test(clean)
+    /[ãõ]/i.test(stripped) ||
+    /\b(olá|ola|bom dia|boa tarde|boa noite|obrigado|obrigada|você|voce|tudo bem)\b/i.test(stripped)
   ) {
     return 'pt';
   }
   if (
-    /\b(ciao|buongiorno|buonasera|grazie|come stai|arrivederci|prego)\b/i.test(clean)
+    /\b(ciao|buongiorno|buonasera|grazie|come stai|arrivederci|prego)\b/i.test(stripped)
   ) {
     return 'it';
   }
   if (
-    /[¿¡ñÑ]/i.test(clean) ||
-    /\b(hola|buenos días|buenas noches|gracias|amigo|amiga|por favor|cómo estás|como estas|adiós|adios|qué tal|que tal)\b/i.test(clean)
+    /[¿¡ñÑ]/i.test(stripped) ||
+    /\b(hola|buenos días|buenas noches|gracias|amigo|amiga|por favor|cómo estás|como estas|adiós|adios|qué tal|que tal)\b/i.test(stripped)
   ) {
     return 'es';
   }
   if (
-    /[œæ]/i.test(clean) ||
-    /\b(bonjour|bonsoir|merci|salut|comment|s'il vous plaît|sil vous plait|oui|non|mon ami|mon amour|très bien|tres bien|ça va|ca va)\b/i.test(clean)
+    /[œæ]/i.test(stripped) ||
+    /\b(bonjour|bonsoir|merci|salut|comment|s'il vous plaît|sil vous plait|oui|non|mon ami|mon amour|très bien|tres bien|ça va|ca va)\b/i.test(stripped)
   ) {
     return 'fr';
   }
   if (
-    /[çÇğĞıİşŞ]/.test(clean) ||
-    /\b(merhaba|günaydın|gunaydin|nasılsın|nasilsin|teşekkür|tesekkur|evet|hayır|hayir|tamam|lütfen|lutfen|görüşürüz|gorusuruz|harika|canım|canim|iyiyim|selam|nasılsınız|nasilsiniz)\b/i.test(clean)
+    /[ğĞıİşŞ]/.test(stripped) ||
+    /\b(merhaba|günaydın|gunaydin|nasılsın|nasilsin|teşekkür|tesekkur|evet|hayır|hayir|tamam|lütfen|lutfen|görüşürüz|gorusuruz|harika|canım|canim|iyiyim|selam|nasılsınız|nasilsiniz)\b/i.test(stripped)
   ) {
     return 'tr';
   }
   if (
-    /[ăắằẳẵặâầấẩẫậêềếểễệôồốổỗộơờớởỡợưừứửữựđẢảẼẽĨĩÕõŨũỸỹẠạẸẹỊịỌọỤụỴỵẢảẺẻỈỉỎỏỦủỶỷàáèéìíòóùúỳý]/i.test(clean) ||
-    /\b(xin chào|cảm ơn|cam on|chào|bạn|ơi|vâng|không|tạm biệt|chúc)\b/i.test(clean)
+    /[ăắằẳẵặấầẩẫậếềểễệốồổỗộơờớởỡợưừứửữựđẢảẼẽĨĩÕõŨũỸỹẠạẸẹỊịỌọỤụỴỵẺẻỈỉỎỏỦủỶỷ]/i.test(stripped) ||
+    /\b(xin chào|cảm ơn|cam on|chào bạn|chào|tạm biệt|chúc|vâng|không)\b/i.test(stripped)
   ) {
     return 'vi';
   }
   if (
-    /[äöüß]/i.test(clean) ||
-    /\b(guten tag|guten morgen|danke|bitte|wie geht|hallo|tschüss|tschuess|auf wiedersehen)\b/i.test(clean)
+    /[ąćęłńśźżĄĆĘŁŃŚŹŻ]/.test(stripped) ||
+    /\b(dzień dobry|dzien dobry|dziękuję|dziekuje|proszę|prosze|cześć|czesc|jak się masz|jak sie masz|przepraszam|dobranoc)\b/i.test(stripped)
+  ) {
+    return 'pl';
+  }
+  if (
+    /ß/.test(stripped) ||
+    (/\b(guten tag|guten morgen|danke|bitte|wie geht|hallo|tschüss|tschuess|auf wiedersehen|ich bin|nicht|sehr gut)\b/i.test(stripped) &&
+      !/\b(goedemorgen|dank je|hoe gaat)\b/i.test(stripped))
   ) {
     return 'de';
   }
   if (
-    /\b(selamat pagi|selamat siang|terima kasih|apa kabar|sama-sama|tidak|iya|halo|bagaimana)\b/i.test(clean)
+    /\b(goedemorgen|goedemiddag|goedenavond|hoe gaat het|met jou|dank je|dank u|alsjeblieft|alstublieft|tot ziens|welkom|graag|vandaag|nederlands|ik ben|ik wil|jij bent|het is)\b/i.test(stripped)
+  ) {
+    return 'nl';
+  }
+  if (
+    /[åÅ]/.test(stripped) ||
+    /\b(hej|hur mår du|hur mar du|god morgon|god kväll|tack så mycket|tack sa mycket|varsågod|förlåt|jag är|det är|svenska)\b/i.test(stripped)
+  ) {
+    return 'sv';
+  }
+  if (
+    /[øØ]/.test(stripped) ||
+    /\b(hvordan har du det|hvordan går det|mange tak|tusen takk|ha det)\b/i.test(stripped)
+  ) {
+    return /\b(tusen takk|hvordan går det)\b/i.test(stripped) ? 'no' : 'da';
+  }
+  if (
+    /[řěůŘĚŮ]/.test(stripped) ||
+    /\b(dobrý den|děkuji|dekuji|prosím|prosim|jak se máš|jak se mas|ahoj)\b/i.test(stripped)
+  ) {
+    return 'cs';
+  }
+  if (
+    /[őűŐŰ]/.test(stripped) ||
+    /\b(köszönöm|koszonom|jó reggelt|hogy vagy|kérem|szia)\b/i.test(stripped)
+  ) {
+    return 'hu';
+  }
+  if (
+    /[șțȘȚ]/.test(stripped) ||
+    /\b(mulțumesc|multumesc|ce faci|te rog|la revedere|bună ziua)\b/i.test(stripped)
+  ) {
+    return 'ro';
+  }
+  if (
+    /\b(apa khabar|selamat petang|boleh|awak|hendak|tolonglah)\b/i.test(stripped)
+  ) {
+    return 'ms';
+  }
+  if (
+    /\b(selamat pagi|selamat siang|selamat sore|terima kasih|apa kabar|sama-sama|tidak|iya|halo|bagaimana|saya mau)\b/i.test(stripped)
   ) {
     return 'id';
   }
-  return 'en';
+  if (
+    /\b(kamusta|kumusta|salamat|magandang umaga|magandang gabi|mabuti|hindi)\b/i.test(stripped)
+  ) {
+    return 'tl';
+  }
+
+  // Only classify as English if pure basic Latin (no foreign diacritics) AND contains recognizable English words/contractions
+  if (
+    !/[à-öø-ÿąćęłńśźżšžčřěůőűăîșțğış]/i.test(stripped) &&
+    (/\b(the|is|are|am|was|were|be|been|have|has|had|do|does|did|will|would|can|could|should|may|might|this|that|these|those|there|here|what|which|who|when|where|why|how|you|your|yours|we|our|they|their|he|she|it|its|i|my|me|hi|hello|hey|thanks|thank|please|sorry|ok|okay|yes|no|not|and|or|but|for|with|from|about|order|price|status|check|help|need|want|good|great|nice|morning|evening|night|today|tomorrow|yesterday|send|sent|message|account|time|day|work|know|think|like|love|see|get|got|make|made|go|going|come|back|now|just|very|much|more|some|any|all|one|two|world|shipping|delivery|payment|confirm|update|reply|wait|sure)\b/i.test(stripped) ||
+      /\b(i'm|you're|we're|they're|it's|that's|don't|doesn't|didn't|can't|won't|wouldn't|shouldn't|isn't|aren't|haven't|hasn't|what's|who's|where's|how's)\b/i.test(stripped))
+  ) {
+    return 'en';
+  }
+
+  return '';
 }
 
 /**
@@ -8529,7 +8701,6 @@ export async function performStrictTranslation({
     undefined;
   const effectiveUserJwt =
     (typeof userJwt === 'string' && userJwt.trim()) ||
-    lastActiveUserJwt ||
     undefined;
 
   if (!effectiveUserJwt && !effectiveLicenseKey) {
@@ -8588,6 +8759,7 @@ app.post('/api/translate', translationLimiter, requireTenantAuth, async (req: Re
       targetLang = 'Chinese',
       customConfig,
       engine,
+      purpose,
       googleApiKey,
       geminiModel,
       geminiApiKey,
@@ -8606,6 +8778,7 @@ app.post('/api/translate', translationLimiter, requireTenantAuth, async (req: Re
       });
     }
 
+    const isHistoryTranslation = purpose === 'history';
     const userJwt = extractBearerToken(req);
 
     // Resolve saved local user keys/gateways as fallback ONLY if not passed in body
@@ -8634,20 +8807,36 @@ app.post('/api/translate', translationLimiter, requireTenantAuth, async (req: Re
 
     const effectiveCustomConfig =
       customConfig && typeof customConfig === 'object'
-        ? {
-            ...(savedCustomConfig || {}),
-            ...customConfig,
-            enabled:
-              typeof customConfig.enabled === 'boolean'
-                ? customConfig.enabled
-                : savedCustomConfig?.enabled !== false,
-            explicitlyDisabled:
-              typeof customConfig.enabled === 'boolean'
-                ? !customConfig.enabled
-                : Boolean(customConfig.explicitlyDisabled ?? savedCustomConfig?.explicitlyDisabled),
-            baseUrl: customConfig.baseUrl || savedCustomConfig?.baseUrl || '',
-            apiKey: customConfig.apiKey || savedCustomConfig?.apiKey || '',
-          }
+        ? (() => {
+            const explicitEnabled = typeof customConfig.enabled === 'boolean' ? customConfig.enabled : undefined;
+            const explicitDisabled =
+              typeof customConfig.explicitlyDisabled === 'boolean' ? customConfig.explicitlyDisabled : undefined;
+            const resolvedExplicitlyDisabled =
+              explicitDisabled !== undefined
+                ? explicitDisabled
+                : explicitEnabled !== undefined
+                ? !explicitEnabled
+                : Boolean(savedCustomConfig?.explicitlyDisabled);
+            const resolvedEnabled =
+              explicitEnabled !== undefined
+                ? explicitEnabled
+                : explicitDisabled !== undefined
+                ? !explicitDisabled
+                : savedCustomConfig?.enabled !== false;
+            const resolvedEngineMode =
+              customConfig.engineMode === 'custom' || customConfig.engineMode === 'cloud'
+                ? customConfig.engineMode
+                : savedCustomConfig?.engineMode;
+            return {
+              ...(savedCustomConfig || {}),
+              ...customConfig,
+              enabled: resolvedEnabled,
+              explicitlyDisabled: resolvedExplicitlyDisabled,
+              engineMode: resolvedEngineMode,
+              baseUrl: customConfig.baseUrl || savedCustomConfig?.baseUrl || '',
+              apiKey: customConfig.apiKey || savedCustomConfig?.apiKey || '',
+            };
+          })()
         : savedCustomConfig;
 
     const isDualOff = Boolean(
@@ -8658,7 +8847,13 @@ app.post('/api/translate', translationLimiter, requireTenantAuth, async (req: Re
       !isDualOff && effectiveCustomConfig?.enabled && effectiveCustomConfig?.engineMode === 'custom'
     );
 
-    if (isDualOff) {
+    if (isHistoryTranslation) {
+      if (strictEngine !== 'google') {
+        return res.status(400).json({
+          error: '历史记录翻译仅允许使用「谷歌机翻」，禁止消耗大模型配额（只有即时翻译和 AI 回复翻译才走大模型）。',
+        });
+      }
+    } else if (isDualOff) {
       if (strictEngine !== 'google') {
         return res.status(400).json({
           error:
@@ -8713,15 +8908,216 @@ app.post('/api/translate', translationLimiter, requireTenantAuth, async (req: Re
   }
 });
 
-// 8. Audio Transcription (STT) - Strictly single resolved official Gemini model
-app.post('/api/audio/transcribe', aiGenerationLimiter, async (req: Request, res: Response) => {
+// 8. Audio Transcription (STT) - Strictly enforces 3-state mutual exclusion + requireTenantAuth
+app.post('/api/audio/transcribe', aiGenerationLimiter, requireTenantAuth, async (req: Request, res: Response) => {
   try {
-    const { audioBase64, mimeType = 'audio/webm', model, customConfig } = req.body;
+    const { audioBase64, mimeType = 'audio/webm', model, customConfig } = req.body || {};
     if (!audioBase64) return res.status(400).json({ error: 'Audio data is required' });
 
-    const customApiKey = (customConfig?.enabled && customConfig?.protocol === 'gemini' && customConfig?.apiKey) ? customConfig.apiKey : undefined;
+    const savedCustomConfig = await getServerCustomLlmConfig().catch(() => null);
+    const effectiveCustomConfig =
+      customConfig && typeof customConfig === 'object'
+        ? {
+            ...(savedCustomConfig || {}),
+            ...customConfig,
+            enabled:
+              typeof customConfig.enabled === 'boolean'
+                ? customConfig.enabled
+                : savedCustomConfig?.enabled !== false,
+            explicitlyDisabled:
+              typeof customConfig.enabled === 'boolean'
+                ? !customConfig.enabled
+                : Boolean(customConfig.explicitlyDisabled ?? savedCustomConfig?.explicitlyDisabled),
+            baseUrl: customConfig.baseUrl || savedCustomConfig?.baseUrl || '',
+            apiKey: customConfig.apiKey || savedCustomConfig?.apiKey || '',
+          }
+        : savedCustomConfig;
+
+    const isDualOff = Boolean(
+      effectiveCustomConfig &&
+      (effectiveCustomConfig.enabled === false || effectiveCustomConfig.explicitlyDisabled)
+    );
+    if (isDualOff) {
+      return res.status(400).json({
+        error: '当前处于双关状态（官方大模型与自有密钥均已关闭），严禁调用语音转文字大模型；请前往「模型」开启官方大模型或优先自有密钥后再试。',
+      });
+    }
+
+    const isPriorityCustom = Boolean(
+      effectiveCustomConfig?.enabled && effectiveCustomConfig?.engineMode === 'custom'
+    );
+
+    let cleanBase64 = String(audioBase64);
+    let effectiveMimeType = mimeType;
+    let audioBuf: Buffer;
+    const localAudioPath = resolveLocalMediaDiskPath(cleanBase64);
+    if (localAudioPath) {
+      audioBuf = await fs.promises.readFile(localAudioPath);
+      cleanBase64 = audioBuf.toString('base64');
+      effectiveMimeType = inferMediaMimeFromExt(localAudioPath);
+    } else {
+      const dataMatch = cleanBase64.match(/^data:([^;]+);base64,(.+)$/);
+      if (dataMatch) {
+        effectiveMimeType = dataMatch[1] || mimeType;
+        cleanBase64 = dataMatch[2];
+      } else {
+        cleanBase64 = cleanBase64.replace(/^data:audio\/[^;]+;base64,/, '');
+      }
+      audioBuf = Buffer.from(cleanBase64, 'base64');
+    }
+
+    if (!audioBuf || audioBuf.length === 0) {
+      return res.status(400).json({ error: '无效的音频数据（内容为空）' });
+    }
+
+    if (isPriorityCustom) {
+      const cleanBaseUrl = (effectiveCustomConfig?.baseUrl || '').trim().replace(/\/+$/, '');
+      const cleanApiKey = sanitizeHttpHeaderValue(effectiveCustomConfig?.apiKey || '');
+      if (!cleanBaseUrl || isBuiltInCloudGatewayUrl(cleanBaseUrl)) {
+        return res.status(400).json({
+          error: '已开启「优先自有密钥回复」，语音转文字必须走自有模型网关，请先填写有效的接入网址 (Base URL)。',
+        });
+      }
+      let isLocalhostUrl = false;
+      try {
+        const parsed = new URL(cleanBaseUrl);
+        isLocalhostUrl = isAllowedLocalhostEndpoint(parsed.hostname);
+      } catch {
+        return res.status(400).json({ error: '自有模型网关 Base URL 无效' });
+      }
+      if (!cleanApiKey && !isLocalhostUrl) {
+        return res.status(400).json({
+          error: '已开启「优先自有密钥回复」，请先在「模型 → 接入自有模型网关」填写 API 密钥。',
+        });
+      }
+
+      const inferredProtocol =
+        effectiveCustomConfig?.protocol === 'gemini' || cleanBaseUrl.toLowerCase().includes('googleapis.com')
+          ? 'gemini'
+          : effectiveCustomConfig?.protocol === 'anthropic'
+          ? 'anthropic'
+          : 'openai';
+
+      if (inferredProtocol === 'anthropic') {
+        return res.status(400).json({
+          error: 'Anthropic 协议暂不支持音频转写，请在自有模型网关切换 OpenAI 或 Gemini 协议接口。',
+        });
+      }
+
+      if (inferredProtocol === 'gemini') {
+        const customSttModel =
+          (typeof model === 'string' && model.trim()) ||
+          (effectiveCustomConfig?.modelName && effectiveCustomConfig.modelName.trim()) ||
+          resolveGeminiModel(undefined, 'transcribe');
+        try {
+          const sdkBaseUrl = cleanBaseUrl.replace(/\/v1beta.*$/i, '').replace(/\/v1$/i, '');
+          const ai = new GoogleGenAI({
+            apiKey: cleanApiKey || 'local-key',
+            httpOptions: {
+              baseUrl: sdkBaseUrl,
+              headers: { 'User-Agent': 'aistudio-build' },
+            },
+          });
+          const response = await ai.models.generateContent({
+            model: customSttModel,
+            contents: {
+              parts: [
+                { inlineData: { mimeType: effectiveMimeType, data: cleanBase64 } },
+                { text: 'Transcribe this voice message accurately into text verbatim.' },
+              ],
+            },
+          });
+          const text = response.text?.trim();
+          if (!text) {
+            return res.status(502).json({ error: `自有网关 (${customSttModel}) 未返回有效语音识别文本` });
+          }
+          return res.json({ text, modelUsed: customSttModel });
+        } catch (e: any) {
+          return res.status(503).json({
+            error: `自有网关语音识别失败 (${customSttModel}): ${e?.message || String(e)}`,
+          });
+        }
+      }
+
+      // OpenAI-compatible /audio/transcriptions (Whisper)
+      const sttModel = (typeof model === 'string' && model.trim()) || 'whisper-1';
+      const ext = effectiveMimeType.includes('ogg')
+        ? 'ogg'
+        : effectiveMimeType.includes('mpeg') || effectiveMimeType.includes('mp3')
+        ? 'mp3'
+        : effectiveMimeType.includes('wav')
+        ? 'wav'
+        : effectiveMimeType.includes('mp4') || effectiveMimeType.includes('m4a')
+        ? 'm4a'
+        : 'webm';
+      const candidateUrls = cleanBaseUrl.endsWith('/audio/transcriptions')
+        ? [cleanBaseUrl]
+        : cleanBaseUrl.endsWith('/v1')
+        ? [`${cleanBaseUrl}/audio/transcriptions`]
+        : [`${cleanBaseUrl}/v1/audio/transcriptions`, `${cleanBaseUrl}/audio/transcriptions`];
+
+      let extraHeaders: Record<string, string> = {};
+      if (effectiveCustomConfig?.customHeaders) {
+        try {
+          const parsedHeaders =
+            typeof effectiveCustomConfig.customHeaders === 'string'
+              ? JSON.parse(effectiveCustomConfig.customHeaders)
+              : effectiveCustomConfig.customHeaders;
+          if (parsedHeaders && typeof parsedHeaders === 'object' && !Array.isArray(parsedHeaders)) {
+            extraHeaders = parsedHeaders;
+          }
+        } catch {}
+      }
+      let lastStatus = 502;
+      let lastError = '自有模型网关未返回有效语音识别文本';
+
+      for (const targetUrl of candidateUrls) {
+        try {
+          const form = new FormData();
+          form.append('file', new Blob([new Uint8Array(audioBuf)], { type: effectiveMimeType }), `audio.${ext}`);
+          form.append('model', sttModel);
+          const encodedForm = new Response(form);
+          const formBuf = Buffer.from(await encodedForm.arrayBuffer());
+          const formContentType = encodedForm.headers.get('content-type') || 'multipart/form-data';
+
+          const sttRes = await safeSsrfFetch(targetUrl, {
+            method: 'POST',
+            headers: {
+              'Content-Type': formContentType,
+              ...(cleanApiKey ? { Authorization: `Bearer ${cleanApiKey}` } : {}),
+              ...extraHeaders,
+            },
+            body: formBuf,
+            signal: AbortSignal.timeout(30000),
+          });
+          lastStatus = sttRes.status;
+          if (!sttRes.ok) {
+            const errTxt = await sttRes.text().catch(() => '');
+            lastError = `HTTP ${sttRes.status}${errTxt ? `: ${errTxt.slice(0, 180)}` : ''}`;
+            if (sttRes.status !== 404) break;
+            continue;
+          }
+          const json = await sttRes.json().catch(() => null);
+          const text = typeof json?.text === 'string' ? json.text.trim() : '';
+          if (text) {
+            return res.json({ text, modelUsed: sttModel });
+          }
+          lastStatus = 502;
+          lastError = json?.error?.message || '自有网关未返回有效语音识别文本';
+          break;
+        } catch (err: any) {
+          lastStatus = 503;
+          lastError = err?.message || String(err);
+        }
+      }
+      return res.status(lastStatus >= 400 && lastStatus < 600 ? lastStatus : 503).json({
+        error: `自有网关语音识别失败 (${sttModel}): ${lastError}`,
+      });
+    }
+
+    // Cloud Priority Mode: strictly official Gemini STT
     const selectedModel = resolveGeminiModel(model, 'transcribe');
-    if (!isGeminiAvailable(customApiKey)) {
+    if (!isGeminiAvailable()) {
       const circuit = getGeminiCircuitStatus();
       return res.status(circuit.isBlocked ? 503 : 400).json({
         error: circuit.isBlocked
@@ -8731,23 +9127,7 @@ app.post('/api/audio/transcribe', aiGenerationLimiter, async (req: Request, res:
     }
 
     try {
-      let cleanBase64 = String(audioBase64);
-      let effectiveMimeType = mimeType;
-      const localAudioPath = resolveLocalMediaDiskPath(cleanBase64);
-      if (localAudioPath) {
-        const audioBuf = await fs.promises.readFile(localAudioPath);
-        cleanBase64 = audioBuf.toString('base64');
-        effectiveMimeType = inferMediaMimeFromExt(localAudioPath);
-      } else {
-        const dataMatch = cleanBase64.match(/^data:([^;]+);base64,(.+)$/);
-        if (dataMatch) {
-          effectiveMimeType = dataMatch[1] || mimeType;
-          cleanBase64 = dataMatch[2];
-        } else {
-          cleanBase64 = cleanBase64.replace(/^data:audio\/[^;]+;base64,/, '');
-        }
-      }
-      const ai = createGeminiClient(customApiKey);
+      const ai = createGeminiClient();
       const response = await ai.models.generateContent({
         model: selectedModel,
         contents: {
@@ -8827,7 +9207,7 @@ export function determineChatRouting(
 }
 
 // 9. Text to Speech (TTS) - Strictly routed through user's Tab 3 Custom Gateway (Base URL + Key) & Tab 2 TTS Model
-app.post('/api/audio/tts-clone', aiGenerationLimiter, async (req: Request, res: Response) => {
+app.post('/api/audio/tts-clone', aiGenerationLimiter, requireTenantAuth, async (req: Request, res: Response) => {
   try {
     const {
       text,
@@ -8842,6 +9222,36 @@ app.post('/api/audio/tts-clone', aiGenerationLimiter, async (req: Request, res: 
     }
 
     const savedCustomConfig = await getServerCustomLlmConfig().catch(() => null);
+    const effectiveTtsConfig =
+      customConfig && typeof customConfig === 'object'
+        ? {
+            ...(savedCustomConfig || {}),
+            ...customConfig,
+            enabled:
+              typeof customConfig.enabled === 'boolean'
+                ? customConfig.enabled
+                : savedCustomConfig?.enabled !== false,
+            explicitlyDisabled:
+              typeof customConfig.explicitlyDisabled === 'boolean'
+                ? customConfig.explicitlyDisabled
+                : typeof customConfig.enabled === 'boolean'
+                ? !customConfig.enabled
+                : Boolean(savedCustomConfig?.explicitlyDisabled),
+          }
+        : savedCustomConfig;
+
+    const isDualOff = Boolean(
+      effectiveTtsConfig &&
+      (effectiveTtsConfig.enabled === false || effectiveTtsConfig.explicitlyDisabled)
+    );
+    if (isDualOff) {
+      return res.status(400).json({
+        ok: false,
+        error: '当前处于双关状态（官方大模型与自有密钥均已关闭），严禁调用语音合成/音色克隆；请前往「模型」开启官方大模型或优先自有密钥后再试。',
+        message: '当前处于双关状态（官方大模型与自有密钥均已关闭），严禁调用语音合成/音色克隆；请前往「模型」开启官方大模型或优先自有密钥后再试。',
+      });
+    }
+
     const cleanBaseUrl = (
       (typeof customConfig?.baseUrl === 'string' && customConfig.baseUrl.trim()) ||
       (typeof savedCustomConfig?.baseUrl === 'string' && savedCustomConfig.baseUrl.trim()) ||
@@ -9048,7 +9458,11 @@ app.post('/api/audio/tts-clone', aiGenerationLimiter, async (req: Request, res: 
   }
 });
 
-async function getCnTranslationIfForeign(text: string, overrideCustomConfig?: any): Promise<string> {
+async function getCnTranslationIfForeign(
+  text: string,
+  overrideCustomConfig?: any,
+  userJwt?: string
+): Promise<string> {
   if (!text || typeof text !== 'string') return '';
   const hasForeign = /[a-zA-Z\u0400-\u04FF\u0600-\u06FF]/.test(text);
   if (!hasForeign) return '';
@@ -9083,7 +9497,7 @@ async function getCnTranslationIfForeign(text: string, overrideCustomConfig?: an
       geminiApiKey: transSettings?.geminiApiKey,
       customModelName: resolvedCustomModel,
       customConfig,
-      userJwt: lastActiveUserJwt || undefined,
+      userJwt: (typeof userJwt === 'string' && userJwt.trim()) || undefined,
       engineLicenseKey: customConfig?.engineLicenseKey,
     });
     return result.translatedText || '';
@@ -9799,7 +10213,7 @@ ${transcriptContext}${langRequirement}`;
             const replyText = d?.candidates?.[0]?.content?.parts?.[0]?.text?.trim();
             if (replyText) {
               void incrementEvolutionHabitUsage(injectedHabitIds);
-              const cnTranslation = await getCnTranslationIfForeign(replyText, effectiveChatConfig);
+              const cnTranslation = await getCnTranslationIfForeign(replyText, effectiveChatConfig, userJwt);
               return res.json({
                 replyText,
                 cnTranslation,
@@ -9854,7 +10268,7 @@ ${transcriptContext}${langRequirement}`;
                   : '';
                 if (replyText) {
                   void incrementEvolutionHabitUsage(injectedHabitIds);
-                  const cnTranslation = await getCnTranslationIfForeign(replyText, effectiveChatConfig);
+                  const cnTranslation = await getCnTranslationIfForeign(replyText, effectiveChatConfig, userJwt);
                   return res.json({
                     replyText,
                     cnTranslation,
@@ -9915,7 +10329,7 @@ ${transcriptContext}${langRequirement}`;
                 const replyText = data?.choices?.[0]?.message?.content?.trim();
                 if (replyText) {
                   void incrementEvolutionHabitUsage(injectedHabitIds);
-                  const cnTranslation = await getCnTranslationIfForeign(replyText, effectiveChatConfig);
+                  const cnTranslation = await getCnTranslationIfForeign(replyText, effectiveChatConfig, userJwt);
                   return res.json({
                     replyText,
                     cnTranslation,
@@ -9989,7 +10403,7 @@ ${transcriptContext}${langRequirement}`;
 
           if (rawText) {
             void incrementEvolutionHabitUsage(injectedHabitIds);
-            const cnTranslation = await getCnTranslationIfForeign(rawText, effectiveChatConfig);
+            const cnTranslation = await getCnTranslationIfForeign(rawText, effectiveChatConfig, userJwt);
             return res.json({
               replyText: rawText,
               cnTranslation,
@@ -11363,16 +11777,170 @@ export async function sendTelegramVoice(
   }
 }
 
-// Helper: generate TTS audio for Telegram voice replies
-async function generateTtsAudio(
+// Helper: generate TTS audio for Telegram voice replies (strictly obeys 3-state mutual exclusion)
+export async function generateTtsAudio(
   text: string,
   voiceName = 'Kore',
-  toneStyle = 'Warm, authentic human tone'
+  toneStyle = 'Warm, authentic human tone',
+  overrideCustomConfig?: any
 ): Promise<{ audioUrl: string; duration: number }> {
   const allowedVoices = ['Puck', 'Charon', 'Kore', 'Fenrir', 'Zephyr'];
   const chosenVoice = allowedVoices.includes(voiceName) ? voiceName : 'Kore';
   const duration = Math.min(Math.max(Math.round(text.length * 0.2), 2), 30);
 
+  const serverCustomConfig = overrideCustomConfig || (await getServerCustomLlmConfig().catch(() => null));
+  const isDualOff = Boolean(
+    serverCustomConfig &&
+    (serverCustomConfig.enabled === false || serverCustomConfig.explicitlyDisabled)
+  );
+  if (isDualOff) {
+    throw new Error('当前处于双关状态（官方大模型与自有密钥均已关闭），严禁调用语音合成大模型');
+  }
+
+  const isPriorityCustom = Boolean(
+    serverCustomConfig?.enabled && serverCustomConfig?.engineMode === 'custom'
+  );
+
+  if (isPriorityCustom) {
+    const cleanBaseUrl = (serverCustomConfig?.baseUrl || '').trim().replace(/\/+$/, '');
+    const cleanApiKey = sanitizeHttpHeaderValue(serverCustomConfig?.apiKey || '');
+    if (!cleanBaseUrl || isBuiltInCloudGatewayUrl(cleanBaseUrl)) {
+      throw new Error('已开启「优先自有密钥回复」，自动语音合成需配置自有模型网关 Base URL（严禁偷跑官方 Gemini）');
+    }
+    let isLocalhostUrl = false;
+    try {
+      const parsed = new URL(cleanBaseUrl);
+      isLocalhostUrl = isAllowedLocalhostEndpoint(parsed.hostname);
+    } catch {
+      throw new Error('自有模型网关 Base URL 无效，无法进行语音合成');
+    }
+    if (!cleanApiKey && !isLocalhostUrl) {
+      throw new Error('已开启「优先自有密钥回复」，缺少自有模型网关 API 密钥（严禁偷跑官方 Gemini）');
+    }
+
+    const customModel = (serverCustomConfig?.modelName || '').trim() || 'tts-1';
+    const isGeminiProtocol =
+      serverCustomConfig?.protocol === 'gemini' ||
+      cleanBaseUrl.toLowerCase().includes('googleapis.com') ||
+      customModel.toLowerCase().includes('tts');
+    const openAiVoiceMap: Record<string, string> = {
+      Kore: 'nova',
+      Zephyr: 'shimmer',
+      Fenrir: 'onyx',
+      Puck: 'echo',
+      Charon: 'fable',
+    };
+    const mappedOpenAiVoice = openAiVoiceMap[chosenVoice] || 'nova';
+
+    const tryGeminiNativeCustomTts = async (): Promise<{ audioUrl: string; duration: number }> => {
+      const ttsModel = customModel.toLowerCase().includes('tts') ? customModel : 'gemini-3.8-flash-tts';
+      const sdkBaseUrl = cleanBaseUrl.replace(/\/v1beta.*$/i, '').replace(/\/v1$/i, '');
+      const ai = new GoogleGenAI({
+        apiKey: cleanApiKey || 'local-key',
+        httpOptions: {
+          baseUrl: sdkBaseUrl,
+          headers: { 'User-Agent': 'aistudio-build' },
+        },
+      });
+      const response = await ai.models.generateContent({
+        model: ttsModel,
+        contents: [
+          {
+            role: 'user',
+            parts: [{ text, speechMetadata: { style: toneStyle || 'Warm, authentic human tone' } }],
+          },
+        ],
+        config: {
+          responseModalities: ['AUDIO'],
+          speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: chosenVoice } } },
+        },
+      });
+      const audioPart = response.candidates?.[0]?.content?.parts?.[0]?.inlineData;
+      const base64Audio = audioPart?.data;
+      if (!base64Audio || Buffer.from(base64Audio, 'base64').length === 0) {
+        throw new Error(`自有网关 TTS (${ttsModel}) 未返回有效音频数据`);
+      }
+      const mimeType = audioPart?.mimeType || 'audio/wav';
+      return {
+        audioUrl: `data:${mimeType};base64,${base64Audio}`,
+        duration,
+      };
+    };
+
+    if (serverCustomConfig?.protocol === 'gemini' || cleanBaseUrl.toLowerCase().includes('googleapis.com')) {
+      return await tryGeminiNativeCustomTts();
+    }
+
+    const openAiTtsModel = customModel.toLowerCase().includes('tts') ? customModel : 'tts-1';
+    const candidateUrls = cleanBaseUrl.endsWith('/audio/speech')
+      ? [cleanBaseUrl]
+      : cleanBaseUrl.endsWith('/v1')
+      ? [`${cleanBaseUrl}/audio/speech`]
+      : [`${cleanBaseUrl}/v1/audio/speech`, `${cleanBaseUrl}/audio/speech`];
+
+    let lastErr = '自有网关未返回有效音频数据';
+    let lastStatus = 502;
+    for (const targetUrl of candidateUrls) {
+      try {
+        const ttsRes = await safeSsrfFetch(targetUrl, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            ...(cleanApiKey ? { Authorization: `Bearer ${cleanApiKey}` } : {}),
+          },
+          body: JSON.stringify({
+            model: openAiTtsModel,
+            input: text,
+            voice: mappedOpenAiVoice,
+            response_format: 'mp3',
+          }),
+          signal: AbortSignal.timeout(25000),
+        });
+        lastStatus = ttsRes.status;
+        if (!ttsRes.ok) {
+          const errTxt = await ttsRes.text().catch(() => '');
+          lastErr = `HTTP ${ttsRes.status}${errTxt ? `: ${errTxt.slice(0, 180)}` : ''}`;
+          if (ttsRes.status !== 404) break;
+          continue;
+        }
+        const contentType = (ttsRes.headers.get('content-type') || '').toLowerCase();
+        if (contentType.includes('application/json')) {
+          const json = await ttsRes.json().catch(() => null);
+          const rawB64 = json?.audio || json?.data?.[0]?.b64_json || json?.audioBase64;
+          if (typeof rawB64 === 'string' && rawB64.trim()) {
+            return {
+              audioUrl: rawB64.startsWith('data:') ? rawB64 : `data:audio/mp3;base64,${rawB64}`,
+              duration,
+            };
+          }
+          lastErr = json?.error?.message || '自有网关返回 JSON 但未包含音频数据';
+          break;
+        }
+        const buf = Buffer.from(await ttsRes.arrayBuffer());
+        if (buf.length === 0) {
+          lastErr = '自有网关返回空音频文件';
+          break;
+        }
+        const mimeType = contentType.includes('wav')
+          ? 'audio/wav'
+          : contentType.includes('ogg')
+          ? 'audio/ogg'
+          : 'audio/mpeg';
+        return {
+          audioUrl: `data:${mimeType};base64,${buf.toString('base64')}`,
+          duration,
+        };
+      } catch (err: any) {
+        lastErr = err?.message || String(err);
+      }
+    }
+    if (lastStatus === 404 && isGeminiProtocol) {
+      return await tryGeminiNativeCustomTts();
+    }
+    throw new Error(`自有模型网关语音合成失败: ${lastErr}`);
+  }
+
+  // Cloud Priority Mode: official Gemini TTS
   if (!isGeminiAvailable()) {
     const circuit = getGeminiCircuitStatus();
     throw new Error(circuit.reason || 'TTS voice generation failed: Gemini API unavailable or unconfigured');
@@ -11412,9 +11980,10 @@ async function generateTtsAudio(
   throw new Error(`TTS voice generation failed (${ttsModel}): ${lastError}`);
 }
 
-// Helper: Download voice file from Telegram and transcribe via Gemini STT (gemini-3.5-transcribe)
+// Helper: Download voice file from Telegram and transcribe strictly obeying 3-state mutual exclusion
 export async function downloadAndTranscribeTelegramVoice(
-  fileId: string
+  fileId: string,
+  overrideCustomConfig?: any
 ): Promise<{ ok: boolean; text: string; audioUrl: string; error?: string }> {
   const botToken = process.env.TELEGRAM_BOT_TOKEN;
   if (!botToken || !fileId) {
@@ -11469,7 +12038,169 @@ export async function downloadAndTranscribeTelegramVoice(
     const mimeType = filePath.endsWith('.mp3') ? 'audio/mp3' : filePath.endsWith('.wav') ? 'audio/wav' : 'audio/ogg';
     const audioDataUrl = `data:${mimeType};base64,${base64Audio}`;
 
-    // 3. Transcribe using Gemini STT model (strict error propagation, never fake text)
+    // 3. Enforce 3-state mutual exclusion before invoking any STT LLM
+    const serverCustomConfig = overrideCustomConfig || (await getServerCustomLlmConfig().catch(() => null));
+    const isDualOff = Boolean(
+      serverCustomConfig &&
+      (serverCustomConfig.enabled === false || serverCustomConfig.explicitlyDisabled)
+    );
+    if (isDualOff) {
+      return {
+        ok: false,
+        text: '',
+        audioUrl: audioDataUrl,
+        error: '当前处于双关状态（官方大模型与自有密钥均已关闭），已跳过语音转文字大模型调用',
+      };
+    }
+
+    const isPriorityCustom = Boolean(
+      serverCustomConfig?.enabled && serverCustomConfig?.engineMode === 'custom'
+    );
+
+    if (isPriorityCustom) {
+      const cleanBaseUrl = (serverCustomConfig?.baseUrl || '').trim().replace(/\/+$/, '');
+      const cleanApiKey = sanitizeHttpHeaderValue(serverCustomConfig?.apiKey || '');
+      if (!cleanBaseUrl || isBuiltInCloudGatewayUrl(cleanBaseUrl)) {
+        return {
+          ok: false,
+          text: '',
+          audioUrl: audioDataUrl,
+          error: '已开启「优先自有密钥回复」，Webhook 语音转文字需配置自有模型网关 Base URL（严禁偷跑官方 Gemini）',
+        };
+      }
+      let isLocalhostUrl = false;
+      try {
+        const parsed = new URL(cleanBaseUrl);
+        isLocalhostUrl = isAllowedLocalhostEndpoint(parsed.hostname);
+      } catch {
+        return {
+          ok: false,
+          text: '',
+          audioUrl: audioDataUrl,
+          error: '自有模型网关 Base URL 无效，无法执行语音转文字',
+        };
+      }
+      if (!cleanApiKey && !isLocalhostUrl) {
+        return {
+          ok: false,
+          text: '',
+          audioUrl: audioDataUrl,
+          error: '已开启「优先自有密钥回复」，缺少自有模型网关 API 密钥（严禁偷跑官方 Gemini）',
+        };
+      }
+
+      const inferredProtocol =
+        serverCustomConfig?.protocol === 'gemini' || cleanBaseUrl.toLowerCase().includes('googleapis.com')
+          ? 'gemini'
+          : serverCustomConfig?.protocol === 'anthropic'
+          ? 'anthropic'
+          : 'openai';
+
+      if (inferredProtocol === 'anthropic') {
+        return {
+          ok: false,
+          text: '',
+          audioUrl: audioDataUrl,
+          error: 'Anthropic 协议暂不支持音频转写，请在自有模型网关切换 OpenAI 或 Gemini 协议接口',
+        };
+      }
+
+      if (inferredProtocol === 'gemini') {
+        const customSttModel =
+          (serverCustomConfig?.modelName && serverCustomConfig.modelName.trim()) ||
+          resolveGeminiModel(undefined, 'transcribe');
+        try {
+          const sdkBaseUrl = cleanBaseUrl.replace(/\/v1beta.*$/i, '').replace(/\/v1$/i, '');
+          const ai = new GoogleGenAI({
+            apiKey: cleanApiKey || 'local-key',
+            httpOptions: {
+              baseUrl: sdkBaseUrl,
+              headers: { 'User-Agent': 'aistudio-build' },
+            },
+          });
+          const response = await ai.models.generateContent({
+            model: customSttModel,
+            contents: {
+              parts: [
+                { inlineData: { mimeType, data: base64Audio } },
+                { text: 'Transcribe this voice message accurately into text verbatim. Output only the verbatim transcribed spoken words without markdown, explanation or quotes.' },
+              ],
+            },
+          });
+          const text = response.text?.trim() || '';
+          if (!text) {
+            return {
+              ok: false,
+              text: '',
+              audioUrl: audioDataUrl,
+              error: `自有网关 (${customSttModel}) 未识别出有效语音文字`,
+            };
+          }
+          return { ok: true, text, audioUrl: audioDataUrl };
+        } catch (err: any) {
+          return {
+            ok: false,
+            text: '',
+            audioUrl: audioDataUrl,
+            error: `自有网关语音转写失败 (${customSttModel}): ${err?.message || String(err)}`,
+          };
+        }
+      }
+
+      // OpenAI-compatible Whisper transcription on user's custom gateway
+      const sttModel = 'whisper-1';
+      const ext = mimeType.includes('mp3') ? 'mp3' : mimeType.includes('wav') ? 'wav' : 'ogg';
+      const candidateUrls = cleanBaseUrl.endsWith('/audio/transcriptions')
+        ? [cleanBaseUrl]
+        : cleanBaseUrl.endsWith('/v1')
+        ? [`${cleanBaseUrl}/audio/transcriptions`]
+        : [`${cleanBaseUrl}/v1/audio/transcriptions`, `${cleanBaseUrl}/audio/transcriptions`];
+
+      let lastErr = '自有网关未返回有效语音识别文本';
+      for (const targetUrl of candidateUrls) {
+        try {
+          const form = new FormData();
+          form.append('file', new Blob([new Uint8Array(buffer)], { type: mimeType }), `voice.${ext}`);
+          form.append('model', sttModel);
+          const encodedForm = new Response(form);
+          const formBuf = Buffer.from(await encodedForm.arrayBuffer());
+          const formContentType = encodedForm.headers.get('content-type') || 'multipart/form-data';
+
+          const sttRes = await safeSsrfFetch(targetUrl, {
+            method: 'POST',
+            headers: {
+              'Content-Type': formContentType,
+              ...(cleanApiKey ? { Authorization: `Bearer ${cleanApiKey}` } : {}),
+            },
+            body: formBuf,
+            signal: AbortSignal.timeout(30000),
+          });
+          if (!sttRes.ok) {
+            const errTxt = await sttRes.text().catch(() => '');
+            lastErr = `HTTP ${sttRes.status}${errTxt ? `: ${errTxt.slice(0, 180)}` : ''}`;
+            if (sttRes.status !== 404) break;
+            continue;
+          }
+          const json = await sttRes.json().catch(() => null);
+          const text = typeof json?.text === 'string' ? json.text.trim() : '';
+          if (text) {
+            return { ok: true, text, audioUrl: audioDataUrl };
+          }
+          lastErr = json?.error?.message || '自有网关未返回有效语音识别文本';
+          break;
+        } catch (err: any) {
+          lastErr = err?.message || String(err);
+        }
+      }
+      return {
+        ok: false,
+        text: '',
+        audioUrl: audioDataUrl,
+        error: `自有网关语音转写失败 (${sttModel}): ${lastErr}`,
+      };
+    }
+
+    // Cloud Priority Mode: official Gemini STT (strict error propagation, never fake text)
     if (!isGeminiAvailable()) {
       const circuit = getGeminiCircuitStatus();
       return {
@@ -11651,25 +12382,56 @@ async function processTelegramMessageAsync(
       }
     }
 
-    // 0.1 Auto-translate incoming foreign message using user's strictly configured translation engine
+    // 0.1 Auto-translate incoming foreign message using user's strictly configured 3-state translation engine & per-chat lang pref
     if (internalMsgId && effectiveIncomingText && effectiveIncomingText !== 'Voice Message') {
       try {
         const transSettings = await getServerTranslationSettings();
         if (transSettings?.autoTranslateInbound !== false) {
           const customConfig = await getServerCustomLlmConfig();
-          const isPriorityCustom = Boolean(customConfig?.enabled && customConfig?.engineMode === 'custom');
+          const isDualOff = Boolean(
+            customConfig && (customConfig.enabled === false || customConfig.explicitlyDisabled)
+          );
+          const isPriorityCustom = Boolean(
+            !isDualOff && customConfig?.enabled && customConfig?.engineMode === 'custom'
+          );
           const configuredEngine = normalizeStrictTranslationEngine(transSettings?.preferredEngine) || 'gemini';
-          const engine: 'google' | 'gemini' | 'custom_llm' = isPriorityCustom ? 'custom_llm' : configuredEngine;
+          let engine: 'google' | 'gemini' | 'custom_llm';
+          if (isDualOff) {
+            engine = 'google';
+          } else if (isPriorityCustom) {
+            engine = 'custom_llm';
+          } else {
+            engine = configuredEngine === 'google' ? 'google' : 'gemini';
+          }
           const resolvedCustomModel = isPriorityCustom && configuredEngine !== 'custom_llm'
             ? (customConfig?.modelName || transSettings?.customModelName || 'gpt-4o-mini')
             : (transSettings?.customModelName || customConfig?.modelName);
+
+          let chatPrefTargetLang = '';
+          let chatPrefSourceLang = 'Auto';
+          try {
+            const prefRows = (await db.prepare(`
+              SELECT account_id, source_lang, target_lang
+              FROM chat_language_prefs
+              WHERE chat_id = ? AND account_id IN ('acc_telegram_bot', 'acc_1')
+            `).all(chatId)) as any[];
+            const exactPref = prefRows.find((r) => r?.account_id === 'acc_telegram_bot') || prefRows[0];
+            if (exactPref?.target_lang && exactPref.target_lang !== 'Auto') {
+              chatPrefTargetLang = String(exactPref.target_lang).trim();
+            }
+            if (exactPref?.source_lang && exactPref.source_lang !== 'Auto') {
+              chatPrefSourceLang = String(exactPref.source_lang).trim();
+            }
+          } catch {}
+
           const targetLang =
-            transSettings?.defaultTargetLang && transSettings.defaultTargetLang !== 'Auto'
+            chatPrefTargetLang ||
+            (transSettings?.defaultTargetLang && transSettings.defaultTargetLang !== 'Auto'
               ? transSettings.defaultTargetLang
-              : 'Chinese';
+              : 'Chinese');
           const transRes = await performStrictTranslation({
             text: effectiveIncomingText,
-            sourceLang: 'Auto',
+            sourceLang: chatPrefSourceLang,
             targetLang,
             engine,
             googleApiKey: transSettings?.googleApiKey,
@@ -11958,7 +12720,12 @@ ${dialogueTranscript}
     if (isReplyVoice) {
       try {
         console.log(`[Telegram Webhook] Voice requested for chat ${chatId}, synthesizing voice note...`);
-        const tts = await generateTtsAudio(replyText, 'Kore', profile?.tone_style || '温柔亲昵，带轻快波浪号和笑意');
+        const tts = await generateTtsAudio(
+          replyText,
+          'Kore',
+          profile?.tone_style || '温柔亲昵，带轻快波浪号和笑意',
+          serverCustomConfig
+        );
         replyAudioUrl = tts.audioUrl;
         replyAudioDuration = tts.duration;
       } catch (ttsErr: any) {
@@ -11971,7 +12738,7 @@ ${dialogueTranscript}
     let replyTranslatedToChinese = '';
     try {
       if (replyText && !/[\u4e00-\u9fa5]/.test(replyText)) {
-        replyTranslatedToChinese = await getCnTranslationIfForeign(replyText);
+        replyTranslatedToChinese = await getCnTranslationIfForeign(replyText, undefined, lastActiveUserJwt || undefined);
       }
     } catch {
       // non-fatal
@@ -14723,7 +15490,7 @@ app.get('/api/telegram/user/dialogs', requireTenantAuth, async (req: Request, re
       for (const r of prefRows || []) {
         dialogLangPrefs.set(r.chat_id, {
           sourceLang: r.source_lang || 'Auto',
-          targetLang: r.target_lang || 'Chinese',
+          targetLang: r.target_lang || 'Auto',
         });
       }
     } catch {}
@@ -16996,7 +17763,7 @@ app.get('/api/telegram/user/saved-messages', requireTenantAuth, async (req: Requ
         lastTime: last?.timestamp || '刚刚',
         unreadCount: 0,
         sourceLang: 'Auto',
-        targetLang: 'Chinese',
+        targetLang: 'Auto',
       },
       messages,
     });
@@ -19029,7 +19796,7 @@ app.post('/api/telegram/user/create-group', requireTenantAuth, async (req: Reque
       lastTime: '刚刚',
       unreadCount: 0,
       sourceLang: 'Auto',
-      targetLang: 'Chinese',
+      targetLang: 'Auto',
     };
 
     return res.json({ ok: true, cloudSynced: true, invitedCount, chat });
@@ -19128,7 +19895,7 @@ app.post('/api/telegram/user/create-channel', requireTenantAuth, async (req: Req
       lastTime: '刚刚',
       unreadCount: 0,
       sourceLang: 'Auto',
-      targetLang: 'Chinese',
+      targetLang: 'Auto',
     };
 
     return res.json({ ok: true, cloudSynced: true, chat, usernameWarning });
@@ -20389,7 +21156,7 @@ ${kbContext}${langConstraint}
                   let replyZh = '';
                   try {
                     if (replyText && !/[\u4e00-\u9fa5]/.test(replyText)) {
-                      replyZh = await getCnTranslationIfForeign(replyText, serverCustomConfig);
+                      replyZh = await getCnTranslationIfForeign(replyText, serverCustomConfig, lastActiveUserJwt || undefined);
                     }
                   } catch {}
                   const replyTime = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false });

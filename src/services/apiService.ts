@@ -15,6 +15,7 @@ import {
   TranslationSettings,
   SystemProxyConfig,
 } from '../types';
+import { normalizeLanguageCode } from '../data/mockData';
 
 // ==================== SESSION TOKEN & TENANT AUTHENTICATION HELPERS ====================
 
@@ -793,27 +794,7 @@ function setTranslateCache(key: string, value: string): void {
 }
 
 function normalizeClientLangCode(lang?: string): string {
-  const raw = (lang || '').trim();
-  if (!raw) return 'auto';
-  const low = raw.toLowerCase();
-  if (low === 'auto') return 'auto';
-  if (low === 'chinese' || low === 'zh' || low === 'zh-cn' || low === 'zh-hans') return 'zh-cn';
-  if (low === 'traditional chinese' || low === 'zh-tw' || low === 'zh-hant' || low === 'zh-hk') return 'zh-tw';
-  if (low === 'english' || low === 'en' || low === 'en-us' || low === 'en-gb') return 'en';
-  if (low === 'japanese' || low === 'ja' || low === 'jp') return 'ja';
-  if (low === 'korean' || low === 'ko' || low === 'kr') return 'ko';
-  if (low === 'russian' || low === 'ru') return 'ru';
-  if (low === 'spanish' || low === 'es') return 'es';
-  if (low === 'french' || low === 'fr') return 'fr';
-  if (low === 'german' || low === 'de') return 'de';
-  if (low === 'portuguese' || low === 'pt' || low === 'pt-br') return 'pt';
-  if (low === 'italian' || low === 'it') return 'it';
-  if (low === 'arabic' || low === 'ar') return 'ar';
-  if (low === 'turkish' || low === 'türkçe' || low === 'tr') return 'tr';
-  if (low === 'vietnamese' || low === 'vi') return 'vi';
-  if (low === 'thai' || low === 'th') return 'th';
-  if (low === 'indonesian' || low === 'id') return 'id';
-  return low;
+  return normalizeLanguageCode(lang);
 }
 
 async function runQueuedTranslation<T>(fn: () => Promise<T>, signal?: AbortSignal): Promise<T> {
@@ -861,7 +842,7 @@ export async function translateText(
   geminiModel?: string,
   geminiApiKey?: string,
   customModelName?: string,
-  options?: { signal?: AbortSignal; bypassCache?: boolean }
+  options?: { signal?: AbortSignal; bypassCache?: boolean; purpose?: 'realtime' | 'history' }
 ): Promise<string> {
   const trimmedText = typeof text === 'string' ? text.trim() : '';
   if (!trimmedText) return '';
@@ -872,23 +853,29 @@ export async function translateText(
     return text;
   }
 
+  const isHistoryTranslation = options?.purpose === 'history';
   const isDualOff = Boolean(
     customConfig && (customConfig.enabled === false || customConfig.explicitlyDisabled)
   );
   const isPriorityCustom = Boolean(
     !isDualOff && customConfig?.enabled && customConfig?.engineMode === 'custom'
   );
-  const strictEngine: 'gemini' | 'google' | 'custom_llm' =
-    engine === 'google' || engine === 'custom_llm' || engine === 'gemini' ? engine : 'gemini';
+  const strictEngine: 'gemini' | 'google' | 'custom_llm' = isHistoryTranslation
+    ? 'google'
+    : engine === 'google' || engine === 'custom_llm' || engine === 'gemini'
+    ? engine
+    : 'gemini';
 
-  if (isDualOff && strictEngine !== 'google') {
-    throw new Error('当前处于双关状态（云端与自有大模型均已关闭），仅支持「谷歌机翻」；如需使用大模型翻译，请前往「模型」开启对应引擎');
-  }
-  if (isPriorityCustom && strictEngine !== 'custom_llm') {
-    throw new Error('已开启「优先自有密钥回复」，当前仅允许使用「自定义模型」翻译；请切换为自定义模型或切回云端主引擎');
-  }
-  if (!isPriorityCustom && strictEngine === 'custom_llm') {
-    throw new Error('当前未开启「优先自有密钥回复」，不可选择自定义模型翻译；请前往「模型」开启「启用优先自有密钥回复」');
+  if (!isHistoryTranslation) {
+    if (isDualOff && strictEngine !== 'google') {
+      throw new Error('当前处于双关状态（云端与自有大模型均已关闭），仅支持「谷歌机翻」；如需使用大模型翻译，请前往「模型」开启对应引擎');
+    }
+    if (isPriorityCustom && strictEngine !== 'custom_llm') {
+      throw new Error('已开启「优先自有密钥回复」，当前仅允许使用「自定义模型」翻译；请切换为自定义模型或切回云端主引擎');
+    }
+    if (!isPriorityCustom && strictEngine === 'custom_llm') {
+      throw new Error('当前未开启「优先自有密钥回复」，不可选择自定义模型翻译；请前往「模型」开启「启用优先自有密钥回复」');
+    }
   }
 
   const cleanBaseUrl = (customConfig?.baseUrl || '').trim();
@@ -927,6 +914,15 @@ export async function translateText(
         }
       : undefined;
 
+  const compactThreeStateDescriptor = customConfig
+    ? {
+        enabled: !isDualOff && customConfig.enabled !== false,
+        explicitlyDisabled: isDualOff,
+        engineMode: (customConfig.engineMode === 'custom' ? 'custom' : 'cloud') as 'custom' | 'cloud',
+        ...(customConfig.engineLicenseKey ? { engineLicenseKey: customConfig.engineLicenseKey } : {}),
+      }
+    : undefined;
+
   const modelCacheTag =
     strictEngine === 'gemini'
       ? geminiModel || ''
@@ -954,12 +950,13 @@ export async function translateText(
           sourceLang,
           targetLang,
           engine: strictEngine,
+          purpose: options?.purpose,
           googleApiKey,
           geminiModel: strictEngine === 'gemini' ? geminiModel : undefined,
           geminiApiKey: strictEngine === 'gemini' ? geminiApiKey : undefined,
           customModelName: strictEngine === 'custom_llm' ? effectiveCustomModel : undefined,
           engineLicenseKey: strictEngine === 'gemini' ? customConfig?.engineLicenseKey : undefined,
-          customConfig: safeCustomConfigForTranslation,
+          customConfig: safeCustomConfigForTranslation ?? compactThreeStateDescriptor,
         }),
       },
       30000
@@ -1043,7 +1040,7 @@ export async function transcribeAudio(audioBase64: string, mimeType: string = 'a
       body: JSON.stringify({
         audioBase64: payloadAudio,
         mimeType: effectiveMime,
-        customConfig: customConfig?.enabled ? customConfig : undefined,
+        customConfig: customConfig ?? undefined,
       }),
     },
     45000
@@ -1181,8 +1178,13 @@ export async function generateTTSVoice(
     const cleanBaseUrl = (customConfig?.baseUrl || '').trim();
     const cleanApiKey = (customConfig?.apiKey || '').trim();
     const ttsGatewayConfig =
-      cleanBaseUrl || cleanApiKey
+      customConfig || cleanBaseUrl || cleanApiKey
         ? {
+            ...(typeof customConfig?.enabled === 'boolean' ? { enabled: customConfig.enabled } : {}),
+            ...(typeof customConfig?.explicitlyDisabled === 'boolean'
+              ? { explicitlyDisabled: customConfig.explicitlyDisabled }
+              : {}),
+            ...(customConfig?.engineMode ? { engineMode: customConfig.engineMode } : {}),
             baseUrl: cleanBaseUrl,
             apiKey: cleanApiKey,
             protocol: inferGatewayProtocolFromUrlAndModel(cleanBaseUrl, model),

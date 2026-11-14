@@ -19,7 +19,7 @@ interface TranslationDrawerProps {
   onUpdateSettings: (settings: TranslationSettings) => void;
   customLlmEnabled?: boolean;
   customLlmConfig?: CustomLLMConfig;
-  onUpdateCustomLlmConfig?: (config: CustomLLMConfig) => void;
+  onUpdateCustomLlmConfig?: (config: CustomLLMConfig, nextTranslationSettings?: TranslationSettings) => void;
   onGoToModelSettings?: () => void;
   embedded?: boolean;
 }
@@ -462,18 +462,20 @@ export const TranslationDrawer: React.FC<TranslationDrawerProps> = ({
                   <button
                     type="button"
                     onClick={() => {
-                      onUpdateCustomLlmConfig({
-                        ...customLlmConfig,
-                        enabled: true,
-                        explicitlyDisabled: false,
-                        engineMode: 'custom',
-                        enableKnowledgeBaseRAG: false,
-                      });
-                      onUpdateSettings({
-                        ...settings,
-                        preferredEngine: 'custom_llm',
-                        customModelName: currentCustomModel,
-                      });
+                      onUpdateCustomLlmConfig(
+                        {
+                          ...customLlmConfig,
+                          enabled: true,
+                          explicitlyDisabled: false,
+                          engineMode: 'custom',
+                          enableKnowledgeBaseRAG: false,
+                        },
+                        {
+                          ...settings,
+                          preferredEngine: 'custom_llm',
+                          customModelName: currentCustomModel,
+                        }
+                      );
                       setModeGuardNotice(null);
                     }}
                     className="px-2.5 py-1 rounded-md bg-amber-500/25 hover:bg-amber-500/35 text-amber-900 dark:text-amber-100 font-semibold cursor-pointer transition-colors"

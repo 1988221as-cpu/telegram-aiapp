@@ -37,7 +37,7 @@ interface UnifiedRightDockProps {
   currentMessages: Message[];
   // LLM props
   customLLMConfig: CustomLLMConfig;
-  onSaveCustomLLMConfig: (config: CustomLLMConfig) => void;
+  onSaveCustomLLMConfig: (config: CustomLLMConfig, nextTranslationSettings?: TranslationSettings) => void;
   // Translation props
   translationSettings: TranslationSettings;
   onUpdateTranslationSettings: (settings: TranslationSettings) => void;
