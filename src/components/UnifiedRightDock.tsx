@@ -93,18 +93,19 @@ export const UnifiedRightDock: React.FC<UnifiedRightDockProps> = ({
   const ActiveIcon = activeMeta.icon;
 
   return (
-    <>
-      {/* Narrow-viewport backdrop (< 1024px) */}
-      <div
-        onClick={onClose}
-        className="fixed inset-0 bg-black/50 backdrop-blur-[2px] z-30 lg:hidden animate-in fade-in duration-150"
-        aria-hidden="true"
-      />
-
-      {/* Docked Push Split Sidebar on Desktop (>= 1024px), Slide-Over Drawer on Narrow Viewports */}
-      <aside
+    <div
+      onClick={onClose}
+      className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-6 bg-black/60 backdrop-blur-sm animate-in fade-in duration-150"
+    >
+      {/* Standalone Modal Page Overlay (Detached from Chat Workspace) */}
+      <section
+        role="dialog"
+        aria-modal="true"
         aria-label={activeMeta.title}
-        className="fixed inset-y-0 right-0 z-40 w-full max-w-[440px] lg:static lg:z-20 lg:w-[440px] lg:shrink-0 h-full flex flex-col overflow-hidden bg-white/95 dark:bg-[#09111b]/95 aurora:bg-[#0c151b]/95 backdrop-blur-xl border-l border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] shadow-2xl lg:shadow-[-12px_0_32px_-16px_rgba(2,8,20,0.35)] text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] select-none transition-colors animate-in slide-in-from-right duration-200"
+        onClick={(e) => e.stopPropagation()}
+        className={`w-full ${
+          activePanel === 'persona' ? 'max-w-5xl' : 'max-w-3xl'
+        } h-[88vh] max-h-[860px] rounded-2xl flex flex-col overflow-hidden bg-white/95 dark:bg-[#09111b]/95 aurora:bg-[#0c151b]/95 backdrop-blur-xl border border-[#e2e8f0] dark:border-[#1e3148] aurora:border-[#1c343e] shadow-2xl text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] select-none transition-colors animate-in zoom-in-95 fade-in duration-150`}
       >
         {/* Top Precision Hairline Accent */}
         <div className="h-[2px] w-full bg-gradient-to-r from-transparent via-[#2481cc]/60 dark:via-[#2ba0ff]/75 aurora:via-[#2dd4bf]/80 to-transparent shrink-0" />
@@ -125,7 +126,7 @@ export const UnifiedRightDock: React.FC<UnifiedRightDockProps> = ({
                 </h2>
                 <p className="text-[11px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] truncate leading-tight mt-0.5">
                   {activePanel === 'memory'
-                    ? `${customerProfile?.relationshipStage || '沟通中'} · 右侧协同面板`
+                    ? `${customerProfile?.relationshipStage || '沟通中'} · 独立配置页`
                     : activePanel === 'llm'
                     ? customLLMConfig.enabled === false || customLLMConfig.explicitlyDisabled
                       ? '双关状态 · 仅支持谷歌机翻'
@@ -150,7 +151,7 @@ export const UnifiedRightDock: React.FC<UnifiedRightDockProps> = ({
             <button
               type="button"
               onClick={onClose}
-              title="收起右侧面板 (Esc)"
+              title="关闭并返回聊天 (Esc)"
               className="w-7 h-7 rounded-lg flex items-center justify-center text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] hover:text-[#0f172a] dark:hover:text-white aurora:hover:text-[#ecf6f8] hover:bg-[#e2e8f0]/70 dark:hover:bg-[#172638] aurora:hover:bg-[#152934] transition-colors cursor-pointer shrink-0"
             >
               <X className="w-4 h-4" />
@@ -160,7 +161,7 @@ export const UnifiedRightDock: React.FC<UnifiedRightDockProps> = ({
           {/* Row 2: 5-in-1 Mutual-Exclusive Segmented Switcher */}
           <div
             role="tablist"
-            aria-label="右侧功能工作台切换"
+            aria-label="独立功能配置页切换"
             className="grid grid-cols-5 gap-1 p-1 rounded-xl bg-[#eef2f6] dark:bg-[#060c14] aurora:bg-[#081014] border border-[#e2e8f0] dark:border-[#152233] aurora:border-[#182b34]"
           >
             {PANEL_TABS.map((tab) => {
@@ -274,7 +275,7 @@ export const UnifiedRightDock: React.FC<UnifiedRightDockProps> = ({
             />
           )}
         </div>
-      </aside>
-    </>
+      </section>
+    </div>
   );
 };

@@ -330,7 +330,7 @@ export const TranslationDrawer: React.FC<TranslationDrawerProps> = ({
             <span className="text-xs text-[#334155] dark:text-[#dbe6f0] aurora:text-[#d5e8ed]">群聊 / 频道自动翻译</span>
             <input
               type="checkbox"
-              checked={settings.autoTranslateGroups !== false}
+              checked={settings.autoTranslateGroups === true}
               onChange={(e) =>
                 onUpdateSettings({ ...settings, autoTranslateGroups: e.target.checked })
               }
@@ -458,10 +458,7 @@ export const TranslationDrawer: React.FC<TranslationDrawerProps> = ({
                     onUpdateSettings({
                       ...settings,
                       preferredEngine: 'gemini',
-                      geminiModel:
-                        settings.geminiModel === 'gemma-4-31b-it'
-                          ? 'gemma-4-31b-it'
-                          : 'gemma-4-26b-a4b-it',
+                      geminiModel: 'gemma-4-26b-a4b-it',
                     });
                   }}
                   className={`p-2.5 rounded-lg border text-xs text-left transition-colors ${
@@ -569,32 +566,6 @@ export const TranslationDrawer: React.FC<TranslationDrawerProps> = ({
                   </button>
                 )}
               </div>
-            </div>
-          )}
-
-          {/* Google Knowledge Base LLM Model Selector (Gemma 4 26B / 31B, keyless, Cloud Priority Only) */}
-          {masterMode === 'cloud' && settings.preferredEngine === 'gemini' && (
-            <div className="mt-3 pt-3 border-t border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] space-y-1.5">
-              <label className="text-[11px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] block">
-                选择谷歌大模型翻译型号
-              </label>
-              <select
-                value={
-                  settings.geminiModel === 'gemma-4-31b-it'
-                    ? 'gemma-4-31b-it'
-                    : 'gemma-4-26b-a4b-it'
-                }
-                onChange={(e) =>
-                  onUpdateSettings({
-                    ...settings,
-                    geminiModel: e.target.value,
-                  })
-                }
-                className="w-full bg-white dark:bg-[#08101a] aurora:bg-[#081014] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] rounded-lg px-3 py-1.5 text-xs text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] focus:outline-none focus:border-[#2481cc] dark:focus:border-[#2ba0ff] aurora:focus:border-[#2dd4bf]"
-              >
-                <option value="gemma-4-26b-a4b-it">Gemma 4 26B 适合即时聊天秒翻译</option>
-                <option value="gemma-4-31b-it">Gemma 4 31B 适合复杂商务对话</option>
-              </select>
             </div>
           )}
 

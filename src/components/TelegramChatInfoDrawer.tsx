@@ -21,6 +21,7 @@ import {
   UserMinus,
   UserPlus,
   Play,
+  CornerUpLeft,
 } from 'lucide-react';
 import { Chat, Message, TelegramChatFullInfo, TelegramContact } from '../types';
 import {
@@ -50,6 +51,7 @@ interface TelegramChatInfoDrawerProps {
   onAddContact?: (contact: TelegramContact) => void;
   onRemoveContact?: (contactId: string) => void;
   onRefreshMediaUrls?: (urls: string[]) => Promise<Record<string, string>>;
+  onJumpToMessage?: (message: Message) => void;
 }
 
 export const TelegramChatInfoDrawer: React.FC<TelegramChatInfoDrawerProps> = ({
@@ -66,6 +68,7 @@ export const TelegramChatInfoDrawer: React.FC<TelegramChatInfoDrawerProps> = ({
   onAddContact,
   onRemoveContact,
   onRefreshMediaUrls,
+  onJumpToMessage,
 }) => {
   const [activeTab, setActiveTab] = useState<'media' | 'files' | 'voice' | 'links' | 'members'>('media');
   const [isEditingRemark, setIsEditingRemark] = useState(false);
@@ -794,8 +797,19 @@ export const TelegramChatInfoDrawer: React.FC<TelegramChatInfoDrawerProps> = ({
                       const isVid = Boolean((m.isVideo || m.videoUrl) && m.videoUrl);
                       const resolvedVideoSrc = isVid ? resolveDisplayUrl(m.videoUrl) : undefined;
                       const resolvedImageSrc = m.imageUrl ? resolveDisplayUrl(m.imageUrl) : undefined;
+                      const handleLocateMedia = () => {
+                        onClose();
+                        onJumpToMessage?.(m);
+                      };
                       return (
-                        <div key={m.id} className="aspect-square rounded-lg overflow-hidden bg-[#f1f5f9] dark:bg-[#132234] aurora:bg-[#13252e] relative group">
+                        <div
+                          key={m.id}
+                          onClick={!isVid && onJumpToMessage ? handleLocateMedia : undefined}
+                          title={!isVid && onJumpToMessage ? '点击前往聊天中的该消息位置' : undefined}
+                          className={`aspect-square rounded-lg overflow-hidden bg-[#f1f5f9] dark:bg-[#132234] aurora:bg-[#13252e] relative group ${
+                            !isVid && onJumpToMessage ? 'cursor-pointer' : ''
+                          }`}
+                        >
                           {isVid && resolvedVideoSrc ? (
                             <>
                               <video
@@ -811,24 +825,48 @@ export const TelegramChatInfoDrawer: React.FC<TelegramChatInfoDrawerProps> = ({
                                 <Play className="w-2.5 h-2.5 fill-current" />
                                 <span>{m.videoDuration ? `${Math.max(1, Math.round(m.videoDuration))}"` : '视频'}</span>
                               </div>
+                              {onJumpToMessage && (
+                                <button
+                                  type="button"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    handleLocateMedia();
+                                  }}
+                                  title="前往聊天中的该消息位置"
+                                  className="absolute top-1 right-1 px-1.5 py-0.5 rounded bg-black/70 hover:bg-[#2481cc] text-white text-[9px] font-medium flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity cursor-pointer"
+                                >
+                                  <CornerUpLeft className="w-2.5 h-2.5" />
+                                  <span>定位</span>
+                                </button>
+                              )}
                             </>
                           ) : resolvedImageSrc ? (
-                            <img
-                              src={resolvedImageSrc}
-                              alt={m.imageCaption || 'media'}
-                              className="w-full h-full object-cover"
-                              onLoad={(e) => {
-                                e.currentTarget.style.display = '';
-                              }}
-                              onError={(e) => {
-                                const imgEl = e.currentTarget;
-                                void triggerSilentUrlRefresh(m.imageUrl, true).then((nextUrl) => {
-                                  if (!nextUrl) {
-                                    imgEl.style.display = 'none';
-                                  }
-                                });
-                              }}
-                            />
+                            <>
+                              <img
+                                src={resolvedImageSrc}
+                                alt={m.imageCaption || 'media'}
+                                className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-200"
+                                onLoad={(e) => {
+                                  e.currentTarget.style.display = '';
+                                }}
+                                onError={(e) => {
+                                  const imgEl = e.currentTarget;
+                                  void triggerSilentUrlRefresh(m.imageUrl, true).then((nextUrl) => {
+                                    if (!nextUrl) {
+                                      imgEl.style.display = 'none';
+                                    }
+                                  });
+                                }}
+                              />
+                              {onJumpToMessage && (
+                                <div className="pointer-events-none absolute inset-x-0 bottom-0 p-1 bg-gradient-to-t from-black/75 via-black/30 to-transparent opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-end">
+                                  <span className="px-1.5 py-0.5 rounded bg-black/60 text-white text-[9px] font-medium inline-flex items-center gap-0.5">
+                                    <CornerUpLeft className="w-2.5 h-2.5" />
+                                    定位消息
+                                  </span>
+                                </div>
+                              )}
+                            </>
                           ) : (
                             <div className="w-full h-full flex flex-col items-center justify-center text-[10px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] gap-1 p-1 text-center">
                               <ImageIcon className="w-4 h-4 opacity-60" />
@@ -854,7 +892,15 @@ export const TelegramChatInfoDrawer: React.FC<TelegramChatInfoDrawerProps> = ({
                     const resolvedFileHref = m.fileUrl ? resolveDisplayUrl(m.fileUrl) || '' : '';
                     const hasFileUrl = Boolean(resolvedFileHref);
                     return (
-                      <div key={m.id} className="p-2.5 rounded-xl bg-[#f8fafc] dark:bg-[#0e1726]/85 aurora:bg-[#101c23]/90 border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] flex items-center justify-between gap-2 text-xs">
+                      <div
+                        key={m.id}
+                        onClick={() => {
+                          onClose();
+                          onJumpToMessage?.(m);
+                        }}
+                        title="点击跳转到聊天中的该文件消息"
+                        className="p-2.5 rounded-xl bg-[#f8fafc] dark:bg-[#0e1726]/85 aurora:bg-[#101c23]/90 border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] hover:border-[#2481cc]/50 dark:hover:border-[#2ba0ff]/50 aurora:hover:border-[#2dd4bf]/50 flex items-center justify-between gap-2 text-xs cursor-pointer transition-colors"
+                      >
                         <div className="flex items-center gap-2 min-w-0">
                           <FileText className="w-5 h-5 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf] shrink-0" />
                           <div className="min-w-0">
@@ -870,6 +916,7 @@ export const TelegramChatInfoDrawer: React.FC<TelegramChatInfoDrawerProps> = ({
                             href={resolvedFileHref}
                             download={m.fileName || true}
                             onClick={(e) => {
+                              e.stopPropagation();
                               if (!resolvedFileHref) {
                                 e.preventDefault();
                                 return;
@@ -916,7 +963,15 @@ export const TelegramChatInfoDrawer: React.FC<TelegramChatInfoDrawerProps> = ({
                   </div>
                 ) : (
                   voiceMessages.map((m) => (
-                    <div key={m.id} className="p-2.5 rounded-xl bg-[#f8fafc] dark:bg-[#0e1726]/85 aurora:bg-[#101c23]/90 border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] flex items-center justify-between text-xs">
+                    <div
+                      key={m.id}
+                      onClick={() => {
+                        onClose();
+                        onJumpToMessage?.(m);
+                      }}
+                      title="点击跳转到聊天中的该语音消息"
+                      className="p-2.5 rounded-xl bg-[#f8fafc] dark:bg-[#0e1726]/85 aurora:bg-[#101c23]/90 border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] hover:border-[#2481cc]/50 dark:hover:border-[#2ba0ff]/50 aurora:hover:border-[#2dd4bf]/50 flex items-center justify-between text-xs cursor-pointer transition-colors"
+                    >
                       <div className="flex items-center gap-2">
                         <Mic className="w-4 h-4 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf]" />
                         <span>
@@ -940,7 +995,15 @@ export const TelegramChatInfoDrawer: React.FC<TelegramChatInfoDrawerProps> = ({
                   </div>
                 ) : (
                   linkMessages.map((m) => (
-                    <div key={m.id} className="p-2.5 rounded-xl bg-[#f8fafc] dark:bg-[#0e1726]/85 aurora:bg-[#101c23]/90 border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] flex items-center gap-2 text-xs">
+                    <div
+                      key={m.id}
+                      onClick={() => {
+                        onClose();
+                        onJumpToMessage?.(m);
+                      }}
+                      title="点击跳转到聊天中的该链接消息"
+                      className="p-2.5 rounded-xl bg-[#f8fafc] dark:bg-[#0e1726]/85 aurora:bg-[#101c23]/90 border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] hover:border-[#2481cc]/50 dark:hover:border-[#2ba0ff]/50 aurora:hover:border-[#2dd4bf]/50 flex items-center gap-2 text-xs cursor-pointer transition-colors"
+                    >
                       <Link2 className="w-4 h-4 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf] shrink-0" />
                       <span className="truncate text-[#2481cc] dark:text-[#7cc4ff] aurora:text-[#5eead4] underline">{m.text}</span>
                     </div>

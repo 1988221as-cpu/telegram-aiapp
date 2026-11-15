@@ -28,6 +28,7 @@ interface CustomerMemoryDrawerProps {
   chatTitle: string;
   messages?: any[];
   embedded?: boolean;
+  sideDocked?: boolean;
 }
 
 export const CustomerMemoryDrawer: React.FC<CustomerMemoryDrawerProps> = ({
@@ -41,6 +42,7 @@ export const CustomerMemoryDrawer: React.FC<CustomerMemoryDrawerProps> = ({
   chatTitle,
   messages,
   embedded = false,
+  sideDocked = false,
 }) => {
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [newLikeInput, setNewLikeInput] = useState('');
@@ -698,6 +700,24 @@ export const CustomerMemoryDrawer: React.FC<CustomerMemoryDrawerProps> = ({
       <div className="flex-1 flex flex-col min-h-0 overflow-hidden text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8]">
         {bodyContent}
       </div>
+    );
+  }
+
+  if (sideDocked) {
+    return (
+      <>
+        <div
+          onClick={onClose}
+          className="fixed inset-0 bg-black/50 backdrop-blur-[2px] z-30 lg:hidden animate-in fade-in duration-150"
+          aria-hidden="true"
+        />
+        <aside
+          aria-label={`${chatTitle || '当前联系人'} · 全息记忆`}
+          className="fixed inset-y-0 right-0 z-40 w-full max-w-[400px] lg:static lg:z-20 lg:w-[400px] lg:shrink-0 h-full flex flex-col overflow-hidden bg-white dark:bg-[#0b131f] aurora:bg-[#0c151b] border-l border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] shadow-2xl lg:shadow-none text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] select-none animate-in slide-in-from-right duration-200"
+        >
+          {bodyContent}
+        </aside>
+      </>
     );
   }
 

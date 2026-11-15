@@ -906,7 +906,11 @@ function parseCleanedTranslationSettingsRow(rawValue: string): any | null {
       ...cleanParsed
     } = parsed || {};
     const normalizedEngine = normalizeStrictTranslationEngine(cleanParsed?.preferredEngine) || 'gemini';
-    return { ...cleanParsed, preferredEngine: normalizedEngine };
+    return {
+      ...cleanParsed,
+      autoTranslateGroups: cleanParsed?.autoTranslateGroups === true,
+      preferredEngine: normalizedEngine,
+    };
   } catch {
     return null;
   }
@@ -926,7 +930,7 @@ export async function syncServerTranslationSettings(settings: any, accountId?: s
     defaultTargetLang: typeof raw.defaultTargetLang === 'string' ? raw.defaultTargetLang : 'Chinese',
     autoTranslateInbound: raw.autoTranslateInbound !== false,
     autoTranslateOutbound: raw.autoTranslateOutbound !== false,
-    autoTranslateGroups: raw.autoTranslateGroups !== false,
+    autoTranslateGroups: raw.autoTranslateGroups === true,
     autoTranslatePrivate: raw.autoTranslatePrivate !== false,
     showOriginalAndTranslation: raw.showOriginalAndTranslation !== false,
     preferredEngine: normalizedEngine,
@@ -11036,6 +11040,7 @@ app.post('/api/translate', translationLimiter, requireTenantAuth, async (req: Re
       customConfig,
       engine,
       purpose,
+      isGroup,
       googleApiKey,
       geminiModel,
       geminiApiKey,
@@ -11054,7 +11059,7 @@ app.post('/api/translate', translationLimiter, requireTenantAuth, async (req: Re
       });
     }
 
-    const isHistoryTranslation = purpose === 'history';
+    const isGoogleOnlyTranslation = purpose === 'history' || purpose === 'group' || isGroup === true;
     const userJwt = extractBearerToken(req);
 
     // Resolve saved local user keys/gateways as fallback ONLY if not passed in body (scoped by accountId when provided)
@@ -11120,10 +11125,10 @@ app.post('/api/translate', translationLimiter, requireTenantAuth, async (req: Re
       !isDualOff && effectiveCustomConfig?.enabled && effectiveCustomConfig?.engineMode === 'custom'
     );
 
-    if (isHistoryTranslation) {
+    if (isGoogleOnlyTranslation) {
       if (strictEngine !== 'google') {
         return res.status(400).json({
-          error: '历史记录翻译仅允许使用「谷歌机翻」，禁止消耗大模型配额（只有即时翻译和 AI 回复翻译才走大模型）。',
+          error: '历史记录与群消息仅允许使用「谷歌机翻」，禁止使用 AI 翻译。',
         });
       }
     } else if (isDualOff) {
@@ -16062,7 +16067,7 @@ async function processTelegramMessageAsync(
             typeof chatPrefTranslationEnabled === 'boolean'
               ? chatPrefTranslationEnabled
               : isGroupChat
-                ? transSettings?.autoTranslateGroups !== false
+                ? transSettings?.autoTranslateGroups === true
                 : transSettings?.autoTranslatePrivate !== false;
 
           if (shouldTranslateThisChat) {
@@ -16075,7 +16080,7 @@ async function processTelegramMessageAsync(
             );
             const configuredEngine = normalizeStrictTranslationEngine(transSettings?.preferredEngine) || 'gemini';
             let engine: 'google' | 'gemini' | 'custom_llm';
-            if (isDualOff) {
+            if (isGroupChat || isDualOff) {
               engine = 'google';
             } else if (isPriorityCustom) {
               engine = configuredEngine === 'google' ? 'google' : 'custom_llm';

@@ -30,6 +30,7 @@ import {
   Image as ImageIcon,
   Download,
   Cpu,
+  Brain,
   Forward,
   CheckSquare,
   Square,
@@ -45,7 +46,7 @@ import { VoiceCloneStudioModal } from './VoiceCloneStudioModal';
 import { TelegramEmojiPicker } from './TelegramEmojiPicker';
 import { TelegramChatInfoDrawer } from './TelegramChatInfoDrawer';
 import type { RightPanelTab } from './UnifiedRightDock';
-import { getMasterVoiceprint } from '../services/voiceprintStorage';
+import { getMasterVoiceprint, saveMasterVoiceprint } from '../services/voiceprintStorage';
 import { SUPPORTED_LANGUAGES, normalizeLanguageCode } from '../data/mockData';
 import {
   translateText,
@@ -67,6 +68,8 @@ import {
   updateMessageSttInDb,
   previewTelegramInviteApi,
   joinTelegramInviteApi,
+  generateTTSVoice,
+  type VoiceCloneRequestOptions,
 } from '../services/apiService';
 import { sanitizeSafeResourceUrl } from '../services/urlSafety';
 
@@ -427,7 +430,7 @@ export function isChatTranslationActive(
   settings?: TranslationSettings | null
 ): boolean {
   if (typeof chat?.translationEnabled === 'boolean') return chat.translationEnabled;
-  if (chat?.isGroup || chat?.isChannel) return settings?.autoTranslateGroups !== false;
+  if (chat?.isGroup || chat?.isChannel) return settings?.autoTranslateGroups === true;
   return settings?.autoTranslatePrivate !== false;
 }
 
@@ -446,6 +449,8 @@ interface ChatAreaProps {
   onLoadOlderMessages?: (chatId: string, offsetId: number) => Promise<{ ok: boolean; count: number; hasMore: boolean; error?: string }>;
   onMessagesSynced?: (synced: Message[], meta?: { hasMore?: boolean; readOutboxMaxId?: number; fromLocalFallback?: boolean; chatId?: string; accountId?: string }) => void;
   onOpenKnowledgeEvolution?: () => void;
+  onOpenCustomerMemory?: () => void;
+  isCustomerMemoryOpen?: boolean;
   onDeleteMessage?: (messageId: string, options?: { revoke?: boolean }) => void | Promise<{ ok: boolean; error?: string } | void>;
   onBatchDeleteMessages?: (messageIds: string[], options?: { revoke?: boolean }) => void | Promise<{ ok: boolean; error?: string } | void>;
   onForwardMessages?: (payload: { messageIds: string[]; telegramMessageIds: number[]; toChatId: string; dropAuthor?: boolean }) => Promise<{ ok: boolean; error?: string }>;
@@ -604,6 +609,8 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
   onLoadOlderMessages,
   onMessagesSynced,
   onOpenKnowledgeEvolution,
+  onOpenCustomerMemory,
+  isCustomerMemoryOpen = false,
   onDeleteMessage,
   onBatchDeleteMessages,
   onForwardMessages,
@@ -656,15 +663,19 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
   const isCustomPreview = Boolean(
     !isDualOffPreview && customLLMConfig?.enabled && customLLMConfig?.engineMode === 'custom'
   );
-  const effectiveOutboundEngine: 'gemini' | 'google' | 'custom_llm' = isDualOffPreview
-    ? 'google'
-    : isCustomPreview
-    ? translationSettings?.preferredEngine === 'google'
+  const isGroupOrChannelChat = Boolean(
+    chat?.isGroup || chat?.isChannel || /^tg_-/.test(chat?.id || '')
+  );
+  const effectiveOutboundEngine: 'gemini' | 'google' | 'custom_llm' =
+    isGroupOrChannelChat || isDualOffPreview
       ? 'google'
-      : 'custom_llm'
-    : translationSettings?.preferredEngine === 'google'
-    ? 'google'
-    : 'gemini';
+      : isCustomPreview
+      ? translationSettings?.preferredEngine === 'google'
+        ? 'google'
+        : 'custom_llm'
+      : translationSettings?.preferredEngine === 'google'
+      ? 'google'
+      : 'gemini';
   const isLlmOutboundEngine =
     effectiveOutboundEngine === 'gemini' || effectiveOutboundEngine === 'custom_llm';
   const [showOriginalMsgIds, setShowOriginalMsgIds] = useState<Set<string>>(new Set());
@@ -682,6 +693,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
   const recordDurationRef = useRef<number>(0);
   const [retryingMsgIds, setRetryingMsgIds] = useState<Set<string>>(new Set());
   const [isVoiceStudioOpen, setIsVoiceStudioOpen] = useState(false);
+  const [isSynthesizingVoice, setIsSynthesizingVoice] = useState(false);
   const [masterVoiceprint, setMasterVoiceprint] = useState<MasterVoiceprint | null>(null);
   const [activePersonaName, setActivePersonaName] = useState<string>('默认人设');
 
@@ -1457,13 +1469,14 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
         const isCustomMode = Boolean(
           !isDualOffMode && customLLMConfig?.enabled && customLLMConfig?.engineMode === 'custom'
         );
-        const effectiveRefEngine: 'gemini' | 'google' | 'custom_llm' = isDualOffMode
-          ? 'google'
-          : isCustomMode
-          ? 'custom_llm'
-          : translationSettings?.preferredEngine === 'google'
-          ? 'google'
-          : 'gemini';
+        const effectiveRefEngine: 'gemini' | 'google' | 'custom_llm' =
+          isGroupOrChannelChat || isDualOffMode
+            ? 'google'
+            : isCustomMode
+            ? 'custom_llm'
+            : translationSettings?.preferredEngine === 'google'
+            ? 'google'
+            : 'gemini';
 
         if (res.cnTranslation) {
           setAiSuggestionTranslation(res.cnTranslation);
@@ -1477,14 +1490,15 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
               customLLMConfig,
               effectiveRefEngine,
               translationSettings?.googleApiKey,
-              translationSettings?.geminiModel,
-              translationSettings?.geminiApiKey,
-              translationSettings?.customModelName
+              isGroupOrChannelChat ? undefined : translationSettings?.geminiModel,
+              isGroupOrChannelChat ? undefined : translationSettings?.geminiApiKey,
+              isGroupOrChannelChat ? undefined : translationSettings?.customModelName,
+              isGroupOrChannelChat ? { purpose: 'group', isGroup: true } : undefined
             );
             setAiSuggestionTranslation(refTrans || null);
-          } catch (transErr: any) {
+          } catch {
             setAiSuggestionTranslation(null);
-            showSyncNotice(`参考译文失败：${transErr?.message || '请检查翻译通道配置'}`, 5000);
+            showSyncNotice('翻译失败，请检查翻译通道', 5000);
           } finally {
             setIsTranslatingSuggestion(false);
           }
@@ -1675,6 +1689,41 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   };
 
+  const handleJumpToMessage = (targetMsg: Message) => {
+    if (!targetMsg) return;
+    const matched =
+      messages.find(
+        (m) =>
+          m.id === targetMsg.id ||
+          (typeof targetMsg.telegramMessageId === 'number' &&
+            m.telegramMessageId === targetMsg.telegramMessageId)
+      ) || targetMsg;
+
+    if (isSearchingInChat || chatSearchQuery || cloudSearchResults !== null) {
+      setIsSearchingInChat(false);
+      setChatSearchQuery('');
+      setCloudSearchResults(null);
+    }
+
+    requestAnimationFrame(() => {
+      setTimeout(() => {
+        const targetEl = scrollViewportRef.current?.querySelector(
+          `[data-msg-id="${CSS.escape(matched.id)}"]`
+        ) as HTMLElement | null;
+        if (targetEl) {
+          targetEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
+          setHighlightedMsgId(matched.id);
+          setTimeout(
+            () => setHighlightedMsgId((cur) => (cur === matched.id ? null : cur)),
+            2000
+          );
+        } else {
+          showSyncNotice('该消息暂未加载到当前窗口，可点击顶部“加载更早历史消息”后重试', 3000);
+        }
+      }, 40);
+    });
+  };
+
   useEffect(() => {
     const currentId = chat?.id || null;
     const chatChanged = prevChatIdForScrollRef.current !== currentId;
@@ -1768,12 +1817,15 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
           'Auto',
           outboundTargetLang,
           customLLMConfig,
-          translationSettings?.preferredEngine,
+          effectiveOutboundEngine,
           translationSettings?.googleApiKey,
-          translationSettings?.geminiModel,
-          translationSettings?.geminiApiKey,
-          translationSettings?.customModelName,
-          { signal: controller.signal }
+          isGroupOrChannelChat ? undefined : translationSettings?.geminiModel,
+          isGroupOrChannelChat ? undefined : translationSettings?.geminiApiKey,
+          isGroupOrChannelChat ? undefined : translationSettings?.customModelName,
+          {
+            signal: controller.signal,
+            ...(isGroupOrChannelChat ? { purpose: 'group' as const, isGroup: true } : {}),
+          }
         );
         if (isCurrent && !controller.signal.aborted) {
           previewContextRef.current = currentPreviewContext;
@@ -1787,7 +1839,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
         }
         setTranslatedPreview('');
         setTranslatedPreviewSource(queryText);
-        setPreviewError(err?.message || '请求失败');
+        setPreviewError('翻译失败，请检查翻译通道');
       } finally {
         if (isCurrent) {
           setIsTranslatingPreview(false);
@@ -1852,10 +1904,13 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
         customLLMConfig,
         effectiveOutboundEngine,
         translationSettings?.googleApiKey,
-        translationSettings?.geminiModel,
-        translationSettings?.geminiApiKey,
-        translationSettings?.customModelName,
-        { signal: controller.signal }
+        isGroupOrChannelChat ? undefined : translationSettings?.geminiModel,
+        isGroupOrChannelChat ? undefined : translationSettings?.geminiApiKey,
+        isGroupOrChannelChat ? undefined : translationSettings?.customModelName,
+        {
+          signal: controller.signal,
+          ...(isGroupOrChannelChat ? { purpose: 'group' as const, isGroup: true } : {}),
+        }
       );
       if (!controller.signal.aborted && (textareaRef.current?.value.trim() === queryText || inputText.trim() === queryText)) {
         previewContextRef.current = `${outboundTargetLang}|${effectiveOutboundEngine}`;
@@ -1867,7 +1922,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
       if (err?.name === 'AbortError' || controller.signal.aborted) return;
       setTranslatedPreview('');
       setTranslatedPreviewSource(queryText);
-      setPreviewError(err?.message || '请求失败');
+      setPreviewError('翻译失败，请检查翻译通道');
     } finally {
       if (previewAbortRef.current === controller) {
         previewAbortRef.current = null;
@@ -1920,18 +1975,19 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                 'Auto',
                 outboundTargetLang,
                 customLLMConfig,
-                translationSettings?.preferredEngine,
+                effectiveOutboundEngine,
                 translationSettings?.googleApiKey,
-                translationSettings?.geminiModel,
-                translationSettings?.geminiApiKey,
-                translationSettings?.customModelName
+                isGroupOrChannelChat ? undefined : translationSettings?.geminiModel,
+                isGroupOrChannelChat ? undefined : translationSettings?.geminiApiKey,
+                isGroupOrChannelChat ? undefined : translationSettings?.customModelName,
+                isGroupOrChannelChat ? { purpose: 'group', isGroup: true } : undefined
               );
-            } catch (err: any) {
-              const errMsg = err?.message || '请求失败';
+            } catch {
+              const errMsg = '翻译失败，请检查翻译通道';
               setPreviewError(errMsg);
               setTranslatedPreview('');
               setTranslatedPreviewSource(textToSend);
-              showSyncNotice(`翻译失败（可点击「直接发送原文」）：${errMsg}`, 5000);
+              showSyncNotice(errMsg, 5000);
               return;
             }
           }
@@ -1945,15 +2001,16 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                 'Auto',
                 inboundTargetLang,
                 customLLMConfig,
-                translationSettings?.preferredEngine,
+                effectiveOutboundEngine,
                 translationSettings?.googleApiKey,
-                translationSettings?.geminiModel,
-                translationSettings?.geminiApiKey,
-                translationSettings?.customModelName
+                isGroupOrChannelChat ? undefined : translationSettings?.geminiModel,
+                isGroupOrChannelChat ? undefined : translationSettings?.geminiApiKey,
+                isGroupOrChannelChat ? undefined : translationSettings?.customModelName,
+                isGroupOrChannelChat ? { purpose: 'group', isGroup: true } : undefined
               );
-            } catch (err: any) {
+            } catch {
               translationOfTarget = '';
-              showSyncNotice(`对照翻译失败: ${err?.message || '请检查翻译通道配置'}`, 4000);
+              showSyncNotice('翻译失败，请检查翻译通道', 4000);
             }
           }
         }
@@ -2586,13 +2643,14 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
       const isCustomMode = Boolean(
         !isDualOffMode && customLLMConfig?.enabled && customLLMConfig?.engineMode === 'custom'
       );
-      const effectiveEngine = isDualOffMode
-        ? 'google'
-        : isCustomMode
-        ? 'custom_llm'
-        : translationSettings?.preferredEngine === 'google'
-        ? 'google'
-        : 'gemini';
+      const effectiveEngine =
+        isGroupOrChannelChat || isDualOffMode
+          ? 'google'
+          : isCustomMode
+          ? 'custom_llm'
+          : translationSettings?.preferredEngine === 'google'
+          ? 'google'
+          : 'gemini';
 
       try {
         const translated = await translateText(
@@ -2602,9 +2660,10 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
           customLLMConfig,
           effectiveEngine,
           translationSettings?.googleApiKey,
-          translationSettings?.geminiModel,
-          translationSettings?.geminiApiKey,
-          translationSettings?.customModelName
+          isGroupOrChannelChat ? undefined : translationSettings?.geminiModel,
+          isGroupOrChannelChat ? undefined : translationSettings?.geminiApiKey,
+          isGroupOrChannelChat ? undefined : translationSettings?.customModelName,
+          isGroupOrChannelChat ? { purpose: 'group', isGroup: true } : undefined
         );
         persistPatch({
           sttText: transcribed,
@@ -2612,20 +2671,20 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
           translationError: undefined,
           translationErrorChannel: undefined,
         });
-      } catch (transErr: any) {
+      } catch {
         const errChannel: Message['translationErrorChannel'] =
           effectiveEngine === 'custom_llm'
             ? 'live_custom_llm'
             : effectiveEngine === 'google'
             ? 'live_google'
             : 'live_gemini';
-        const transErrMsg = transErr?.message || '译文生成失败';
+        const transErrMsg = '翻译失败，请检查翻译通道';
         persistPatch({
           sttText: transcribed,
           translationError: transErrMsg,
           translationErrorChannel: errChannel,
         });
-        setSyncNotice(`语音转写已完成，但译文失败：${transErrMsg}`);
+        setSyncNotice(transErrMsg);
         setTimeout(() => setSyncNotice(null), 3500);
       }
     } catch (err: any) {
@@ -2845,6 +2904,31 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
     }
   };
 
+  const probeSynthesizedAudioDuration = (src: string): Promise<number> => {
+    return new Promise((resolve) => {
+      const probe = new Audio();
+      const timer = setTimeout(() => {
+        cleanup();
+        resolve(1);
+      }, 6000);
+      const cleanup = () => {
+        clearTimeout(timer);
+        probe.onloadedmetadata = null;
+        probe.onerror = null;
+      };
+      probe.onloadedmetadata = () => {
+        const dur = probe.duration;
+        cleanup();
+        resolve(Number.isFinite(dur) && dur > 0 ? Math.max(1, Math.round(dur)) : 1);
+      };
+      probe.onerror = () => {
+        cleanup();
+        resolve(1);
+      };
+      probe.src = src;
+    });
+  };
+
   const handleTriggerVoiceCloneSend = (voiceData: {
     text: string;
     audioUrl?: string;
@@ -2852,6 +2936,8 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
     voiceName: string;
     voiceTone: string;
     isMasterVoice?: boolean;
+    chatId?: string;
+    accountId?: string;
   }) => {
     if (!voiceData.audioUrl) {
       setSyncNotice('缺少有效合成音频，已中止发送');
@@ -2861,6 +2947,8 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
 
     setIsVoiceStudioOpen(false);
     onSendMessage({
+      chatId: voiceData.chatId,
+      accountId: voiceData.accountId,
       sender: 'me',
       isAudio: true,
       audioDuration: voiceData.audioDuration,
@@ -2877,6 +2965,183 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
 
     setInputText('');
     setTranslatedPreview('');
+    setTranslatedPreviewSource('');
+    setPreviewError('');
+  };
+
+  const handleDirectVoiceSynthesis = async () => {
+    if (isSynthesizingVoice || isSending) return;
+    const rawText = inputText.trim();
+    if (!rawText) {
+      showSyncNotice('请先输入内容', 3000);
+      return;
+    }
+    if (!chat) return;
+
+    const originChatId = chat.id;
+    const originAccountId = currentAccountId;
+    const mv = masterVoiceprint || getMasterVoiceprint();
+    const isMasterVoiceClone = Boolean(
+      mv?.cloneMode === 'voice_clone' && (mv.sampleId || mv.sampleAudioUrl || mv.cloneVoiceId)
+    );
+    const hasSavedVoice = Boolean(mv && (isMasterVoiceClone || mv.baseVoice));
+    if (!hasSavedVoice || !mv) {
+      showSyncNotice('尚未保存声纹样本或预设音色，请先在右侧「音色」面板配置并保存', 4000);
+      return;
+    }
+
+    setIsSynthesizingVoice(true);
+    try {
+      // 1. 文本与翻译联动判断
+      const shouldAutoTranslate =
+        isChatTransEnabled &&
+        translationSettings?.autoTranslateOutbound !== false &&
+        (!editingMessage || translateOnEdit);
+      let speechText = rawText;
+
+      if (shouldAutoTranslate && hasTranslatableLetters(rawText)) {
+        const inputNormCode = normalizeChatLangCode(detectClientLangCode(rawText));
+        const targetNormCode = normalizeChatLangCode(outboundTargetLang);
+        const isAlreadyTargetLang =
+          inputNormCode !== 'auto' && targetNormCode !== 'auto' && inputNormCode === targetNormCode;
+
+        if (!isAlreadyTargetLang) {
+          if (previewError && translatedPreviewSource === rawText) {
+            showSyncNotice('请确认翻译通道流畅', 4000);
+            return;
+          }
+          const hasFreshPreview = Boolean(
+            translatedPreview.trim() && translatedPreviewSource === rawText
+          );
+          if (hasFreshPreview) {
+            speechText = translatedPreview.trim();
+          } else {
+            try {
+              const trans = await translateText(
+                rawText,
+                'Auto',
+                outboundTargetLang,
+                customLLMConfig,
+                effectiveOutboundEngine,
+                translationSettings?.googleApiKey,
+                isGroupOrChannelChat ? undefined : translationSettings?.geminiModel,
+                isGroupOrChannelChat ? undefined : translationSettings?.geminiApiKey,
+                isGroupOrChannelChat ? undefined : translationSettings?.customModelName,
+                isGroupOrChannelChat ? { purpose: 'group', isGroup: true } : undefined
+              );
+              if (!trans || !trans.trim()) {
+                setPreviewError('译文为空');
+                setTranslatedPreview('');
+                setTranslatedPreviewSource(rawText);
+                showSyncNotice('请确认翻译通道流畅', 4000);
+                return;
+              }
+              speechText = trans.trim();
+            } catch (err: any) {
+              setPreviewError(err?.message || '翻译失败');
+              setTranslatedPreview('');
+              setTranslatedPreviewSource(rawText);
+              showSyncNotice('请确认翻译通道流畅', 4000);
+              return;
+            }
+          }
+        }
+      }
+
+      // 2. 读取已保存声纹模型与网关参数，直接调用合成接口
+      const isCustomPriority = Boolean(
+        customLLMConfig &&
+          customLLMConfig.enabled !== false &&
+          !customLLMConfig.explicitlyDisabled &&
+          customLLMConfig.engineMode === 'custom'
+      );
+      const isCustomGeminiGateway = Boolean(
+        isCustomPriority &&
+          (customLLMConfig?.protocol === 'gemini' ||
+            (customLLMConfig?.baseUrl || '').toLowerCase().includes('googleapis.com'))
+      );
+      const isCustomOpenAiGateway = Boolean(isCustomPriority && !isCustomGeminiGateway);
+
+      const savedTts = mv.ttsModel?.trim() || '';
+      let ttsEngine = 'gemini-3.8-flash-tts';
+      if (isMasterVoiceClone) {
+        const cloneFallback =
+          mv.cloneProvider === 'elevenlabs'
+            ? 'eleven_multilingual_v2'
+            : mv.cloneProvider === 'siliconflow_cosyvoice'
+            ? 'FunAudioLLM/CosyVoice2-0.5B'
+            : 'tts-1';
+        ttsEngine = savedTts && !/^gemini-/i.test(savedTts) ? savedTts : cloneFallback;
+      } else if (isCustomOpenAiGateway) {
+        ttsEngine = savedTts && !/^gemini-/i.test(savedTts) ? savedTts : 'tts-1';
+      } else if (savedTts) {
+        ttsEngine = savedTts;
+      }
+
+      const speedRate = typeof mv.rate === 'number' && Number.isFinite(mv.rate) ? mv.rate : 1.0;
+      const pitchRate = typeof mv.pitch === 'number' && Number.isFinite(mv.pitch) ? mv.pitch : 1.0;
+      const voiceClonePayload: VoiceCloneRequestOptions | undefined = isMasterVoiceClone
+        ? {
+            cloneMode: 'voice_clone',
+            sampleId: mv.sampleId,
+            sampleAudioDataUrl: !mv.sampleId ? mv.sampleAudioUrl : undefined,
+            sampleName: mv.name,
+            sampleTranscript: mv.sampleTranscript,
+            cloneProvider: mv.cloneProvider || 'elevenlabs',
+            cloneGatewayUrl: mv.cloneGatewayUrl,
+            cloneApiKey: mv.cloneApiKey,
+            cloneVoiceId: mv.cloneVoiceId,
+          }
+        : undefined;
+
+      const res = await generateTTSVoice(
+        speechText,
+        mv.baseVoice || 'Kore',
+        'Natural, friendly and conversational',
+        customLLMConfig,
+        'high',
+        '日常',
+        ttsEngine,
+        {
+          speechRate: speedRate,
+          pitch: pitchRate,
+          ...(voiceClonePayload ? { voiceClone: voiceClonePayload } : {}),
+        }
+      );
+
+      if (!res?.audioUrl || res.error) {
+        showSyncNotice('请检查合成通道', 4000);
+        return;
+      }
+
+      if (res.clonedVoiceId && isMasterVoiceClone && res.clonedVoiceId !== mv.cloneVoiceId) {
+        const updatedVp: MasterVoiceprint = {
+          ...mv,
+          cloneVoiceId: res.clonedVoiceId,
+          updatedAt: Date.now(),
+        };
+        saveMasterVoiceprint(updatedVp);
+        setMasterVoiceprint(updatedVp);
+      }
+
+      const audioDuration = await probeSynthesizedAudioDuration(res.audioUrl);
+      handleTriggerVoiceCloneSend({
+        text: speechText,
+        audioUrl: res.audioUrl,
+        audioDuration,
+        voiceName: isMasterVoiceClone
+          ? `${mv.name || '个人克隆声纹'} (声纹克隆)`
+          : `${mv.name || '个人预设'} (${mv.baseVoice || 'Kore'})`,
+        voiceTone: '💫 自然日常',
+        isMasterVoice: true,
+        chatId: originChatId,
+        accountId: originAccountId,
+      });
+    } catch {
+      showSyncNotice('请检查合成通道', 4000);
+    } finally {
+      setIsSynthesizingVoice(false);
+    }
   };
 
   if (!chat) {
@@ -2890,7 +3155,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
             选择左侧会话开始协同
           </div>
           <p className="text-[11.5px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#86a4b0] leading-relaxed">
-            可随时点击最左侧导航栏在右侧工作台展开记忆、大模型、翻译、音色与人设配置。
+            可随时点击最左侧导航栏弹出独立的记忆、大模型、翻译、音色与人设配置页。
           </p>
         </div>
       </div>
@@ -3051,27 +3316,8 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
           </div>
         </div>
 
-        {/* Right: Active Model Indicator + Translation Bar Toggle + Real Actions */}
+        {/* Right: Translation Bar Toggle + Real Actions */}
         <div className="flex items-center gap-1.5 shrink-0 text-[#64748b] dark:text-[#9bb3c9] aurora:text-[#7e9aa5]">
-          {/* Active LLM Indicator (Opens LLM settings in right dock) */}
-          {onOpenCustomLLM && (
-            <button
-              type="button"
-              onClick={onOpenCustomLLM}
-              title={isModelDualOff ? '大模型已关闭（双关状态）— 点击前往配置' : '切换或配置大模型引擎'}
-              className={`hidden xl:flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[11.5px] font-medium border transition-colors cursor-pointer ${
-                activeRightPanel === 'llm'
-                  ? 'bg-[#e8f3ff] border-[#bfdbfe] text-[#2481cc] dark:bg-[#132234] dark:border-[#2ba0ff]/40 dark:text-[#2ba0ff] aurora:bg-[#112e37] aurora:border-[#2dd4bf]/45 aurora:text-[#5eead4]'
-                  : isModelDualOff
-                  ? 'bg-amber-50/70 hover:bg-amber-50 dark:bg-amber-500/10 dark:hover:bg-amber-500/15 aurora:bg-amber-500/10 aurora:hover:bg-amber-500/15 border-amber-200 dark:border-amber-500/30 aurora:border-amber-500/30 text-amber-700 dark:text-amber-300 aurora:text-amber-300'
-                  : 'bg-[#f8fafc] hover:bg-[#f1f5f9] dark:bg-[#0e1726] dark:hover:bg-[#142236] aurora:bg-[#101c23] aurora:hover:bg-[#15252e] border-[#e2e8f0] dark:border-[#1a2b40] aurora:border-[#1e343e] text-[#334155] dark:text-[#dbe7f3] aurora:text-[#d5ebee]'
-              }`}
-            >
-              <Cpu className={`w-3.5 h-3.5 ${isModelDualOff ? 'text-amber-500 dark:text-amber-400' : 'text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf]'}`} />
-              <span className="max-w-[140px] truncate">{activeModelDisplay}</span>
-            </button>
-          )}
-
           {/* Bidirectional Translation Bar Toggle */}
           <button
             type="button"
@@ -3122,19 +3368,19 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
             <Search className="w-4 h-4" />
           </button>
 
-          {/* 角色人设资料中心按钮 */}
+          {/* 当前联系人全息记忆按钮 */}
           <button
             type="button"
-            onClick={onOpenKnowledgeEvolution}
-            title="人设资料"
+            onClick={onOpenCustomerMemory || onOpenKnowledgeEvolution}
+            title="全息记忆"
             className={`flex items-center gap-1 px-2.5 py-1 rounded-lg text-[11.5px] font-medium border transition-colors cursor-pointer ${
-              activeRightPanel === 'persona'
+              isCustomerMemoryOpen
                 ? 'bg-[#2481cc] border-[#2481cc] text-white dark:bg-[#2ba0ff]/20 dark:border-[#2ba0ff]/50 dark:text-[#2ba0ff] aurora:bg-[#112e37] aurora:border-[#2dd4bf]/55 aurora:text-[#5eead4]'
                 : 'bg-[#f0f7ff] hover:bg-[#e0efff] dark:bg-[#102033] dark:hover:bg-[#142840] aurora:bg-[#10242b] aurora:hover:bg-[#132d36] border-[#dbeafe] dark:border-[#2ba0ff]/25 aurora:border-[#2dd4bf]/30 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#5eead4]'
             }`}
           >
-            <Sparkles className="w-3.5 h-3.5" />
-            <span className="hidden lg:inline font-semibold">人设资料</span>
+            <Brain className="w-3.5 h-3.5" />
+            <span className="hidden lg:inline font-semibold">全息记忆</span>
           </button>
 
           {/* More Options / Chat Info Drawer */}
@@ -3436,7 +3682,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
       {/* 3. Messages Stream Viewport with Official Telegram Wallpaper Pattern */}
       <div
         ref={scrollViewportRef}
-        className="flex-1 overflow-y-auto px-5 py-4 space-y-3 tg-chat-pattern select-text"
+        className="flex-1 overflow-y-auto px-3.5 py-2.5 space-y-1.5 tg-chat-pattern select-text"
       >
         {/* Load Older Cloud History Button */}
         {chat.id.startsWith('tg_') && currentAccountId !== 'acc_telegram_bot' && hasMoreHistory && cloudSearchResults === null && onLoadOlderMessages && (
@@ -3487,7 +3733,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
           return (
             <React.Fragment key={msg.id}>
               {showDayDivider && (
-                <div className="flex items-center justify-center my-1.5">
+                <div className="flex items-center justify-center my-1">
                   <span className="px-3 py-0.5 rounded-full bg-white/90 dark:bg-[#0e1726]/80 aurora:bg-[#101c23]/85 border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#1c323c] text-[11px] font-medium text-[#64748b] dark:text-[#b4c6d8] aurora:text-[#b7d0d8] shadow-xs">
                     {formatMessageDayLabel(dayKey)}
                   </span>
@@ -3499,9 +3745,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                 onClick={isMultiSelectMode ? () => toggleSelectMessage(msg.id) : undefined}
                 className={`flex ${isMultiSelectMode ? 'items-center gap-2.5 cursor-pointer rounded-xl px-1.5 py-0.5 transition-colors ' + (isSelectedMulti ? 'bg-[#2481cc]/10 dark:bg-[#2ba0ff]/15 aurora:bg-[#14b8a6]/15' : 'hover:bg-black/5 dark:hover:bg-white/5 aurora:hover:bg-white/5') : 'flex-col'} ${
                   isMe ? (isMultiSelectMode ? 'justify-end' : 'items-end') : (isMultiSelectMode ? 'justify-start' : 'items-start')
-                } group relative ${hoveredMessageId === msg.id ? 'z-30' : ''} ${isSameSenderAsPrev ? 'mt-0.5' : 'mt-1.5'} ${isSameSenderAsNext ? 'mb-0.5' : 'mb-1.5'}`}
-                onMouseEnter={() => !isMultiSelectMode && setHoveredMessageId(msg.id)}
-                onMouseLeave={() => setHoveredMessageId(null)}
+                } group relative ${hoveredMessageId === msg.id ? 'z-30' : ''} ${isSameSenderAsPrev ? 'mt-0.5' : 'mt-1'} ${isSameSenderAsNext ? 'mb-0.5' : 'mb-1'}`}
                 onContextMenu={(e) => {
                   if (!isMultiSelectMode) handleMessageContextMenu(e, msg);
                 }}
@@ -3686,7 +3930,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                   )}
 
                   <div
-                    className={`${isGroupPeer ? 'min-w-0' : 'max-w-[80%] sm:max-w-[74%]'} rounded-2xl p-3 px-3.5 relative transition-all select-text ${
+                    className={`${isGroupPeer ? 'min-w-0' : 'max-w-[84%] sm:max-w-[78%]'} rounded-xl py-1.5 px-2.5 relative transition-all select-text ${
                       highlightedMsgId === msg.id ? 'ring-2 ring-amber-400 shadow-lg' : ''
                     } ${
                       isMe
@@ -3968,7 +4212,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                         ) : msg.translationError ? (
                           <div className={`mt-1 text-[11px] flex items-center justify-between gap-2 ${isMe ? 'text-amber-200' : 'text-rose-600 dark:text-rose-400 aurora:text-rose-300'}`}>
                             <span className="min-w-0 break-words">
-                              {getTranslationErrorLabel(msg.translationErrorChannel)}：{msg.translationError}
+                              翻译失败，请检查翻译通道
                             </span>
                             {onRetranslateMessage && (
                               <button
@@ -4055,7 +4299,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                       return (
                         <>
                           {!msg.isImage && !msg.isFile && !msg.isVideo && (
-                            <p className="text-[13.5px] leading-relaxed whitespace-pre-wrap break-words select-text cursor-text">
+                            <p className="text-[13px] leading-snug whitespace-pre-wrap break-words select-text cursor-text">
                               {renderMessageTextWithLinks(msg.text, isMe)}
                             </p>
                           )}
@@ -4065,7 +4309,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                             (!msg.imageUrl ||
                               (!isSystemMediaPlaceholder(msg.text, msg) &&
                                 !/\.(jpg|jpeg|png|gif|webp|bmp|svg|heic)$/i.test(msg.text.trim()))) && (
-                            <p className="text-[13.5px] leading-relaxed whitespace-pre-wrap break-words select-text cursor-text mt-1">
+                            <p className="text-[13px] leading-snug whitespace-pre-wrap break-words select-text cursor-text mt-1">
                               {renderMessageTextWithLinks(msg.text, isMe)}
                             </p>
                           )}
@@ -4075,7 +4319,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                             (!msg.videoUrl ||
                               (!isSystemMediaPlaceholder(msg.text, msg) &&
                                 !/\.(mp4|mov|webm|mkv|avi|m4v)$/i.test(msg.text.trim()))) && (
-                            <p className="text-[13.5px] leading-relaxed whitespace-pre-wrap break-words select-text cursor-text mt-1">
+                            <p className="text-[13px] leading-snug whitespace-pre-wrap break-words select-text cursor-text mt-1">
                               {renderMessageTextWithLinks(msg.text, isMe)}
                             </p>
                           )}
@@ -4085,7 +4329,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                             (msg.isImage && msg.imageUrl && (!msg.text?.trim() || isSystemMediaPlaceholder(msg.text, msg))) ||
                             (msg.isVideo && msg.videoUrl && (!msg.text?.trim() || isSystemMediaPlaceholder(msg.text, msg)))) ? null : msg.isTranslating ? (
                             <div
-                              className={`mt-2 p-2 rounded-xl border text-[11px] flex items-center gap-1.5 ${
+                              className={`mt-1.5 px-2 py-1 rounded-lg border text-[10.5px] flex items-center gap-1.5 ${
                                 isMe
                                   ? 'bg-white/10 border-white/20 text-white/85'
                                   : 'bg-[#f8fafc] dark:bg-[#0b131f]/80 aurora:bg-[#0c161c]/85 border-[#e2e8f0] dark:border-[#1e3148] aurora:border-[#1e343e] text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#5eead4]'
@@ -4096,15 +4340,15 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                             </div>
                           ) : msg.translatedText ? (
                             <div
-                              className={`mt-2 p-2.5 rounded-xl border text-xs select-text cursor-text ${
+                              className={`mt-1.5 px-2 py-1.5 rounded-lg border text-[11.5px] select-text cursor-text ${
                                 isMe
                                   ? 'bg-white/12 border-white/20 text-white/95'
                                   : 'bg-[#f8fafc] dark:bg-[#0b131f]/80 aurora:bg-[#0c161c]/85 border-[#e2e8f0] dark:border-[#1e3148] aurora:border-[#1e343e] text-[#1e293b] dark:text-[#eef4fb] aurora:text-[#ecf6f8]'
                               }`}
                             >
-                              <div className="flex items-center justify-between gap-2 mb-1 select-none">
+                              <div className="flex items-center justify-between gap-2 mb-0.5 select-none">
                                 <span
-                                  className={`inline-flex items-center gap-1 text-[10.5px] font-medium ${
+                                  className={`inline-flex items-center gap-1 text-[10px] font-medium ${
                                     isMe ? 'text-white/85' : 'text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#5eead4]'
                                   }`}
                                 >
@@ -4150,18 +4394,18 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                                   </button>
                                 </div>
                               </div>
-                              <p className="leading-relaxed font-normal select-text cursor-text">{msg.translatedText}</p>
+                              <p className="leading-snug font-normal select-text cursor-text">{msg.translatedText}</p>
                             </div>
                           ) : msg.translationError ? (
                             <div
-                              className={`mt-2 pt-1.5 border-t text-[11px] flex items-center justify-between gap-2 select-text cursor-text ${
+                              className={`mt-1.5 pt-1 border-t text-[10.5px] flex items-center justify-between gap-2 select-text cursor-text ${
                                 isMe
                                   ? 'border-white/20 text-amber-200'
                                   : 'border-rose-500/20 text-rose-600 dark:text-rose-400 aurora:text-rose-300'
                               }`}
                             >
                               <span className="min-w-0 break-words">
-                                {getTranslationErrorLabel(msg.translationErrorChannel)}：{msg.translationError}
+                                翻译失败，请检查翻译通道
                               </span>
                               {onRetranslateMessage && (
                                 <button
@@ -4190,7 +4434,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                 {/* Message Reactions Pills */}
                 {msg.reactions && Object.keys(msg.reactions).length > 0 && (
                   <div
-                    className={`flex flex-wrap items-center gap-1 mt-1.5 pt-1 border-t ${
+                    className={`flex flex-wrap items-center gap-1 mt-1 pt-1 border-t ${
                       isMe ? 'border-white/15' : 'border-black/5 dark:border-white/10 aurora:border-white/10'
                     }`}
                   >
@@ -4221,7 +4465,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
 
                 {/* Message Timestamp & Status Checks */}
                 <div
-                  className={`flex items-center justify-end gap-1 mt-1.5 text-[10px] select-none tabular-nums ${
+                  className={`flex items-center justify-end gap-1 mt-1 text-[10px] select-none tabular-nums ${
                     isMe ? 'text-white/80' : 'text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5]'
                   }`}
                 >
@@ -4451,13 +4695,14 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                     const isCustomSend = Boolean(
                       !isDualOffSend && customLLMConfig?.enabled && customLLMConfig?.engineMode === 'custom'
                     );
-                    const effectiveSendRefEngine: 'gemini' | 'google' | 'custom_llm' = isDualOffSend
-                      ? 'google'
-                      : isCustomSend
-                      ? 'custom_llm'
-                      : translationSettings?.preferredEngine === 'google'
-                      ? 'google'
-                      : 'gemini';
+                    const effectiveSendRefEngine: 'gemini' | 'google' | 'custom_llm' =
+                      isGroupOrChannelChat || isDualOffSend
+                        ? 'google'
+                        : isCustomSend
+                        ? 'custom_llm'
+                        : translationSettings?.preferredEngine === 'google'
+                        ? 'google'
+                        : 'gemini';
                     const resolvedInbound =
                       inboundTargetLang && inboundTargetLang !== 'Auto' ? inboundTargetLang : 'Chinese';
                     if (
@@ -4473,12 +4718,13 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                           customLLMConfig,
                           effectiveSendRefEngine,
                           translationSettings?.googleApiKey,
-                          translationSettings?.geminiModel,
-                          translationSettings?.geminiApiKey,
-                          translationSettings?.customModelName
+                          isGroupOrChannelChat ? undefined : translationSettings?.geminiModel,
+                          isGroupOrChannelChat ? undefined : translationSettings?.geminiApiKey,
+                          isGroupOrChannelChat ? undefined : translationSettings?.customModelName,
+                          isGroupOrChannelChat ? { purpose: 'group', isGroup: true } : undefined
                         );
-                      } catch (transErr: any) {
-                        setSyncNotice(`对照翻译失败: ${transErr?.message || '请检查翻译通道配置'}`);
+                      } catch {
+                        setSyncNotice('翻译失败，请检查翻译通道');
                         setTimeout(() => setSyncNotice(null), 4000);
                       }
                     }
@@ -4530,10 +4776,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                 <ShieldAlert className="w-4 h-4 text-rose-500 shrink-0" />
                 <div className="min-w-0">
                   <span className="text-[10.5px] font-semibold text-rose-700 dark:text-rose-300 block">
-                    翻译预览失败（发送未受阻，可直接发送原文）
-                  </span>
-                  <span className="text-[11px] text-rose-600 dark:text-rose-200 truncate block">
-                    {previewError}
+                    翻译失败，请检查翻译通道
                   </span>
                 </div>
               </div>
@@ -4825,23 +5068,9 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
           </div>
         )}
 
-        {/* Composer Top Utility Strip: Active Persona + Outbound Auto-Translate Target */}
+        {/* Composer Top Utility Strip: Outbound Auto-Translate Target */}
         <div className="flex items-center justify-between gap-2 mb-2 text-[11.5px]">
           <div className="flex items-center gap-2 min-w-0 overflow-x-auto no-scrollbar">
-            <button
-              type="button"
-              onClick={onOpenKnowledgeEvolution}
-              title="查看或切换人设资料"
-              className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg border font-medium cursor-pointer transition-colors shrink-0 ${
-                activeRightPanel === 'persona'
-                  ? 'bg-[#2481cc] border-[#2481cc] text-white dark:bg-[#132234] dark:border-[#2ba0ff]/45 dark:text-[#2ba0ff] aurora:bg-[#112e37] aurora:border-[#2dd4bf]/50 aurora:text-[#5eead4]'
-                  : 'bg-[#f0f7ff] hover:bg-[#e0efff] dark:bg-[#0e1726] dark:hover:bg-[#142236] aurora:bg-[#102027] aurora:hover:bg-[#142a33] border-[#dbeafe] dark:border-[#1a2b40] aurora:border-[#1e3640] text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#5eead4]'
-              }`}
-            >
-              <Sparkles className="w-3 h-3" />
-              <span className="truncate max-w-[160px]">人设: {activePersonaName}</span>
-            </button>
-
             <button
               type="button"
               onClick={() => {
@@ -4876,12 +5105,15 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
 
           <button
             type="button"
-            onClick={() => setIsVoiceStudioOpen(true)}
-            title="打开预设音色与语音合成台"
-            className="inline-flex items-center gap-1 px-2 py-1 rounded-lg text-[#64748b] hover:text-[#2481cc] hover:bg-[#f1f5f9] dark:text-[#94a3b8] dark:hover:text-[#2ba0ff] dark:hover:bg-[#101c2d] aurora:text-[#7e9aa5] aurora:hover:text-[#5eead4] aurora:hover:bg-[#12222a] transition-colors cursor-pointer shrink-0"
+            disabled={isSynthesizingVoice}
+            onClick={() => void handleDirectVoiceSynthesis()}
+            title="使用已保存声纹直接将当前文本合成为语音发送"
+            className={`inline-flex items-center gap-1 px-2 py-1 rounded-lg text-[#64748b] hover:text-[#2481cc] hover:bg-[#f1f5f9] dark:text-[#94a3b8] dark:hover:text-[#2ba0ff] dark:hover:bg-[#101c2d] aurora:text-[#7e9aa5] aurora:hover:text-[#5eead4] aurora:hover:bg-[#12222a] transition-colors cursor-pointer shrink-0 ${
+              isSynthesizingVoice ? 'opacity-60 pointer-events-none' : ''
+            }`}
           >
-            <AudioWaveform className="w-3.5 h-3.5" />
-            <span className="hidden sm:inline">音色合成</span>
+            <AudioWaveform className={`w-3.5 h-3.5 ${isSynthesizingVoice ? 'animate-pulse text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf]' : ''}`} />
+            <span className="hidden sm:inline">{isSynthesizingVoice ? '合成中...' : '音色合成'}</span>
           </button>
         </div>
 
@@ -5025,6 +5257,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
         onAddContact={onAddContact}
         onRemoveContact={onRemoveContact}
         onRefreshMediaUrls={onRefreshMediaUrls}
+        onJumpToMessage={handleJumpToMessage}
       />
 
       {/* Voice Clone Studio Modal */}

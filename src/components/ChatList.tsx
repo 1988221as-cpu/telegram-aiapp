@@ -12,6 +12,7 @@ import {
   PenSquare,
   MoreVertical,
   Eye,
+  EyeOff,
   MessageSquare,
   Bell,
   BellOff,
@@ -125,6 +126,22 @@ export const ChatList: React.FC<ChatListProps> = ({
   const startWidthRef = useRef(280);
 
   const [activeFolder, setActiveFolder] = useState<'all' | 'unread' | 'personal' | 'groups' | 'channels' | 'bots' | 'archived'>('all');
+  const [isArchivedBoxVisible, setIsArchivedBoxVisible] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem('tg_pro_show_archived_box') !== 'false';
+    } catch {
+      return true;
+    }
+  });
+  const handleToggleArchivedBoxVisible = useCallback((nextVisible?: boolean) => {
+    setIsArchivedBoxVisible((prev) => {
+      const resolved = typeof nextVisible === 'boolean' ? nextVisible : !prev;
+      try {
+        localStorage.setItem('tg_pro_show_archived_box', resolved ? 'true' : 'false');
+      } catch {}
+      return resolved;
+    });
+  }, []);
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
   const [chatToDelete, setChatToDelete] = useState<Chat | null>(null);
   const [revokeDeleteChat, setRevokeDeleteChat] = useState(false);
@@ -373,6 +390,22 @@ export const ChatList: React.FC<ChatListProps> = ({
           )}
         </div>
 
+        {/* Toggle Archived Box Visibility */}
+        {archivedCount > 0 && (
+          <button
+            type="button"
+            onClick={() => handleToggleArchivedBoxVisible()}
+            title={isArchivedBoxVisible ? '隐藏顶部「已归档对话」框' : '打开顶部「已归档对话」框'}
+            className={`w-8 h-8 rounded-lg flex items-center justify-center transition-colors cursor-pointer shrink-0 border ${
+              isArchivedBoxVisible
+                ? 'bg-[#e8f3ff] text-[#0284c7] border-[#bfdbfe] dark:bg-[#13253b] dark:text-[#2ba0ff] dark:border-[#2ba0ff]/35 aurora:bg-[#112e37] aurora:text-[#5eead4] aurora:border-[#2dd4bf]/40'
+                : 'bg-[#f1f5f9] hover:bg-[#e8f3ff] dark:bg-[#0e1726] dark:hover:bg-[#132236] aurora:bg-[#162128] aurora:hover:bg-[#112d36] text-[#64748b] hover:text-[#0284c7] dark:text-[#7f95ab] dark:hover:text-[#2ba0ff] aurora:text-[#7e9aa5] aurora:hover:text-[#5eead4] border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#203540]'
+            }`}
+          >
+            <Archive className="w-4 h-4" />
+          </button>
+        )}
+
         {/* Inline New Chat Button */}
         {onNewChatClick && (
           <button
@@ -521,7 +554,7 @@ export const ChatList: React.FC<ChatListProps> = ({
       {/* 3. Chat Items List */}
       <div className="flex-1 overflow-y-auto py-1 space-y-0.5">
         {/* Top "已归档对话" Collapsed Row */}
-        {activeFolder !== 'archived' && !searchQuery && archivedCount > 0 && (
+        {activeFolder !== 'archived' && !searchQuery && archivedCount > 0 && isArchivedBoxVisible && (
           <div
             onClick={() => setActiveFolder('archived')}
             className="mx-1.5 px-2.5 py-2 rounded-xl flex items-center cursor-pointer hover:bg-[#f1f5f9] dark:hover:bg-[#0e1726]/80 aurora:hover:bg-[#132129]/80 transition-colors group border border-transparent"
@@ -533,9 +566,22 @@ export const ChatList: React.FC<ChatListProps> = ({
               <span className="text-[13px] font-semibold text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] group-hover:text-[#0284c7] dark:group-hover:text-[#2ba0ff] aurora:group-hover:text-[#5eead4]">
                 已归档对话
               </span>
-              <span className="text-[11px] text-[#64748b] dark:text-[#7f95ab] aurora:text-[#7e9aa5] tabular-nums">
-                {archivedCount}
-              </span>
+              <div className="flex items-center gap-1.5">
+                <span className="text-[11px] text-[#64748b] dark:text-[#7f95ab] aurora:text-[#7e9aa5] tabular-nums">
+                  {archivedCount}
+                </span>
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    handleToggleArchivedBoxVisible(false);
+                  }}
+                  title="隐藏「已归档对话」框"
+                  className="p-1 rounded-md text-[#94a3b8] hover:text-[#0f172a] dark:text-[#647a90] dark:hover:text-white aurora:text-[#6d8994] aurora:hover:text-[#ecf6f8] hover:bg-black/5 dark:hover:bg-white/10 transition-colors cursor-pointer"
+                >
+                  <EyeOff className="w-3.5 h-3.5" />
+                </button>
+              </div>
             </div>
           </div>
         )}
@@ -544,10 +590,22 @@ export const ChatList: React.FC<ChatListProps> = ({
         {activeFolder === 'archived' && (
           <div
             onClick={() => setActiveFolder('all')}
-            className="mx-1.5 px-3 py-2 rounded-xl bg-[#e8f3ff] dark:bg-[#12263f] aurora:bg-[#112d36] text-[#0284c7] dark:text-[#2ba0ff] aurora:text-[#5eead4] text-xs font-medium flex items-center gap-1.5 cursor-pointer hover:underline border border-[#bfdbfe]/60 dark:border-[#2ba0ff]/35 aurora:border-[#2dd4bf]/35"
+            className="mx-1.5 px-3 py-2 rounded-xl bg-[#e8f3ff] dark:bg-[#12263f] aurora:bg-[#112d36] text-[#0284c7] dark:text-[#2ba0ff] aurora:text-[#5eead4] text-xs font-medium flex items-center justify-between gap-2 cursor-pointer border border-[#bfdbfe]/60 dark:border-[#2ba0ff]/35 aurora:border-[#2dd4bf]/35"
           >
-            <ChevronLeft className="w-4 h-4" />
-            <span>返回全部会话</span>
+            <span className="flex items-center gap-1.5 hover:underline">
+              <ChevronLeft className="w-4 h-4" />
+              <span>返回全部会话</span>
+            </span>
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                handleToggleArchivedBoxVisible();
+              }}
+              className="text-[11px] px-2 py-0.5 rounded-md bg-white/70 dark:bg-[#0b1626]/70 aurora:bg-[#0b1920]/70 hover:bg-white dark:hover:bg-[#0f1f36] aurora:hover:bg-[#112630] transition-colors cursor-pointer shrink-0"
+            >
+              {isArchivedBoxVisible ? '隐藏顶部框' : '显示顶部框'}
+            </button>
           </div>
         )}
 

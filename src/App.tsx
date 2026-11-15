@@ -3,6 +3,7 @@ import { LeftSidebar } from './components/LeftSidebar';
 import { ChatList } from './components/ChatList';
 import { ChatArea, detectClientLangCode } from './components/ChatArea';
 import { UnifiedRightDock, RightPanelTab } from './components/UnifiedRightDock';
+import { CustomerMemoryDrawer } from './components/CustomerMemoryDrawer';
 import { MultiAccountModal } from './components/MultiAccountModal';
 import { TelegramMenuDrawer } from './components/TelegramMenuDrawer';
 import { DatabaseModal } from './components/DatabaseModal';
@@ -360,12 +361,11 @@ function normalizeLoadedTranslationSettings(raw: any): TranslationSettings {
     rawEngine === 'google' || rawEngine === 'custom_llm' || rawEngine === 'gemini'
       ? rawEngine
       : 'gemini';
-  const rawModel = String(raw.geminiModel || '').toLowerCase();
-  const normalizedGemmaModel = rawModel.includes('31b') ? 'gemma-4-31b-it' : 'gemma-4-26b-a4b-it';
+  const normalizedGemmaModel = 'gemma-4-26b-a4b-it';
   const merged: TranslationSettings = {
     ...INITIAL_TRANSLATION_SETTINGS,
     ...raw,
-    autoTranslateGroups: raw.autoTranslateGroups !== false,
+    autoTranslateGroups: raw.autoTranslateGroups === true,
     autoTranslatePrivate: raw.autoTranslatePrivate !== false,
     preferredEngine: normalizedEngine,
     geminiModel: normalizedGemmaModel,
@@ -471,6 +471,7 @@ export default function App() {
   const [searchQuery, setSearchQuery] = useState('');
   const [activeRightPanel, setActiveRightPanel] = useState<RightPanelTab | null>(null);
   const [isChatInfoOpen, setIsChatInfoOpen] = useState(false);
+  const [isChatMemoryOpen, setIsChatMemoryOpen] = useState(false);
   const [chatHasMoreMap, setChatHasMoreMap] = useState<Record<string, boolean>>({});
 
   const openRightPanel = (tab: RightPanelTab) => {
@@ -481,6 +482,12 @@ export default function App() {
   const toggleRightPanel = (tab: RightPanelTab) => {
     setIsChatInfoOpen(false);
     setActiveRightPanel((prev) => (prev === tab ? null : tab));
+  };
+
+  const toggleChatMemoryPanel = () => {
+    setIsChatInfoOpen(false);
+    setActiveRightPanel(null);
+    setIsChatMemoryOpen((prev) => !prev);
   };
 
   // 2. Modals & Drawers Visibility State
@@ -889,8 +896,7 @@ export default function App() {
         const rawEngine = (rawSavedTrans as any).preferredEngine;
         const normalizedEngine: 'gemini' | 'google' | 'custom_llm' =
           rawEngine === 'google' || rawEngine === 'custom_llm' || rawEngine === 'gemini' ? rawEngine : 'gemini';
-        const rawModel = String((rawSavedTrans as any).geminiModel || '').toLowerCase();
-        const normalizedGemmaModel = rawModel.includes('31b') ? 'gemma-4-31b-it' : 'gemma-4-26b-a4b-it';
+        const normalizedGemmaModel = 'gemma-4-26b-a4b-it';
         const mergedTrans: TranslationSettings = {
           ...INITIAL_TRANSLATION_SETTINGS,
           ...rawSavedTrans,
@@ -1118,8 +1124,7 @@ export default function App() {
                 rawEngine === 'google' || rawEngine === 'custom_llm' || rawEngine === 'gemini'
                   ? rawEngine
                   : 'gemini';
-              const rawModel = String(unwrappedTrans?.geminiModel || '').toLowerCase();
-              const normalizedGemmaModel = rawModel.includes('31b') ? 'gemma-4-31b-it' : 'gemma-4-26b-a4b-it';
+              const normalizedGemmaModel = 'gemma-4-26b-a4b-it';
               const mergedServerTrans: TranslationSettings = {
                 ...INITIAL_TRANSLATION_SETTINGS,
                 ...unwrappedTrans,
@@ -1837,7 +1842,7 @@ export default function App() {
     typeof activeChatForBackfill?.translationEnabled === 'boolean'
       ? activeChatForBackfill.translationEnabled
       : activeChatIsGroup
-        ? translationSettings.autoTranslateGroups !== false
+        ? translationSettings.autoTranslateGroups === true
         : translationSettings.autoTranslatePrivate !== false;
   const backfillScopeKey = `${activeAccountId}::${activeChatId || ''}::${backfillTargetLang}::${backfillSourceLang}::${backfillHistoryEngine}::${translationSettings.autoTranslateInbound !== false}::${isActiveChatTranslationEnabled}::${translationSettings.googleApiKey || ''}`;
 
@@ -2076,7 +2081,7 @@ export default function App() {
             attemptedInboundBackfillRef.current.delete(dedupeKey);
             scheduleBackfillRetryWakeup(backoffMs + 150);
           }
-          const errMsg = err?.message || '历史消息谷歌机翻失败';
+          const errMsg = '翻译失败，请检查翻译通道';
           pendingUpdates.set(msg.id, {
             msg,
             translationError: errMsg,
@@ -2544,7 +2549,7 @@ export default function App() {
               typeof matchedChatForLang?.translationEnabled === 'boolean'
                 ? matchedChatForLang.translationEnabled
                 : incomingIsGroup
-                  ? currentTransSettings.autoTranslateGroups !== false
+                  ? currentTransSettings.autoTranslateGroups === true
                   : currentTransSettings.autoTranslatePrivate !== false;
 
             const incomingNormLang = normalizeLanguageCode(detectClientLangCode(trimmedIncomingText));
@@ -2564,10 +2569,12 @@ export default function App() {
               !incomingMsg.translatedText &&
               !isIncomingAlreadyTargetLang
             ) {
-              const effectiveInboundEngine = enforceTranslationEngineForLlm(
-                currentLLMConfig,
-                currentTransSettings
-              ).preferredEngine;
+              const effectiveInboundEngine = incomingIsGroup
+                ? ('google' as const)
+                : enforceTranslationEngineForLlm(
+                    currentLLMConfig,
+                    currentTransSettings
+                  ).preferredEngine;
               const inboundSourceLang =
                 matchedChatForLang?.sourceLang && matchedChatForLang.sourceLang !== 'Auto'
                   ? matchedChatForLang.sourceLang
@@ -2580,9 +2587,10 @@ export default function App() {
                 currentLLMConfig,
                 effectiveInboundEngine,
                 currentTransSettings.googleApiKey,
-                currentTransSettings.geminiModel,
-                currentTransSettings.geminiApiKey,
-                currentTransSettings.customModelName
+                incomingIsGroup ? undefined : currentTransSettings.geminiModel,
+                incomingIsGroup ? undefined : currentTransSettings.geminiApiKey,
+                incomingIsGroup ? undefined : currentTransSettings.customModelName,
+                incomingIsGroup ? { purpose: 'group', isGroup: true } : undefined
               )
                 .then((trans) => {
                   if (trans && trans.trim() && trans.trim().toLowerCase() !== trimmedIncomingText.toLowerCase()) {
@@ -2607,10 +2615,10 @@ export default function App() {
                     });
                   }
                 })
-                .catch((err: any) => {
+                .catch(() => {
                   const withErr: Message = {
                     ...incomingMsg,
-                    translationError: err?.message || '翻译通道不可用',
+                    translationError: '翻译失败，请检查翻译通道',
                     translationErrorChannel: engineToLiveErrorChannel(effectiveInboundEngine),
                   };
                   saveLocalMessage(targetChatId, withErr, targetAccountId);
@@ -3737,9 +3745,15 @@ export default function App() {
     const activeChat = chatsRef.current.find(
       (c) => c.id === targetChatId && (!targetAccountId || c.accountId === targetAccountId)
     );
+    const isGroupTarget = Boolean(
+      activeChat?.isGroup || activeChat?.isChannel || /^tg_-/.test(targetChatId)
+    );
+    const forceGoogleOnly = isHistoricalTarget || isGroupTarget;
     const currentLlm = customLLMConfigRef.current;
     const currentTrans = translationSettingsRef.current;
     const effectiveEngine = isHistoricalTarget
+      ? 'google'
+      : isGroupTarget
       ? 'google'
       : enforceTranslationEngineForLlm(currentLlm, currentTrans).preferredEngine;
     const resolvedGlobalTargetLang =
@@ -3807,10 +3821,17 @@ export default function App() {
         currentLlm,
         effectiveEngine,
         currentTrans.googleApiKey,
-        isHistoricalTarget ? undefined : currentTrans.geminiModel,
-        isHistoricalTarget ? undefined : currentTrans.geminiApiKey,
-        isHistoricalTarget ? undefined : currentTrans.customModelName,
-        { bypassCache: true, ...(isHistoricalTarget ? { purpose: 'history' as const } : {}) }
+        forceGoogleOnly ? undefined : currentTrans.geminiModel,
+        forceGoogleOnly ? undefined : currentTrans.geminiApiKey,
+        forceGoogleOnly ? undefined : currentTrans.customModelName,
+        {
+          bypassCache: true,
+          ...(isHistoricalTarget
+            ? { purpose: 'history' as const }
+            : isGroupTarget
+            ? { purpose: 'group' as const, isGroup: true }
+            : {}),
+        }
       );
       const cleanTranslated = (translated || '').trim();
       const isSameAsOriginal =
@@ -3837,8 +3858,8 @@ export default function App() {
         telegramMessageId: targetMsg.telegramMessageId,
         accountId: targetAccountId,
       });
-    } catch (err: any) {
-      const errMsg = err?.message || '重新翻译失败';
+    } catch {
+      const errMsg = '翻译失败，请检查翻译通道';
       const errChannel: Message['translationErrorChannel'] = isHistoricalTarget
         ? 'history_google'
         : engineToLiveErrorChannel(effectiveEngine);
@@ -4488,11 +4509,16 @@ export default function App() {
           customLLMConfig={customLLMConfig}
           currentAccountId={activeAccountId}
           onOpenKnowledgeEvolution={() => toggleRightPanel('persona')}
+          onOpenCustomerMemory={toggleChatMemoryPanel}
+          isCustomerMemoryOpen={isChatMemoryOpen}
           activeRightPanel={activeRightPanel}
           isChatInfoOpenExternal={isChatInfoOpen}
           onChatInfoOpenChange={(open) => {
             setIsChatInfoOpen(open);
-            if (open) setActiveRightPanel(null);
+            if (open) {
+              setActiveRightPanel(null);
+              setIsChatMemoryOpen(false);
+            }
           }}
           onDeleteMessage={handleDeleteMessage}
           onBatchDeleteMessages={handleBatchDeleteMessages}
@@ -4586,7 +4612,38 @@ export default function App() {
           }}
         />
 
-        {/* 3.5 Unified Right Push-Split Workspace Dock (440px Desktop / Slide-over Mobile) */}
+        {/* 3.4 Standalone Chat-Docked Customer Memory Side Panel (Single-Page, No Extra Tabs) */}
+        <CustomerMemoryDrawer
+          isOpen={isChatMemoryOpen && Boolean(activeChatId)}
+          sideDocked={true}
+          onClose={() => setIsChatMemoryOpen(false)}
+          profile={customerProfile}
+          chatId={activeChatId || ''}
+          currentAccountId={activeAccountId}
+          onUpdateProfile={(updated) => {
+            if (
+              updated.chatId &&
+              updated.chatId !== 'current' &&
+              activeChatIdRef.current &&
+              updated.chatId !== activeChatIdRef.current
+            ) {
+              return;
+            }
+            if (
+              updated.accountId &&
+              activeAccountIdRef.current &&
+              updated.accountId !== activeAccountIdRef.current
+            ) {
+              return;
+            }
+            setCustomerProfile(updated);
+          }}
+          customConfig={customLLMConfig}
+          chatTitle={currentChat?.title || '当前联系人'}
+          messages={currentMessages}
+        />
+
+        {/* 3.5 Unified Feature Modal Page Overlay (Standalone 5-Tab Modal) */}
         <UnifiedRightDock
           activePanel={activeRightPanel}
           onSelectPanel={openRightPanel}

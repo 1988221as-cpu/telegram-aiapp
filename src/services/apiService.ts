@@ -989,7 +989,7 @@ export async function translateText(
   geminiModel?: string,
   geminiApiKey?: string,
   customModelName?: string,
-  options?: { signal?: AbortSignal; bypassCache?: boolean; purpose?: 'realtime' | 'history' }
+  options?: { signal?: AbortSignal; bypassCache?: boolean; purpose?: 'realtime' | 'history' | 'group'; isGroup?: boolean }
 ): Promise<string> {
   const trimmedText = typeof text === 'string' ? text.trim() : '';
   if (!trimmedText) return '';
@@ -1001,19 +1001,20 @@ export async function translateText(
   }
 
   const isHistoryTranslation = options?.purpose === 'history';
+  const isForceGoogleOnly = isHistoryTranslation || options?.purpose === 'group' || Boolean(options?.isGroup);
   const isDualOff = Boolean(
     customConfig && (customConfig.enabled === false || customConfig.explicitlyDisabled)
   );
   const isPriorityCustom = Boolean(
     !isDualOff && customConfig?.enabled && customConfig?.engineMode === 'custom'
   );
-  const strictEngine: 'gemini' | 'google' | 'custom_llm' = isHistoryTranslation
+  const strictEngine: 'gemini' | 'google' | 'custom_llm' = isForceGoogleOnly
     ? 'google'
     : engine === 'google' || engine === 'custom_llm' || engine === 'gemini'
     ? engine
     : 'gemini';
 
-  if (!isHistoryTranslation) {
+  if (!isForceGoogleOnly) {
     if (isDualOff && strictEngine !== 'google') {
       throw new Error('当前处于双关状态（云端与自有大模型均已关闭），仅支持「谷歌机翻」；如需使用大模型翻译，请前往「模型」开启对应引擎');
     }
@@ -1124,6 +1125,7 @@ export async function translateText(
           targetLang,
           engine: strictEngine,
           purpose: options?.purpose,
+          isGroup: Boolean(options?.isGroup),
           googleApiKey,
           geminiModel: strictEngine === 'gemini' ? geminiModel : undefined,
           geminiApiKey: strictEngine === 'gemini' ? geminiApiKey : undefined,
