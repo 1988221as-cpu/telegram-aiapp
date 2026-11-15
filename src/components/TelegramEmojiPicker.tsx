@@ -1,4 +1,5 @@
-import React, { useState, useMemo, useEffect, useCallback } from 'react';
+import React, { useState, useMemo, useEffect, useLayoutEffect, useCallback, useRef } from 'react';
+import { createPortal } from 'react-dom';
 import { Smile, Sparkles, Search, X, Loader2, RefreshCw, AlertCircle } from 'lucide-react';
 import { TelegramStickerItem, TelegramStickerPack } from '../types';
 import { fetchTelegramStickersApi } from '../services/apiService';
@@ -9,6 +10,7 @@ interface TelegramEmojiPickerProps {
   onSelectEmoji: (emoji: string) => void;
   onSelectSticker?: (sticker: TelegramStickerItem, packTitle?: string) => void;
   accountId?: string;
+  anchorRef?: React.RefObject<HTMLElement | null>;
 }
 
 interface EmojiItem {
@@ -135,6 +137,7 @@ export const TelegramEmojiPicker: React.FC<TelegramEmojiPickerProps> = ({
   onSelectEmoji,
   onSelectSticker,
   accountId,
+  anchorRef,
 }) => {
   const [tab, setTab] = useState<'emoji' | 'stickers'>('emoji');
   const [searchQuery, setSearchQuery] = useState('');
@@ -143,6 +146,62 @@ export const TelegramEmojiPicker: React.FC<TelegramEmojiPickerProps> = ({
   const [selectedPackId, setSelectedPackId] = useState<string>('all');
   const [isLoadingStickers, setIsLoadingStickers] = useState(false);
   const [stickersError, setStickersError] = useState<string | null>(null);
+  const pickerRef = useRef<HTMLDivElement>(null);
+  const [popupPos, setPopupPos] = useState<{ top: number; left: number; width: number; maxHeight: number } | null>(null);
+
+  useLayoutEffect(() => {
+    if (!isOpen) {
+      setPopupPos(null);
+      return;
+    }
+    const updatePosition = () => {
+      if (typeof window === 'undefined' || !anchorRef?.current) {
+        setPopupPos(null);
+        return;
+      }
+      const rect = anchorRef.current.getBoundingClientRect();
+      const margin = 12;
+      const gap = 8;
+      const vw = window.innerWidth;
+      const vh = window.innerHeight;
+      const desiredWidth = vw < 640 ? 340 : 380;
+      const width = Math.min(desiredWidth, vw - margin * 2);
+      const left = Math.max(margin, Math.min(rect.left, vw - width - margin));
+      const desiredHeight = 460;
+      const spaceAbove = rect.top - gap - margin;
+      const spaceBelow = vh - rect.bottom - gap - margin;
+      const openAbove = spaceAbove >= 220 || spaceAbove >= spaceBelow;
+      const avail = Math.max(180, openAbove ? spaceAbove : spaceBelow);
+      const maxHeight = Math.min(desiredHeight, avail);
+      const top = openAbove
+        ? Math.max(margin, rect.top - gap - maxHeight)
+        : Math.min(vh - maxHeight - margin, rect.bottom + gap);
+      setPopupPos({ top, left, width, maxHeight });
+    };
+    updatePosition();
+    window.addEventListener('resize', updatePosition);
+    window.addEventListener('scroll', updatePosition, true);
+    return () => {
+      window.removeEventListener('resize', updatePosition);
+      window.removeEventListener('scroll', updatePosition, true);
+    };
+  }, [isOpen, anchorRef]);
+
+  useEffect(() => {
+    if (!isOpen) return;
+    const handleOutsideClick = (e: MouseEvent) => {
+      const target = e.target as Node;
+      if (
+        pickerRef.current &&
+        !pickerRef.current.contains(target) &&
+        (!anchorRef?.current || !anchorRef.current.contains(target))
+      ) {
+        onClose();
+      }
+    };
+    document.addEventListener('mousedown', handleOutsideClick);
+    return () => document.removeEventListener('mousedown', handleOutsideClick);
+  }, [isOpen, onClose, anchorRef]);
 
   const loadOfficialStickers = useCallback(async () => {
     setIsLoadingStickers(true);
@@ -199,8 +258,25 @@ export const TelegramEmojiPicker: React.FC<TelegramEmojiPickerProps> = ({
 
   if (!isOpen) return null;
 
-  return (
-    <div className="absolute bottom-16 right-4 w-[340px] sm:w-[380px] bg-white dark:bg-[#0b131f] aurora:bg-[#0c151b] rounded-2xl shadow-2xl border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] overflow-hidden z-40 animate-in fade-in slide-in-from-bottom-2 duration-150 select-none flex flex-col max-h-[460px]">
+  const pickerEl = (
+    <div
+      ref={pickerRef}
+      style={
+        popupPos
+          ? {
+              top: `${popupPos.top}px`,
+              left: `${popupPos.left}px`,
+              width: `${popupPos.width}px`,
+              maxHeight: `${popupPos.maxHeight}px`,
+            }
+          : undefined
+      }
+      className={
+        popupPos
+          ? 'fixed z-[9990] bg-white dark:bg-[#0b131f] aurora:bg-[#0c151b] rounded-2xl shadow-2xl border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] overflow-hidden animate-in fade-in slide-in-from-bottom-2 duration-150 select-none flex flex-col'
+          : 'fixed bottom-16 right-4 z-[9990] w-[340px] sm:w-[380px] bg-white dark:bg-[#0b131f] aurora:bg-[#0c151b] rounded-2xl shadow-2xl border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] overflow-hidden animate-in fade-in slide-in-from-bottom-2 duration-150 select-none flex flex-col max-h-[460px]'
+      }
+    >
       {/* 1. Top Header: Tabs + Close Button */}
       <div className="flex items-center justify-between px-3 py-2 border-b border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] bg-[#f8fafc] dark:bg-[#0d1726] aurora:bg-[#0e1920] shrink-0">
         <div className="flex items-center gap-1.5 text-xs font-semibold">
@@ -471,4 +547,6 @@ export const TelegramEmojiPicker: React.FC<TelegramEmojiPickerProps> = ({
       </div>
     </div>
   );
+
+  return typeof document !== 'undefined' ? createPortal(pickerEl, document.body) : pickerEl;
 };

@@ -1462,7 +1462,36 @@ export async function sendAutonomousChat(
     const errorData = await res.json().catch(() => null);
     throw new Error(errorData?.error || `Autonomous chat error: ${res.statusText}`);
   }
-  return await res.json();
+  const data = await res.json();
+  if (data && typeof data.replyText === 'string') {
+    const trimmedReply = data.replyText.trim();
+    const fenceMatch = trimmedReply.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i);
+    const candidate = (fenceMatch ? fenceMatch[1] : trimmedReply).trim();
+    if (candidate.startsWith('{')) {
+      try {
+        const parsed = JSON.parse(candidate);
+        if (
+          parsed &&
+          typeof parsed === 'object' &&
+          !Array.isArray(parsed) &&
+          typeof parsed.reply === 'string' &&
+          parsed.reply.trim().length > 0 &&
+          ('intent' in parsed ||
+            'emotion' in parsed ||
+            'strategy' in parsed ||
+            'context_summary' in parsed ||
+            'memory_candidates' in parsed ||
+            'knowledge_candidates' in parsed ||
+            'confidence' in parsed)
+        ) {
+          data.replyText = parsed.reply.trim();
+        }
+      } catch {
+        // Non-JSON reply text stays intact
+      }
+    }
+  }
+  return data;
 }
 
 export interface ModelUsageDetail {
@@ -1648,7 +1677,8 @@ export async function saveChatLanguagePrefApi(
   chatId: string,
   sourceLang: string,
   targetLang: string,
-  accountId?: string
+  accountId?: string,
+  translationEnabled?: boolean | null
 ): Promise<boolean> {
   try {
     const effectiveAcc = accountId || currentActiveAccountId;
@@ -1660,6 +1690,7 @@ export async function saveChatLanguagePrefApi(
         body: JSON.stringify({
           sourceLang,
           targetLang,
+          ...(translationEnabled !== undefined ? { translationEnabled } : {}),
           accountId: effectiveAcc,
         }),
       },
@@ -1794,6 +1825,8 @@ function buildCompactOutboundJsonPayload(
     createdAt: message.createdAt,
   };
   if (message.senderName) clean.senderName = message.senderName;
+  if (message.senderId) clean.senderId = message.senderId;
+  if (message.senderAvatarUrl) clean.senderAvatarUrl = message.senderAvatarUrl;
   if (message.translatedText) clean.translatedText = message.translatedText;
   if (message.replyTo) clean.replyTo = message.replyTo;
   if (message.telegramMessageId !== undefined) clean.telegramMessageId = message.telegramMessageId;
@@ -3989,6 +4022,53 @@ export async function createTelegramChannelApi(payload: {
       headers: getAuthHeaders(payload.accountId),
       body: JSON.stringify(payload),
     }, 20000);
+    return await res.json();
+  } catch (err: any) {
+    return { ok: false, error: err?.message || '网络连接异常' };
+  }
+}
+
+export interface TelegramInvitePreviewResult {
+  ok: boolean;
+  kind?: 'invite' | 'public';
+  url?: string;
+  alreadyMember?: boolean;
+  requestNeeded?: boolean;
+  title?: string;
+  about?: string;
+  participantsCount?: number;
+  isGroup?: boolean;
+  isChannel?: boolean;
+  chat?: Chat;
+  error?: string;
+}
+
+export async function previewTelegramInviteApi(payload: {
+  accountId?: string;
+  url: string;
+}): Promise<TelegramInvitePreviewResult> {
+  try {
+    const res = await fetchWithTimeout('/api/telegram/user/invite/preview', {
+      method: 'POST',
+      headers: getAuthHeaders(payload.accountId),
+      body: JSON.stringify(payload),
+    }, 15000);
+    return await res.json();
+  } catch (err: any) {
+    return { ok: false, error: err?.message || '网络连接异常' };
+  }
+}
+
+export async function joinTelegramInviteApi(payload: {
+  accountId?: string;
+  url: string;
+}): Promise<{ ok: boolean; alreadyMember?: boolean; requestSent?: boolean; chat?: Chat; error?: string }> {
+  try {
+    const res = await fetchWithTimeout('/api/telegram/user/invite/join', {
+      method: 'POST',
+      headers: getAuthHeaders(payload.accountId),
+      body: JSON.stringify(payload),
+    }, 15000);
     return await res.json();
   } catch (err: any) {
     return { ok: false, error: err?.message || '网络连接异常' };

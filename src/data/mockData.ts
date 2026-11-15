@@ -27,6 +27,8 @@ export const INITIAL_TRANSLATION_SETTINGS: TranslationSettings = {
   defaultTargetLang: 'Chinese',
   autoTranslateInbound: true,
   autoTranslateOutbound: true,
+  autoTranslateGroups: true,
+  autoTranslatePrivate: true,
   showOriginalAndTranslation: true,
   preferredEngine: 'gemini',
   geminiModel: 'gemma-4-26b-a4b-it',

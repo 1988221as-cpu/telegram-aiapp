@@ -46,6 +46,7 @@ export interface Chat {
   readInboxMaxId?: number;
   phone?: string;
   isBlocked?: boolean;
+  translationEnabled?: boolean;
 }
 
 export interface TelegramChatParticipant {
@@ -114,6 +115,8 @@ export interface Message {
   accountId: string;
   sender: 'me' | 'peer' | 'system';
   senderName?: string;
+  senderId?: string;
+  senderAvatarUrl?: string;
   text: string;
   translatedText?: string;
   translationError?: string;
@@ -191,6 +194,8 @@ export interface TranslationSettings {
   defaultTargetLang: string;
   autoTranslateInbound: boolean;
   autoTranslateOutbound: boolean;
+  autoTranslateGroups?: boolean;
+  autoTranslatePrivate?: boolean;
   showOriginalAndTranslation: boolean;
   preferredEngine: 'gemini' | 'google' | 'custom_llm';
   geminiModel?: string;

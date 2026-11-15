@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
+import { createPortal } from 'react-dom';
 import {
   Search,
   Check,
@@ -744,10 +745,10 @@ export const ChatList: React.FC<ChatListProps> = ({
       </div>
 
       {/* 5. Official Telegram Right-Click Context Menu */}
-      {contextMenu && (
+      {contextMenu && typeof document !== 'undefined' && createPortal(
         <div
           style={{ top: `${contextMenu.y}px`, left: `${contextMenu.x}px` }}
-          className="fixed z-50 w-52 bg-white dark:bg-[#0e1726] aurora:bg-[#101c23] rounded-2xl shadow-2xl border border-[#e2e8f0] dark:border-[#1e3148] aurora:border-[#203742] py-1.5 animate-in fade-in zoom-in-95 duration-100 text-xs text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] select-none"
+          className="fixed z-[9995] w-52 bg-white dark:bg-[#0e1726] aurora:bg-[#101c23] rounded-2xl shadow-2xl border border-[#e2e8f0] dark:border-[#1e3148] aurora:border-[#203742] py-1.5 animate-in fade-in zoom-in-95 duration-100 text-xs text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] select-none"
           onClick={(e) => e.stopPropagation()}
         >
           {/* Open in New Tab */}
@@ -865,7 +866,8 @@ export const ChatList: React.FC<ChatListProps> = ({
             <Trash2 className="w-4 h-4" />
             <span>{contextMenu.chat.isGroup || contextMenu.chat.isChannel ? '退出并删除对话' : '删除对话'}</span>
           </button>
-        </div>
+        </div>,
+        document.body
       )}
 
       {/* 6. Quick Preview Modal */}

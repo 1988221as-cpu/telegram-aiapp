@@ -252,6 +252,30 @@ export const TranslationDrawer: React.FC<TranslationDrawerProps> = ({
           <div className="text-xs font-semibold text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8]">翻译行为控制</div>
 
           <label className="flex items-center justify-between py-1 cursor-pointer">
+            <span className="text-xs text-[#334155] dark:text-[#dbe6f0] aurora:text-[#d5e8ed]">私聊消息自动翻译</span>
+            <input
+              type="checkbox"
+              checked={settings.autoTranslatePrivate !== false}
+              onChange={(e) =>
+                onUpdateSettings({ ...settings, autoTranslatePrivate: e.target.checked })
+              }
+              className="w-4 h-4 accent-[#2481cc] dark:accent-[#2ba0ff] aurora:accent-[#14b8a6] cursor-pointer"
+            />
+          </label>
+
+          <label className="flex items-center justify-between py-1 border-t border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] cursor-pointer">
+            <span className="text-xs text-[#334155] dark:text-[#dbe6f0] aurora:text-[#d5e8ed]">群聊 / 频道自动翻译</span>
+            <input
+              type="checkbox"
+              checked={settings.autoTranslateGroups !== false}
+              onChange={(e) =>
+                onUpdateSettings({ ...settings, autoTranslateGroups: e.target.checked })
+              }
+              className="w-4 h-4 accent-[#2481cc] dark:accent-[#2ba0ff] aurora:accent-[#14b8a6] cursor-pointer"
+            />
+          </label>
+
+          <label className="flex items-center justify-between py-1 border-t border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] cursor-pointer">
             <span className="text-xs text-[#334155] dark:text-[#dbe6f0] aurora:text-[#d5e8ed]">接收消息自动翻译</span>
             <input
               type="checkbox"

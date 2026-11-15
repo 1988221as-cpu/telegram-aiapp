@@ -871,6 +871,8 @@ export async function syncServerTranslationSettings(settings: any, accountId?: s
     defaultTargetLang: typeof raw.defaultTargetLang === 'string' ? raw.defaultTargetLang : 'Chinese',
     autoTranslateInbound: raw.autoTranslateInbound !== false,
     autoTranslateOutbound: raw.autoTranslateOutbound !== false,
+    autoTranslateGroups: raw.autoTranslateGroups !== false,
+    autoTranslatePrivate: raw.autoTranslatePrivate !== false,
     showOriginalAndTranslation: raw.showOriginalAndTranslation !== false,
     preferredEngine: normalizedEngine,
     geminiModel: typeof raw.geminiModel === 'string' ? raw.geminiModel.trim() : '',
@@ -1112,6 +1114,32 @@ export function extractUpstreamErrDetail(rawText: string): string {
     parsed?.message ||
     (typeof parsed?.error === 'string' ? parsed.error : '');
   return String(msg || clean).replace(/\s+/g, ' ').trim().slice(0, 400);
+}
+
+export function extractStructuredReplyText(rawText: string): string {
+  const trimmed = String(rawText || '').trim();
+  if (!trimmed) return '';
+  const fenceMatch = trimmed.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i);
+  const candidate = (fenceMatch ? fenceMatch[1] : trimmed).trim();
+  if (!candidate.startsWith('{')) return trimmed;
+  const parsed = safeJsonParse<any>(candidate, null);
+  if (
+    parsed &&
+    typeof parsed === 'object' &&
+    !Array.isArray(parsed) &&
+    typeof parsed.reply === 'string' &&
+    parsed.reply.trim().length > 0 &&
+    ('intent' in parsed ||
+      'emotion' in parsed ||
+      'strategy' in parsed ||
+      'context_summary' in parsed ||
+      'memory_candidates' in parsed ||
+      'knowledge_candidates' in parsed ||
+      'confidence' in parsed)
+  ) {
+    return parsed.reply.trim();
+  }
+  return trimmed;
 }
 
 export async function callCustomLlm({
@@ -4477,6 +4505,8 @@ export interface UnifiedChatMessage {
   accountId: string;
   sender: 'me' | 'peer' | 'system';
   senderName: string;
+  senderId?: string;
+  senderAvatarUrl?: string;
   text: string;
   translatedText: string;
   isAudio: boolean;
@@ -4611,13 +4641,18 @@ export function normalizeStoredMessageRecord(
       ? parseStoredReactionsJson({ reactions: raw.reactions, myReactions: raw.myReactions })
       : parseStoredReactionsJson(raw.reactions_json ?? raw.reactionsJson);
 
+  const senderId = String(raw.senderId ?? raw.sender_id ?? '').trim();
+  const rawSenderAvatarUrl = String(raw.senderAvatarUrl ?? raw.sender_avatar_url ?? '').trim();
+
   return {
     id,
     telegramMessageId,
     chatId,
     accountId: String(raw.accountId || raw.account_id || fallbackAccountId || 'acc_1'),
     sender,
-    senderName: String(raw.senderName ?? raw.sender_name ?? (sender === 'peer' ? '客户' : '我方')),
+    senderName: String(raw.senderName ?? raw.sender_name ?? ''),
+    ...(senderId ? { senderId } : {}),
+    ...(rawSenderAvatarUrl ? { senderAvatarUrl: rawSenderAvatarUrl } : {}),
     text: String(raw.text ?? ''),
     translatedText: String(raw.translatedText ?? raw.translated_text ?? ''),
     isAudio: Boolean(raw.isAudio ?? raw.is_audio),
@@ -5025,9 +5060,16 @@ export async function upsertSyncedMessageToDb(
         const safeImageUrl = sanitizeDbMediaUrl(msg.imageUrl);
         const safeVideoUrl = sanitizeDbMediaUrl(msg.videoUrl);
         const safeFileUrl = sanitizeDbMediaUrl(msg.fileUrl);
+        const safeSenderName =
+          msg.senderName && !['客户', '对方', '我方', 'Telegram 联系人'].includes(msg.senderName)
+            ? msg.senderName
+            : '';
+        const safeSenderId = msg.senderId || '';
         await db
           .prepare(
             `UPDATE messages SET
+               sender_name = CASE WHEN ? != '' THEN ? ELSE sender_name END,
+               sender_id = CASE WHEN ? != '' THEN ? ELSE sender_id END,
                text = CASE WHEN ? != '' THEN ? ELSE text END,
                translated_text = CASE WHEN ? != '' THEN ? ELSE translated_text END,
                stt_text = CASE WHEN ? != '' THEN ? ELSE stt_text END,
@@ -5054,6 +5096,10 @@ export async function upsertSyncedMessageToDb(
              WHERE id = ?`
           )
           .run(
+            safeSenderName,
+            safeSenderName,
+            safeSenderId,
+            safeSenderId,
             msg.text,
             msg.text,
             msg.translatedText,
@@ -5101,14 +5147,16 @@ export async function upsertSyncedMessageToDb(
     await db
       .prepare(
         `INSERT INTO messages (
-          id, chat_id, account_id, sender, sender_name, text, translated_text,
+          id, chat_id, account_id, sender, sender_name, sender_id, text, translated_text,
           is_audio, audio_duration, audio_url, stt_text, voice_tone,
           is_image, image_url, image_caption, is_video, video_url, video_duration,
           is_file, file_name, file_size, file_url,
           timestamp, created_at, delivery_status, telegram_message_id,
           reply_to_json, is_edited, is_pinned, forward_from, reactions_json
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
+          sender_name = CASE WHEN excluded.sender_name != '' AND excluded.sender_name NOT IN ('客户', '对方', '我方', 'Telegram 联系人') THEN excluded.sender_name ELSE messages.sender_name END,
+          sender_id = CASE WHEN excluded.sender_id != '' THEN excluded.sender_id ELSE messages.sender_id END,
           text = CASE WHEN excluded.text != '' THEN excluded.text ELSE messages.text END,
           translated_text = CASE WHEN excluded.translated_text != '' THEN excluded.translated_text ELSE messages.translated_text END,
           stt_text = CASE WHEN excluded.stt_text != '' THEN excluded.stt_text ELSE messages.stt_text END,
@@ -5140,6 +5188,7 @@ export async function upsertSyncedMessageToDb(
         msg.accountId,
         msg.sender,
         msg.senderName,
+        msg.senderId || '',
         msg.text,
         msg.translatedText,
         msg.isAudio ? 1 : 0,
@@ -5212,7 +5261,12 @@ export function mergeUnifiedConversationMessages(lists: Array<Array<any>>): Unif
           ...item,
           id: prev.id || item.id,
           telegramMessageId: item.telegramMessageId || prev.telegramMessageId,
-          senderName: item.senderName && item.senderName !== '客户' && item.senderName !== '我方' ? item.senderName : prev.senderName,
+          senderName:
+            item.senderName && !['客户', '对方', '我方', 'Telegram 联系人'].includes(item.senderName)
+              ? item.senderName
+              : prev.senderName,
+          senderId: item.senderId || prev.senderId,
+          senderAvatarUrl: item.senderAvatarUrl || prev.senderAvatarUrl,
           text: item.text || prev.text,
           translatedText: item.translatedText || prev.translatedText,
           sttText: item.sttText || prev.sttText,
@@ -5277,6 +5331,7 @@ export async function resolveUnifiedChatMessages(params: {
       .prepare(
         `SELECT
           id, chat_id as chatId, account_id as accountId, sender, sender_name as senderName,
+          sender_id as senderId,
           text, translated_text as translatedText, is_audio as isAudio, audio_duration as audioDuration,
           audio_url as audioUrl, stt_text as sttText, voice_tone as voiceTone,
           is_image as isImage, image_url as imageUrl, image_caption as imageCaption,
@@ -5522,24 +5577,32 @@ app.get('/api/chats', requireTenantAuth, async (req: Request, res: Response) => 
     );
 
     // Load persisted per-chat language preferences scoped to this account
-    const langPrefsMap = new Map<string, { sourceLang: string; targetLang: string }>();
+    const langPrefsMap = new Map<string, { sourceLang: string; targetLang: string; translationEnabled?: boolean }>();
     try {
       const langRows = (await db.prepare(`
-        SELECT account_id, chat_id, source_lang, target_lang
+        SELECT account_id, chat_id, source_lang, target_lang, translation_enabled
         FROM chat_language_prefs
         WHERE account_id IN (${accPlaceholders})
            OR (account_id = 'acc_telegram_bot' AND ? IN ('acc_telegram_bot', 'acc_1'))
       `).all(...accVariants, effectiveAccountId)) as any[];
       for (const lr of langRows || []) {
+        const parsedEnabled =
+          lr.translation_enabled === 1 || lr.translation_enabled === true
+            ? true
+            : lr.translation_enabled === 0 || lr.translation_enabled === false
+              ? false
+              : undefined;
         const scKey = `${lr.account_id}::${lr.chat_id}`;
         langPrefsMap.set(scKey, {
           sourceLang: lr.source_lang || 'Auto',
           targetLang: lr.target_lang || 'Auto',
+          ...(parsedEnabled !== undefined ? { translationEnabled: parsedEnabled } : {}),
         });
         if (!langPrefsMap.has(lr.chat_id)) {
           langPrefsMap.set(lr.chat_id, {
             sourceLang: lr.source_lang || 'Auto',
             targetLang: lr.target_lang || 'Auto',
+            ...(parsedEnabled !== undefined ? { translationEnabled: parsedEnabled } : {}),
           });
         }
       }
@@ -5571,6 +5634,7 @@ app.get('/api/chats', requireTenantAuth, async (req: Request, res: Response) => 
           unreadCount: 0,
           sourceLang: langPref?.sourceLang || 'Auto',
           targetLang: langPref?.targetLang || 'Auto',
+          ...(typeof langPref?.translationEnabled === 'boolean' ? { translationEnabled: langPref.translationEnabled } : {}),
           aiEnabled: true,
           aiMode: 'adaptive',
           typingDelayMin: 2,
@@ -5600,18 +5664,38 @@ app.post('/api/chats/:chatId/language', requireTenantAuth, async (req: Request, 
     const targetLang = typeof req.body?.targetLang === 'string' && req.body.targetLang.trim()
       ? req.body.targetLang.trim()
       : 'Auto';
+    const hasExplicitTranslationEnabled = 'translationEnabled' in (req.body || {});
+    const translationEnabledParam: number | null | undefined = hasExplicitTranslationEnabled
+      ? req.body?.translationEnabled === true
+        ? 1
+        : req.body?.translationEnabled === false
+          ? 0
+          : null
+      : undefined;
     if (!chatId || !chatId.trim()) {
       return res.status(400).json({ ok: false, error: '缺少有效的会话 chatId' });
     }
     const now = Date.now();
-    await db.prepare(`
-      INSERT INTO chat_language_prefs (account_id, chat_id, source_lang, target_lang, updated_at)
-      VALUES (?, ?, ?, ?, ?)
-      ON CONFLICT(account_id, chat_id) DO UPDATE SET
-        source_lang = excluded.source_lang,
-        target_lang = excluded.target_lang,
-        updated_at = excluded.updated_at
-    `).run(effectiveAccountId, chatId.trim(), sourceLang, targetLang, now);
+    if (hasExplicitTranslationEnabled) {
+      await db.prepare(`
+        INSERT INTO chat_language_prefs (account_id, chat_id, source_lang, target_lang, translation_enabled, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(account_id, chat_id) DO UPDATE SET
+          source_lang = excluded.source_lang,
+          target_lang = excluded.target_lang,
+          translation_enabled = excluded.translation_enabled,
+          updated_at = excluded.updated_at
+      `).run(effectiveAccountId, chatId.trim(), sourceLang, targetLang, translationEnabledParam ?? null, now);
+    } else {
+      await db.prepare(`
+        INSERT INTO chat_language_prefs (account_id, chat_id, source_lang, target_lang, updated_at)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(account_id, chat_id) DO UPDATE SET
+          source_lang = excluded.source_lang,
+          target_lang = excluded.target_lang,
+          updated_at = excluded.updated_at
+      `).run(effectiveAccountId, chatId.trim(), sourceLang, targetLang, now);
+    }
 
     res.json({
       ok: true,
@@ -5619,6 +5703,7 @@ app.post('/api/chats/:chatId/language', requireTenantAuth, async (req: Request, 
       chatId: chatId.trim(),
       sourceLang,
       targetLang,
+      ...(hasExplicitTranslationEnabled ? { translationEnabled: req.body?.translationEnabled } : {}),
       updatedAt: now,
     });
   } catch (err: any) {
@@ -5669,6 +5754,7 @@ app.get('/api/messages/:chatId', requireTenantAuth, async (req: Request, res: Re
       const descRows = (await db.prepare(`
         SELECT 
           id, chat_id as chatId, account_id as accountId, sender, sender_name as senderName,
+          sender_id as senderId,
           text, translated_text as translatedText, is_audio as isAudio, audio_duration as audioDuration,
           audio_url as audioUrl, stt_text as sttText, voice_tone as voiceTone,
           is_image as isImage, image_url as imageUrl, image_caption as imageCaption,
@@ -5691,6 +5777,7 @@ app.get('/api/messages/:chatId', requireTenantAuth, async (req: Request, res: Re
       rows = (await db.prepare(`
         SELECT 
           id, chat_id as chatId, account_id as accountId, sender, sender_name as senderName,
+          sender_id as senderId,
           text, translated_text as translatedText, is_audio as isAudio, audio_duration as audioDuration,
           audio_url as audioUrl, stt_text as sttText, voice_tone as voiceTone,
           is_image as isImage, image_url as imageUrl, image_caption as imageCaption,
@@ -5724,8 +5811,15 @@ app.get('/api/messages/:chatId', requireTenantAuth, async (req: Request, res: Re
       const { replyToJson, reactionsJson, ...rest } = r;
       const replyTo = replyToJson ? safeJsonParse(replyToJson, undefined) : undefined;
       const parsedReactions = parseStoredReactionsJson(reactionsJson);
+      const cleanSenderId = r.senderId ? String(r.senderId).trim() : '';
+      const senderAvatarUrl =
+        r.sender !== 'me' && cleanSenderId && r.accountId && r.accountId !== 'acc_telegram_bot'
+          ? signTelegramResourceUrl(`/api/telegram/user/avatar/${encodeURIComponent(cleanSenderId)}`, r.accountId)
+          : undefined;
       return {
         ...rest,
+        ...(cleanSenderId ? { senderId: cleanSenderId } : {}),
+        ...(senderAvatarUrl ? { senderAvatarUrl } : {}),
         audioUrl: resignStoredMediaUrl(r.audioUrl, r.accountId),
         imageUrl: resignStoredMediaUrl(r.imageUrl, r.accountId),
         videoUrl: resignStoredMediaUrl(r.videoUrl, r.accountId),
@@ -8407,7 +8501,7 @@ app.post('/api/persona/test-reply', aiGenerationLimiter, requireTenantAuth, asyn
           error: '自定义大模型 / 云端引擎未返回有效回复内容（严禁降级代答）',
         });
       }
-      reply = customRes.trim();
+      reply = extractStructuredReplyText(customRes);
       replySource =
         effectivePersonaConfig?.engineMode === 'cloud' ||
         (effectivePersonaConfig?.engineMode !== 'custom' && !effectivePersonaConfig?.baseUrl?.trim())
@@ -12759,7 +12853,9 @@ ${customerMemories.map((m: any) => `  * [${m.date}] ${m.topic}: ${m.summary} (�
                 lastUpstreamStatus = 502;
                 lastUpstreamError = `上游网关返回错误: ${extractUpstreamErrDetail(rawBody)}`;
               } else {
-                const replyText = d?.candidates?.[0]?.content?.parts?.[0]?.text?.trim();
+                const replyText = extractStructuredReplyText(
+                  d?.candidates?.[0]?.content?.parts?.[0]?.text || ''
+                );
                 if (replyText) {
                   void incrementEvolutionHabitUsage(injectedHabitIds, accountId);
                   const cnTranslation = await getCnTranslationIfForeign(
@@ -12833,13 +12929,14 @@ ${customerMemories.map((m: any) => `  * [${m.date}] ${m.topic}: ${m.summary} (�
                   lastUpstreamError = `上游网关返回错误: ${extractUpstreamErrDetail(rawBody)}`;
                   break;
                 }
-                const replyText = Array.isArray(data?.content)
+                const rawAnthropicReply = Array.isArray(data?.content)
                   ? data.content
                       .filter((c: any) => c?.type === 'text' && typeof c?.text === 'string')
                       .map((c: any) => c.text)
                       .join('')
                       .trim()
                   : '';
+                const replyText = extractStructuredReplyText(rawAnthropicReply);
                 if (replyText) {
                   void incrementEvolutionHabitUsage(injectedHabitIds, accountId);
                   const cnTranslation = await getCnTranslationIfForeign(
@@ -12930,7 +13027,9 @@ ${customerMemories.map((m: any) => `  * [${m.date}] ${m.topic}: ${m.summary} (�
                   lastUpstreamError = `上游网关返回错误: ${extractUpstreamErrDetail(rawBody)}`;
                   break;
                 }
-                const replyText = data?.choices?.[0]?.message?.content?.trim();
+                const replyText = extractStructuredReplyText(
+                  data?.choices?.[0]?.message?.content || ''
+                );
                 if (replyText) {
                   void incrementEvolutionHabitUsage(injectedHabitIds, accountId);
                   const cnTranslation = await getCnTranslationIfForeign(
@@ -15112,31 +15211,12 @@ async function processTelegramMessageAsync(
       try {
         const transSettings = await getServerTranslationSettings('acc_telegram_bot');
         if (transSettings?.autoTranslateInbound !== false) {
-          const customConfig = await getServerCustomLlmConfig();
-          const isDualOff = Boolean(
-            customConfig && (customConfig.enabled === false || customConfig.explicitlyDisabled)
-          );
-          const isPriorityCustom = Boolean(
-            !isDualOff && customConfig?.enabled && customConfig?.engineMode === 'custom'
-          );
-          const configuredEngine = normalizeStrictTranslationEngine(transSettings?.preferredEngine) || 'gemini';
-          let engine: 'google' | 'gemini' | 'custom_llm';
-          if (isDualOff) {
-            engine = 'google';
-          } else if (isPriorityCustom) {
-            engine = 'custom_llm';
-          } else {
-            engine = configuredEngine === 'google' ? 'google' : 'gemini';
-          }
-          const resolvedCustomModel = isPriorityCustom && configuredEngine !== 'custom_llm'
-            ? (customConfig?.modelName || transSettings?.customModelName || '')
-            : (transSettings?.customModelName || customConfig?.modelName);
-
           let chatPrefTargetLang = '';
           let chatPrefSourceLang = 'Auto';
+          let chatPrefTranslationEnabled: boolean | undefined;
           try {
             const prefRows = (await db.prepare(`
-              SELECT account_id, source_lang, target_lang
+              SELECT account_id, source_lang, target_lang, translation_enabled
               FROM chat_language_prefs
               WHERE chat_id = ? AND account_id IN ('acc_telegram_bot', 'acc_1')
             `).all(chatId)) as any[];
@@ -15147,33 +15227,68 @@ async function processTelegramMessageAsync(
             if (exactPref?.source_lang && exactPref.source_lang !== 'Auto') {
               chatPrefSourceLang = String(exactPref.source_lang).trim();
             }
+            if (exactPref?.translation_enabled === 1 || exactPref?.translation_enabled === true) {
+              chatPrefTranslationEnabled = true;
+            } else if (exactPref?.translation_enabled === 0 || exactPref?.translation_enabled === false) {
+              chatPrefTranslationEnabled = false;
+            }
           } catch {}
 
-          const targetLang =
-            chatPrefTargetLang ||
-            (transSettings?.defaultTargetLang && transSettings.defaultTargetLang !== 'Auto'
-              ? transSettings.defaultTargetLang
-              : 'Chinese');
-          const transRes = await performStrictTranslation({
-            text: effectiveIncomingText,
-            sourceLang: chatPrefSourceLang,
-            targetLang,
-            engine,
-            googleApiKey: transSettings?.googleApiKey,
-            geminiModel: transSettings?.geminiModel,
-            geminiApiKey: transSettings?.geminiApiKey,
-            customModelName: resolvedCustomModel,
-            customConfig,
-            userJwt: lastActiveUserJwt || undefined,
-            engineLicenseKey: customConfig?.engineLicenseKey,
-          });
-          const translatedInbound = transRes.translatedText;
-          if (translatedInbound && translatedInbound.toLowerCase() !== effectiveIncomingText.toLowerCase()) {
-            await db.prepare(`
-              UPDATE messages
-              SET translated_text = ?
-              WHERE id = ?
-            `).run(translatedInbound, internalMsgId);
+          const isGroupChat = /^(?:tg_)?-/.test(String(chatId || ''));
+          const shouldTranslateThisChat =
+            typeof chatPrefTranslationEnabled === 'boolean'
+              ? chatPrefTranslationEnabled
+              : isGroupChat
+                ? transSettings?.autoTranslateGroups !== false
+                : transSettings?.autoTranslatePrivate !== false;
+
+          if (shouldTranslateThisChat) {
+            const customConfig = await getServerCustomLlmConfig();
+            const isDualOff = Boolean(
+              customConfig && (customConfig.enabled === false || customConfig.explicitlyDisabled)
+            );
+            const isPriorityCustom = Boolean(
+              !isDualOff && customConfig?.enabled && customConfig?.engineMode === 'custom'
+            );
+            const configuredEngine = normalizeStrictTranslationEngine(transSettings?.preferredEngine) || 'gemini';
+            let engine: 'google' | 'gemini' | 'custom_llm';
+            if (isDualOff) {
+              engine = 'google';
+            } else if (isPriorityCustom) {
+              engine = 'custom_llm';
+            } else {
+              engine = configuredEngine === 'google' ? 'google' : 'gemini';
+            }
+            const resolvedCustomModel = isPriorityCustom && configuredEngine !== 'custom_llm'
+              ? (customConfig?.modelName || transSettings?.customModelName || '')
+              : (transSettings?.customModelName || customConfig?.modelName);
+
+            const targetLang =
+              chatPrefTargetLang ||
+              (transSettings?.defaultTargetLang && transSettings.defaultTargetLang !== 'Auto'
+                ? transSettings.defaultTargetLang
+                : 'Chinese');
+            const transRes = await performStrictTranslation({
+              text: effectiveIncomingText,
+              sourceLang: chatPrefSourceLang,
+              targetLang,
+              engine,
+              googleApiKey: transSettings?.googleApiKey,
+              geminiModel: transSettings?.geminiModel,
+              geminiApiKey: transSettings?.geminiApiKey,
+              customModelName: resolvedCustomModel,
+              customConfig,
+              userJwt: lastActiveUserJwt || undefined,
+              engineLicenseKey: customConfig?.engineLicenseKey,
+            });
+            const translatedInbound = transRes.translatedText;
+            if (translatedInbound && translatedInbound.toLowerCase() !== effectiveIncomingText.toLowerCase()) {
+              await db.prepare(`
+                UPDATE messages
+                SET translated_text = ?
+                WHERE id = ?
+              `).run(translatedInbound, internalMsgId);
+            }
           }
         }
       } catch (transErr: any) {
@@ -15456,7 +15571,7 @@ ${dialogueTranscript}
           skipSync: true,
         });
         if (customReply?.trim()) {
-          replyText = customReply.trim();
+          replyText = extractStructuredReplyText(customReply);
         }
       } catch (err: any) {
         console.warn('[Telegram Webhook LLM Guard]: 大模型调用失败，严格保持静默（严禁静默降级）:', err?.message || err);
@@ -18646,18 +18761,25 @@ app.get('/api/telegram/user/dialogs', requireTenantAuth, async (req: Request, re
     if (!dialogAccVariants.includes(tgPrefAcc)) dialogAccVariants.push(tgPrefAcc);
 
     const loadDialogLangPrefs = async () => {
-      const prefs = new Map<string, { sourceLang: string; targetLang: string }>();
+      const prefs = new Map<string, { sourceLang: string; targetLang: string; translationEnabled?: boolean }>();
       try {
         const ph = dialogAccVariants.map(() => '?').join(', ');
         const prefRows = (await db.prepare(`
-          SELECT chat_id, source_lang, target_lang
+          SELECT chat_id, source_lang, target_lang, translation_enabled
           FROM chat_language_prefs
           WHERE account_id IN (${ph})
         `).all(...dialogAccVariants)) as any[];
         for (const r of prefRows || []) {
+          const parsedEnabled =
+            r.translation_enabled === 1 || r.translation_enabled === true
+              ? true
+              : r.translation_enabled === 0 || r.translation_enabled === false
+                ? false
+                : undefined;
           prefs.set(r.chat_id, {
             sourceLang: r.source_lang || 'Auto',
             targetLang: r.target_lang || 'Auto',
+            ...(parsedEnabled !== undefined ? { translationEnabled: parsedEnabled } : {}),
           });
         }
       } catch {}
@@ -18673,7 +18795,12 @@ app.get('/api/telegram/user/dialogs', requireTenantAuth, async (req: Request, re
     const dialogs = rawDialogs.map((d: any) => {
       const pref = dialogLangPrefs.get(d.id);
       return pref
-        ? { ...d, sourceLang: pref.sourceLang, targetLang: pref.targetLang }
+        ? {
+            ...d,
+            sourceLang: pref.sourceLang,
+            targetLang: pref.targetLang,
+            ...(typeof pref.translationEnabled === 'boolean' ? { translationEnabled: pref.translationEnabled } : {}),
+          }
         : d;
     });
     if (!cached) {
@@ -23226,6 +23353,220 @@ app.post('/api/telegram/user/create-channel', requireTenantAuth, async (req: Req
   }
 });
 
+function parseTelegramInviteOrPublicLink(rawInput: string):
+  | { kind: 'invite'; hash: string; url: string }
+  | { kind: 'public'; username: string; url: string }
+  | null {
+  const trimmed = String(rawInput || '').trim();
+  if (!trimmed) return null;
+
+  // 1. tg://join?invite=HASH or tg://resolve?domain=USERNAME
+  if (/^tg:\/\//i.test(trimmed)) {
+    try {
+      const u = new URL(trimmed);
+      const host = u.hostname.toLowerCase();
+      if (host === 'join') {
+        const invite = (u.searchParams.get('invite') || '').trim();
+        if (invite) return { kind: 'invite', hash: invite, url: `https://t.me/+${invite}` };
+      }
+      if (host === 'resolve') {
+        const domain = (u.searchParams.get('domain') || '').trim().replace(/^@/, '');
+        if (domain && /^[a-zA-Z0-9_]{4,64}$/.test(domain)) {
+          return { kind: 'public', username: domain, url: `https://t.me/${domain}` };
+        }
+      }
+    } catch {
+      return null;
+    }
+    return null;
+  }
+
+  // 2. https://t.me/+HASH / t.me/joinchat/HASH / t.me/username
+  const normalizedUrl = /^https?:\/\//i.test(trimmed) ? trimmed : `https://${trimmed}`;
+  try {
+    const u = new URL(normalizedUrl);
+    const hostname = u.hostname.toLowerCase();
+    if (!['t.me', 'telegram.me', 'telegram.dog'].includes(hostname)) return null;
+    const segments = u.pathname.split('/').filter(Boolean);
+    if (segments.length === 0) return null;
+
+    if (segments[0].startsWith('+') && segments[0].length > 1) {
+      const hash = segments[0].slice(1);
+      return { kind: 'invite', hash, url: `https://t.me/+${hash}` };
+    }
+    if (segments[0].toLowerCase() === 'joinchat' && segments[1]) {
+      return { kind: 'invite', hash: segments[1], url: `https://t.me/+${segments[1]}` };
+    }
+
+    const reserved = new Set(['s', 'addstickers', 'addemoji', 'proxy', 'socks', 'share', 'iv', 'bg', 'setlanguage', 'addtheme', 'c']);
+    const candidate = segments[0].replace(/^@/, '');
+    if (!reserved.has(candidate.toLowerCase()) && /^[a-zA-Z0-9_]{4,64}$/.test(candidate)) {
+      return { kind: 'public', username: candidate, url: `https://t.me/${candidate}` };
+    }
+  } catch {
+    return null;
+  }
+  return null;
+}
+
+function formatTelegramChatEntityToUiChat(entity: any, connectedUserId: string, fallbackMemberCount?: number) {
+  const accountId = `acc_tg_${connectedUserId}`;
+  const isChannelEntity = entity?.className === 'Channel' || entity?.className === 'ChannelForbidden';
+  const isBasicChatEntity = entity?.className === 'Chat' || entity?.className === 'ChatForbidden';
+  const isUserEntity = entity?.className === 'User';
+  const rawDialogId = isChannelEntity
+    ? `-100${entity.id}`
+    : isBasicChatEntity
+      ? `-${entity.id}`
+      : `${entity.id}`;
+  const title = isUserEntity
+    ? ([entity.firstName, entity.lastName].filter(Boolean).join(' ').trim() || (entity.username ? `@${entity.username}` : `User ${entity.id}`))
+    : String(entity?.title || entity?.username || `Chat ${entity?.id || ''}`).trim();
+  const isMegagroup = Boolean(entity?.megagroup);
+  const isBroadcast = Boolean(entity?.broadcast && !isMegagroup);
+  const isGroup = isBasicChatEntity || isMegagroup;
+
+  return {
+    id: `tg_${rawDialogId}`,
+    accountId,
+    title,
+    avatarUrl: signTelegramResourceUrl(`/api/telegram/user/avatar/${encodeURIComponent(rawDialogId)}`, accountId),
+    avatarBg: pickAvatarBg(rawDialogId),
+    avatarInitial: (title || 'TG').slice(0, 2).toUpperCase(),
+    isGroup,
+    isChannel: isBroadcast,
+    username: entity?.username ? `@${entity.username}` : undefined,
+    memberCount: typeof entity?.participantsCount === 'number' ? entity.participantsCount : fallbackMemberCount,
+    lastMessage: isBroadcast ? '已打开频道' : isGroup ? '已加入群组' : '已打开对话',
+    lastTime: '刚刚',
+    unreadCount: 0,
+    sourceLang: 'Auto',
+    targetLang: 'Auto',
+  };
+}
+
+// 20.3.5.1 Preview Telegram Group/Channel Invite Link (CheckChatInvite / ResolveUsername)
+app.post('/api/telegram/user/invite/preview', requireTenantAuth, async (req: Request, res: Response) => {
+  try {
+    const accountId = (req.body?.accountId as string) || (req.headers['x-account-id'] as string) || '';
+    const rawUrl = typeof req.body?.url === 'string' ? req.body.url.trim() : '';
+    const parsed = parseTelegramInviteOrPublicLink(rawUrl);
+    if (!parsed) {
+      return res.status(400).json({ ok: false, error: '无效的 Telegram 群组或频道链接' });
+    }
+    const connected = resolveConnectedTelegramUser(accountId);
+    if (!connected || !connected.client) {
+      return res.status(400).json({ ok: false, error: '当前账号未在线连接 Telegram MTProto' });
+    }
+
+    if (parsed.kind === 'invite') {
+      const inviteRes: any = await connected.client.invoke(new Api.messages.CheckChatInvite({ hash: parsed.hash }));
+      const cls = inviteRes?.className;
+      if ((cls === 'ChatInviteAlready' || cls === 'ChatInvitePeek') && inviteRes.chat) {
+        const chat = formatTelegramChatEntityToUiChat(inviteRes.chat, connected.userId);
+        return res.json({
+          ok: true,
+          kind: 'invite',
+          url: parsed.url,
+          alreadyMember: cls === 'ChatInviteAlready',
+          title: chat.title,
+          isChannel: Boolean(chat.isChannel),
+          isGroup: Boolean(chat.isGroup),
+          participantsCount: chat.memberCount,
+          chat,
+        });
+      }
+      return res.json({
+        ok: true,
+        kind: 'invite',
+        url: parsed.url,
+        alreadyMember: false,
+        requestNeeded: Boolean(inviteRes?.requestNeeded),
+        title: String(inviteRes?.title || 'Telegram 群组'),
+        about: String(inviteRes?.about || ''),
+        participantsCount: typeof inviteRes?.participantsCount === 'number' ? inviteRes.participantsCount : undefined,
+        isGroup: Boolean(!inviteRes?.broadcast || inviteRes?.megagroup),
+        isChannel: Boolean(inviteRes?.broadcast && !inviteRes?.megagroup),
+      });
+    }
+
+    const resolved: any = await connected.client.invoke(new Api.contacts.ResolveUsername({ username: parsed.username }));
+    const targetEntity = resolved?.chats?.[0] || resolved?.users?.[0];
+    if (!targetEntity) {
+      return res.status(404).json({ ok: false, error: `未找到公开链接 @${parsed.username} 对应的群组或频道` });
+    }
+    const chat = formatTelegramChatEntityToUiChat(targetEntity, connected.userId);
+    const alreadyMember = targetEntity?.className === 'User' ? true : targetEntity?.left === false;
+    return res.json({
+      ok: true,
+      kind: 'public',
+      url: parsed.url,
+      alreadyMember,
+      title: chat.title,
+      about: String(targetEntity?.about || ''),
+      participantsCount: chat.memberCount,
+      isChannel: Boolean(chat.isChannel),
+      isGroup: Boolean(chat.isGroup),
+      chat,
+    });
+  } catch (err: any) {
+    return await handleMtprotoRouteError(res, err, {
+      accountId: (req.body?.accountId as string) || (req.headers['x-account-id'] as string) || '',
+    }, 400);
+  }
+});
+
+// 20.3.5.2 Join Telegram Group/Channel via Invite Hash or Public Username
+app.post('/api/telegram/user/invite/join', requireTenantAuth, async (req: Request, res: Response) => {
+  const accountId = (req.body?.accountId as string) || (req.headers['x-account-id'] as string) || '';
+  const rawUrl = typeof req.body?.url === 'string' ? req.body.url.trim() : '';
+  const parsed = parseTelegramInviteOrPublicLink(rawUrl);
+  if (!parsed) {
+    return res.status(400).json({ ok: false, error: '无效的 Telegram 群组或频道链接' });
+  }
+  const connected = resolveConnectedTelegramUser(accountId);
+  if (!connected || !connected.client) {
+    return res.status(400).json({ ok: false, error: '当前账号未在线连接 Telegram MTProto' });
+  }
+
+  try {
+    if (parsed.kind === 'invite') {
+      const importRes: any = await connected.client.invoke(new Api.messages.ImportChatInvite({ hash: parsed.hash }));
+      const chatEntity = importRes?.chats?.[0] || importRes?.updates?.chats?.[0];
+      const chat = chatEntity ? formatTelegramChatEntityToUiChat(chatEntity, connected.userId) : undefined;
+      return res.json({ ok: true, alreadyMember: false, chat });
+    }
+
+    const resolved: any = await connected.client.invoke(new Api.contacts.ResolveUsername({ username: parsed.username }));
+    const targetEntity = resolved?.chats?.[0] || resolved?.users?.[0];
+    if (!targetEntity) {
+      return res.status(404).json({ ok: false, error: `未找到 @${parsed.username}` });
+    }
+    if (targetEntity.className === 'Channel' && targetEntity.left !== false) {
+      const joinRes: any = await connected.client.invoke(new Api.channels.JoinChannel({ channel: targetEntity }));
+      const joinedEntity = joinRes?.chats?.[0] || targetEntity;
+      return res.json({ ok: true, alreadyMember: false, chat: formatTelegramChatEntityToUiChat(joinedEntity, connected.userId) });
+    }
+    return res.json({ ok: true, alreadyMember: true, chat: formatTelegramChatEntityToUiChat(targetEntity, connected.userId) });
+  } catch (err: any) {
+    const msg = String(err?.errorMessage || err?.message || err || '');
+    if (msg.includes('USER_ALREADY_PARTICIPANT') && parsed.kind === 'invite') {
+      try {
+        const checkRes: any = await connected.client.invoke(new Api.messages.CheckChatInvite({ hash: parsed.hash }));
+        if (checkRes?.chat) {
+          return res.json({ ok: true, alreadyMember: true, chat: formatTelegramChatEntityToUiChat(checkRes.chat, connected.userId) });
+        }
+      } catch {
+        // fall through to standard error handler
+      }
+    }
+    if (msg.includes('INVITE_REQUEST_SENT')) {
+      return res.json({ ok: true, requestSent: true });
+    }
+    return await handleMtprotoRouteError(res, err, { accountId }, 400);
+  }
+});
+
 // 20.3.6 Real Telegram VoIP Call Signaling via MTProto (messages.GetDhConfig + phone.RequestCall / DiscardCall)
 interface ActiveTelegramCallSession {
   callId: string;
@@ -23557,14 +23898,73 @@ function parseTelegramReactions(m: any): {
   };
 }
 
+function extractTelegramSenderPeerId(m: any): string {
+  const fromId = m?.fromId;
+  if (fromId?.userId) return String(fromId.userId);
+  if (fromId?.channelId) return `-100${String(fromId.channelId)}`;
+  if (fromId?.chatId) return `-${String(fromId.chatId)}`;
+  if (m?.senderId) return String(m.senderId);
+  if (m?.sender?.id) {
+    const sid = String(m.sender.id);
+    const cls = String(m.sender.className || '');
+    if (cls === 'Channel' || cls === 'ChannelForbidden') return sid.startsWith('-100') ? sid : `-100${sid}`;
+    if (cls === 'Chat' || cls === 'ChatForbidden') return sid.startsWith('-') ? sid : `-${sid}`;
+    return sid;
+  }
+  return '';
+}
+
 function getTelegramMessageSenderName(m: any, isOut: boolean): string {
-  if (isOut) return '我方';
+  if (isOut) return '';
+  const postAuthor = typeof m?.postAuthor === 'string' ? m.postAuthor.trim() : '';
+  if (postAuthor) return postAuthor;
   const sender = m?.sender;
   if (sender) {
     const full = [sender.firstName, sender.lastName].filter(Boolean).join(' ').trim() || sender.title || sender.username;
     if (full) return String(full);
   }
-  return '客户';
+  return '';
+}
+
+async function resolveTelegramMessageSenderInfo(
+  m: any,
+  isOut: boolean,
+  accountId: string,
+  senderCache?: Map<string, { senderId: string; senderName: string; senderAvatarUrl?: string }>
+): Promise<{ senderId: string; senderName: string; senderAvatarUrl?: string }> {
+  if (isOut) return { senderId: '', senderName: '' };
+  const peerId = extractTelegramSenderPeerId(m);
+  if (peerId && senderCache?.has(peerId)) {
+    return senderCache.get(peerId)!;
+  }
+  let senderEntity = m?.sender;
+  if (!senderEntity && typeof m?.getSender === 'function') {
+    try {
+      senderEntity = await m.getSender();
+    } catch {}
+  }
+  const resolvedId = peerId || (senderEntity?.id ? String(senderEntity.id) : '');
+  const postAuthor = typeof m?.postAuthor === 'string' ? m.postAuthor.trim() : '';
+  const entityName = senderEntity
+    ? [senderEntity.firstName, senderEntity.lastName].filter(Boolean).join(' ').trim() ||
+      senderEntity.title ||
+      senderEntity.username ||
+      ''
+    : '';
+  const senderName = String(postAuthor || entityName || '').trim();
+  const senderAvatarUrl =
+    resolvedId && accountId && accountId !== 'acc_telegram_bot'
+      ? signTelegramResourceUrl(`/api/telegram/user/avatar/${encodeURIComponent(resolvedId)}`, accountId)
+      : undefined;
+  const result = {
+    senderId: resolvedId,
+    senderName,
+    ...(senderAvatarUrl ? { senderAvatarUrl } : {}),
+  };
+  if (resolvedId && senderCache && (senderName || !senderEntity)) {
+    senderCache.set(resolvedId, result);
+  }
+  return result;
 }
 
 function extractTelegramMediaFields(m: any, canonicalId: string, accountId: string) {
@@ -23744,6 +24144,7 @@ export async function syncTelegramUserChatMessages(
     }
 
     const synced: any[] = [];
+    const senderInfoCache = new Map<string, { senderId: string; senderName: string; senderAvatarUrl?: string }>();
     for (const m of allFetched) {
       if (!m) continue;
       const mediaParsed = extractTelegramMediaFields(m, canonicalId, accountId);
@@ -23753,7 +24154,8 @@ export async function syncTelegramUserChatMessages(
       const createdAt = m.date ? m.date * 1000 : Date.now();
       const timestamp = new Date(createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false });
       const internalId = `tg_cloud_${m.id}_${createdAt}_${accountId}`;
-      const senderName = getTelegramMessageSenderName(m, isOut);
+      const senderInfo = await resolveTelegramMessageSenderInfo(m, isOut, accountId, senderInfoCache);
+      const senderName = senderInfo.senderName;
 
       let replyTo: { id: string; telegramMessageId?: number; senderName?: string; text: string } | undefined = undefined;
       const replyToId = Number((m as any).replyTo?.replyToMsgId || 0);
@@ -23761,9 +24163,15 @@ export async function syncTelegramUserChatMessages(
         const targetReply = msgById.get(replyToId);
         const quoteText = String((m as any).replyTo?.quoteText || '').trim();
         const replySummary = quoteText || (targetReply ? summarizeTelegramDialogMedia(targetReply) : `消息 #${replyToId}`);
-        const replySenderName = targetReply
-          ? (targetReply.out ? '我' : getTelegramMessageSenderName(targetReply, false))
-          : '回复消息';
+        let replySenderName = '回复消息';
+        if (targetReply) {
+          if (targetReply.out) {
+            replySenderName = '我';
+          } else {
+            const replySenderInfo = await resolveTelegramMessageSenderInfo(targetReply, false, accountId, senderInfoCache);
+            replySenderName = replySenderInfo.senderName || '回复消息';
+          }
+        }
         replyTo = {
           id: targetReply
             ? `tg_cloud_${targetReply.id}_${(targetReply.date || 0) * 1000}_${accountId}`
@@ -23785,6 +24193,8 @@ export async function syncTelegramUserChatMessages(
         accountId,
         sender: isOut ? 'me' : 'peer',
         senderName,
+        ...(senderInfo.senderId ? { senderId: senderInfo.senderId } : {}),
+        ...(senderInfo.senderAvatarUrl ? { senderAvatarUrl: senderInfo.senderAvatarUrl } : {}),
         text: mediaParsed.text,
         translatedText: '',
         isAudio: mediaParsed.isAudio,
@@ -23869,6 +24279,7 @@ export async function querySqlitePaginatedMessagesFallback(
     .prepare(
       `SELECT
         id, chat_id as chatId, account_id as accountId, sender, sender_name as senderName,
+        sender_id as senderId,
         text, translated_text as translatedText, is_audio as isAudio, audio_duration as audioDuration,
         audio_url as audioUrl, stt_text as sttText, voice_tone as voiceTone,
         is_image as isImage, image_url as imageUrl, image_caption as imageCaption,
@@ -23902,12 +24313,19 @@ export async function querySqlitePaginatedMessagesFallback(
   const messages: UnifiedChatMessage[] = pageRows.map((r: any) => {
     const replyTo = r.replyToJson ? safeJsonParse(r.replyToJson, undefined) : undefined;
     const parsedReactions = parseStoredReactionsJson(r.reactionsJson);
+    const cleanSenderId = r.senderId ? String(r.senderId).trim() : '';
+    const senderAvatarUrl =
+      r.sender !== 'me' && cleanSenderId && r.accountId && r.accountId !== 'acc_telegram_bot'
+        ? signTelegramResourceUrl(`/api/telegram/user/avatar/${encodeURIComponent(cleanSenderId)}`, r.accountId)
+        : undefined;
     return {
       id: r.id,
       chatId: r.chatId,
       accountId: r.accountId,
       sender: r.sender === 'me' ? 'me' : r.sender === 'system' ? 'system' : 'peer',
       senderName: r.senderName || '',
+      ...(cleanSenderId ? { senderId: cleanSenderId } : {}),
+      ...(senderAvatarUrl ? { senderAvatarUrl } : {}),
       text: r.text || '',
       translatedText: r.translatedText || '',
       isAudio: Boolean(r.isAudio),
@@ -24212,6 +24630,8 @@ export interface LocalIncomingUpdate {
   accountId: string;
   sender: 'me' | 'peer';
   senderName: string;
+  senderId?: string;
+  senderAvatarUrl?: string;
   text: string;
   translatedText?: string;
   sttText?: string;
@@ -24614,6 +25034,10 @@ export function attachTelegramClientMessageListener(client: TelegramClient, phon
           };
         }
 
+        const senderInfo = isOfficialService
+          ? { senderId: senderId || '', senderName: 'Telegram 官方服务通知', senderAvatarUrl: undefined }
+          : await resolveTelegramMessageSenderInfo(message, isOut, accountId);
+
         const realtimeUpdate: LocalIncomingUpdate = {
           id: messageId,
           telegramMessageId: Number(message.id),
@@ -24621,7 +25045,9 @@ export function attachTelegramClientMessageListener(client: TelegramClient, phon
           rawChatId,
           accountId,
           sender: isOut ? 'me' : 'peer',
-          senderName: isOfficialService ? 'Telegram 官方服务通知' : getTelegramMessageSenderName(message, isOut),
+          senderName: senderInfo.senderName,
+          ...(senderInfo.senderId ? { senderId: senderInfo.senderId } : {}),
+          ...(senderInfo.senderAvatarUrl ? { senderAvatarUrl: senderInfo.senderAvatarUrl } : {}),
           text,
           timestamp,
           createdAt,
@@ -24911,7 +25337,7 @@ ${memories.slice(-3).map((m: any) => `  * [${m.date}] ${m.topic}: ${m.summary}`)
                     skipSync: true,
                   });
                   if (candidate?.trim()) {
-                    replyText = candidate.trim();
+                    replyText = extractStructuredReplyText(candidate);
                   }
                 } catch (autoLlmErr: any) {
                   console.warn(

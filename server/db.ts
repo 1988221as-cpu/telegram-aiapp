@@ -389,6 +389,7 @@ export async function initDatabase() {
       account_id TEXT NOT NULL,
       sender TEXT NOT NULL,
       sender_name TEXT,
+      sender_id TEXT,
       text TEXT NOT NULL,
       translated_text TEXT,
       is_audio INTEGER DEFAULT 0,
@@ -601,6 +602,9 @@ export async function initDatabase() {
   try {
     await db.exec(`ALTER TABLE messages ADD COLUMN reactions_json TEXT`);
   } catch {}
+  try {
+    await db.exec(`ALTER TABLE messages ADD COLUMN sender_id TEXT`);
+  } catch {}
 
   try {
     await db.exec(`ALTER TABLE knowledge_base ADD COLUMN account_id TEXT DEFAULT 'global'`);
@@ -631,6 +635,9 @@ export async function initDatabase() {
   } catch {}
   try {
     await db.exec(`CREATE INDEX IF NOT EXISTS idx_training_logs_account ON training_logs (account_id)`);
+  } catch {}
+  try {
+    await db.exec(`ALTER TABLE chat_language_prefs ADD COLUMN translation_enabled INTEGER`);
   } catch {}
 
   // Ensure telegram_user_sessions exists and has api_id/api_hash columns
@@ -1294,6 +1301,7 @@ export function validateDatabaseSnapshot(snapshot: any): { skippedUserSessions: 
         }
         assertStringField(row.text, `messages[${i}].text`);
         assertStringField(row.sender_name, `messages[${i}].sender_name`, '', 512);
+        assertStringField(row.sender_id, `messages[${i}].sender_id`, '', 256);
         assertStringField(row.translated_text, `messages[${i}].translated_text`);
         assertFlagInt(row.is_audio, `messages[${i}].is_audio`, 0);
         assertNonNegFiniteNumber(row.audio_duration, `messages[${i}].audio_duration`, false, 0);
@@ -1359,6 +1367,9 @@ export function validateDatabaseSnapshot(snapshot: any): { skippedUserSessions: 
         assertStringField(row.source_lang, `chat_language_prefs[${i}].source_lang`, 'Auto', 64);
         assertStringField(row.target_lang, `chat_language_prefs[${i}].target_lang`, 'Auto', 64);
         assertNonNegFiniteNumber(row.updated_at, `chat_language_prefs[${i}].updated_at`, false, 0);
+        if (row.translation_enabled !== undefined && row.translation_enabled !== null && row.translation_enabled !== 0 && row.translation_enabled !== 1) {
+          throw new SnapshotValidationError(`快照校验失败：chat_language_prefs[${i}].translation_enabled 必须为 null/0/1`);
+        }
       } else if (tableName === 'media_materials') {
         assertRequiredNonEmptyString(row.id, `media_materials[${i}].id`, 256);
         assertRequiredNonEmptyString(row.category, `media_materials[${i}].category`, 256);
@@ -1497,15 +1508,15 @@ export async function restoreDatabaseSnapshot(snapshot: any): Promise<{ success:
       for (const m of tables.messages) {
         await db.prepare(`
           INSERT OR REPLACE INTO messages (
-            id, chat_id, account_id, sender, sender_name, text, translated_text,
+            id, chat_id, account_id, sender, sender_name, sender_id, text, translated_text,
             is_audio, audio_duration, audio_url, stt_text, voice_tone,
             is_image, image_url, image_caption, is_video, video_url, video_duration,
             is_file, file_name, file_size, file_url,
             timestamp, created_at, delivery_status, telegram_message_id,
             reply_to_json, is_edited, is_pinned, forward_from, reactions_json
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         `).run(
-          m.id, m.chat_id, m.account_id, m.sender, m.sender_name ?? '', m.text ?? '', m.translated_text ?? '',
+          m.id, m.chat_id, m.account_id, m.sender, m.sender_name ?? '', m.sender_id ?? '', m.text ?? '', m.translated_text ?? '',
           m.is_audio ?? 0, m.audio_duration ?? 0, m.audio_url ?? '', m.stt_text ?? '', m.voice_tone ?? '',
           m.is_image ?? 0, m.image_url ?? '', m.image_caption ?? '', m.is_video ?? 0, m.video_url || '', m.video_duration ?? 0,
           m.is_file ?? 0, m.file_name || '', m.file_size || '', m.file_url || '',
@@ -1708,15 +1719,22 @@ export async function restoreDatabaseSnapshot(snapshot: any): Promise<{ success:
     if (Array.isArray(tables.chat_language_prefs)) {
       for (const lp of tables.chat_language_prefs) {
         if (!lp?.chat_id) continue;
+        const parsedTransEnabled =
+          lp.translation_enabled === 1 || lp.translation_enabled === true
+            ? 1
+            : lp.translation_enabled === 0 || lp.translation_enabled === false
+              ? 0
+              : null;
         await db.prepare(`
-          INSERT OR REPLACE INTO chat_language_prefs (account_id, chat_id, source_lang, target_lang, updated_at)
-          VALUES (?, ?, ?, ?, ?)
+          INSERT OR REPLACE INTO chat_language_prefs (account_id, chat_id, source_lang, target_lang, updated_at, translation_enabled)
+          VALUES (?, ?, ?, ?, ?, ?)
         `).run(
           String(lp.account_id || 'acc_1'),
           String(lp.chat_id),
           String(lp.source_lang || 'Auto'),
           String(lp.target_lang || 'Auto'),
-          Number(lp.updated_at) || Date.now()
+          Number(lp.updated_at) || Date.now(),
+          parsedTransEnabled
         );
         restoredLangPrefCount++;
       }

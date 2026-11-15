@@ -1,4 +1,5 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useLayoutEffect, useRef, useCallback } from 'react';
+import { createPortal } from 'react-dom';
 import {
   Send,
   Mic,
@@ -34,6 +35,10 @@ import {
   Square,
   History,
   ChevronUp,
+  Users,
+  Megaphone,
+  ExternalLink,
+  Clock,
 } from 'lucide-react';
 import { Chat, Message, TranslationSettings, MasterVoiceprint, TelegramStickerItem, TelegramContact } from '../types';
 import { VoiceCloneStudioModal } from './VoiceCloneStudioModal';
@@ -60,6 +65,8 @@ import {
   ensureFreshSignedResourceUrl,
   saveLocalMessage,
   updateMessageSttInDb,
+  previewTelegramInviteApi,
+  joinTelegramInviteApi,
 } from '../services/apiService';
 import { sanitizeSafeResourceUrl } from '../services/urlSafety';
 
@@ -327,7 +334,8 @@ export function isSystemMediaPlaceholder(text?: string | null, msg?: Partial<Mes
   if (!trimmed) return true;
 
   if (
-    /^\[(语音|图片|视频|文件|多媒体|贴纸)消息\]$/i.test(trimmed) ||
+    /^\[(语音|图片|照片|视频|文件|多媒体|贴纸)(?:消息)?\]$/i.test(trimmed) ||
+    /^\[(照片|视频)\]\s+.*$/i.test(trimmed) ||
     /^\[贴纸\]$/i.test(trimmed) ||
     /^Voice Message$/i.test(trimmed) ||
     /^(?:🎤\s*语音消息|🎥\s*视频消息|🎬\s*(?:视频消息|视频|\[视频\])|🖼️\s*(?:图片消息|图片|\[图片\]|贴纸)|📎\s*(?:文件附件|文件|媒体消息)|📍\s*位置信息|👤\s*联系人名片(?:\s*[:：].*)?|📊\s*投票|🔗\s*网页链接|暂无消息)$/.test(
@@ -414,12 +422,22 @@ export function getInboundTargetLanguage(
   return 'Chinese';
 }
 
+export function isChatTranslationActive(
+  chat?: Chat | null,
+  settings?: TranslationSettings | null
+): boolean {
+  if (typeof chat?.translationEnabled === 'boolean') return chat.translationEnabled;
+  if (chat?.isGroup || chat?.isChannel) return settings?.autoTranslateGroups !== false;
+  return settings?.autoTranslatePrivate !== false;
+}
+
 interface ChatAreaProps {
   chat: Chat | null;
   messages: Message[];
   translationSettings: TranslationSettings;
   onSendMessage: (message: Partial<Message> & { skipCloudRelay?: boolean; mediaFile?: File | Blob }) => void;
   onUpdateChatLanguage?: (chatId: string, sourceLang: string, targetLang: string) => void;
+  onToggleChatTranslation?: (chatId: string, enabled: boolean) => void;
   onOpenTranslation?: () => void;
   customLLMConfig?: any;
   currentAccountId?: string;
@@ -445,6 +463,7 @@ interface ChatAreaProps {
   onChatInfoUpdated?: (chatId: string, patch: Partial<Chat>) => void;
   onAddContact?: (contact: TelegramContact) => void;
   onRemoveContact?: (contactId: string) => void;
+  onJoinOrOpenChat?: (chat: Chat) => void;
   onCloseChat?: () => void;
   onOpenCustomLLM?: () => void;
   activeRightPanel?: RightPanelTab | null;
@@ -478,11 +497,84 @@ function formatMessageDayLabel(dayKey: string): string {
   return `${y}年${m}月${d}日`;
 }
 
+const LEGACY_PLACEHOLDER_SENDER_NAMES = new Set(['客户', '对方', '我方', 'Telegram 联系人']);
+
+function computeAnchoredPopupPos(
+  anchorEl: HTMLElement | null,
+  options: { width: number; maxHeight: number; preferAbove?: boolean; gap?: number }
+): { top: number; left: number; maxHeight: number } | null {
+  if (!anchorEl || typeof window === 'undefined') return null;
+  const rect = anchorEl.getBoundingClientRect();
+  const margin = 12;
+  const gap = options.gap ?? 6;
+  const vw = window.innerWidth;
+  const vh = window.innerHeight;
+  const width = Math.min(options.width, vw - margin * 2);
+  const left = Math.max(margin, Math.min(rect.left, vw - width - margin));
+  const spaceBelow = vh - rect.bottom - gap - margin;
+  const spaceAbove = rect.top - gap - margin;
+  const openAbove = options.preferAbove
+    ? spaceAbove >= Math.min(options.maxHeight, 180) || spaceAbove >= spaceBelow
+    : spaceBelow < Math.min(options.maxHeight, 220) && spaceAbove > spaceBelow;
+  const avail = Math.max(140, openAbove ? spaceAbove : spaceBelow);
+  const usedHeight = Math.min(options.maxHeight, avail);
+  const top = openAbove
+    ? Math.max(margin, rect.top - gap - usedHeight)
+    : Math.min(vh - usedHeight - margin, rect.bottom + gap);
+  return { top, left, maxHeight: usedHeight };
+}
+
+function normalizeGroupMemberDisplayName(name?: string): string {
+  const trimmed = typeof name === 'string' ? name.trim() : '';
+  if (!trimmed || LEGACY_PLACEHOLDER_SENDER_NAMES.has(trimmed)) return '';
+  return trimmed;
+}
+
+const TG_SENDER_NAME_COLORS = [
+  'text-[#e17076] dark:text-[#ff8a8f] aurora:text-[#fda4af]',
+  'text-[#eda86c] dark:text-[#ffb870] aurora:text-[#fdba74]',
+  'text-[#a695e7] dark:text-[#b6a6ff] aurora:text-[#c4b5fd]',
+  'text-[#7bc862] dark:text-[#86e06b] aurora:text-[#86efac]',
+  'text-[#65aadd] dark:text-[#64b5f6] aurora:text-[#67e8f9]',
+  'text-[#ee7aae] dark:text-[#f48fb1] aurora:text-[#f9a8d4]',
+];
+
+const TG_SENDER_AVATAR_BGS = [
+  'from-[#ff516a] to-[#ff885e]',
+  'from-[#ffa85c] to-[#ffcd6a]',
+  'from-[#8b6ff5] to-[#b594ff]',
+  'from-[#54cb68] to-[#7be078]',
+  'from-[#2a9ef1] to-[#5ec0ff]',
+  'from-[#e5599d] to-[#f489bd]',
+];
+
+function getTelegramSenderColorIndex(seed: string): number {
+  let hash = 0;
+  for (let i = 0; i < seed.length; i++) {
+    hash = (hash * 31 + seed.charCodeAt(i)) | 0;
+  }
+  return Math.abs(hash) % TG_SENDER_NAME_COLORS.length;
+}
+
+function getSenderAvatarInitial(name?: string, senderId?: string): string {
+  const clean = normalizeGroupMemberDisplayName(name);
+  if (clean) {
+    const ch = Array.from(clean)[0] || '';
+    return ch.toUpperCase();
+  }
+  if (senderId) {
+    const digits = senderId.replace(/^-/, '');
+    if (digits) return digits[0];
+  }
+  return '•';
+}
+
 function buildReplyPayload(replyMsg: Message, chatTitle?: string) {
+  const replyMemberName = normalizeGroupMemberDisplayName(replyMsg.senderName);
   return {
     id: replyMsg.id,
     telegramMessageId: replyMsg.telegramMessageId,
-    senderName: replyMsg.sender === 'me' ? '我' : (chatTitle || '对方'),
+    senderName: replyMsg.sender === 'me' ? '我' : (replyMemberName || chatTitle || ''),
     text:
       replyMsg.text?.trim() ||
       (replyMsg.isAudio
@@ -503,6 +595,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
   translationSettings,
   onSendMessage,
   onUpdateChatLanguage,
+  onToggleChatTranslation,
   onOpenTranslation,
   customLLMConfig,
   currentAccountId,
@@ -528,6 +621,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
   onChatInfoUpdated,
   onAddContact,
   onRemoveContact,
+  onJoinOrOpenChat,
   onCloseChat,
   onOpenCustomLLM,
   activeRightPanel,
@@ -664,6 +758,188 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
   } | null>(null);
   const [messageToDelete, setMessageToDelete] = useState<Message | null>(null);
   const [revokeSingleDelete, setRevokeSingleDelete] = useState(true);
+  const [inviteModalState, setInviteModalState] = useState<{
+    url: string;
+    loading: boolean;
+    joining: boolean;
+    preview?: {
+      alreadyMember?: boolean;
+      requestNeeded?: boolean;
+      requestSent?: boolean;
+      title?: string;
+      about?: string;
+      participantsCount?: number;
+      isGroup?: boolean;
+      isChannel?: boolean;
+      chat?: Chat;
+    };
+    error?: string;
+  } | null>(null);
+
+  const isTelegramJoinOrChatUrl = useCallback((rawUrl: string): boolean => {
+    const trimmed = rawUrl.trim();
+    if (/^tg:\/\/(join|resolve)\b/i.test(trimmed)) return true;
+    const withProto = /^https?:\/\//i.test(trimmed) ? trimmed : `https://${trimmed}`;
+    try {
+      const u = new URL(withProto);
+      const host = u.hostname.toLowerCase();
+      if (!['t.me', 'telegram.me', 'telegram.dog'].includes(host)) return false;
+      const segs = u.pathname.split('/').filter(Boolean);
+      if (segs.length === 0) return false;
+      const reserved = new Set(['s', 'addstickers', 'addemoji', 'proxy', 'socks', 'share', 'iv', 'bg', 'setlanguage', 'addtheme', 'c']);
+      return segs[0].startsWith('+') || segs[0].toLowerCase() === 'joinchat' || !reserved.has(segs[0].toLowerCase());
+    } catch {
+      return false;
+    }
+  }, []);
+
+  const handleOpenTelegramInviteLink = useCallback(async (rawUrl: string) => {
+    const normalizedUrl = /^https?:\/\/|^tg:\/\//i.test(rawUrl.trim()) ? rawUrl.trim() : `https://${rawUrl.trim()}`;
+    setInviteModalState({
+      url: normalizedUrl,
+      loading: true,
+      joining: false,
+    });
+    const res = await previewTelegramInviteApi({
+      accountId: currentAccountId,
+      url: normalizedUrl,
+    });
+    if (!res.ok) {
+      setInviteModalState({
+        url: normalizedUrl,
+        loading: false,
+        joining: false,
+        error: res.error || '无法解析该群组或频道链接，可能已过期或失效',
+      });
+      return;
+    }
+    setInviteModalState({
+      url: res.url || normalizedUrl,
+      loading: false,
+      joining: false,
+      preview: {
+        alreadyMember: res.alreadyMember,
+        requestNeeded: res.requestNeeded,
+        title: res.title,
+        about: res.about,
+        participantsCount: res.participantsCount,
+        isGroup: res.isGroup,
+        isChannel: res.isChannel,
+        chat: res.chat,
+      },
+    });
+  }, [currentAccountId]);
+
+  const handleConfirmJoinInvite = useCallback(async () => {
+    if (!inviteModalState || inviteModalState.joining) return;
+    if (inviteModalState.preview?.alreadyMember && inviteModalState.preview.chat) {
+      onJoinOrOpenChat?.(inviteModalState.preview.chat);
+      setInviteModalState(null);
+      return;
+    }
+    setInviteModalState((prev) => (prev ? { ...prev, joining: true, error: undefined } : prev));
+    const res = await joinTelegramInviteApi({
+      accountId: currentAccountId,
+      url: inviteModalState.url,
+    });
+    if (!res.ok) {
+      setInviteModalState((prev) => (prev ? { ...prev, joining: false, error: res.error || '加入失败，请稍后重试' } : prev));
+      return;
+    }
+    if (res.requestSent) {
+      setInviteModalState((prev) =>
+        prev
+          ? {
+              ...prev,
+              joining: false,
+              preview: { ...prev.preview, requestSent: true },
+            }
+          : prev
+      );
+      return;
+    }
+    if (res.chat) {
+      onJoinOrOpenChat?.(res.chat);
+      setInviteModalState(null);
+      return;
+    }
+    setInviteModalState((prev) =>
+      prev ? { ...prev, joining: false, error: '已提交加入请求，但暂未获取到会话信息，请刷新会话列表' } : prev
+    );
+  }, [inviteModalState, currentAccountId, onJoinOrOpenChat]);
+
+  const renderMessageTextWithLinks = useCallback((text: string | undefined | null, isOwnBubble: boolean) => {
+    if (!text) return null;
+    const urlRegex = /((?:https?:\/\/|tg:\/\/)[^\s<>"{}|\\^`\[\]]+|(?:t\.me|telegram\.me|telegram\.dog)\/[^\s<>"{}|\\^`\[\]]+)/gi;
+    const nodes: React.ReactNode[] = [];
+    let lastIndex = 0;
+    let match: RegExpExecArray | null;
+    while ((match = urlRegex.exec(text)) !== null) {
+      const startIdx = match.index;
+      let rawMatched = match[0];
+      let trailing = '';
+      while (rawMatched.length > 0 && /[),.;:!?，。；：！？、'"）】》」』]$/.test(rawMatched)) {
+        trailing = rawMatched.slice(-1) + trailing;
+        rawMatched = rawMatched.slice(0, -1);
+      }
+      if (startIdx > lastIndex) {
+        nodes.push(text.slice(lastIndex, startIdx));
+      }
+      if (rawMatched) {
+        if (isTelegramJoinOrChatUrl(rawMatched)) {
+          nodes.push(
+            <button
+              key={`tg-link-${startIdx}`}
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                void handleOpenTelegramInviteLink(rawMatched);
+              }}
+              className={`inline underline underline-offset-2 font-medium cursor-pointer break-all text-left transition-opacity hover:opacity-80 ${
+                isOwnBubble
+                  ? 'text-[#bae6fd] dark:text-[#bfdbfe] aurora:text-[#a5f3fc]'
+                  : 'text-[#2481cc] dark:text-[#38bdf8] aurora:text-[#5eead4]'
+              }`}
+              title="点击预览并加入群组 / 频道"
+            >
+              {rawMatched}
+            </button>
+          );
+        } else {
+          const hrefCandidate = /^https?:\/\//i.test(rawMatched) ? rawMatched : `https://${rawMatched}`;
+          const safeHref = sanitizeSafeResourceUrl(hrefCandidate);
+          if (safeHref) {
+            nodes.push(
+              <a
+                key={`ext-link-${startIdx}`}
+                href={safeHref}
+                target="_blank"
+                rel="noopener noreferrer"
+                onClick={(e) => e.stopPropagation()}
+                className={`underline underline-offset-2 font-medium break-all transition-opacity hover:opacity-80 ${
+                  isOwnBubble
+                    ? 'text-[#bae6fd] dark:text-[#bfdbfe] aurora:text-[#a5f3fc]'
+                    : 'text-[#2481cc] dark:text-[#38bdf8] aurora:text-[#5eead4]'
+                }`}
+              >
+                {rawMatched}
+              </a>
+            );
+          } else {
+            nodes.push(rawMatched);
+          }
+        }
+      }
+      if (trailing) {
+        nodes.push(trailing);
+      }
+      lastIndex = startIdx + match[0].length;
+    }
+    if (lastIndex < text.length) {
+      nodes.push(text.slice(lastIndex));
+    }
+    return nodes.length > 0 ? nodes : text;
+  }, [isTelegramJoinOrChatUrl, handleOpenTelegramInviteLink]);
 
   const handleMessageContextMenu = (e: React.MouseEvent, msg: Message) => {
     e.preventDefault();
@@ -854,6 +1130,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
   const [isTranslatingSuggestion, setIsTranslatingSuggestion] = useState(false);
   const [isSyncingCloud, setIsSyncingCloud] = useState(false);
   const [syncNotice, setSyncNotice] = useState<string | null>(null);
+  const [failedAvatarUrls, setFailedAvatarUrls] = useState<Set<string>>(() => new Set());
   const syncNoticeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const showSyncNotice = (msg: string, durationMs = 4000) => {
@@ -878,6 +1155,13 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
   }, []);
 
   const langMenuRef = useRef<HTMLDivElement>(null);
+  const langButtonRef = useRef<HTMLButtonElement>(null);
+  const langDropdownRef = useRef<HTMLDivElement>(null);
+  const [langMenuPos, setLangMenuPos] = useState<{ top: number; left: number; maxHeight: number } | null>(null);
+  const attachmentButtonRef = useRef<HTMLButtonElement>(null);
+  const attachmentMenuRef = useRef<HTMLDivElement>(null);
+  const [attachmentMenuPos, setAttachmentMenuPos] = useState<{ top: number; left: number; maxHeight: number } | null>(null);
+  const emojiButtonRef = useRef<HTMLButtonElement>(null);
   const scrollViewportRef = useRef<HTMLDivElement>(null);
   const suppressAutoScrollRef = useRef(false);
   const prevChatIdForScrollRef = useRef<string | null>(null);
@@ -1005,6 +1289,8 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
 
   const outboundTargetLang = getOutboundTargetLanguage(chat, translationSettings, messages);
   const inboundTargetLang = getInboundTargetLanguage(chat, translationSettings);
+  const isChatTransEnabled = isChatTranslationActive(chat, translationSettings);
+  const chatTransScopeLabel = chat?.isGroup || chat?.isChannel ? '群翻译' : '私聊翻译';
 
   const handleSyncCloudMessages = async () => {
     if (!chat?.id) return;
@@ -1194,7 +1480,12 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
 
   useEffect(() => {
     const handleOutsideClick = (e: MouseEvent) => {
-      if (langMenuRef.current && !langMenuRef.current.contains(e.target as Node)) {
+      const target = e.target as Node;
+      if (
+        langMenuRef.current &&
+        !langMenuRef.current.contains(target) &&
+        (!langDropdownRef.current || !langDropdownRef.current.contains(target))
+      ) {
         setIsLangMenuOpen(false);
       }
     };
@@ -1204,12 +1495,67 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
     }
   }, [isLangMenuOpen]);
 
+  useLayoutEffect(() => {
+    if (!isLangMenuOpen) {
+      setLangMenuPos(null);
+      return;
+    }
+    const updatePos = () => {
+      setLangMenuPos(computeAnchoredPopupPos(langButtonRef.current, { width: 256, maxHeight: 320, preferAbove: false }));
+    };
+    updatePos();
+    window.addEventListener('resize', updatePos);
+    window.addEventListener('scroll', updatePos, true);
+    return () => {
+      window.removeEventListener('resize', updatePos);
+      window.removeEventListener('scroll', updatePos, true);
+    };
+  }, [isLangMenuOpen]);
+
+  useEffect(() => {
+    if (!isAttachmentMenuOpen) return;
+    const handleOutsideClick = (e: MouseEvent) => {
+      const target = e.target as Node;
+      if (
+        attachmentButtonRef.current &&
+        !attachmentButtonRef.current.contains(target) &&
+        (!attachmentMenuRef.current || !attachmentMenuRef.current.contains(target))
+      ) {
+        setIsAttachmentMenuOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', handleOutsideClick);
+    return () => document.removeEventListener('mousedown', handleOutsideClick);
+  }, [isAttachmentMenuOpen]);
+
+  useLayoutEffect(() => {
+    if (!isAttachmentMenuOpen) {
+      setAttachmentMenuPos(null);
+      return;
+    }
+    const updatePos = () => {
+      setAttachmentMenuPos(computeAnchoredPopupPos(attachmentButtonRef.current, { width: 176, maxHeight: 190, preferAbove: true, gap: 8 }));
+    };
+    updatePos();
+    window.addEventListener('resize', updatePos);
+    window.addEventListener('scroll', updatePos, true);
+    return () => {
+      window.removeEventListener('resize', updatePos);
+      window.removeEventListener('scroll', updatePos, true);
+    };
+  }, [isAttachmentMenuOpen]);
+
   // Telegram Desktop Esc key handler to close overlays or active chat
   useEffect(() => {
     if (!chat) return;
 
     const handleGlobalKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
+        if (inviteModalState) {
+          e.preventDefault();
+          setInviteModalState(null);
+          return;
+        }
         // If an external modal (z-50) or docked right panel is open, let it handle Esc
         if (document.querySelector('.z-50') || activeRightPanel) return;
 
@@ -1233,6 +1579,11 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
         if (showEmojiPicker) {
           e.preventDefault();
           setShowEmojiPicker(false);
+          return;
+        }
+        if (isAttachmentMenuOpen) {
+          e.preventDefault();
+          setIsAttachmentMenuOpen(false);
           return;
         }
         if (isLangMenuOpen) {
@@ -1288,6 +1639,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
     editingMessage,
     replyingTo,
     showEmojiPicker,
+    isAttachmentMenuOpen,
     isLangMenuOpen,
     isSearchingInChat,
     isChatInfoOpen,
@@ -1296,6 +1648,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
     translatedPreview,
     messageContextMenu,
     messageToDelete,
+    inviteModalState,
     onCloseChat,
   ]);
 
@@ -1353,7 +1706,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
     }
 
     const queryText = inputText.trim();
-    if (!queryText || !hasTranslatableLetters(queryText) || translationSettings?.autoTranslateOutbound === false || (editingMessage && !translateOnEdit)) {
+    if (!queryText || !hasTranslatableLetters(queryText) || !isChatTransEnabled || translationSettings?.autoTranslateOutbound === false || (editingMessage && !translateOnEdit)) {
       setTranslatedPreview('');
       setTranslatedPreviewSource('');
       setPreviewError('');
@@ -1422,6 +1775,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
   }, [
     inputText,
     outboundTargetLang,
+    isChatTransEnabled,
     translationSettings,
     customLLMConfig,
     editingMessage,
@@ -1441,6 +1795,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
     try {
       const shouldAutoTranslate =
         !bypassTranslation &&
+        isChatTransEnabled &&
         translationSettings?.autoTranslateOutbound !== false &&
         (!editingMessage || translateOnEdit);
       const hasTextToTranslate = hasTranslatableLetters(textToSend);
@@ -2610,16 +2965,18 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
           <button
             type="button"
             onClick={() => setIsTranslateBarVisible(!isTranslateBarVisible)}
-            title="展开或收起实时翻译栏"
+            title={isChatTransEnabled ? '展开或收起实时翻译栏' : '当前会话翻译已关闭（点击展开配置或重新开启）'}
             className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[11.5px] font-medium border transition-colors cursor-pointer ${
-              isTranslateBarVisible
-                ? 'bg-[#e8f3ff] border-[#bfdbfe] text-[#2481cc] dark:bg-[#132234] dark:border-[#2ba0ff]/40 dark:text-[#2ba0ff] aurora:bg-[#112e37] aurora:border-[#2dd4bf]/45 aurora:text-[#5eead4]'
-                : 'bg-[#f8fafc] border-[#e2e8f0] text-[#64748b] hover:text-[#0f172a] dark:bg-[#0e1726] dark:border-[#1a2b40] dark:text-[#8aa0b8] dark:hover:text-white aurora:bg-[#101c23] aurora:border-[#1e343e] aurora:text-[#7e9aa5] aurora:hover:text-[#ecf6f8]'
+              !isChatTransEnabled
+                ? 'bg-slate-100 border-slate-300 text-slate-500 hover:text-slate-800 dark:bg-[#0e1726] dark:border-[#1e3148] dark:text-[#7b93ad] dark:hover:text-white aurora:bg-[#0e1920] aurora:border-[#1e343e] aurora:text-[#7e9aa5] aurora:hover:text-[#ecf6f8]'
+                : isTranslateBarVisible
+                  ? 'bg-[#e8f3ff] border-[#bfdbfe] text-[#2481cc] dark:bg-[#132234] dark:border-[#2ba0ff]/40 dark:text-[#2ba0ff] aurora:bg-[#112e37] aurora:border-[#2dd4bf]/45 aurora:text-[#5eead4]'
+                  : 'bg-[#f8fafc] border-[#e2e8f0] text-[#64748b] hover:text-[#0f172a] dark:bg-[#0e1726] dark:border-[#1a2b40] dark:text-[#8aa0b8] dark:hover:text-white aurora:bg-[#101c23] aurora:border-[#1e343e] aurora:text-[#7e9aa5] aurora:hover:text-[#ecf6f8]'
             }`}
           >
             <Languages className="w-3.5 h-3.5" />
             <span className="hidden sm:inline">
-              双向翻译: {isTranslateBarVisible ? '开启' : '收起'}
+              {chatTransScopeLabel}: {isChatTransEnabled ? (isTranslateBarVisible ? '开启' : '开启') : '已关闭'}
             </span>
           </button>
 
@@ -2837,15 +3194,22 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
       {isTranslateBarVisible && (
         <div className="bg-[#f8fafc]/90 dark:bg-[#0c1624]/90 aurora:bg-[#0c171d]/92 backdrop-blur-xs border-b border-[#e2e8f0] dark:border-[#162436] aurora:border-[#182b34] px-4 py-1.5 flex items-center justify-between text-xs text-[#0f172a] dark:text-[#d3e2ef] aurora:text-[#d5ebee] transition-colors shrink-0">
           <div className="flex items-center gap-2 min-w-0">
-            <Languages className="w-3.5 h-3.5 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf] shrink-0" />
-            <span className="font-medium whitespace-nowrap text-[#334155] dark:text-[#d3e2ef] aurora:text-[#d5ebee]">
-              自动翻译为{getLanguageDisplayName(inboundTargetLang)}
-            </span>
+            <Languages className={`w-3.5 h-3.5 shrink-0 ${isChatTransEnabled ? 'text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf]' : 'text-[#94a3b8] dark:text-[#64748b]'}`} />
+            {isChatTransEnabled ? (
+              <span className="font-medium whitespace-nowrap text-[#334155] dark:text-[#d3e2ef] aurora:text-[#d5ebee]">
+                自动翻译为{getLanguageDisplayName(inboundTargetLang)}
+              </span>
+            ) : (
+              <span className="font-medium whitespace-nowrap text-[#64748b] dark:text-[#8aa0b8] aurora:text-[#7e9aa5]">
+                {chatTransScopeLabel}已关闭（消息仅展示原文）
+              </span>
+            )}
             <span className="text-[#94a3b8] dark:text-[#7b93ad] aurora:text-[#7e9aa5]">·</span>
 
             {/* Quick Target Language Selector */}
             <div className="relative inline-flex items-center" ref={langMenuRef}>
               <button
+                ref={langButtonRef}
                 type="button"
                 onClick={() => setIsLangMenuOpen(!isLangMenuOpen)}
                 className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-white dark:bg-[#0e1726] aurora:bg-[#101c23] hover:bg-[#f1f5f9] dark:hover:bg-[#152438] aurora:hover:bg-[#152934] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#5eead4] cursor-pointer transition-colors font-medium text-[11px]"
@@ -2854,12 +3218,20 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                 <ChevronDown className="w-3 h-3 opacity-70" />
               </button>
 
-              {isLangMenuOpen && (
-                <div className="absolute top-full left-0 mt-1.5 w-64 bg-white dark:bg-[#0b131f] aurora:bg-[#0c151b] border border-[#e2e8f0] dark:border-[#1e3148] aurora:border-[#203742] rounded-xl shadow-xl p-1.5 z-50 animate-in fade-in duration-150">
-                  <div className="px-2 py-1 text-[10px] font-semibold text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] uppercase tracking-wider border-b border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] pb-1 mb-1">
+              {isLangMenuOpen && langMenuPos && typeof document !== 'undefined' && createPortal(
+                <div
+                  ref={langDropdownRef}
+                  style={{
+                    top: `${langMenuPos.top}px`,
+                    left: `${langMenuPos.left}px`,
+                    maxHeight: `${langMenuPos.maxHeight}px`,
+                  }}
+                  className="fixed z-[9990] w-64 flex flex-col bg-white dark:bg-[#0b131f] aurora:bg-[#0c151b] border border-[#e2e8f0] dark:border-[#1e3148] aurora:border-[#203742] rounded-xl shadow-2xl p-1.5 animate-in fade-in duration-150"
+                >
+                  <div className="px-2 py-1 text-[10px] font-semibold text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] uppercase tracking-wider border-b border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] pb-1 mb-1 shrink-0">
                     选择联系人语言 (全球 {SUPPORTED_LANGUAGES.length - 1} 种)
                   </div>
-                  <div className="px-1 pb-1.5">
+                  <div className="px-1 pb-1.5 shrink-0">
                     <input
                       type="text"
                       value={langMenuSearch}
@@ -2868,7 +3240,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                       className="w-full px-2 py-1 text-[11px] rounded-md bg-[#f1f5f9] dark:bg-[#08101a] aurora:bg-[#081014] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] placeholder-[#94a3b8] dark:placeholder-[#4e657e] aurora:placeholder-[#5a7782] focus:outline-none focus:border-[#2ba0ff] aurora:focus:border-[#2dd4bf]"
                     />
                   </div>
-                  <div className="max-h-56 overflow-y-auto space-y-0.5">
+                  <div className="flex-1 min-h-0 overflow-y-auto space-y-0.5">
                     {SUPPORTED_LANGUAGES.filter((l) => {
                       const q = langMenuSearch.trim().toLowerCase();
                       if (!q) return true;
@@ -2909,12 +3281,30 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                       );
                     })}
                   </div>
-                </div>
+                </div>,
+                document.body
               )}
             </div>
           </div>
 
-          <div className="flex items-center gap-2 shrink-0">
+          <div className="flex items-center gap-2.5 shrink-0">
+            <button
+              type="button"
+              onClick={() => onToggleChatTranslation?.(chat.id, !isChatTransEnabled)}
+              title={isChatTransEnabled ? `点击关闭当前${chatTransScopeLabel}` : `点击开启当前${chatTransScopeLabel}`}
+              className={`inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-[11px] font-medium border transition-colors cursor-pointer ${
+                isChatTransEnabled
+                  ? 'bg-emerald-500/12 border-emerald-500/35 text-emerald-700 dark:text-emerald-300 aurora:text-emerald-300 hover:bg-emerald-500/20'
+                  : 'bg-slate-200/80 border-slate-300 text-slate-600 dark:bg-[#132234] dark:border-[#1e3148] dark:text-[#94a3b8] aurora:bg-[#10242b] aurora:border-[#1e343e] aurora:text-[#8eb2bd] hover:bg-slate-300/70 dark:hover:bg-[#1a2e45]'
+              }`}
+            >
+              <span
+                className={`w-1.5 h-1.5 rounded-full ${
+                  isChatTransEnabled ? 'bg-emerald-500' : 'bg-slate-400 dark:bg-slate-500'
+                }`}
+              />
+              <span>{isChatTransEnabled ? '已开启 · 点击关闭' : '已关闭 · 点击开启'}</span>
+            </button>
             <button
               onClick={onOpenTranslation}
               className="text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#5eead4] hover:underline font-medium cursor-pointer"
@@ -2924,7 +3314,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
             <button
               onClick={() => setIsTranslateBarVisible(false)}
               className="p-1 text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] hover:text-[#0f172a] dark:hover:text-white aurora:hover:text-[#ecf6f8] transition-colors cursor-pointer"
-              title="关闭翻译栏"
+              title="收起翻译栏"
             >
               <X className="w-3.5 h-3.5" />
             </button>
@@ -2954,10 +3344,34 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
 
         {displayedMessages.map((msg, idx) => {
           const isMe = msg.sender === 'me';
+          const isGroupPeer = Boolean(chat.isGroup && !isMe);
           const dayKey = getMessageDayKey(msg);
-          const prevDayKey = idx > 0 ? getMessageDayKey(displayedMessages[idx - 1]) : null;
+          const prevMsg = idx > 0 ? displayedMessages[idx - 1] : null;
+          const nextMsg = idx < displayedMessages.length - 1 ? displayedMessages[idx + 1] : null;
+          const prevDayKey = prevMsg ? getMessageDayKey(prevMsg) : null;
+          const nextDayKey = nextMsg ? getMessageDayKey(nextMsg) : null;
           const showDayDivider = idx === 0 || dayKey !== prevDayKey;
           const isSelectedMulti = selectedMessageIds.has(msg.id);
+
+          const cleanSenderName = normalizeGroupMemberDisplayName(msg.senderName);
+          const senderGroupKey = isGroupPeer
+            ? msg.senderId || cleanSenderName || `msg_${msg.id}`
+            : '';
+          const prevGroupKey =
+            isGroupPeer && prevMsg && prevMsg.sender !== 'me' && prevDayKey === dayKey
+              ? prevMsg.senderId || normalizeGroupMemberDisplayName(prevMsg.senderName) || `msg_${prevMsg.id}`
+              : '';
+          const nextGroupKey =
+            isGroupPeer && nextMsg && nextMsg.sender !== 'me' && nextDayKey === dayKey
+              ? nextMsg.senderId || normalizeGroupMemberDisplayName(nextMsg.senderName) || `msg_${nextMsg.id}`
+              : '';
+          const isSameSenderAsPrev = Boolean(isGroupPeer && senderGroupKey && senderGroupKey === prevGroupKey);
+          const isSameSenderAsNext = Boolean(isGroupPeer && senderGroupKey && senderGroupKey === nextGroupKey);
+          const showGroupSenderName = isGroupPeer && !isSameSenderAsPrev && Boolean(cleanSenderName);
+          const showGroupSenderAvatar = isGroupPeer && !isSameSenderAsNext;
+          const senderColorIdx = getTelegramSenderColorIndex(msg.senderId || cleanSenderName || msg.id);
+          const safeMemberAvatarUrl = (msg.senderAvatarUrl ? resolveDisplayUrl(msg.senderAvatarUrl) : '') || '';
+          const showAvatarImage = Boolean(safeMemberAvatarUrl && !failedAvatarUrls.has(safeMemberAvatarUrl));
 
           return (
             <React.Fragment key={msg.id}>
@@ -2974,7 +3388,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                 onClick={isMultiSelectMode ? () => toggleSelectMessage(msg.id) : undefined}
                 className={`flex ${isMultiSelectMode ? 'items-center gap-2.5 cursor-pointer rounded-xl px-1.5 py-0.5 transition-colors ' + (isSelectedMulti ? 'bg-[#2481cc]/10 dark:bg-[#2ba0ff]/15 aurora:bg-[#14b8a6]/15' : 'hover:bg-black/5 dark:hover:bg-white/5 aurora:hover:bg-white/5') : 'flex-col'} ${
                   isMe ? (isMultiSelectMode ? 'justify-end' : 'items-end') : (isMultiSelectMode ? 'justify-start' : 'items-start')
-                } group relative my-1`}
+                } group relative ${hoveredMessageId === msg.id ? 'z-30' : ''} ${isSameSenderAsPrev ? 'mt-0.5' : 'mt-1.5'} ${isSameSenderAsNext ? 'mb-0.5' : 'mb-1.5'}`}
                 onMouseEnter={() => !isMultiSelectMode && setHoveredMessageId(msg.id)}
                 onMouseLeave={() => setHoveredMessageId(null)}
                 onContextMenu={(e) => {
@@ -3001,8 +3415,8 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                 {/* Telegram Floating Quick Action Menu on Hover */}
                 {!isMultiSelectMode && hoveredMessageId === msg.id && (
                   <div
-                    className={`absolute -top-4 z-20 flex items-center gap-0.5 bg-white dark:bg-[#0e1726] aurora:bg-[#101c23] border border-[#e2e8f0] dark:border-[#1e3148] aurora:border-[#203742] rounded-full px-1.5 py-0.5 shadow-lg animate-in fade-in zoom-in-95 duration-100 ${
-                      isMe ? 'right-2' : 'left-2'
+                    className={`absolute ${idx === 0 ? 'top-1' : '-top-4'} z-40 flex items-center gap-0.5 bg-white dark:bg-[#0e1726] aurora:bg-[#101c23] border border-[#e2e8f0] dark:border-[#1e3148] aurora:border-[#203742] rounded-full px-1.5 py-0.5 shadow-lg animate-in fade-in zoom-in-95 duration-100 ${
+                      isMe ? 'right-2' : isGroupPeer ? 'left-10' : 'left-2'
                     }`}
                   >
                     {/* Quick Reactions Bar */}
@@ -3129,15 +3543,54 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                   </div>
                 )}
 
-                <div
-                  className={`max-w-[80%] sm:max-w-[74%] rounded-2xl p-3 px-3.5 relative transition-all select-text ${
-                    highlightedMsgId === msg.id ? 'ring-2 ring-amber-400 shadow-lg' : ''
-                  } ${
-                    isMe
-                      ? 'bg-[#1e88e5] text-white dark:bg-[#1b4975] dark:text-white aurora:bg-[#11434d] aurora:border aurora:border-[#2dd4bf]/25 rounded-br-xs shadow-[0_1px_3px_rgba(30,136,229,0.22)]'
-                      : 'bg-white text-[#0f172a] border border-[#e2e8f0] dark:bg-[#101b2a] dark:text-[#eef4fb] dark:border-[#1a2b40] aurora:bg-[#101c23] aurora:text-[#ecf6f8] aurora:border-[#1c323c] rounded-bl-xs shadow-[0_1px_2px_rgba(15,23,42,0.04)]'
-                  }`}
-                >
+                <div className={isGroupPeer ? 'flex items-end gap-2 max-w-[86%] sm:max-w-[78%]' : 'contents'}>
+                  {isGroupPeer && (
+                    showGroupSenderAvatar ? (
+                      <div className="w-8 h-8 rounded-full shrink-0 overflow-hidden select-none shadow-xs">
+                        {showAvatarImage ? (
+                          <img
+                            src={safeMemberAvatarUrl}
+                            alt={cleanSenderName || ''}
+                            className="w-full h-full object-cover"
+                            onError={() => {
+                              setFailedAvatarUrls((prev) => {
+                                if (prev.has(safeMemberAvatarUrl)) return prev;
+                                const next = new Set(prev);
+                                next.add(safeMemberAvatarUrl);
+                                return next;
+                              });
+                            }}
+                          />
+                        ) : (
+                          <div
+                            className={`w-full h-full bg-gradient-to-br ${TG_SENDER_AVATAR_BGS[senderColorIdx]} flex items-center justify-center text-white text-[13px] font-semibold`}
+                          >
+                            {getSenderAvatarInitial(cleanSenderName, msg.senderId)}
+                          </div>
+                        )}
+                      </div>
+                    ) : (
+                      <div className="w-8 shrink-0" />
+                    )
+                  )}
+
+                  <div
+                    className={`${isGroupPeer ? 'min-w-0' : 'max-w-[80%] sm:max-w-[74%]'} rounded-2xl p-3 px-3.5 relative transition-all select-text ${
+                      highlightedMsgId === msg.id ? 'ring-2 ring-amber-400 shadow-lg' : ''
+                    } ${
+                      isMe
+                        ? 'bg-[#1e88e5] text-white dark:bg-[#1b4975] dark:text-white aurora:bg-[#11434d] aurora:border aurora:border-[#2dd4bf]/25 rounded-br-xs shadow-[0_1px_3px_rgba(30,136,229,0.22)]'
+                        : 'bg-white text-[#0f172a] border border-[#e2e8f0] dark:bg-[#101b2a] dark:text-[#eef4fb] dark:border-[#1a2b40] aurora:bg-[#101c23] aurora:text-[#ecf6f8] aurora:border-[#1c323c] rounded-bl-xs shadow-[0_1px_2px_rgba(15,23,42,0.04)]'
+                    }`}
+                  >
+                    {/* Official Telegram Group Member Name */}
+                    {showGroupSenderName && (
+                      <div
+                        className={`mb-1 text-[12px] font-semibold leading-tight truncate select-none ${TG_SENDER_NAME_COLORS[senderColorIdx]}`}
+                      >
+                        {cleanSenderName}
+                      </div>
+                    )}
                   {/* Forwarded Label */}
                   {msg.forwardFrom && (
                     <div
@@ -3174,8 +3627,13 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                 {msg.isImage && msg.imageUrl && (() => {
                   const safeImageHref = resolveDisplayUrl(msg.imageUrl);
                   if (!safeImageHref) return null;
+                  const hasVisibleImageCaption = Boolean(
+                    msg.text?.trim() &&
+                      !isSystemMediaPlaceholder(msg.text, msg) &&
+                      !/\.(jpg|jpeg|png|gif|webp|bmp|svg|heic)$/i.test(msg.text.trim())
+                  );
                   return (
-                    <div className="mb-1.5 rounded-xl overflow-hidden max-w-[280px] shadow-xs relative group/img">
+                    <div className={`${hasVisibleImageCaption ? 'mb-1.5' : ''} rounded-xl overflow-hidden max-w-[280px] shadow-xs relative group/img`}>
                       <img
                         src={safeImageHref}
                         alt={msg.imageCaption || 'image'}
@@ -3242,8 +3700,13 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                 {msg.isVideo && msg.videoUrl && (() => {
                   const safeVideoHref = resolveDisplayUrl(msg.videoUrl);
                   if (!safeVideoHref) return null;
+                  const hasVisibleVideoCaption = Boolean(
+                    msg.text?.trim() &&
+                      !isSystemMediaPlaceholder(msg.text, msg) &&
+                      !/\.(mp4|mov|webm|mkv|avi|m4v)$/i.test(msg.text.trim())
+                  );
                   return (
-                    <div className="mb-1.5 rounded-xl overflow-hidden max-w-[320px] shadow-sm relative group/vid bg-black/10 dark:bg-black/40">
+                    <div className={`${hasVisibleVideoCaption ? 'mb-1.5' : ''} rounded-xl overflow-hidden max-w-[320px] shadow-sm relative group/vid bg-black/10 dark:bg-black/40`}>
                       <video
                         src={safeVideoHref}
                         controls
@@ -3368,15 +3831,16 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                           />
                         </div>
                         <div className="flex items-center justify-between text-[11px] mt-1 opacity-75 tabular-nums">
-                          <span>{msg.audioDuration && msg.audioDuration > 0 ? `${msg.audioDuration}"` : '--'}</span>
-                          <span className="flex items-center gap-1.5">
-                            {(msg.isMasterVoice || msg.voiceName) && (
-                              <span className={`text-[10px] ${isMe ? 'text-white/90' : 'text-[#2481cc] dark:text-[#7cc4ff] aurora:text-[#5eead4]'}`}>
-                                🎙️ {msg.voiceName || '个人预设音色'}
-                              </span>
-                            )}
-                            <span>语音消息</span>
+                          <span>
+                            {msg.audioDuration && msg.audioDuration > 0
+                              ? `${Math.floor(msg.audioDuration / 60)}:${String(Math.floor(msg.audioDuration % 60)).padStart(2, '0')}`
+                              : '--'}
                           </span>
+                          {msg.voiceName && (
+                            <span className={`text-[10px] ${isMe ? 'text-white/90' : 'text-[#2481cc] dark:text-[#7cc4ff] aurora:text-[#5eead4]'}`}>
+                              🎙️ {msg.voiceName}
+                            </span>
+                          )}
                         </div>
                       </div>
                     </div>
@@ -3431,6 +3895,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                       const showOriginalAndTranslation =
                         translationSettings?.showOriginalAndTranslation !== false;
                       const isTranslationOnlyPeer =
+                        isChatTransEnabled &&
                         !isMe &&
                         !showOriginalAndTranslation &&
                         Boolean(msg.translatedText) &&
@@ -3469,7 +3934,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                             {isShowingOriginalOverlay && msg.text && (
                               <div className="mt-1.5 p-2 rounded-lg bg-[#f8fafc] dark:bg-[#0b131f]/80 aurora:bg-[#0c161c]/85 border border-[#e2e8f0] dark:border-[#1e3148] aurora:border-[#1e343e] text-xs text-[#475569] dark:text-[#cbd5e1] aurora:text-[#b7d0d8] select-text">
                                 <div className="text-[10px] opacity-70 mb-0.5 select-none">原文：</div>
-                                <p className="whitespace-pre-wrap break-words">{msg.text}</p>
+                                <p className="whitespace-pre-wrap break-words">{renderMessageTextWithLinks(msg.text, false)}</p>
                               </div>
                             )}
                           </div>
@@ -3480,22 +3945,34 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                         <>
                           {!msg.isImage && !msg.isFile && !msg.isVideo && (
                             <p className="text-[13.5px] leading-relaxed whitespace-pre-wrap break-words select-text cursor-text">
-                              {msg.text}
+                              {renderMessageTextWithLinks(msg.text, isMe)}
                             </p>
                           )}
-                          {msg.isImage && msg.text && msg.text.trim() && !msg.text.startsWith('[照片]') && !/\.(jpg|jpeg|png|gif|webp|bmp|svg|heic)$/i.test(msg.text.trim()) && (
+                          {msg.isImage &&
+                            msg.text &&
+                            msg.text.trim() &&
+                            (!msg.imageUrl ||
+                              (!isSystemMediaPlaceholder(msg.text, msg) &&
+                                !/\.(jpg|jpeg|png|gif|webp|bmp|svg|heic)$/i.test(msg.text.trim()))) && (
                             <p className="text-[13.5px] leading-relaxed whitespace-pre-wrap break-words select-text cursor-text mt-1">
-                              {msg.text}
+                              {renderMessageTextWithLinks(msg.text, isMe)}
                             </p>
                           )}
-                          {msg.isVideo && msg.text && msg.text.trim() && !msg.text.startsWith('[视频]') && !/\.(mp4|mov|webm|mkv|avi|m4v)$/i.test(msg.text.trim()) && (
+                          {msg.isVideo &&
+                            msg.text &&
+                            msg.text.trim() &&
+                            (!msg.videoUrl ||
+                              (!isSystemMediaPlaceholder(msg.text, msg) &&
+                                !/\.(mp4|mov|webm|mkv|avi|m4v)$/i.test(msg.text.trim()))) && (
                             <p className="text-[13.5px] leading-relaxed whitespace-pre-wrap break-words select-text cursor-text mt-1">
-                              {msg.text}
+                              {renderMessageTextWithLinks(msg.text, isMe)}
                             </p>
                           )}
 
                           {/* Official Telegram Inline Translation Card */}
-                          {msg.isTranslating ? (
+                          {(!isChatTransEnabled ||
+                            (msg.isImage && msg.imageUrl && (!msg.text?.trim() || isSystemMediaPlaceholder(msg.text, msg))) ||
+                            (msg.isVideo && msg.videoUrl && (!msg.text?.trim() || isSystemMediaPlaceholder(msg.text, msg)))) ? null : msg.isTranslating ? (
                             <div
                               className={`mt-2 p-2 rounded-xl border text-[11px] flex items-center gap-1.5 ${
                                 isMe
@@ -3698,6 +4175,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                     )
                   )}
                 </div>
+              </div>
               </div>
             </div>
             </React.Fragment>
@@ -4032,7 +4510,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                   <Edit2 className="w-3.5 h-3.5" />
                   <span>正在编辑消息</span>
                 </span>
-                {translationSettings?.autoTranslateOutbound !== false && (
+                {isChatTransEnabled && translationSettings?.autoTranslateOutbound !== false && (
                   <label className="inline-flex items-center gap-1 text-[11px] font-normal text-[#475569] dark:text-[#b4c6d8] aurora:text-[#b7d0d8] cursor-pointer select-none">
                     <input
                       type="checkbox"
@@ -4064,8 +4542,12 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
         )}
 
         {/* Attachment Menu Popup */}
-        {isAttachmentMenuOpen && (
-          <div className="absolute bottom-24 left-4 bg-white dark:bg-[#0e1726] aurora:bg-[#101c23] rounded-2xl shadow-2xl border border-[#e2e8f0] dark:border-[#1e3148] aurora:border-[#203742] p-2 flex flex-col gap-1 z-30 animate-in fade-in zoom-in-95 duration-150 text-xs select-none">
+        {isAttachmentMenuOpen && attachmentMenuPos && typeof document !== 'undefined' && createPortal(
+          <div
+            ref={attachmentMenuRef}
+            style={{ top: `${attachmentMenuPos.top}px`, left: `${attachmentMenuPos.left}px` }}
+            className="fixed z-[9990] w-44 bg-white dark:bg-[#0e1726] aurora:bg-[#101c23] rounded-2xl shadow-2xl border border-[#e2e8f0] dark:border-[#1e3148] aurora:border-[#203742] p-2 flex flex-col gap-1 animate-in fade-in zoom-in-95 duration-150 text-xs select-none"
+          >
             <button
               type="button"
               onClick={() => {
@@ -4110,7 +4592,8 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
               <FileText className="w-4 h-4 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#5eead4]" />
               <span>文档与文件</span>
             </button>
-          </div>
+          </div>,
+          document.body
         )}
 
         {/* Hidden File Inputs */}
@@ -4208,6 +4691,10 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
             <button
               type="button"
               onClick={() => {
+                if (!isChatTransEnabled) {
+                  onToggleChatTranslation?.(chat.id, true);
+                  return;
+                }
                 if (onOpenTranslation) {
                   onOpenTranslation();
                 } else {
@@ -4215,15 +4702,21 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                   setIsLangMenuOpen((v) => !v);
                 }
               }}
-              title="配置发信自动翻译语言"
+              title={isChatTransEnabled ? '配置发信自动翻译语言' : `当前${chatTransScopeLabel}已关闭，点击重新开启`}
               className={`inline-flex items-center gap-1 px-2 py-1 rounded-lg border transition-colors cursor-pointer shrink-0 ${
-                activeRightPanel === 'translation'
-                  ? 'bg-[#e8f3ff] border-[#bfdbfe] text-[#2481cc] dark:bg-[#132234] dark:border-[#2ba0ff]/45 dark:text-[#2ba0ff] aurora:bg-[#112e37] aurora:border-[#2dd4bf]/50 aurora:text-[#5eead4]'
-                  : 'border-transparent text-[#475569] hover:text-[#2481cc] hover:bg-[#f1f5f9] dark:text-[#94a3b8] dark:hover:text-[#2ba0ff] dark:hover:bg-[#101c2d] aurora:text-[#7e9aa5] aurora:hover:text-[#5eead4] aurora:hover:bg-[#12222a]'
+                !isChatTransEnabled
+                  ? 'border-transparent text-[#64748b] hover:text-[#2481cc] hover:bg-[#f1f5f9] dark:text-[#7b93ad] dark:hover:text-[#2ba0ff] dark:hover:bg-[#101c2d] aurora:text-[#7e9aa5] aurora:hover:text-[#5eead4] aurora:hover:bg-[#12222a]'
+                  : activeRightPanel === 'translation'
+                    ? 'bg-[#e8f3ff] border-[#bfdbfe] text-[#2481cc] dark:bg-[#132234] dark:border-[#2ba0ff]/45 dark:text-[#2ba0ff] aurora:bg-[#112e37] aurora:border-[#2dd4bf]/50 aurora:text-[#5eead4]'
+                    : 'border-transparent text-[#475569] hover:text-[#2481cc] hover:bg-[#f1f5f9] dark:text-[#94a3b8] dark:hover:text-[#2ba0ff] dark:hover:bg-[#101c2d] aurora:text-[#7e9aa5] aurora:hover:text-[#5eead4] aurora:hover:bg-[#12222a]'
               }`}
             >
-              <Languages className="w-3.5 h-3.5 text-[#16a34a] dark:text-emerald-400" />
-              <span>发送时自动译为: {getLanguageDisplayName(outboundTargetLang)}</span>
+              <Languages className={`w-3.5 h-3.5 ${isChatTransEnabled ? 'text-[#16a34a] dark:text-emerald-400' : 'text-[#94a3b8] dark:text-[#64748b]'}`} />
+              <span>
+                {isChatTransEnabled
+                  ? `发送时自动译为: ${getLanguageDisplayName(outboundTargetLang)}`
+                  : `${chatTransScopeLabel}已关闭 · 直接发送原文（点击开启）`}
+              </span>
             </button>
           </div>
 
@@ -4261,6 +4754,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
             {/* Left Tools */}
             <div className="flex items-center gap-1">
               <button
+                ref={attachmentButtonRef}
                 type="button"
                 onClick={() => setIsAttachmentMenuOpen(!isAttachmentMenuOpen)}
                 title="附加文件、图片或文档"
@@ -4274,6 +4768,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
               </button>
 
               <button
+                ref={emojiButtonRef}
                 type="button"
                 onClick={() => setShowEmojiPicker(!showEmojiPicker)}
                 title="表情与贴纸"
@@ -4357,6 +4852,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
         onSelectEmoji={(emoji) => setInputText((prev) => prev + emoji)}
         onSelectSticker={handleSendSticker}
         accountId={currentAccountId}
+        anchorRef={emojiButtonRef}
       />
 
 
@@ -4389,9 +4885,9 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
       />
 
       {/* Telegram Message Context Menu Popup (Right-Click) */}
-      {messageContextMenu && (
+      {messageContextMenu && typeof document !== 'undefined' && createPortal(
         <div
-          className="fixed z-50 bg-white dark:bg-[#0e1726] aurora:bg-[#101c23] border border-[#e2e8f0] dark:border-[#1e3148] aurora:border-[#203742] rounded-2xl p-1.5 shadow-2xl min-w-[170px] text-xs select-none animate-in fade-in zoom-in-95 duration-100"
+          className="fixed z-[9995] bg-white dark:bg-[#0e1726] aurora:bg-[#101c23] border border-[#e2e8f0] dark:border-[#1e3148] aurora:border-[#203742] rounded-2xl p-1.5 shadow-2xl min-w-[170px] text-xs select-none animate-in fade-in zoom-in-95 duration-100"
           style={{
             left: `${messageContextMenu.x}px`,
             top: `${messageContextMenu.y}px`,
@@ -4544,7 +5040,8 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
             <Trash2 className="w-4 h-4 text-rose-500" />
             <span>删除单条消息</span>
           </button>
-        </div>
+        </div>,
+        document.body
       )}
 
       {/* Telegram Confirmation Modal for Deleting Single Message */}
@@ -4796,6 +5293,139 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
           </div>
         </div>
       )}
+
+      {/* Telegram Group / Channel Invite Preview & Join Modal */}
+      {inviteModalState &&
+        createPortal(
+          <div
+            className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-black/55 backdrop-blur-xs"
+            onClick={() => !inviteModalState.joining && setInviteModalState(null)}
+          >
+            <div
+              className="w-full max-w-sm rounded-2xl border border-[#e2e8f0] dark:border-[#1e3148] aurora:border-[#1f3b44] bg-white dark:bg-[#0f172a] aurora:bg-[#0d1c22] shadow-2xl overflow-hidden"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="flex items-center justify-between px-4 py-3 border-b border-[#e2e8f0] dark:border-[#1e3148] aurora:border-[#1c353d]">
+                <div className="flex items-center gap-2 text-sm font-semibold text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8]">
+                  {inviteModalState.preview?.isChannel ? (
+                    <Megaphone className="w-4 h-4 text-[#2481cc] dark:text-[#38bdf8] aurora:text-[#5eead4]" />
+                  ) : (
+                    <Users className="w-4 h-4 text-[#2481cc] dark:text-[#38bdf8] aurora:text-[#5eead4]" />
+                  )}
+                  <span>{inviteModalState.preview?.isChannel ? '频道邀请' : '群组邀请'}</span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => !inviteModalState.joining && setInviteModalState(null)}
+                  className="p-1 rounded-lg text-[#64748b] dark:text-[#94a3b8] hover:bg-black/5 dark:hover:bg-white/10 transition-colors cursor-pointer"
+                  aria-label="关闭"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+
+              <div className="p-5">
+                {inviteModalState.loading ? (
+                  <div className="py-8 flex flex-col items-center justify-center gap-2.5 text-[#64748b] dark:text-[#94a3b8] aurora:text-[#8eb2bd]">
+                    <RotateCw className="w-6 h-6 animate-spin text-[#2481cc] dark:text-[#38bdf8] aurora:text-[#5eead4]" />
+                    <span className="text-xs">正在读取 Telegram 群组/频道信息...</span>
+                  </div>
+                ) : inviteModalState.error && !inviteModalState.preview ? (
+                  <div className="py-4 flex flex-col items-center text-center gap-2.5">
+                    <ShieldAlert className="w-8 h-8 text-rose-500" />
+                    <p className="text-xs leading-relaxed text-[#475569] dark:text-[#cbd5e1] aurora:text-[#b7d0d8]">
+                      {inviteModalState.error}
+                    </p>
+                  </div>
+                ) : (
+                  <div className="flex flex-col items-center text-center">
+                    <div
+                      className="w-16 h-16 rounded-full flex items-center justify-center text-white text-lg font-bold shadow-md overflow-hidden relative mb-3"
+                      style={{ backgroundColor: inviteModalState.preview?.chat?.avatarBg || '#2481cc' }}
+                    >
+                      <span>{(inviteModalState.preview?.title || 'TG').slice(0, 2).toUpperCase()}</span>
+                      {inviteModalState.preview?.chat?.avatarUrl && (
+                        <img
+                          src={resolveDisplayUrl(inviteModalState.preview.chat.avatarUrl)}
+                          alt={inviteModalState.preview.title || 'Group'}
+                          className="w-full h-full object-cover absolute inset-0"
+                          onError={(e) => {
+                            e.currentTarget.style.display = 'none';
+                          }}
+                        />
+                      )}
+                    </div>
+                    <h3 className="text-base font-bold text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] break-words">
+                      {inviteModalState.preview?.title || 'Telegram 群组'}
+                    </h3>
+                    <div className="mt-1 text-xs text-[#64748b] dark:text-[#94a3b8] aurora:text-[#8eb2bd]">
+                      {inviteModalState.preview?.isChannel ? '频道' : '群组'}
+                      {typeof inviteModalState.preview?.participantsCount === 'number'
+                        ? ` · ${inviteModalState.preview.participantsCount.toLocaleString()} 位成员`
+                        : ''}
+                    </div>
+                    {inviteModalState.preview?.about && (
+                      <p className="mt-3 text-xs leading-relaxed text-[#475569] dark:text-[#cbd5e1] aurora:text-[#b7d0d8] bg-[#f8fafc] dark:bg-[#132234] aurora:bg-[#10262d] px-3 py-2 rounded-xl w-full text-left whitespace-pre-wrap break-words max-h-28 overflow-y-auto">
+                        {inviteModalState.preview.about}
+                      </p>
+                    )}
+                    {inviteModalState.preview?.requestSent ? (
+                      <div className="mt-3 w-full rounded-xl bg-emerald-500/10 border border-emerald-500/30 px-3 py-2 text-xs text-emerald-600 dark:text-emerald-400 flex items-center justify-center gap-1.5">
+                        <Clock className="w-3.5 h-3.5 shrink-0" />
+                        <span>已提交入群申请，请等待管理员批准</span>
+                      </div>
+                    ) : inviteModalState.preview?.requestNeeded && !inviteModalState.preview?.alreadyMember ? (
+                      <div className="mt-3 w-full rounded-xl bg-amber-500/10 border border-amber-500/30 px-3 py-2 text-xs text-amber-600 dark:text-amber-400">
+                        该群组开启了入群审核，点击加入后需管理员审批
+                      </div>
+                    ) : null}
+                    {inviteModalState.error && (
+                      <div className="mt-3 w-full rounded-xl bg-rose-500/10 border border-rose-500/30 px-3 py-2 text-xs text-rose-500">
+                        {inviteModalState.error}
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                <div className="mt-5 flex items-center justify-end gap-2">
+                  <button
+                    type="button"
+                    disabled={inviteModalState.joining}
+                    onClick={() => setInviteModalState(null)}
+                    className="px-3.5 py-2 rounded-xl text-xs font-medium text-[#475569] dark:text-[#cbd5e1] aurora:text-[#b7d0d8] hover:bg-black/5 dark:hover:bg-white/10 transition-colors cursor-pointer disabled:opacity-50"
+                  >
+                    {inviteModalState.preview?.requestSent ? '关闭' : '取消'}
+                  </button>
+                  {!inviteModalState.loading && inviteModalState.preview && !inviteModalState.preview.requestSent && (
+                    <button
+                      type="button"
+                      disabled={inviteModalState.joining}
+                      onClick={() => void handleConfirmJoinInvite()}
+                      className="px-4 py-2 rounded-xl text-xs font-semibold text-white bg-[#2481cc] hover:bg-[#1e6eb0] dark:bg-[#0284c7] dark:hover:bg-[#0369a1] aurora:bg-[#0d9488] aurora:hover:bg-[#0f766e] transition-colors cursor-pointer disabled:opacity-60 flex items-center gap-1.5"
+                    >
+                      {inviteModalState.joining ? (
+                        <>
+                          <RotateCw className="w-3.5 h-3.5 animate-spin" />
+                          <span>正在加入...</span>
+                        </>
+                      ) : inviteModalState.preview.alreadyMember ? (
+                        <>
+                          <ExternalLink className="w-3.5 h-3.5" />
+                          <span>打开会话</span>
+                        </>
+                      ) : inviteModalState.preview.requestNeeded ? (
+                        <span>申请加入</span>
+                      ) : (
+                        <span>{inviteModalState.preview.isChannel ? '订阅频道' : '加入群组'}</span>
+                      )}
+                    </button>
+                  )}
+                </div>
+              </div>
+            </div>
+          </div>,
+          document.body
+        )}
     </div>
   );
 };

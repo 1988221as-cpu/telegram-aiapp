@@ -185,6 +185,11 @@ function mapCloudDialogToChat(d: any, accountId: string, existing?: Chat): Chat 
     readInboxMaxId: typeof d.readInboxMaxId === 'number' ? d.readInboxMaxId : existing?.readInboxMaxId,
     sourceLang: existing?.sourceLang || d.sourceLang || 'Auto',
     targetLang: existing?.targetLang || d.targetLang || 'Auto',
+    ...(typeof existing?.translationEnabled === 'boolean'
+      ? { translationEnabled: existing.translationEnabled }
+      : typeof d.translationEnabled === 'boolean'
+        ? { translationEnabled: d.translationEnabled }
+        : {}),
   };
 }
 
@@ -271,10 +276,19 @@ function mergeCloudMessagesWithLocal(
     }
     if (lm) {
       matchedLocalIds.add(lm.id);
+      const isLegacyPlaceholder = (name?: string) =>
+        !name || name === '客户' || name === '对方' || name === '我方' || name === 'Telegram 联系人';
       return {
         ...lm,
         ...cm,
         id: cm.id || lm.id,
+        senderId: cm.senderId || lm.senderId,
+        senderAvatarUrl: cm.senderAvatarUrl || lm.senderAvatarUrl,
+        senderName: !isLegacyPlaceholder(cm.senderName)
+          ? cm.senderName
+          : !isLegacyPlaceholder(lm.senderName)
+          ? lm.senderName
+          : '',
         translatedText: lm.translatedText || cm.translatedText,
         sttText: lm.sttText || cm.sttText,
         voiceName: lm.voiceName || cm.voiceName,
@@ -351,6 +365,8 @@ function normalizeLoadedTranslationSettings(raw: any): TranslationSettings {
   const merged: TranslationSettings = {
     ...INITIAL_TRANSLATION_SETTINGS,
     ...raw,
+    autoTranslateGroups: raw.autoTranslateGroups !== false,
+    autoTranslatePrivate: raw.autoTranslatePrivate !== false,
     preferredEngine: normalizedEngine,
     geminiModel: normalizedGemmaModel,
   };
@@ -1563,6 +1579,11 @@ export default function App() {
                   lastTime: dbc.lastTime,
                   sourceLang: existing.sourceLang || dbc.sourceLang || 'Auto',
                   targetLang: existing.targetLang || dbc.targetLang || 'Auto',
+                  ...(typeof existing.translationEnabled === 'boolean'
+                    ? { translationEnabled: existing.translationEnabled }
+                    : typeof dbc.translationEnabled === 'boolean'
+                      ? { translationEnabled: dbc.translationEnabled }
+                      : {}),
                 });
               } else {
                 map.set(bucketKey, dbc);
@@ -1810,7 +1831,14 @@ export default function App() {
       ? activeChatForBackfill.sourceLang
       : 'Auto';
   const backfillHistoryEngine = 'google' as const;
-  const backfillScopeKey = `${activeAccountId}::${activeChatId || ''}::${backfillTargetLang}::${backfillSourceLang}::${backfillHistoryEngine}::${translationSettings.autoTranslateInbound !== false}::${translationSettings.googleApiKey || ''}`;
+  const activeChatIsGroup = Boolean(activeChatForBackfill?.isGroup || activeChatForBackfill?.isChannel);
+  const isActiveChatTranslationEnabled =
+    typeof activeChatForBackfill?.translationEnabled === 'boolean'
+      ? activeChatForBackfill.translationEnabled
+      : activeChatIsGroup
+        ? translationSettings.autoTranslateGroups !== false
+        : translationSettings.autoTranslatePrivate !== false;
+  const backfillScopeKey = `${activeAccountId}::${activeChatId || ''}::${backfillTargetLang}::${backfillSourceLang}::${backfillHistoryEngine}::${translationSettings.autoTranslateInbound !== false}::${isActiveChatTranslationEnabled}::${translationSettings.googleApiKey || ''}`;
 
   useEffect(() => {
     return () => {
@@ -1829,6 +1857,7 @@ export default function App() {
   useEffect(() => {
     if (!isMemberAuthenticated || !activeChatId || !activeAccountId) return;
     if (translationSettings.autoTranslateInbound === false) return;
+    if (!isActiveChatTranslationEnabled) return;
 
     if (backfillScopeKeyRef.current !== backfillScopeKey || !backfillAbortRef.current) {
       if (backfillAbortRef.current) {
@@ -2337,7 +2366,9 @@ export default function App() {
               accountId: targetAccountId,
               telegramMessageId: typeof upd.telegramMessageId === 'number' ? upd.telegramMessageId : undefined,
               sender: upd.sender || 'peer',
-              senderName: isOfficialNotice ? officialTitle : (upd.senderName || 'Telegram 联系人'),
+              senderName: isOfficialNotice ? officialTitle : (upd.senderName || ''),
+              senderId: upd.senderId,
+              senderAvatarUrl: upd.senderAvatarUrl,
               text: upd.text || '',
               translatedText: upd.translatedText,
               isAudio: Boolean(upd.isAudio),
@@ -2474,8 +2505,23 @@ export default function App() {
               trimmedIncomingText.startsWith('🎬') ||
               trimmedIncomingText.startsWith('📁');
 
+            const incomingIsGroup = Boolean(
+              matchedChatForLang?.isGroup ||
+                matchedChatForLang?.isChannel ||
+                upd.isGroup ||
+                upd.isChannel ||
+                /^tg_-/.test(targetChatId)
+            );
+            const isIncomingChatTransEnabled =
+              typeof matchedChatForLang?.translationEnabled === 'boolean'
+                ? matchedChatForLang.translationEnabled
+                : incomingIsGroup
+                  ? currentTransSettings.autoTranslateGroups !== false
+                  : currentTransSettings.autoTranslatePrivate !== false;
+
             if (
               currentTransSettings.autoTranslateInbound !== false &&
+              isIncomingChatTransEnabled &&
               incomingMsg.sender === 'peer' &&
               !isMediaPlaceholder &&
               !incomingMsg.translatedText
@@ -3119,19 +3165,50 @@ export default function App() {
 
   // Update per-chat translation language pair strictly scoped to activeAccountId (never mutate global defaultSourceLang/defaultTargetLang)
   const handleUpdateChatLanguage = (chatId: string, sourceLang: string, targetLang: string) => {
+    let curEnabled: boolean | undefined;
     setChats((prev) => {
-      const updated = prev.map((c) =>
-        c.id === chatId && (!activeAccountId || c.accountId === activeAccountId)
-          ? { ...c, sourceLang, targetLang }
-          : c
-      );
+      const updated = prev.map((c) => {
+        if (c.id === chatId && (!activeAccountId || c.accountId === activeAccountId)) {
+          curEnabled = c.translationEnabled;
+          return { ...c, sourceLang, targetLang };
+        }
+        return c;
+      });
       if (isHydrated) {
         secureSetItemSync('tg_pro_chats', updated);
       }
       return updated;
     });
     if (isMemberAuthenticated) {
-      saveChatLanguagePrefApi(chatId, sourceLang, targetLang, activeAccountId).catch(() => {});
+      saveChatLanguagePrefApi(
+        chatId,
+        sourceLang,
+        targetLang,
+        activeAccountId,
+        typeof curEnabled === 'boolean' ? curEnabled : null
+      ).catch(() => {});
+    }
+  };
+
+  const handleToggleChatTranslation = (chatId: string, enabled: boolean) => {
+    let curSource = 'Auto';
+    let curTarget = 'Auto';
+    setChats((prev) => {
+      const updated = prev.map((c) => {
+        if (c.id === chatId && (!activeAccountId || c.accountId === activeAccountId)) {
+          curSource = c.sourceLang || 'Auto';
+          curTarget = c.targetLang || 'Auto';
+          return { ...c, translationEnabled: enabled };
+        }
+        return c;
+      });
+      if (isHydrated) {
+        secureSetItemSync('tg_pro_chats', updated);
+      }
+      return updated;
+    });
+    if (isMemberAuthenticated) {
+      saveChatLanguagePrefApi(chatId, curSource, curTarget, activeAccountId, enabled).catch(() => {});
     }
   };
 
@@ -4333,6 +4410,7 @@ export default function App() {
           onSendMessage={handleSendMessage}
           onCloseChat={() => setActiveChatId(null)}
           onUpdateChatLanguage={handleUpdateChatLanguage}
+          onToggleChatTranslation={handleToggleChatTranslation}
           onOpenTranslation={() => toggleRightPanel('translation')}
           onOpenCustomLLM={() => toggleRightPanel('llm')}
           customLLMConfig={customLLMConfig}
@@ -4367,6 +4445,7 @@ export default function App() {
           onTogglePinChat={handleTogglePinChat}
           onUpdateChatTitle={handleUpdateChatTitle}
           onAddContact={handleAddContact}
+          onJoinOrOpenChat={handleCreateGroup}
           onRemoveContact={handleRemoveContact}
           onChatInfoUpdated={(chatId, patch) => {
             setChats((prev) =>
