@@ -105,6 +105,8 @@ import {
   saveScopedContacts,
   isSignedResourceUrl,
   refreshSignedResourceUrlsApi,
+  checkAppUpdateApi,
+  type AppUpdateCheckResult,
 } from './services/apiService';
 
 
@@ -558,6 +560,9 @@ export default function App() {
   const [isContactsOpen, setIsContactsOpen] = useState(false);
   const [isCallsOpen, setIsCallsOpen] = useState(false);
   const [isTelegramSettingsOpen, setIsTelegramSettingsOpen] = useState(false);
+  const [appUpdateInfo, setAppUpdateInfo] = useState<AppUpdateCheckResult | null>(null);
+  const [isUpdateModalOpen, setIsUpdateModalOpen] = useState(false);
+  const hasCheckedUpdateOnBootRef = useRef(false);
 
   // Member authentication gate state (credentials & member count on server, chat data strictly local)
   const [isAuthChecking, setIsAuthChecking] = useState(true);
@@ -1464,6 +1469,26 @@ export default function App() {
       isMounted = false;
       clearTimeout(initialRetryTimer);
       clearInterval(statusPollTimer);
+    };
+  }, [isMemberAuthenticated]);
+
+  // Check GitHub Releases once after login (non-blocking, respects dismissed version)
+  useEffect(() => {
+    if (!isMemberAuthenticated || hasCheckedUpdateOnBootRef.current) return;
+    hasCheckedUpdateOnBootRef.current = true;
+    let cancelled = false;
+    checkAppUpdateApi()
+      .then((res) => {
+        if (cancelled || !res?.ok || !res.hasUpdate || !res.latestVersion) return;
+        try {
+          if (localStorage.getItem('tg_dismissed_update_version') === res.latestVersion) return;
+        } catch {}
+        setAppUpdateInfo(res);
+        setIsUpdateModalOpen(true);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
     };
   }, [isMemberAuthenticated]);
 
@@ -4828,6 +4853,10 @@ export default function App() {
         onClose={() => setIsSystemSettingsOpen(false)}
         onOpenDatabase={() => setIsDatabaseOpen(true)}
         onOpenTranslation={() => openRightPanel('translation')}
+        onUpdateAvailable={(info) => {
+          setAppUpdateInfo(info);
+          setIsUpdateModalOpen(true);
+        }}
       />
 
       {/* 14. Telegram New Group Dialog */}
@@ -4930,6 +4959,87 @@ export default function App() {
           </button>
         </div>
       )}
+
+      {/* Lightweight GitHub Release Update Prompt Modal */}
+      {isUpdateModalOpen && appUpdateInfo?.hasUpdate && (() => {
+        const safeHref = (raw?: string) => {
+          try {
+            if (!raw) return 'https://github.com/1988221as-cpu/telegram-aiapp/releases';
+            const u = new URL(raw);
+            return u.protocol === 'https:' ? u.toString() : 'https://github.com/1988221as-cpu/telegram-aiapp/releases';
+          } catch {
+            return 'https://github.com/1988221as-cpu/telegram-aiapp/releases';
+          }
+        };
+        const downloadHref = safeHref(appUpdateInfo.downloadUrl);
+        const releaseHref = safeHref(appUpdateInfo.releaseUrl);
+        return (
+          <div className="fixed inset-0 z-[70] bg-black/55 backdrop-blur-xs flex items-center justify-center p-4 select-none">
+            <div className="w-full max-w-md bg-white dark:bg-[#0b131f] aurora:bg-[#0c151b] border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] rounded-2xl shadow-2xl overflow-hidden text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8]">
+              <div className="px-5 py-4 border-b border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] bg-[#f8fafc] dark:bg-[#0d1726] aurora:bg-[#0e1920] flex items-center justify-between">
+                <div className="text-sm font-bold">
+                  发现新版本 v{appUpdateInfo.latestVersion}
+                  <span className="ml-2 text-xs font-normal text-[#64748b] dark:text-[#7b93ad]">
+                    (当前 v{appUpdateInfo.currentVersion})
+                  </span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setIsUpdateModalOpen(false)}
+                  className="text-xs text-[#64748b] hover:text-[#0f172a] dark:text-[#7b93ad] dark:hover:text-white cursor-pointer"
+                >
+                  ✕
+                </button>
+              </div>
+              <div className="p-5 space-y-3 text-xs">
+                {appUpdateInfo.assetName && (
+                  <div className="text-[#475569] dark:text-[#b4c6d8]">
+                    安装包/便携版：<span className="font-mono font-medium">{appUpdateInfo.assetName}</span>
+                  </div>
+                )}
+                <div className="max-h-48 overflow-y-auto whitespace-pre-wrap rounded-xl bg-[#f8fafc] dark:bg-[#08101a] aurora:bg-[#081014] border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] p-3 text-[#334155] dark:text-[#b4c6d8] leading-relaxed select-text">
+                  {appUpdateInfo.releaseNotes?.trim() || '本次发布包含功能优化与问题修复，建议下载最新便携版覆盖使用。'}
+                </div>
+              </div>
+              <div className="px-5 py-3.5 border-t border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] bg-[#f8fafc] dark:bg-[#0d1726] aurora:bg-[#0e1920] flex items-center justify-between gap-2 text-xs">
+                <button
+                  type="button"
+                  onClick={() => {
+                    try {
+                      if (appUpdateInfo.latestVersion) {
+                        localStorage.setItem('tg_dismissed_update_version', appUpdateInfo.latestVersion);
+                      }
+                    } catch {}
+                    setIsUpdateModalOpen(false);
+                  }}
+                  className="text-[#64748b] hover:text-[#0f172a] dark:text-[#7b93ad] dark:hover:text-white cursor-pointer"
+                >
+                  忽略此版本
+                </button>
+                <div className="flex items-center gap-2">
+                  <a
+                    href={releaseHref}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="px-3 py-1.5 rounded-lg border border-[#cbd5e1] dark:border-[#1e3148] hover:border-[#2481cc] text-[#334155] dark:text-[#b4c6d8] font-medium"
+                  >
+                    查看 Release
+                  </a>
+                  <a
+                    href={downloadHref}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    onClick={() => setIsUpdateModalOpen(false)}
+                    className="px-3.5 py-1.5 rounded-lg bg-[#2481cc] hover:bg-[#1d6fb3] dark:bg-[#2ba0ff] dark:hover:bg-[#1e8ee8] aurora:bg-[#0d9488] aurora:hover:bg-[#0f766e] text-white font-semibold"
+                  >
+                    立即下载新版
+                  </a>
+                </div>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
     </div>
   );
 };

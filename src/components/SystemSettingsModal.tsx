@@ -18,6 +18,8 @@ import {
   getSystemProxyApi,
   saveSystemProxyApi,
   reconnectTelegramSessionsApi,
+  checkAppUpdateApi,
+  type AppUpdateCheckResult,
 } from '../services/apiService';
 import { getCryptoStorageSecurityInfo } from '../services/cryptoStorage';
 
@@ -26,6 +28,7 @@ interface SystemSettingsModalProps {
   onClose: () => void;
   onOpenDatabase?: () => void;
   onOpenTranslation?: () => void;
+  onUpdateAvailable?: (info: AppUpdateCheckResult) => void;
 }
 
 export const SystemSettingsModal: React.FC<SystemSettingsModalProps> = ({
@@ -33,6 +36,7 @@ export const SystemSettingsModal: React.FC<SystemSettingsModalProps> = ({
   onClose,
   onOpenDatabase,
   onOpenTranslation,
+  onUpdateAvailable,
 }) => {
   const [jwtMode, setJwtMode] = useState<'asymmetric' | 'hs256' | 'unconfigured' | null>(null);
   const [proxyEnabled, setProxyEnabled] = useState(false);
@@ -44,10 +48,13 @@ export const SystemSettingsModal: React.FC<SystemSettingsModalProps> = ({
   const [hasExistingPassword, setHasExistingPassword] = useState(false);
   const [isSavingProxy, setIsSavingProxy] = useState(false);
   const [proxyFeedback, setProxyFeedback] = useState<{ ok: boolean; text: string } | null>(null);
+  const [isCheckingUpdate, setIsCheckingUpdate] = useState(false);
+  const [updateCheckMessage, setUpdateCheckMessage] = useState<string | null>(null);
 
   useEffect(() => {
     if (!isOpen) {
       setProxyFeedback(null);
+      setUpdateCheckMessage(null);
       return;
     }
     let active = true;
@@ -116,6 +123,24 @@ export const SystemSettingsModal: React.FC<SystemSettingsModalProps> = ({
 
     setIsSavingProxy(false);
     setProxyFeedback({ ok: true, text: saveRes.message || '代理设置已保存' });
+  };
+
+  const handleManualCheckUpdate = async () => {
+    setIsCheckingUpdate(true);
+    setUpdateCheckMessage(null);
+    try {
+      const res = await checkAppUpdateApi();
+      if (!res.ok) {
+        setUpdateCheckMessage(res.error || '检查更新失败');
+      } else if (res.hasUpdate) {
+        setUpdateCheckMessage(`发现新版本 v${res.latestVersion}`);
+        onUpdateAvailable?.(res);
+      } else {
+        setUpdateCheckMessage(`已是最新版本 (v${res.currentVersion || APP_VERSION})`);
+      }
+    } finally {
+      setIsCheckingUpdate(false);
+    }
   };
 
   if (!isOpen) return null;
@@ -342,11 +367,26 @@ export const SystemSettingsModal: React.FC<SystemSettingsModalProps> = ({
         </div>
 
         {/* Footer */}
-        <div className="px-6 py-3 border-t border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] bg-[#f8fafc] dark:bg-[#0d1726] aurora:bg-[#0e1920] flex items-center justify-between shrink-0">
-          <span className="text-[11px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5]">HumanSense Internal Settings · v{APP_VERSION}</span>
+        <div className="px-6 py-3 border-t border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] bg-[#f8fafc] dark:bg-[#0d1726] aurora:bg-[#0e1920] flex items-center justify-between gap-3 shrink-0">
+          <div className="flex items-center gap-2.5 min-w-0">
+            <span className="text-[11px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] shrink-0">v{APP_VERSION}</span>
+            <button
+              type="button"
+              disabled={isCheckingUpdate}
+              onClick={handleManualCheckUpdate}
+              className="text-[11px] px-2 py-0.5 rounded-md border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf] hover:bg-[#e8f3ff] dark:hover:bg-[#132234] aurora:hover:bg-[#13252e] disabled:opacity-50 cursor-pointer transition-colors shrink-0"
+            >
+              {isCheckingUpdate ? '检查中...' : '检查更新'}
+            </button>
+            {updateCheckMessage && (
+              <span className="text-[11px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] truncate">
+                {updateCheckMessage}
+              </span>
+            )}
+          </div>
           <button
             onClick={onClose}
-            className="px-4 py-2 rounded-lg bg-[#2481cc] hover:bg-[#1d6fb3] dark:bg-[#2ba0ff] dark:hover:bg-[#1e8ee8] aurora:bg-[#0d9488] aurora:hover:bg-[#0f766e] text-white text-xs font-semibold shadow-xs cursor-pointer transition-colors"
+            className="px-4 py-2 rounded-lg bg-[#2481cc] hover:bg-[#1d6fb3] dark:bg-[#2ba0ff] dark:hover:bg-[#1e8ee8] aurora:bg-[#0d9488] aurora:hover:bg-[#0f766e] text-white text-xs font-semibold shadow-xs cursor-pointer transition-colors shrink-0"
           >
             完成并关闭
           </button>

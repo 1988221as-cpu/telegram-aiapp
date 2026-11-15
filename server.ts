@@ -18159,6 +18159,136 @@ app.post('/api/system/proxy', requireTenantAuth, async (req: Request, res: Respo
   }
 });
 
+function parseSemverTuple(rawVersion: string): [number, number, number] {
+  const clean = String(rawVersion || '')
+    .trim()
+    .replace(/^v/i, '')
+    .split('-')[0]
+    .split('+')[0];
+  const parts = clean.split('.').map((n) => {
+    const parsed = parseInt(n, 10);
+    return Number.isFinite(parsed) && parsed >= 0 ? parsed : 0;
+  });
+  return [parts[0] || 0, parts[1] || 0, parts[2] || 0];
+}
+
+function compareSemver(a: string, b: string): number {
+  const pa = parseSemverTuple(a);
+  const pb = parseSemverTuple(b);
+  for (let i = 0; i < 3; i++) {
+    if (pa[i] > pb[i]) return 1;
+    if (pa[i] < pb[i]) return -1;
+  }
+  return 0;
+}
+
+function readLocalAppVersion(): string {
+  const candidates = [
+    path.resolve(__dirname, 'package.json'),
+    path.resolve(__dirname, '..', 'package.json'),
+  ];
+  for (const pkgPath of candidates) {
+    try {
+      if (fs.existsSync(pkgPath)) {
+        const parsed = JSON.parse(fs.readFileSync(pkgPath, 'utf8'));
+        if (parsed && typeof parsed.version === 'string' && parsed.version.trim()) {
+          return parsed.version.trim();
+        }
+      }
+    } catch {}
+  }
+  return '1.0.0';
+}
+
+// Lightweight GitHub Releases version check (portable & installer compatible)
+app.get('/api/system/check-update', requireTenantAuth, async (_req: Request, res: Response) => {
+  const currentVersion = readLocalAppVersion();
+  const rawRepo = (process.env.GITHUB_UPDATE_REPO || '1988221as-cpu/telegram-aiapp').trim();
+  const repo = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(rawRepo)
+    ? rawRepo
+    : '1988221as-cpu/telegram-aiapp';
+  const fallbackReleaseUrl = `https://github.com/${repo}/releases`;
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 8000);
+  try {
+    const ghToken = (process.env.GITHUB_TOKEN || '').trim();
+    const ghRes = await fetch(`https://api.github.com/repos/${repo}/releases/latest`, {
+      headers: {
+        Accept: 'application/vnd.github+json',
+        'User-Agent': 'HumanSense-Updater',
+        ...(ghToken ? { Authorization: `Bearer ${ghToken}` } : {}),
+      },
+      signal: controller.signal,
+    });
+
+    if (ghRes.status === 404) {
+      return res.json({
+        ok: true,
+        hasUpdate: false,
+        currentVersion,
+        latestVersion: currentVersion,
+        noReleasesYet: true,
+        releaseUrl: fallbackReleaseUrl,
+        downloadUrl: fallbackReleaseUrl,
+      });
+    }
+
+    if (!ghRes.ok) {
+      return res.status(502).json({
+        ok: false,
+        currentVersion,
+        error: `GitHub 版本检查请求失败 (HTTP ${ghRes.status})`,
+      });
+    }
+
+    const release: any = await ghRes.json();
+    const latestTag = String(release?.tag_name || release?.name || '').trim();
+    const latestVersion = latestTag.replace(/^v/i, '') || currentVersion;
+    const releaseUrl =
+      typeof release?.html_url === 'string' && release.html_url.startsWith('https://')
+        ? release.html_url
+        : fallbackReleaseUrl;
+
+    const assets: any[] = Array.isArray(release?.assets) ? release.assets : [];
+    const exeAssets = assets.filter(
+      (a) =>
+        typeof a?.name === 'string' &&
+        /\.exe$/i.test(a.name) &&
+        !/^Uninstall/i.test(a.name) &&
+        typeof a?.browser_download_url === 'string' &&
+        a.browser_download_url.startsWith('https://')
+    );
+    const portableExe = exeAssets.find((a) => !/setup|installer/i.test(a.name));
+    const preferredAsset = portableExe || exeAssets[0] || null;
+    const downloadUrl = preferredAsset?.browser_download_url || releaseUrl;
+
+    const hasUpdate = Boolean(latestTag) && compareSemver(latestVersion, currentVersion) > 0;
+    return res.json({
+      ok: true,
+      hasUpdate,
+      currentVersion,
+      latestVersion,
+      tagName: latestTag || `v${latestVersion}`,
+      releaseName: String(release?.name || latestTag || `v${latestVersion}`),
+      releaseNotes: typeof release?.body === 'string' ? release.body.slice(0, 4000) : '',
+      publishedAt: typeof release?.published_at === 'string' ? release.published_at : undefined,
+      releaseUrl,
+      downloadUrl,
+      assetName: preferredAsset?.name || undefined,
+    });
+  } catch (err: any) {
+    const isAbort = err?.name === 'AbortError';
+    return res.status(504).json({
+      ok: false,
+      currentVersion,
+      error: isAbort ? '连接 GitHub 检测更新超时，请稍后再试' : err?.message || '检查更新失败',
+    });
+  } finally {
+    clearTimeout(timer);
+  }
+});
+
 export interface ExpiredTelegramAccountInfo {
   accountId: string;
   userId?: string;

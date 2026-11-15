@@ -2872,6 +2872,37 @@ export async function saveSystemProxyApi(payload: SystemProxyConfig & { preserve
   }
 }
 
+export interface AppUpdateCheckResult {
+  ok: boolean;
+  hasUpdate?: boolean;
+  currentVersion?: string;
+  latestVersion?: string;
+  tagName?: string;
+  releaseName?: string;
+  releaseNotes?: string;
+  publishedAt?: string;
+  releaseUrl?: string;
+  downloadUrl?: string;
+  assetName?: string;
+  noReleasesYet?: boolean;
+  error?: string;
+}
+
+export async function checkAppUpdateApi(): Promise<AppUpdateCheckResult> {
+  try {
+    const res = await fetchWithTimeout('/api/system/check-update', {
+      headers: getAuthHeaders(),
+    }, 10000);
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || !data?.ok) {
+      return { ok: false, error: data?.error || `检查更新失败 (HTTP ${res.status})` };
+    }
+    return data as AppUpdateCheckResult;
+  } catch (err: any) {
+    return { ok: false, error: err?.message || '检查更新连接失败' };
+  }
+}
+
 export async function downloadDatabaseBackup(bundleMode: 'client-encrypt' | 'sealed' = 'client-encrypt'): Promise<any> {
   try {
     const res = await fetchWithTimeout(
