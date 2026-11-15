@@ -73,6 +73,25 @@ import {
 } from '../services/apiService';
 import { sanitizeSafeResourceUrl } from '../services/urlSafety';
 
+const AI_SUGGESTION_COOLDOWN_MS = 60_000;
+const AI_SUGGESTION_COOLDOWN_STORAGE_KEY = 'tg_ai_suggestion_cooldown_until';
+
+function readAiSuggestionCooldownUntil(): number {
+  try {
+    const raw = localStorage.getItem(AI_SUGGESTION_COOLDOWN_STORAGE_KEY);
+    const ts = Number(raw || 0);
+    return Number.isFinite(ts) && ts > 0 ? ts : 0;
+  } catch {
+    return 0;
+  }
+}
+
+function getAiSuggestionRemainingSeconds(fallbackUntil = 0): number {
+  const until = Math.max(fallbackUntil, readAiSuggestionCooldownUntil());
+  const diff = until - Date.now();
+  return diff > 0 ? Math.ceil(diff / 1000) : 0;
+}
+
 function getTranslationErrorLabel(channel?: Message['translationErrorChannel']): string {
   switch (channel) {
     case 'live_gemini':
@@ -1162,6 +1181,8 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
 
   // AI Holographic Memory Suggestion State
   const [isGeneratingAi, setIsGeneratingAi] = useState(false);
+  const aiCooldownUntilRef = useRef<number>(readAiSuggestionCooldownUntil());
+  const [aiCooldownSeconds, setAiCooldownSeconds] = useState<number>(() => getAiSuggestionRemainingSeconds());
   const [isSending, setIsSending] = useState(false);
   const [aiSuggestion, setAiSuggestion] = useState<string | null>(null);
   const [aiSuggestionTranslation, setAiSuggestionTranslation] = useState<string | null>(null);
@@ -1170,6 +1191,18 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
   const [syncNotice, setSyncNotice] = useState<string | null>(null);
   const [failedAvatarUrls, setFailedAvatarUrls] = useState<Set<string>>(() => new Set());
   const syncNoticeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    if (aiCooldownSeconds <= 0) return;
+    const timer = setInterval(() => {
+      const remaining = getAiSuggestionRemainingSeconds(aiCooldownUntilRef.current);
+      setAiCooldownSeconds(remaining);
+      if (remaining <= 0) {
+        clearInterval(timer);
+      }
+    }, 1000);
+    return () => clearInterval(timer);
+  }, [aiCooldownSeconds > 0]);
 
   const showSyncNotice = (msg: string, durationMs = 4000) => {
     if (syncNoticeTimerRef.current) {
@@ -1429,7 +1462,13 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
   };
 
   const handleGenerateAiSuggestion = async () => {
-    if (!chat) return;
+    if (!chat || isGeneratingAi) return;
+    const remainingSec = getAiSuggestionRemainingSeconds(aiCooldownUntilRef.current);
+    if (remainingSec > 0) {
+      setAiCooldownSeconds(remainingSec);
+      showSyncNotice(`大模型冷却中（请 ${remainingSec} 秒后再试）`, 3000);
+      return;
+    }
     setIsGeneratingAi(true);
     setAiSuggestion(null);
     setAiSuggestionTranslation(null);
@@ -1465,6 +1504,12 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
         outboundTargetLang
       );
       if (res && res.replyText) {
+        const nextUntil = Date.now() + AI_SUGGESTION_COOLDOWN_MS;
+        aiCooldownUntilRef.current = nextUntil;
+        try {
+          localStorage.setItem(AI_SUGGESTION_COOLDOWN_STORAGE_KEY, String(nextUntil));
+        } catch {}
+        setAiCooldownSeconds(Math.ceil(AI_SUGGESTION_COOLDOWN_MS / 1000));
         setAiSuggestion(res.replyText);
         const refTargetLang =
           inboundTargetLang && inboundTargetLang !== 'Auto' ? inboundTargetLang : 'Chinese';
@@ -3602,7 +3647,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
 
       {/* Cloud Sync & Protection Notice Banner */}
       {syncNotice && (() => {
-        const isAlertNotice = /静默|中断|失败|断连|阻断|超时|未连通|异常|错误/.test(syncNotice);
+        const isAlertNotice = /静默|中断|失败|断连|阻断|超时|未连通|异常|错误|冷却/.test(syncNotice);
         return (
           <div
             className={`border-b px-4 py-2 text-xs flex items-center justify-between animate-in fade-in duration-150 ${
@@ -5262,15 +5307,27 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                 type="button"
                 onClick={handleGenerateAiSuggestion}
                 disabled={isGeneratingAi}
-                title="基于人设与最近30条对话生成 AI 拟真回复"
+                title={
+                  aiCooldownSeconds > 0
+                    ? `大模型冷却中（剩余 ${aiCooldownSeconds} 秒）`
+                    : '基于人设与最近30条对话生成 AI 拟真回复'
+                }
                 className={`flex items-center gap-1 px-2.5 h-8 rounded-lg text-xs font-medium transition-all cursor-pointer ${
                   isGeneratingAi
                     ? 'bg-[#e8f3ff] text-[#2481cc] dark:bg-[#2ba0ff]/20 dark:text-[#2ba0ff] aurora:bg-[#112e37] aurora:text-[#5eead4]'
+                    : aiCooldownSeconds > 0
+                    ? 'bg-[#f1f5f9] text-[#64748b] hover:bg-[#e2e8f0]/80 dark:bg-[#152438] dark:text-[#7b93ad] dark:hover:bg-[#1b2f48] aurora:bg-[#13252e] aurora:text-[#7e9aa5] aurora:hover:bg-[#18303b]'
                     : 'hover:bg-[#e8f3ff] text-[#2481cc] dark:text-[#2ba0ff] dark:hover:bg-[#2ba0ff]/15 aurora:text-[#5eead4] aurora:hover:bg-[#112e37]'
                 }`}
               >
                 <Sparkles className={`w-3.5 h-3.5 ${isGeneratingAi ? 'animate-spin' : ''}`} />
-                <span>{isGeneratingAi ? '生成中...' : 'AI 建议回复'}</span>
+                <span>
+                  {isGeneratingAi
+                    ? '生成中...'
+                    : aiCooldownSeconds > 0
+                    ? `AI 建议回复 (${aiCooldownSeconds}s)`
+                    : 'AI 建议回复'}
+                </span>
               </button>
             </div>
 

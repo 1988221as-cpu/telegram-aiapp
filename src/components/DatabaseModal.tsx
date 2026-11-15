@@ -66,13 +66,24 @@ function sanitizeBackupEntry(key: string, value: any): any {
     delete clone.hasGoogleApiKey;
     return clone;
   }
+  if (key === 'tg_master_voiceprint' || key.startsWith('tg_master_voiceprint::')) {
+    const clone = { ...value };
+    delete clone.cloneApiKey;
+    delete clone.hasCloneApiKey;
+    return clone;
+  }
   return value;
 }
 
 const SENSITIVE_CONFIG_BACKUP_KEYS = new Set(['tg_pro_llm_config', 'tg_pro_trans_settings']);
 
 function isSensitiveConfigBackupKey(key: string): boolean {
-  return SENSITIVE_CONFIG_BACKUP_KEYS.has(key) || key.startsWith('tg_pro_trans_settings::');
+  return (
+    SENSITIVE_CONFIG_BACKUP_KEYS.has(key) ||
+    key.startsWith('tg_pro_trans_settings::') ||
+    key === 'tg_master_voiceprint' ||
+    key.startsWith('tg_master_voiceprint::')
+  );
 }
 
 function shouldBackupLocalKey(key: string): boolean {
