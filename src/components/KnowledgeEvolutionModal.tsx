@@ -128,6 +128,14 @@ export const KnowledgeEvolutionModal: React.FC<KnowledgeEvolutionModalProps> = (
 }) => {
   const [activeTab, setActiveTab] = useState<ModalTab>('persona');
 
+  const isDualOffMode = Boolean(
+    customConfig && (customConfig.enabled === false || customConfig.explicitlyDisabled === true)
+  );
+  const isCustomLlmMode = Boolean(
+    customConfig && !isDualOffMode && customConfig.engineMode === 'custom'
+  );
+  const isCloudLlmMode = !isDualOffMode && !isCustomLlmMode;
+
   // 1. Persona State
   const [persona, setPersona] = useState<GlobalPersonaConfig | null>(null);
   const [isLoadingPersona, setIsLoadingPersona] = useState<boolean>(false);
@@ -213,6 +221,7 @@ export const KnowledgeEvolutionModal: React.FC<KnowledgeEvolutionModalProps> = (
     matchedKnowledge: any[];
     ragSources?: {
       cloudRagEnabled?: boolean;
+      localRagEnabled?: boolean;
       cloudRagMatchedCount?: number;
       localRagMatchedCount?: number;
     };
@@ -770,6 +779,8 @@ export const KnowledgeEvolutionModal: React.FC<KnowledgeEvolutionModalProps> = (
           ].map((tab) => {
             const Icon = tab.icon;
             const active = activeTab === tab.id;
+            const isLocalOnlyTab = tab.id === 'knowledge' || tab.id === 'transcripts';
+            const showInactiveTag = isLocalOnlyTab && !isCustomLlmMode;
             return (
               <button
                 key={tab.id}
@@ -780,11 +791,18 @@ export const KnowledgeEvolutionModal: React.FC<KnowledgeEvolutionModalProps> = (
                 } font-medium rounded-t-lg transition-all flex items-center gap-1.5 border-b-2 cursor-pointer whitespace-nowrap ${
                   active
                     ? 'text-[#0284c7] dark:text-[#2ba0ff] aurora:text-[#2dd4bf] border-[#2481cc] dark:border-[#2ba0ff] aurora:border-[#2dd4bf] bg-white dark:bg-[#0b131f] aurora:bg-[#0c151b]'
+                    : showInactiveTag
+                    ? 'text-[#94a3b8] dark:text-[#5b748f] aurora:text-[#5d7b86] border-transparent hover:text-[#475569] dark:hover:text-[#b4c6d8] aurora:hover:text-[#b7d0d8] hover:bg-black/5 dark:hover:bg-[#152438] aurora:hover:bg-[#152934]'
                     : 'text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] border-transparent hover:text-[#0f172a] dark:hover:text-[#eef4fb] aurora:hover:text-[#ecf6f8] hover:bg-black/5 dark:hover:bg-[#152438] aurora:hover:bg-[#152934]'
                 }`}
               >
                 <Icon className="w-3.5 h-3.5" />
                 <span>{tab.label}</span>
+                {showInactiveTag && (
+                  <span className="px-1 py-0.2 rounded text-[9.5px] font-medium bg-slate-200/80 dark:bg-[#162638] aurora:bg-[#152934] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5]">
+                    未生效
+                  </span>
+                )}
               </button>
             );
           })}
@@ -1144,6 +1162,22 @@ export const KnowledgeEvolutionModal: React.FC<KnowledgeEvolutionModalProps> = (
         {/* ==================== TAB 2: LOCAL KNOWLEDGE BASE (CRUD + REAL DOC UPLOAD) ==================== */}
         {activeTab === 'knowledge' && (
           <div className="space-y-4">
+            {!isCustomLlmMode && (
+              <div className="px-3.5 py-2.5 rounded-xl border border-amber-500/35 bg-amber-500/10 text-amber-800 dark:text-amber-300 text-xs flex items-start gap-2 leading-relaxed">
+                <AlertCircle className="w-4 h-4 shrink-0 mt-0.5 text-amber-600 dark:text-amber-400" />
+                <div>
+                  <span className="font-semibold">
+                    {isCloudLlmMode
+                      ? '当前为官方大模型（已使用云端自建知识库），软件本地知识库与整文范本仅在切换至「自定义大模型」时生效。'
+                      : '当前处于「双关状态」（官方大模型与自定义大模型均已关闭），软件本地知识库与整文范本仅在切换至「自定义大模型」时生效。'}
+                  </span>
+                  <span className="block text-[11px] opacity-85 mt-0.5">
+                    官方大模型默认只结合全局人设/个人资料、客户全息记忆与最近 30 条对话及云端自建知识库；您仍可在此提前维护本地知识条目，切换至自定义大模型后即刻注入。
+                  </span>
+                </div>
+              </div>
+            )}
+            <div className={!isCustomLlmMode ? 'space-y-4 opacity-60 transition-opacity' : 'space-y-4'}>
             {/* Metrics Row */}
             <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
               {[
@@ -1484,12 +1518,29 @@ export const KnowledgeEvolutionModal: React.FC<KnowledgeEvolutionModalProps> = (
                 ))}
               </div>
             )}
+            </div>
           </div>
         )}
 
         {/* ==================== TAB 3: FULL DIALOGUE TRANSCRIPTS & ONE-CLICK CLIENT IMPORT ==================== */}
         {activeTab === 'transcripts' && (
           <div className="space-y-4">
+            {!isCustomLlmMode && (
+              <div className="px-3.5 py-2.5 rounded-xl border border-amber-500/35 bg-amber-500/10 text-amber-800 dark:text-amber-300 text-xs flex items-start gap-2 leading-relaxed">
+                <AlertCircle className="w-4 h-4 shrink-0 mt-0.5 text-amber-600 dark:text-amber-400" />
+                <div>
+                  <span className="font-semibold">
+                    {isCloudLlmMode
+                      ? '当前为官方大模型（已使用云端自建知识库），软件本地知识库与整文范本仅在切换至「自定义大模型」时生效。'
+                      : '当前处于「双关状态」（官方大模型与自定义大模型均已关闭），软件本地知识库与整文范本仅在切换至「自定义大模型」时生效。'}
+                  </span>
+                  <span className="block text-[11px] opacity-85 mt-0.5">
+                    官方大模型仅传入全局人设/个人资料、客户全息记忆与最近 30 条对话，不会读取整文范本库；您仍可预先导入整理范本，切换至「自定义大模型」后即刻生效。
+                  </span>
+                </div>
+              </div>
+            )}
+            <div className={!isCustomLlmMode ? 'space-y-4 opacity-60 transition-opacity' : 'space-y-4'}>
             {transcriptFeedback && (
               <div
                 className={`px-3 py-2 rounded-lg border text-xs flex items-start gap-2 ${
@@ -1693,6 +1744,7 @@ export const KnowledgeEvolutionModal: React.FC<KnowledgeEvolutionModalProps> = (
                 })}
               </div>
             )}
+            </div>
           </div>
         )}
 
@@ -2007,7 +2059,9 @@ export const KnowledgeEvolutionModal: React.FC<KnowledgeEvolutionModalProps> = (
                         {sandboxResult.ragSources && (
                           <span className="px-1.5 py-0.5 rounded bg-[#e8f3ff] dark:bg-[#2ba0ff]/12 aurora:bg-[#112d36] text-[#0284c7] dark:text-[#7cc4ff] aurora:text-[#5eead4]">
                             {sandboxResult.ragSources.cloudRagEnabled
-                              ? `云端RAG(${sandboxResult.ragSources.cloudRagMatchedCount ?? 0}) + 本地RAG(${sandboxResult.ragSources.localRagMatchedCount ?? 0})`
+                              ? `云端RAG(${sandboxResult.ragSources.cloudRagMatchedCount ?? 0})`
+                              : sandboxResult.ragSources.localRagEnabled === false
+                              ? '未启用知识库'
                               : `本地RAG(${sandboxResult.ragSources.localRagMatchedCount ?? 0})`}
                           </span>
                         )}
@@ -2039,9 +2093,11 @@ export const KnowledgeEvolutionModal: React.FC<KnowledgeEvolutionModalProps> = (
                                     云端知识库 (Cloud RAG): {sandboxResult.ragSources.cloudRagMatchedCount ?? 0} 条
                                   </span>
                                 )}
-                                <span className="px-1.5 py-0.5 rounded bg-slate-500/10 text-[#475569] dark:text-[#b4c6d8] aurora:text-[#b7d0d8] font-medium">
-                                  本地知识库: {sandboxResult.ragSources.localRagMatchedCount ?? 0} 条
-                                </span>
+                                {(sandboxResult.ragSources.localRagEnabled ?? !sandboxResult.ragSources.cloudRagEnabled) && (
+                                  <span className="px-1.5 py-0.5 rounded bg-slate-500/10 text-[#475569] dark:text-[#b4c6d8] aurora:text-[#b7d0d8] font-medium">
+                                    本地知识库: {sandboxResult.ragSources.localRagMatchedCount ?? 0} 条
+                                  </span>
+                                )}
                               </div>
                             )}
                           </div>

@@ -17,7 +17,6 @@ import {
   DEFAULT_TELEGRAM_CLIENT_PREFS,
 } from './components/TelegramSettingsModal';
 import { MemberAuthModal } from './components/MemberAuthModal';
-import { TelegramVoiceCallModal } from './components/TelegramVoiceCallModal';
 import { getMasterVoiceprint, hydrateMasterVoiceprint } from './services/voiceprintStorage';
 import {
   INITIAL_ACCOUNTS,
@@ -335,6 +334,32 @@ function sanitizeCallRecords(list: any): TelegramCallRecord[] {
   return list.filter((rec) => rec && rec.id && !LEGACY_MOCK_CALL_IDS.has(String(rec.id)));
 }
 
+function getScopedTranslationSettingsKey(accountId?: string): string {
+  const clean = typeof accountId === 'string' ? accountId.trim() : '';
+  return clean ? `tg_pro_trans_settings::${clean}` : 'tg_pro_trans_settings';
+}
+
+function normalizeLoadedTranslationSettings(raw: any): TranslationSettings {
+  if (!raw || typeof raw !== 'object') return INITIAL_TRANSLATION_SETTINGS;
+  const rawEngine = raw.preferredEngine;
+  const normalizedEngine: 'gemini' | 'google' | 'custom_llm' =
+    rawEngine === 'google' || rawEngine === 'custom_llm' || rawEngine === 'gemini'
+      ? rawEngine
+      : 'gemini';
+  const rawModel = String(raw.geminiModel || '').toLowerCase();
+  const normalizedGemmaModel = rawModel.includes('31b') ? 'gemma-4-31b-it' : 'gemma-4-26b-a4b-it';
+  const merged: TranslationSettings = {
+    ...INITIAL_TRANSLATION_SETTINGS,
+    ...raw,
+    preferredEngine: normalizedEngine,
+    geminiModel: normalizedGemmaModel,
+  };
+  delete (merged as any).success;
+  delete (merged as any).config;
+  delete (merged as any).settings;
+  return merged;
+}
+
 export default function App() {
   // 1. Core State with LocalStorage Web Crypto AES-256 Encrypted Persistence
   const [accounts, setAccounts] = useState<Account[]>(() => {
@@ -407,21 +432,12 @@ export default function App() {
   });
 
   const [translationSettings, setTranslationSettings] = useState<TranslationSettings>(() => {
-    const saved = secureGetItemSync<any>('tg_pro_trans_settings');
-    if (!saved) return INITIAL_TRANSLATION_SETTINGS;
-    const normalizedEngine =
-      saved.preferredEngine === 'google' || saved.preferredEngine === 'custom_llm' || saved.preferredEngine === 'gemini'
-        ? saved.preferredEngine
-        : 'gemini';
-    const rawModel = String(saved.geminiModel || '').toLowerCase();
-    const normalizedGemmaModel = rawModel.includes('31b') ? 'gemma-4-31b-it' : 'gemma-4-26b-a4b-it';
-    return {
-      ...INITIAL_TRANSLATION_SETTINGS,
-      ...saved,
-      preferredEngine: normalizedEngine,
-      geminiModel: normalizedGemmaModel,
-    };
+    const saved =
+      secureGetItemSync<any>(getScopedTranslationSettingsKey(activeAccountId)) ??
+      secureGetItemSync<any>('tg_pro_trans_settings');
+    return normalizeLoadedTranslationSettings(saved);
   });
+  const translationAccountScopeRef = useRef<string>(activeAccountId);
 
   const [customLLMConfig, setCustomLLMConfig] = useState<CustomLLMConfig>(() => {
     const saved = secureGetItemSync<CustomLLMConfig>('tg_pro_llm_config');
@@ -491,10 +507,6 @@ export default function App() {
   }>({});
   const pendingAutoSelectAccountRef = useRef<string | null>(null);
 
-  // Telegram Voice Call modal state
-  const [isVoiceCallOpen, setIsVoiceCallOpen] = useState(false);
-  const [voiceCallTargetName, setVoiceCallTargetName] = useState<string>('');
-  const activeCallRecordIdRef = useRef<string | null>(null);
   const pendingMediaFilesRef = useRef<Map<string, File | Blob>>(new Map());
   const pendingMediaSaveMapRef = useRef<Map<string, Promise<boolean>>>(new Map());
   const restoredBlobUrlsRef = useRef<Map<string, string>>(new Map());
@@ -658,7 +670,7 @@ export default function App() {
 
   const rehydrateFromLocalStorage = async (isRestore = false) => {
     try {
-      const [savedAccs, savedChats, savedMsgs, savedTrans, savedLLM] = await Promise.all([
+      const [savedAccs, savedChats, savedMsgs, savedLegacyTrans, savedLLM] = await Promise.all([
         secureGetItemAsync<Account[]>('tg_pro_accounts'),
         secureGetItemAsync<Chat[]>('tg_pro_chats'),
         secureGetItemAsync<Record<string, Message[]>>('tg_pro_messages'),
@@ -683,6 +695,11 @@ export default function App() {
         setActiveAccountId(candidateId);
         setActiveApiAccount(candidateId);
       }
+
+      const savedScopedTrans = resolvedActiveAccId
+        ? await secureGetItemAsync<TranslationSettings>(getScopedTranslationSettingsKey(resolvedActiveAccId)).catch(() => null)
+        : null;
+      const savedTrans = savedScopedTrans || savedLegacyTrans;
 
       let nextChats: Chat[] | null = null;
       if (savedChats && Array.isArray(savedChats) && savedChats.length > 0) {
@@ -791,7 +808,7 @@ export default function App() {
       if (isRestore) {
         const [srvLlmRes, srvTransRes] = await Promise.all([
           rawSavedLlm ? fetchCustomLLMConfigApi().catch(() => null) : Promise.resolve(null),
-          rawSavedTrans ? fetchTranslationSettingsApi().catch(() => null) : Promise.resolve(null),
+          rawSavedTrans ? fetchTranslationSettingsApi(resolvedActiveAccId).catch(() => null) : Promise.resolve(null),
         ]);
         if (srvLlmRes && typeof srvLlmRes === 'object') {
           serverLlmUnwrapped =
@@ -879,10 +896,12 @@ export default function App() {
         delete (mergedTrans as any).success;
         delete (mergedTrans as any).config;
         delete (mergedTrans as any).settings;
+        translationAccountScopeRef.current = resolvedActiveAccId;
         setTranslationSettings(
           normalizedSavedLlm ? enforceTranslationEngineForLlm(normalizedSavedLlm, mergedTrans) : mergedTrans
         );
       } else if (normalizedSavedLlm) {
+        translationAccountScopeRef.current = resolvedActiveAccId;
         setTranslationSettings((prev) => enforceTranslationEngineForLlm(normalizedSavedLlm, prev));
       }
 
@@ -992,11 +1011,39 @@ export default function App() {
 
   useEffect(() => {
     if (!isHydrated) return;
-    secureSetItemSync('tg_pro_trans_settings', translationSettings);
+    const targetAcc = activeAccountIdRef.current;
+    if (translationAccountScopeRef.current !== targetAcc) return;
+    secureSetItemSync(getScopedTranslationSettingsKey(targetAcc), translationSettings);
     if (isMemberAuthenticated) {
-      syncTranslationSettingsApi(translationSettings).catch(() => {});
+      syncTranslationSettingsApi(translationSettings, targetAcc).catch(() => {});
     }
   }, [translationSettings, isHydrated, isMemberAuthenticated]);
+
+  const startupReconnectInFlightRef = useRef<boolean>(false);
+  const startupReconnectPromiseRef = useRef<Promise<void> | null>(null);
+  const triggerAccountDialogRefreshRef = useRef<((targetAccId?: string, opts?: { force?: boolean }) => Promise<void>) | null>(null);
+
+  const runHandshakeTelegramReconnect = () => {
+    if (startupReconnectPromiseRef.current) return startupReconnectPromiseRef.current;
+    startupReconnectInFlightRef.current = true;
+    const task = (async () => {
+      try {
+        const reconRes = await reconnectTelegramSessionsApi(false, false);
+        await syncTelegramAccountStatus();
+        const curAcc = activeAccountIdRef.current;
+        if (reconRes.ok && (reconRes.restoredCount || 0) > 0 && curAcc && curAcc.startsWith('acc_tg_')) {
+          void triggerAccountDialogRefreshRef.current?.(curAcc);
+        }
+      } catch {
+      } finally {
+        startupReconnectInFlightRef.current = false;
+        startupReconnectPromiseRef.current = null;
+        await syncTelegramAccountStatus().catch(() => {});
+      }
+    })();
+    startupReconnectPromiseRef.current = task;
+    return task;
+  };
 
   // Verify member session on mount before unlocking workspace & starting API sync
   useEffect(() => {
@@ -1011,13 +1058,17 @@ export default function App() {
         if ((handshake.authenticated && handshake.user) || (status.authenticated && status.user)) {
           const authUser = (handshake.authenticated && handshake.user ? handshake.user : status.user) || null;
           setCurrentMember(storedUser && authUser ? { ...storedUser, ...authUser } : authUser);
+          const targetAcc = activeAccountIdRef.current;
           const hasLocalLlm = Boolean(secureGetItemSync<CustomLLMConfig>('tg_pro_llm_config'));
-          const hasLocalTrans = Boolean(secureGetItemSync<TranslationSettings>('tg_pro_trans_settings'));
+          const hasLocalTrans = Boolean(
+            secureGetItemSync<TranslationSettings>(getScopedTranslationSettingsKey(targetAcc)) ||
+              secureGetItemSync<TranslationSettings>('tg_pro_trans_settings')
+          );
           let resolvedLlm: CustomLLMConfig | null = null;
           if (!hasLocalLlm || !hasLocalTrans) {
             const [serverLlm, serverTrans] = await Promise.all([
               !hasLocalLlm ? fetchCustomLLMConfigApi() : Promise.resolve(null),
-              !hasLocalTrans ? fetchTranslationSettingsApi() : Promise.resolve(null),
+              !hasLocalTrans ? fetchTranslationSettingsApi(targetAcc) : Promise.resolve(null),
             ]);
             if (!active) return;
             if (serverLlm && !hasLocalLlm) {
@@ -1062,12 +1113,15 @@ export default function App() {
               delete (mergedServerTrans as any).success;
               delete (mergedServerTrans as any).config;
               delete (mergedServerTrans as any).settings;
+              translationAccountScopeRef.current = activeAccountIdRef.current;
               setTranslationSettings((prev) =>
                 enforceTranslationEngineForLlm(resolvedLlm || customLLMConfigRef.current, { ...prev, ...mergedServerTrans })
               );
             }
           }
+          startupReconnectInFlightRef.current = true;
           setIsMemberAuthenticated(true);
+          void runHandshakeTelegramReconnect();
           setCustomLLMConfig((prev) =>
             !prev.enabled && !prev.explicitlyDisabled && prev.engineMode !== 'custom' && !prev.baseUrl?.trim()
               ? { ...prev, enabled: true, explicitlyDisabled: false, engineMode: 'cloud', enableKnowledgeBaseRAG: true }
@@ -1185,7 +1239,7 @@ export default function App() {
       statusRes.activeUsers.forEach((u) => {
         const nextStatus: 'online' | 'away' | 'offline' = u.isConnected
           ? 'online'
-          : u.isInMemoryConnected || statusRes.isRestoringSessions
+          : u.isInMemoryConnected || statusRes.isRestoringSessions || startupReconnectInFlightRef.current
             ? 'away'
             : 'offline';
         statusById.set(u.id, nextStatus);
@@ -1220,7 +1274,9 @@ export default function App() {
       const map = new Map<string, Account>();
       prev.forEach((a) => {
         if (a.id.startsWith('acc_tg_')) {
-          const realStatus = statusById.get(a.id) || 'offline';
+          const realStatus =
+            statusById.get(a.id) ||
+            (statusRes.isRestoringSessions || startupReconnectInFlightRef.current ? 'away' : 'offline');
           const nextBio =
             realStatus === 'expired'
               ? '会话已失效，请重新登录'
@@ -1259,7 +1315,6 @@ export default function App() {
 
   const lastDialogsSyncAtRef = useRef<Record<string, number>>({});
   const lastFloodToastAtRef = useRef<Record<string, number>>({});
-  const triggerAccountDialogRefreshRef = useRef<((targetAccId?: string, opts?: { force?: boolean }) => Promise<void>) | null>(null);
 
   const notifyTelegramFloodCooldown = (accId: string, errorMsg?: string, retryAfterSeconds?: number) => {
     const now = Date.now();
@@ -1334,7 +1389,7 @@ export default function App() {
     };
   }, [isMemberAuthenticated]);
 
-  // Account-level syncing: scoped contacts, DB chats, and MTProto dialogs (runs ONLY on activeAccountId/auth changes)
+  // Account-level syncing: scoped contacts, per-account translation settings, DB chats, and MTProto dialogs
   useEffect(() => {
     if (!activeAccountId || !isMemberAuthenticated) return;
     setActiveApiAccount(activeAccountId);
@@ -1342,6 +1397,35 @@ export default function App() {
     let isMounted = true;
     const targetAccId = activeAccountId;
     setContacts(getScopedContacts(targetAccId));
+    (async () => {
+      try {
+        const localScopedTrans = await secureGetItemAsync<TranslationSettings>(
+          getScopedTranslationSettingsKey(targetAccId)
+        );
+        if (!isMounted || activeAccountIdRef.current !== targetAccId) return;
+        if (localScopedTrans) {
+          translationAccountScopeRef.current = targetAccId;
+          setTranslationSettings(
+            enforceTranslationEngineForLlm(
+              customLLMConfigRef.current,
+              normalizeLoadedTranslationSettings(localScopedTrans)
+            )
+          );
+          return;
+        }
+        const serverScopedTrans = await fetchTranslationSettingsApi(targetAccId).catch(() => null);
+        if (!isMounted || activeAccountIdRef.current !== targetAccId) return;
+        if (serverScopedTrans) {
+          translationAccountScopeRef.current = targetAccId;
+          setTranslationSettings(
+            enforceTranslationEngineForLlm(
+              customLLMConfigRef.current,
+              normalizeLoadedTranslationSettings(serverScopedTrans)
+            )
+          );
+        }
+      } catch {}
+    })();
     if (targetAccId.startsWith('acc_tg_')) {
       fetchTelegramUserContactsApi(targetAccId).then((res) => {
         if (isMounted && activeAccountIdRef.current === targetAccId && res.ok && Array.isArray(res.contacts)) {
@@ -2915,13 +2999,23 @@ export default function App() {
     return { ok: true };
   };
 
-  // Switch Active Telegram Account (account-level useEffect handles real dialog sync & auto-selection cleanly without duplicate calls)
+  // Switch Active Telegram Account (account-level useEffect handles real dialog sync & per-account translation settings cleanly)
   const handleSelectAccount = (accountId: string) => {
     selectAccountSeqRef.current += 1;
     selectChatSeqRef.current += 1;
     pendingAutoSelectAccountRef.current = accountId;
     activeAccountIdRef.current = accountId;
     activeChatIdRef.current = null;
+    translationAccountScopeRef.current = accountId;
+    const nextLocalTrans =
+      secureGetItemSync<any>(getScopedTranslationSettingsKey(accountId)) ??
+      secureGetItemSync<any>('tg_pro_trans_settings');
+    setTranslationSettings(
+      enforceTranslationEngineForLlm(
+        customLLMConfigRef.current,
+        normalizeLoadedTranslationSettings(nextLocalTrans)
+      )
+    );
     setActiveAccountId(accountId);
     setActiveApiAccount(accountId);
     setActiveChatId(null);
@@ -2997,6 +3091,7 @@ export default function App() {
     scheduleRevokeBlobUrls(removedAccountBlobUrls);
 
     clearAccountLocalCache(id, unsharedRemovedChatIds);
+    secureRemoveItem(getScopedTranslationSettingsKey(id));
     void clearAccountPendingMediaBlobs(id);
 
     setAccounts(remaining);
@@ -4098,25 +4193,6 @@ export default function App() {
     setIsContactsOpen(false);
   };
 
-  const handleStartCall = (contactName: string) => {
-    const recId = `call_${Date.now()}`;
-    const newRecord: TelegramCallRecord = {
-      id: recId,
-      accountId: activeAccountId,
-      contactName,
-      avatarBg: '#2ba0ff',
-      avatarInitial: contactName.slice(0, 2).toUpperCase(),
-      type: 'outgoing',
-      duration: '00:00',
-      timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false }),
-    };
-    activeCallRecordIdRef.current = recId;
-    setCallRecords((prev) => [newRecord, ...prev]);
-    setIsCallsOpen(false);
-    setVoiceCallTargetName(contactName);
-    setIsVoiceCallOpen(true);
-  };
-
   const handleUpdateCurrentAccount = (updated: Partial<Account>, targetAccountId?: string) => {
     const idToUpdate = targetAccountId || activeAccountId;
     setAccounts((prev) =>
@@ -4320,26 +4396,6 @@ export default function App() {
             }
           }}
           sendWithEnter={clientPrefs.sendWithEnter}
-          onOpenVoiceCall={() => {
-            const targetName = currentChat?.title || 'Telegram 用户';
-            const recId = `call_${Date.now()}`;
-            activeCallRecordIdRef.current = recId;
-            setCallRecords((prev) => [
-              {
-                id: recId,
-                accountId: activeAccountId,
-                contactName: targetName,
-                avatarBg: currentChat?.avatarBg || '#2481cc',
-                avatarInitial: currentChat?.avatarInitial || targetName.slice(0, 2).toUpperCase(),
-                type: 'outgoing',
-                duration: '00:00',
-                timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false }),
-              },
-              ...prev,
-            ]);
-            setVoiceCallTargetName(targetName);
-            setIsVoiceCallOpen(true);
-          }}
           onMessagesSynced={(synced, meta) => {
             const syncChatId = meta?.chatId || activeChatIdRef.current || activeChatId;
             const syncAccountId = meta?.accountId || activeAccountIdRef.current || activeAccountId;
@@ -4442,7 +4498,6 @@ export default function App() {
         onOpenNewGroup={() => setIsNewGroupOpen(true)}
         onOpenNewChannel={() => setIsNewChannelOpen(true)}
         onOpenContacts={() => setIsContactsOpen(true)}
-        onOpenCalls={() => setIsCallsOpen(true)}
         onOpenTelegramSettings={() => setIsTelegramSettingsOpen(true)}
         onOpenKnowledgeEvolution={() => openRightPanel('persona')}
         currentMember={currentMember}
@@ -4523,12 +4578,11 @@ export default function App() {
         onStartChatWithContact={handleStartChatWithContact}
       />
 
-      {/* 17. Telegram Call Records & Dialing Modal (strictly scoped by active account) */}
+      {/* 17. Telegram Call Records Modal (read-only archive, strictly scoped by active account; VoIP dialing offlined) */}
       <TelegramCallsModal
         isOpen={isCallsOpen}
         onClose={() => setIsCallsOpen(false)}
-        callRecords={callRecords.filter((rec) => !rec.accountId || !activeAccountId || rec.accountId === activeAccountId)}
-        onStartCall={handleStartCall}
+        callRecords={callRecords.filter((rec) => !activeAccountId || rec.accountId === activeAccountId)}
       />
 
       {/* 18. Official Telegram Account & Client Settings Modal */}
@@ -4546,38 +4600,6 @@ export default function App() {
         onBlockStatusChanged={handleContactBlockChanged}
       />
 
-      {/* 19. Telegram Voice Call Modal */}
-      <TelegramVoiceCallModal
-        isOpen={isVoiceCallOpen}
-        onClose={() => {
-          setIsVoiceCallOpen(false);
-          activeCallRecordIdRef.current = null;
-        }}
-        chat={voiceCallTargetName && currentChat?.title !== voiceCallTargetName ? null : currentChat}
-        currentAccountId={activeAccountId}
-        contactName={voiceCallTargetName || currentChat?.title}
-        avatarBg={currentChat?.avatarBg}
-        avatarInitial={currentChat?.avatarInitial}
-        onCallEnded={(durationSeconds, outcome) => {
-          const targetRecId = activeCallRecordIdRef.current;
-          if (!targetRecId) return;
-          const mins = Math.floor(durationSeconds / 60);
-          const secs = durationSeconds % 60;
-          const formatted = `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
-          setCallRecords((prev) =>
-            prev.map((rec) =>
-              rec.id === targetRecId
-                ? {
-                    ...rec,
-                    duration: formatted,
-                    type: outcome === 'missed' && durationSeconds === 0 ? 'missed' : rec.type,
-                  }
-                : rec
-            )
-          );
-        }}
-      />
-
       {/* 22. Member Authentication Gate Modal */}
       <MemberAuthModal
         isOpen={!isAuthChecking && !isMemberAuthenticated}
@@ -4587,6 +4609,7 @@ export default function App() {
         onSuccess={async (user) => {
           setAuthPromptState({});
           setCurrentMember(user);
+          startupReconnectInFlightRef.current = true;
           setIsMemberAuthenticated(true);
           setCustomLLMConfig((prev) =>
             !prev.enabled && !prev.explicitlyDisabled && prev.engineMode !== 'custom' && !prev.baseUrl?.trim()
@@ -4601,7 +4624,7 @@ export default function App() {
           );
           try {
             await initSessionHandshake();
-            await syncTelegramAccountStatus();
+            await runHandshakeTelegramReconnect();
           } catch {}
           fetchAuthStatus()
             .then((s) => setTotalMembersCount(s.totalMembers || 0))

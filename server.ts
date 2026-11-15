@@ -807,9 +807,18 @@ export async function syncServerCustomLlmConfig(config: any) {
   } catch {}
 }
 
-// Server-side active Translation Settings cache for persistent background tasks
+// Server-side active Translation Settings cache (global default + per-account overrides)
 let activeServerTranslationSettings: any = null;
+const activeServerTranslationSettingsByAccount = new Map<string, any>();
 let lastActiveUserJwt: string | null = null;
+
+function resolveTranslationSettingsScope(accountId?: string): { storageKey: string; scopedAccId: string } {
+  const clean = typeof accountId === 'string' ? accountId.trim() : '';
+  if (!clean || clean === '__default__' || clean === 'undefined' || clean === 'null') {
+    return { storageKey: 'translation_settings', scopedAccId: '' };
+  }
+  return { storageKey: `translation_settings::${clean}`, scopedAccId: clean };
+}
 
 export function normalizeCloudGemmaTranslateModel(rawModel?: string): 'gemma-4-26b-a4b-it' | 'gemma-4-31b-it' {
   const lowered = typeof rawModel === 'string' ? rawModel.trim().toLowerCase() : '';
@@ -826,9 +835,32 @@ export function normalizeStrictTranslationEngine(engine?: string): 'google' | 'g
   return null;
 }
 
-export async function syncServerTranslationSettings(settings: any) {
+function parseCleanedTranslationSettingsRow(rawValue: string): any | null {
+  try {
+    const parsedRaw = JSON.parse(rawValue);
+    const parsed =
+      parsedRaw && typeof parsedRaw === 'object' && parsedRaw.settings && typeof parsedRaw.settings === 'object' && 'success' in parsedRaw
+        ? parsedRaw.settings
+        : parsedRaw;
+    const {
+      success: _s,
+      config: _c,
+      settings: _st,
+      hasGeminiApiKey: _hg,
+      hasGoogleApiKey: _hgk,
+      ...cleanParsed
+    } = parsed || {};
+    const normalizedEngine = normalizeStrictTranslationEngine(cleanParsed?.preferredEngine) || 'gemini';
+    return { ...cleanParsed, preferredEngine: normalizedEngine };
+  } catch {
+    return null;
+  }
+}
+
+export async function syncServerTranslationSettings(settings: any, accountId?: string) {
   if (!settings || typeof settings !== 'object') return;
-  const existing = await getServerTranslationSettings().catch(() => null);
+  const { storageKey, scopedAccId } = resolveTranslationSettingsScope(accountId);
+  const existing = await getServerTranslationSettings(scopedAccId || undefined).catch(() => null);
   const raw =
     settings.settings && typeof settings.settings === 'object' && 'success' in settings
       ? settings.settings
@@ -846,37 +878,53 @@ export async function syncServerTranslationSettings(settings: any) {
     googleApiKey: resolveSecretUpdate(raw.googleApiKey, existing?.googleApiKey, true),
     customModelName: typeof raw.customModelName === 'string' ? raw.customModelName.trim() : '',
   };
-  activeServerTranslationSettings = { ...clean };
+  if (scopedAccId) {
+    activeServerTranslationSettingsByAccount.set(scopedAccId, { ...clean });
+  } else {
+    activeServerTranslationSettings = { ...clean };
+  }
   try {
     await db.prepare(`
       INSERT INTO system_config (key, value, updated_at)
-      VALUES ('translation_settings', ?, ?)
+      VALUES (?, ?, ?)
       ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
-    `).run(JSON.stringify(clean), Date.now());
+    `).run(storageKey, JSON.stringify(clean), Date.now());
   } catch {}
 }
 
-export async function getServerTranslationSettings(): Promise<any> {
+export async function getServerTranslationSettings(accountId?: string): Promise<any> {
+  const { scopedAccId } = resolveTranslationSettingsScope(accountId);
+  if (scopedAccId) {
+    const cachedScoped = activeServerTranslationSettingsByAccount.get(scopedAccId);
+    if (cachedScoped) return cachedScoped;
+    try {
+      const variants = getScopedAccountIdVariants(scopedAccId);
+      const keysToCheck = variants.map((v) => `translation_settings::${v}`);
+      const placeholders = keysToCheck.map(() => '?').join(', ');
+      const rows = (await db
+        .prepare(`SELECT key, value FROM system_config WHERE key IN (${placeholders})`)
+        .all(...keysToCheck)) as any[];
+      const exactKey = `translation_settings::${scopedAccId}`;
+      const matchedRow = rows.find((r) => r?.key === exactKey) || rows[0];
+      if (matchedRow && matchedRow.value) {
+        const cleaned = parseCleanedTranslationSettingsRow(matchedRow.value);
+        if (cleaned) {
+          activeServerTranslationSettingsByAccount.set(scopedAccId, cleaned);
+          return cleaned;
+        }
+      }
+    } catch {}
+  }
+
   if (activeServerTranslationSettings) return activeServerTranslationSettings;
   try {
     const row = (await db.prepare("SELECT value FROM system_config WHERE key = 'translation_settings'").get()) as any;
     if (row && row.value) {
-      const parsedRaw = JSON.parse(row.value);
-      const parsed =
-        parsedRaw && typeof parsedRaw === 'object' && parsedRaw.settings && typeof parsedRaw.settings === 'object' && 'success' in parsedRaw
-          ? parsedRaw.settings
-          : parsedRaw;
-      const {
-        success: _s,
-        config: _c,
-        settings: _st,
-        hasGeminiApiKey: _hg,
-        hasGoogleApiKey: _hgk,
-        ...cleanParsed
-      } = parsed || {};
-      const normalizedEngine = normalizeStrictTranslationEngine(cleanParsed?.preferredEngine) || 'gemini';
-      activeServerTranslationSettings = { ...cleanParsed, preferredEngine: normalizedEngine };
-      return activeServerTranslationSettings;
+      const cleaned = parseCleanedTranslationSettingsRow(row.value);
+      if (cleaned) {
+        activeServerTranslationSettings = cleaned;
+        return activeServerTranslationSettings;
+      }
     }
   } catch {}
   return null;
@@ -7412,13 +7460,16 @@ app.get('/api/llm/config', requireTenantAuth, async (req: Request, res: Response
   }
 });
 
-// Synchronize user's translation settings (strict single engine & local keys) for background workers
+// Synchronize user's translation settings (strict single engine & local keys, scoped per accountId) for background workers
 app.post('/api/translate/settings', requireTenantAuth, async (req: Request, res: Response) => {
   try {
+    const scope = resolveScopedAccountFromRequest(req, { allowBot: true });
+    if (!scope.ok) return res.status(scope.status).json({ error: scope.error });
+    const scopedAccId = scope.isExplicit ? scope.accountId : undefined;
     const settings = req.body;
     if (settings && typeof settings === 'object') {
-      await syncServerTranslationSettings(settings);
-      return res.json({ success: true });
+      await syncServerTranslationSettings(settings, scopedAccId);
+      return res.json({ success: true, accountId: scopedAccId || 'default' });
     }
     return res.status(400).json({ error: '无效的翻译设置参数' });
   } catch (err: any) {
@@ -7428,9 +7479,12 @@ app.post('/api/translate/settings', requireTenantAuth, async (req: Request, res:
 
 app.get('/api/translate/settings', requireTenantAuth, async (req: Request, res: Response) => {
   try {
-    const settings = await getServerTranslationSettings();
+    const scope = resolveScopedAccountFromRequest(req, { allowBot: true });
+    if (!scope.ok) return res.status(scope.status).json({ error: scope.error });
+    const scopedAccId = scope.isExplicit ? scope.accountId : undefined;
+    const settings = await getServerTranslationSettings(scopedAccId);
     const publicSettings = maskTranslationSettingsForResponse(settings);
-    return res.json({ success: true, settings: publicSettings });
+    return res.json({ success: true, accountId: scopedAccId || 'default', settings: publicSettings });
   } catch (err: any) {
     return res.status(500).json({ error: err.message });
   }
@@ -8216,10 +8270,11 @@ app.post('/api/persona/test-reply', aiGenerationLimiter, requireTenantAuth, asyn
     );
     const ragQueryText = buildUnifiedRagQuery(recent30Turns, cleanIncomingMessage);
 
-    // Real Cloud RAG (when enabled, zero silent fallback) + Local SQL RAG
+    // Real Cloud KB (Official Cloud mode only) vs Local SQL RAG & Transcripts (Custom LLM mode only)
     let knowledgeContext = '';
     const matchedKnowledge: Array<{ id?: string; title: string; source: 'cloud_kb' | 'local_rag'; category?: string }> = [];
-    const cloudRagEnabled = isCloudKnowledgeBaseEnabled(effectivePersonaConfig);
+    const { cloudKbEnabled: cloudRagEnabled, localKbEnabled: localRagEnabled } =
+      resolveKnowledgeRagScope(effectivePersonaConfig);
     let cloudRagMatchedCount = 0;
 
     if (cloudRagEnabled) {
@@ -8274,24 +8329,28 @@ app.post('/api/persona/test-reply', aiGenerationLimiter, requireTenantAuth, asyn
       }
     }
 
-    const rag = await queryKnowledgeRAG(ragQueryText, 3, scope.accountId);
-    if (rag.matchedCount > 0 && rag.context) {
-      knowledgeContext += rag.context;
-    }
-    const localRagMatchedCount = Number(rag.matchedCount) || 0;
-    for (const item of rag.matchedItems || []) {
-      matchedKnowledge.push({
-        id: item.id,
-        title: item.title || '本地知识条目',
-        source: 'local_rag',
-        category: item.category,
-      });
-    }
+    let localRagMatchedCount = 0;
+    let transcriptContext = '';
+    if (localRagEnabled) {
+      const rag = await queryKnowledgeRAG(ragQueryText, 3, scope.accountId);
+      if (rag.matchedCount > 0 && rag.context) {
+        knowledgeContext += rag.context;
+      }
+      localRagMatchedCount = Number(rag.matchedCount) || 0;
+      for (const item of rag.matchedItems || []) {
+        matchedKnowledge.push({
+          id: item.id,
+          title: item.title || '本地知识条目',
+          source: 'local_rag',
+          category: item.category,
+        });
+      }
 
-    const transcriptContext = await loadUnifiedTranscriptContext(
-      scope.accountId,
-      typeof chatTranscript === 'string' ? chatTranscript : undefined
-    );
+      transcriptContext = await loadUnifiedTranscriptContext(
+        scope.accountId,
+        typeof chatTranscript === 'string' ? chatTranscript : undefined
+      );
+    }
 
     const coldStartGuideline = buildUnifiedColdStartGuideline(true, []);
     const antiAiDirective = buildUnifiedAntiAiDirective(UNIFIED_REPLY_HISTORY_LIMIT);
@@ -8374,6 +8433,7 @@ app.post('/api/persona/test-reply', aiGenerationLimiter, requireTenantAuth, asyn
       matchedKnowledge,
       ragSources: {
         cloudRagEnabled,
+        localRagEnabled,
         cloudRagMatchedCount,
         localRagMatchedCount,
       },
@@ -8960,6 +9020,26 @@ export function isCloudKnowledgeBaseEnabled(config?: any): boolean {
   return Boolean(
     (process.env.RAILWAY_BRAIN_URL || process.env.RAILWAY_KB_URL || process.env.RAILWAY_BRAIN_KEY || '').trim()
   );
+}
+
+export function isLocalKnowledgeBaseEnabled(config?: any): boolean {
+  if (!config || typeof config !== 'object') {
+    return false;
+  }
+  if (config.enabled === false || config.explicitlyDisabled) {
+    return false;
+  }
+  return config.engineMode === 'custom';
+}
+
+export function resolveKnowledgeRagScope(config?: any): {
+  cloudKbEnabled: boolean;
+  localKbEnabled: boolean;
+} {
+  return {
+    cloudKbEnabled: isCloudKnowledgeBaseEnabled(config),
+    localKbEnabled: isLocalKnowledgeBaseEnabled(config),
+  };
 }
 
 function formatRemoteKbHttpError(status: number, rawBody: string): string {
@@ -10650,8 +10730,10 @@ app.post('/api/translate', translationLimiter, requireTenantAuth, async (req: Re
     const isHistoryTranslation = purpose === 'history';
     const userJwt = extractBearerToken(req);
 
-    // Resolve saved local user keys/gateways as fallback ONLY if not passed in body
-    const savedTransSettings = await getServerTranslationSettings();
+    // Resolve saved local user keys/gateways as fallback ONLY if not passed in body (scoped by accountId when provided)
+    const transScope = resolveScopedAccountFromRequest(req, { allowBot: true });
+    const scopedTransAccId = transScope.ok && transScope.isExplicit ? transScope.accountId : undefined;
+    const savedTransSettings = await getServerTranslationSettings(scopedTransAccId);
     const savedCustomConfig = await getServerCustomLlmConfig();
 
     const effectiveGoogleKey =
@@ -11535,7 +11617,8 @@ export async function getCnTranslationIfForeign(
   text: string,
   overrideCustomConfig?: any,
   userJwt?: string,
-  overrideTargetLang?: string
+  overrideTargetLang?: string,
+  accountId?: string
 ): Promise<string> {
   if (!text || typeof text !== 'string') return '';
   const stripped = text
@@ -11549,7 +11632,7 @@ export async function getCnTranslationIfForeign(
     .trim();
   if (!stripped || !/\p{L}/u.test(stripped)) return '';
   try {
-    const transSettings = await getServerTranslationSettings();
+    const transSettings = await getServerTranslationSettings(accountId);
     const cleanedOverrideTarget = typeof overrideTargetLang === 'string' ? overrideTargetLang.trim() : '';
     const targetLang =
       cleanedOverrideTarget && cleanedOverrideTarget !== 'Auto'
@@ -12407,6 +12490,9 @@ app.post('/api/llm/chat', aiGenerationLimiter, requireTenantAuth, async (req: Re
 - 客户 ID：${holographicPayload.customerId}
 - 客户昵称/称谓：${p.client_name}
 - 当前关系阶段：${p.relationship_stage}
+- 年龄估算：${holographicPayload.ageEstimate || '-'}
+- 职业背景：${holographicPayload.occupation || '未知'}
+- 所在地区/时区：${holographicPayload.locationTimezone || '未知'}
 - 客户性格与语气风格：${p.tone_style}
 - 客户的核心喜好与爱聊话题：${customerLikes.join('、')}
 - 客户的忌讳与敏感雷区：${(Array.isArray(taboos) ? taboos : []).join('、')}
@@ -12443,13 +12529,14 @@ ${customerMemories.map((m: any) => `  * [${m.date}] ${m.topic}: ${m.summary} (�
       });
     }
 
-    // Optional Cloud KB / Local RAG / Transcript style context (unified 4-message RAG window)
+    // Strictly isolate Cloud KB (Official Cloud model only) vs Local SQL RAG & Transcripts (Custom LLM only)
     let knowledgeContext = '';
     let matchedKnowledgeCount = 0;
     const recentChatText = buildUnifiedRagQuery(recent30Messages);
     const userJwt = extractBearerToken(req);
+    const { cloudKbEnabled, localKbEnabled } = resolveKnowledgeRagScope(effectiveChatConfig);
 
-    if (isCloudKnowledgeBaseEnabled(effectiveChatConfig)) {
+    if (cloudKbEnabled) {
       const kbUrl = effectiveChatConfig?.knowledgeBaseApiUrl;
       const kbApiKey = effectiveChatConfig?.knowledgeBaseApiKey || effectiveChatConfig?.apiKey;
       const engineKey = effectiveChatConfig?.engineLicenseKey;
@@ -12489,17 +12576,20 @@ ${customerMemories.map((m: any) => `  * [${m.date}] ${m.topic}: ${m.summary} (�
       }
     }
 
-    try {
-      const ragResult = await queryKnowledgeRAG(recentChatText, 3, accountId);
-      if (ragResult.context) {
-        knowledgeContext += ragResult.context;
-        matchedKnowledgeCount += ragResult.matchedCount;
+    let transcriptContext = '';
+    if (localKbEnabled) {
+      try {
+        const ragResult = await queryKnowledgeRAG(recentChatText, 3, accountId);
+        if (ragResult.context) {
+          knowledgeContext += ragResult.context;
+          matchedKnowledgeCount += ragResult.matchedCount;
+        }
+      } catch (err) {
+        console.warn('Knowledge RAG retrieval failed:', err);
       }
-    } catch (err) {
-      console.warn('Knowledge RAG retrieval failed:', err);
-    }
 
-    const transcriptContext = await loadUnifiedTranscriptContext(accountId);
+      transcriptContext = await loadUnifiedTranscriptContext(accountId);
+    }
 
     // Intelligent foreign-language detection & anti-drift lock
     let resolvedLang =
@@ -12676,7 +12766,8 @@ ${customerMemories.map((m: any) => `  * [${m.date}] ${m.topic}: ${m.summary} (�
                     replyText,
                     effectiveChatConfig,
                     userJwt,
-                    chatTranslationTargetLang
+                    chatTranslationTargetLang,
+                    accountId
                   );
                   return res.json({
                     replyText,
@@ -12755,7 +12846,8 @@ ${customerMemories.map((m: any) => `  * [${m.date}] ${m.topic}: ${m.summary} (�
                     replyText,
                     effectiveChatConfig,
                     userJwt,
-                    chatTranslationTargetLang
+                    chatTranslationTargetLang,
+                    accountId
                   );
                   return res.json({
                     replyText,
@@ -12845,7 +12937,8 @@ ${customerMemories.map((m: any) => `  * [${m.date}] ${m.topic}: ${m.summary} (�
                     replyText,
                     effectiveChatConfig,
                     userJwt,
-                    chatTranslationTargetLang
+                    chatTranslationTargetLang,
+                    accountId
                   );
                   return res.json({
                     replyText,
@@ -15017,7 +15110,7 @@ async function processTelegramMessageAsync(
     // 0.1 Auto-translate incoming foreign message using user's strictly configured 3-state translation engine & per-chat lang pref
     if (internalMsgId && effectiveIncomingText && effectiveIncomingText !== 'Voice Message') {
       try {
-        const transSettings = await getServerTranslationSettings();
+        const transSettings = await getServerTranslationSettings('acc_telegram_bot');
         if (transSettings?.autoTranslateInbound !== false) {
           const customConfig = await getServerCustomLlmConfig();
           const isDualOff = Boolean(
@@ -15178,6 +15271,9 @@ async function processTelegramMessageAsync(
 【全息客户画像与长期记忆档案】：
 - 客户姓名/称谓: ${profile.client_name}
 - 当前关系阶段: ${profile.relationship_stage || '初次结识'}
+- 年龄估算: ${String(profile.age_estimate || '-').trim() || '-'}
+- 职业背景: ${String(profile.occupation || '未知').trim() || '未知'}
+- 所在地区/时区: ${String(profile.location_timezone || '未知').trim() || '未知'}
 - 性格与互动特征: ${profile.tone_style || '真实自然、随和礼貌'}
 - 核心喜好与兴趣: ${webhookLikes.join('、')}
 - 敏感雷区与禁忌: ${Array.isArray(taboos) ? taboos.join('、') : ''}
@@ -15218,7 +15314,9 @@ async function processTelegramMessageAsync(
     let knowledgeContext = '';
     let genuineMatchedKnowledge: any[] = [];
     const combinedText = buildUnifiedRagQuery(boundedHistory, effectiveIncomingText);
-    if (isCloudKnowledgeBaseEnabled(serverCustomConfig)) {
+    const { cloudKbEnabled: webhookCloudKbEnabled, localKbEnabled: webhookLocalKbEnabled } =
+      resolveKnowledgeRagScope(serverCustomConfig);
+    if (webhookCloudKbEnabled) {
       let railwayRes: RemoteKbSearchResult;
       try {
         railwayRes = await searchRailwayKnowledgeBase(
@@ -15250,18 +15348,22 @@ async function processTelegramMessageAsync(
         knowledgeContext += `\n${railwayRes.context}\n`;
       }
     }
-    try {
-      const ragResult = await queryKnowledgeRAG(combinedText, 3, 'acc_telegram_bot');
-      if (ragResult.matchedCount > 0 && ragResult.context) {
-        knowledgeContext += ragResult.context;
-        genuineMatchedKnowledge = ragResult.matchedItems;
-      }
-    } catch (knowErr: any) {
-      console.warn('[Telegram Webhook RAG] Knowledge retrieval failed:', knowErr.message);
-    }
 
-    // 7. Full Dialogue Transcripts & Authentic Demonstrations (Strictly Bot Account Scoped)
-    const transcriptContext = await loadUnifiedTranscriptContext('acc_telegram_bot');
+    // 7. Local SQL RAG & Full Dialogue Transcripts (Custom LLM mode only)
+    let transcriptContext = '';
+    if (webhookLocalKbEnabled) {
+      try {
+        const ragResult = await queryKnowledgeRAG(combinedText, 3, 'acc_telegram_bot');
+        if (ragResult.matchedCount > 0 && ragResult.context) {
+          knowledgeContext += ragResult.context;
+          genuineMatchedKnowledge = ragResult.matchedItems;
+        }
+      } catch (knowErr: any) {
+        console.warn('[Telegram Webhook RAG] Knowledge retrieval failed:', knowErr.message);
+      }
+
+      transcriptContext = await loadUnifiedTranscriptContext('acc_telegram_bot');
+    }
 
     // 8. Generate intelligent AI response aligned with active Global Persona, Evolution Habits & Custom LLM (Strictly Bot Account Scoped)
     let replyText = '';
@@ -15403,7 +15505,8 @@ ${dialogueTranscript}
           replyText,
           serverCustomConfig,
           lastActiveUserJwt || undefined,
-          webhookChatTargetLang
+          webhookChatTargetLang,
+          'acc_telegram_bot'
         );
       }
     } catch {
@@ -17075,6 +17178,71 @@ function clearExpiredAccountRecord(userId?: string, phone?: string) {
   }
 }
 
+export const TELEGRAM_DESKTOP_CLIENT_PARAMS = {
+  deviceModel: 'HumanSense Desktop',
+  systemVersion: 'Windows 11',
+  appVersion: '4.16.8',
+  langCode: 'zh-CN',
+  systemLangCode: 'zh-CN',
+} as const;
+
+export async function getRegisteredTelegramAccountsSummary(): Promise<{
+  totalUniqueCount: number;
+  activePhones: Set<string>;
+  activeUserIds: Set<string>;
+}> {
+  const rawEntries: Array<{ uid: string; phone: string }> = [];
+  for (const u of connectedUserClients.values()) {
+    const uid = u?.userId ? String(u.userId).trim() : '';
+    const rawPhone = u?.phone ? String(u.phone).trim() : '';
+    const phone = rawPhone ? normalizePhoneNumber(rawPhone) || rawPhone : '';
+    if (uid || phone) {
+      rawEntries.push({ uid, phone });
+    }
+  }
+
+  try {
+    const rows = (await db
+      .prepare('SELECT phone, user_id FROM telegram_user_sessions WHERE is_active = 1')
+      .all()) as any[];
+    for (const r of rows || []) {
+      const uid = r?.user_id ? String(r.user_id).trim() : '';
+      const rawPhone = r?.phone ? String(r.phone).trim() : '';
+      const phone = rawPhone ? normalizePhoneNumber(rawPhone) || rawPhone : '';
+      if (uid || phone) {
+        rawEntries.push({ uid, phone });
+      }
+    }
+  } catch {}
+
+  const phoneToUid = new Map<string, string>();
+  for (const e of rawEntries) {
+    if (e.uid && e.phone && !phoneToUid.has(e.phone)) {
+      phoneToUid.set(e.phone, e.uid);
+    }
+  }
+
+  const uniqueCanonical = new Set<string>();
+  const activePhones = new Set<string>();
+  const activeUserIds = new Set<string>();
+
+  for (const e of rawEntries) {
+    const resolvedUid = e.uid || (e.phone ? phoneToUid.get(e.phone) || '' : '');
+    if (resolvedUid) activeUserIds.add(resolvedUid);
+    if (e.phone) activePhones.add(e.phone);
+    const canonical = resolvedUid ? `uid:${resolvedUid}` : `phone:${e.phone}`;
+    if (canonical && canonical !== 'phone:') {
+      uniqueCanonical.add(canonical);
+    }
+  }
+
+  return {
+    totalUniqueCount: uniqueCanonical.size,
+    activePhones,
+    activeUserIds,
+  };
+}
+
 function configureTelegramClientErrorGuard(
   client: TelegramClient,
   context: string,
@@ -17237,8 +17405,12 @@ app.post('/api/telegram/user/send-code', requireTenantAuth, async (req: Request,
       });
     }
 
-    const activeUniqueUsers = new Set(Array.from(connectedUserClients.values()).map((u) => u.userId));
-    if (hasReachedTelegramAccountLimit(activeUniqueUsers.size) && !connectedUserClients.has(cleanPhone)) {
+    const accountSummary = await getRegisteredTelegramAccountsSummary();
+    if (
+      hasReachedTelegramAccountLimit(accountSummary.totalUniqueCount) &&
+      !connectedUserClients.has(cleanPhone) &&
+      !accountSummary.activePhones.has(cleanPhone)
+    ) {
       return res.status(400).json({
         ok: false,
         error: `已达到单机多账号关联上限（最多同时关联 ${MAX_TELEGRAM_ACCOUNTS} 个账号）。如需添加新账号，请先退出注销闲置账号。`,
@@ -17267,11 +17439,7 @@ app.post('/api/telegram/user/send-code', requireTenantAuth, async (req: Request,
       connectionRetries: 5,
       useWSS: false,
       autoReconnect: true,
-      deviceModel: 'Telegram Desktop Pro',
-      systemVersion: 'Windows 11',
-      appVersion: '4.16.8',
-      langCode: 'zh-CN',
-      systemLangCode: 'zh-CN',
+      ...TELEGRAM_DESKTOP_CLIENT_PARAMS,
       ...(telegramProxy ? { proxy: telegramProxy } : {}),
     });
 
@@ -17725,8 +17893,8 @@ app.post('/api/telegram/user/qr-token', requireTenantAuth, async (req: Request, 
     }
     const useApiId = resolvedCreds.apiId;
     const useApiHash = resolvedCreds.apiHash;
-    const activeUniqueUsers = new Set(Array.from(connectedUserClients.values()).map((u) => u.userId));
-    if (hasReachedTelegramAccountLimit(activeUniqueUsers.size)) {
+    const accountSummary = await getRegisteredTelegramAccountsSummary();
+    if (hasReachedTelegramAccountLimit(accountSummary.totalUniqueCount)) {
       return res.status(400).json({
         ok: false,
         error: `已达到单机多账号关联上限（最多同时关联 ${MAX_TELEGRAM_ACCOUNTS} 个账号）。如需添加新账号，请先退出注销闲置账号。`,
@@ -17743,11 +17911,7 @@ app.post('/api/telegram/user/qr-token', requireTenantAuth, async (req: Request, 
       connectionRetries: 5,
       useWSS: false,
       autoReconnect: true,
-      deviceModel: 'LingXi Context Workstation',
-      systemVersion: 'Web/Node',
-      appVersion: '10.14.0',
-      langCode: 'zh-CN',
-      systemLangCode: 'zh-CN',
+      ...TELEGRAM_DESKTOP_CLIENT_PARAMS,
       ...(telegramProxy ? { proxy: telegramProxy } : {}),
     });
     configureTelegramClientErrorGuard(client, sessionId);
@@ -19502,6 +19666,7 @@ app.post('/api/telegram/user/disconnect', requireTenantAuth, async (req: Request
             const telegramProxy = getConfiguredTelegramProxy();
             const tempClient = new TelegramClient(new StringSession(decrypted), creds.apiId, creds.apiHash, {
               connectionRetries: 2,
+              ...TELEGRAM_DESKTOP_CLIENT_PARAMS,
               ...(telegramProxy ? { proxy: telegramProxy } : {}),
             });
             configureTelegramClientErrorGuard(tempClient, `logout_${storedRow.phone || uid}`);
@@ -24595,7 +24760,11 @@ export function attachTelegramClientMessageListener(client: TelegramClient, phon
                 hasAutoConfiguredPersona = autoCtx.hasConfiguredPersona;
               } catch {}
 
-              const oralStyleContext = await loadUnifiedTranscriptContext(accountId);
+              const { cloudKbEnabled: autoCloudKbEnabled, localKbEnabled: autoLocalKbEnabled } =
+                resolveKnowledgeRagScope(serverCustomConfig);
+              const oralStyleContext = autoLocalKbEnabled
+                ? await loadUnifiedTranscriptContext(accountId)
+                : '';
 
               // Retrieve recent 30 two-way conversation turns strictly scoped by accountId so replies never leak across accounts
               let recentHistoryTurns: NormalizedChatTurn[] = [];
@@ -24612,10 +24781,10 @@ export function attachTelegramClientMessageListener(client: TelegramClient, phon
                 }
               } catch {}
 
-              // Retrieve Cloud Brain Knowledge Base (if enabled) & local RAG context (unified 4-msg window)
+              // Retrieve Cloud Brain Knowledge Base (Official Cloud only) OR Local SQLite RAG (Custom LLM only)
               const autoRagQuery = buildUnifiedRagQuery(recentHistoryTurns, effectiveIncomingText);
               let kbContext = '';
-              if (isCloudKnowledgeBaseEnabled(serverCustomConfig)) {
+              if (autoCloudKbEnabled) {
                 let railwayRes: RemoteKbSearchResult;
                 try {
                   railwayRes = await searchRailwayKnowledgeBase(
@@ -24646,13 +24815,14 @@ export function attachTelegramClientMessageListener(client: TelegramClient, phon
                 if (railwayRes.matchedCount > 0 && railwayRes.context) {
                   kbContext += `\n${railwayRes.context}\n`;
                 }
+              } else if (autoLocalKbEnabled) {
+                try {
+                  const localRag = await queryKnowledgeRAG(autoRagQuery, 3, accountId);
+                  if (localRag.matchedCount > 0 && localRag.context) {
+                    kbContext += `\n${localRag.context}\n`;
+                  }
+                } catch {}
               }
-              try {
-                const localRag = await queryKnowledgeRAG(autoRagQuery, 3, accountId);
-                if (localRag.matchedCount > 0 && localRag.context) {
-                  kbContext += `\n${localRag.context}\n`;
-                }
-              } catch {}
 
               const cleanAutoIncoming = String(effectiveIncomingText || '').replace(/^📊\s*投票\s*[:：]\s*/, '').trim();
               let targetLangCode =
@@ -24697,9 +24867,14 @@ export function attachTelegramClientMessageListener(client: TelegramClient, phon
 
               const autoProfileSection = `【客户全息画像与长期记忆档案】：
 - 客户称谓: ${p?.client_name || '好友'}
+- 当前关系阶段: ${p?.relationship_stage || '初次结识'}
+- 年龄估算: ${String(p?.age_estimate || '-').trim() || '-'}
+- 职业背景: ${String(p?.occupation || '未知').trim() || '未知'}
+- 所在地区/时区: ${String(p?.location_timezone || '未知').trim() || '未知'}
 - 性格风格: ${p?.tone_style || '自然亲切、口语化交流'}
 - 喜好: ${likes.join('、')}
 - 忌讳雷区: ${taboos.join('、')}
+- 核心情感诉求: ${p?.emotional_needs || '暂无记录'}
 - 关键约定与共同记忆:
 ${memories.slice(-3).map((m: any) => `  * [${m.date}] ${m.topic}: ${m.summary}`).join('\n')}`;
 
@@ -24777,7 +24952,8 @@ ${memories.slice(-3).map((m: any) => `  * [${m.date}] ${m.topic}: ${m.summary}`)
                     replyText,
                     serverCustomConfig,
                     lastActiveUserJwt || undefined,
-                    autopilotChatTargetLang
+                    autopilotChatTargetLang,
+                    accountId
                   );
                 } catch {}
                 const replyTime = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false });
@@ -25193,6 +25369,14 @@ export async function restoreTelegramUserSessionsOnStartup(
         if (dedupedRows.length >= MAX_TELEGRAM_ACCOUNTS) break;
       }
 
+      const hasCredsPath = Boolean(
+        effectiveBearer || getEnvTelegramApiCredentials() || getInMemoryTelegramApiCredentials()
+      );
+      if (!hasCredsPath) {
+        telegramSessionRestoreState.lastError = null;
+        return 0;
+      }
+
       const creds = await resolveTelegramApiCredentials({ bearerToken: effectiveBearer });
       if (!creds.ok || !creds.apiId || !creds.apiHash) {
         telegramSessionRestoreState.lastError = creds.error || '云端 Telegram 接入凭据暂不可用，请检查会员登录或网络连接';
@@ -25241,11 +25425,7 @@ export async function restoreTelegramUserSessionsOnStartup(
               connectionRetries: 5,
               useWSS: false,
               autoReconnect: true,
-              deviceModel: 'HumanSense Desktop',
-              systemVersion: 'Windows 11',
-              appVersion: '4.16.8',
-              langCode: 'zh-CN',
-              systemLangCode: 'zh-CN',
+              ...TELEGRAM_DESKTOP_CLIENT_PARAMS,
               ...(telegramProxy ? { proxy: telegramProxy } : {}),
             }
           );

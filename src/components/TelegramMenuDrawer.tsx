@@ -3,7 +3,6 @@ import {
   Users,
   Megaphone,
   User,
-  PhoneCall,
   Bookmark,
   Settings,
   Moon,
@@ -37,7 +36,6 @@ interface TelegramMenuDrawerProps {
   onOpenNewGroup?: () => void;
   onOpenNewChannel?: () => void;
   onOpenContacts?: () => void;
-  onOpenCalls?: () => void;
   onOpenTelegramSettings?: () => void;
   onOpenKnowledgeEvolution?: () => void;
   currentMember?: MemberUser | null;
@@ -60,7 +58,6 @@ export const TelegramMenuDrawer: React.FC<TelegramMenuDrawerProps> = ({
   onOpenNewGroup,
   onOpenNewChannel,
   onOpenContacts,
-  onOpenCalls,
   onOpenTelegramSettings,
   currentMember,
   onMemberLogout,
@@ -388,19 +385,6 @@ export const TelegramMenuDrawer: React.FC<TelegramMenuDrawerProps> = ({
           >
             <User className="w-5 h-5 text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5]" />
             <span>联系人</span>
-          </button>
-
-          {/* 通话 */}
-          <button
-            onClick={() => {
-              if (onOpenCalls) onOpenCalls();
-              else showToast('暂无未接来电');
-              onClose();
-            }}
-            className="flex items-center gap-4 px-3 py-2.5 rounded-xl text-[#0f172a] dark:text-[#b4c6d8] aurora:text-[#b7d0d8] hover:text-[#2481cc] dark:hover:text-[#eef4fb] aurora:hover:text-[#5eead4] hover:bg-[#f1f5f9] dark:hover:bg-[#132234] aurora:hover:bg-[#13252e] transition-colors cursor-pointer w-full text-left"
-          >
-            <PhoneCall className="w-5 h-5 text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5]" />
-            <span>通话记录</span>
           </button>
 
           {/* 收藏夹 (Saved Messages) */}

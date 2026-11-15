@@ -58,7 +58,7 @@ function sanitizeBackupEntry(key: string, value: any): any {
     delete clone.hasEngineLicenseKey;
     return clone;
   }
-  if (key === 'tg_pro_trans_settings') {
+  if (key === 'tg_pro_trans_settings' || key.startsWith('tg_pro_trans_settings::')) {
     const clone = { ...value };
     delete clone.geminiApiKey;
     delete clone.googleApiKey;
@@ -70,6 +70,10 @@ function sanitizeBackupEntry(key: string, value: any): any {
 }
 
 const SENSITIVE_CONFIG_BACKUP_KEYS = new Set(['tg_pro_llm_config', 'tg_pro_trans_settings']);
+
+function isSensitiveConfigBackupKey(key: string): boolean {
+  return SENSITIVE_CONFIG_BACKUP_KEYS.has(key) || key.startsWith('tg_pro_trans_settings::');
+}
 
 function shouldBackupLocalKey(key: string): boolean {
   if (!key || EXCLUDED_BACKUP_KEYS.has(key)) return false;
@@ -184,7 +188,7 @@ export const DatabaseModal: React.FC<DatabaseModalProps> = ({ isOpen, onClose, o
         const key = localStorage.key(i) || '';
         if (shouldBackupLocalKey(key)) {
           const decoded = await secureGetItemAsync(key);
-          if (SENSITIVE_CONFIG_BACKUP_KEYS.has(key)) {
+          if (isSensitiveConfigBackupKey(key)) {
             if (decoded && typeof decoded === 'object') {
               const sanitized = sanitizeBackupEntry(key, decoded);
               decryptedPayload[key] = sanitized;

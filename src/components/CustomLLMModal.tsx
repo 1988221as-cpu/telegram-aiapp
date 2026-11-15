@@ -517,9 +517,9 @@ export const CustomLLMModal: React.FC<CustomLLMModalProps> = ({
               )}
 
               <div className="p-2.5 rounded-lg bg-white dark:bg-[#08101a] aurora:bg-[#081014] border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] text-[11px] text-[#475569] dark:text-[#b4c6d8] aurora:text-[#b7d0d8] leading-relaxed">
-                <div>云端引擎模式负责：<span className="font-medium text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8]">智能聊天回复（含 Cloud RAG 话术）、谷歌大模型 (Gemma 4 26B / 31B) 翻译、客户全息记忆提炼</span>。</div>
+                <div>云端引擎模式负责：<span className="font-medium text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8]">官方大模型智能回复（使用云端自建知识库 Cloud RAG）、谷歌大模型 (Gemma 4 26B / 31B) 翻译、客户全息记忆提炼</span>。</div>
                 <div className="mt-1 text-[10.5px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5]">
-                  在云端模式下，语音合成生成可独立走「接入自有模型网关」；如需使用自定义翻译选择其他大模型，请先前往「接入自有模型网关」开启「启用优先自有密钥回复」。
+                  提示：官方大模型只结合个人资料、客户全息记忆与云端自建知识库，不读取软件本地知识库与整文范本库；如需使用软件本地知识库或自定义翻译模型，请前往「接入自有模型网关」开启「启用优先自有密钥回复」。
                 </div>
               </div>
             </div>
@@ -646,7 +646,7 @@ export const CustomLLMModal: React.FC<CustomLLMModalProps> = ({
                 </label>
               </div>
               <p className="text-[11px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] leading-relaxed">
-                开启后将自动关闭云端话术检索，所有<span className="font-medium text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8]">聊天 AI 回复（沿用原人设与提示词）、客户记忆提炼及聊天翻译</span>统一改走下方自有密钥；开启云端开关则自动切回云端。
+                开启后将自动关闭官方云端自建知识库，专属启用软件<span className="font-medium text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8]">「本地知识库」与「整文范本库」</span>，并将<span className="font-medium text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8]">聊天 AI 回复（含人设/个人资料/客户记忆）、记忆提炼及聊天翻译</span>统一改走下方自有密钥；开启云端开关则自动切回官方云端引擎。
               </p>
               {!isCloudModeEnabled && !isCustomPriorityEnabled && (
                 <div className="p-2.5 rounded-lg bg-slate-500/10 border border-slate-400/30 text-[11px] text-slate-700 dark:text-slate-300 aurora:text-[#b7d0d8] leading-relaxed">

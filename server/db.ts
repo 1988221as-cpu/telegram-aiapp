@@ -1416,7 +1416,10 @@ export async function exportDatabaseSnapshot() {
     })
     .map((row: any) => {
       const key = String(row?.key || '');
-      if (key === 'translation_settings' && typeof row?.value === 'string') {
+      if (
+        (key === 'translation_settings' || key.startsWith('translation_settings::')) &&
+        typeof row?.value === 'string'
+      ) {
         try {
           const parsed = JSON.parse(row.value);
           if (parsed && typeof parsed === 'object') {
@@ -1659,7 +1662,9 @@ export async function restoreDatabaseSnapshot(snapshot: any): Promise<{ success:
         }
         if (typeof c?.value !== 'string') continue;
         let valueToSave = c.value;
-        if (cfgKey === 'translation_settings' || cfgKey === 'network_proxy') {
+        const isTranslationConfigKey =
+          cfgKey === 'translation_settings' || cfgKey.startsWith('translation_settings::');
+        if (isTranslationConfigKey || cfgKey === 'network_proxy') {
           try {
             const incomingObj = JSON.parse(c.value);
             if (incomingObj && typeof incomingObj === 'object') {
@@ -1671,7 +1676,7 @@ export async function restoreDatabaseSnapshot(snapshot: any): Promise<{ success:
                   ? JSON.parse(existingRow.value)
                   : null;
               if (existingObj && typeof existingObj === 'object') {
-                if (cfgKey === 'translation_settings') {
+                if (isTranslationConfigKey) {
                   const merged = { ...incomingObj };
                   if (merged.geminiApiKey === undefined && existingObj.geminiApiKey) {
                     merged.geminiApiKey = existingObj.geminiApiKey;

@@ -7,7 +7,7 @@
   "type": "module",
   "main": "main.cjs",
   "scripts": {
-    "dev": "tsx server.ts",
+    "dev": "tsx server.ts --port 3000 --host 0.0.0.0",
     "build": "vite build && esbuild server.ts --platform=node --format=esm --packages=external --bundle --minify --outfile=dist/server.js",
     "start": "node server.ts",
     "build:exe": "npm run build && npx electron-builder --win",

@@ -2142,11 +2142,11 @@ test('Priority Custom Key mode: mutually exclusive with Cloud RAG and routes cha
   assert.match(serverSrc, /app\.post\('\/api\/translate'[\s\S]*?isPriorityCustomGateway[\s\S]*?'custom_llm'/);
   assert.match(
     serverSrc,
-    /getCnTranslationIfForeign\(\s*replyText,\s*effectiveChatConfig,\s*userJwt,\s*chatTranslationTargetLang\s*\)/
+    /getCnTranslationIfForeign\(\s*replyText,\s*effectiveChatConfig,\s*userJwt,\s*chatTranslationTargetLang(?:\s*,\s*accountId)?\s*\)/
   );
   assert.match(
     serverSrc,
-    /getCnTranslationIfForeign\(\s*replyText,\s*serverCustomConfig,\s*lastActiveUserJwt \|\| undefined,\s*webhookChatTargetLang\s*\)/
+    /getCnTranslationIfForeign\(\s*replyText,\s*serverCustomConfig,\s*lastActiveUserJwt \|\| undefined,\s*webhookChatTargetLang(?:\s*,\s*'acc_telegram_bot')?\s*\)/
   );
   assert.match(
     serverSrc,
@@ -6323,10 +6323,12 @@ test('Section 4 P0: backup secret stripping, config secret masking/preservation,
       }),
     });
     assert.equal(postTransRes.status, 200);
-    const storedTransAfterMasked = await getServerTranslationSettings();
+    const storedTransAfterMasked = await getServerTranslationSettings(accA);
     assert.equal(storedTransAfterMasked.geminiApiKey, 'AIza-real-gemini-123456');
     assert.equal(storedTransAfterMasked.googleApiKey, 'AIza-real-google-654321');
     assert.equal(storedTransAfterMasked.defaultTargetLang, 'English');
+    const globalTransAfterAccA = await getServerTranslationSettings();
+    assert.equal(globalTransAfterAccA.defaultTargetLang, 'Chinese');
 
     // 3b. Knowledge Base strict account isolation (CRUD + RAG)
     const addKbA = await fetch(`http://127.0.0.1:${port}/api/knowledge`, {
@@ -6541,12 +6543,13 @@ test('Section 4 P0: backup secret stripping, config secret masking/preservation,
       await db.prepare('DELETE FROM chat_transcripts WHERE id IN (?, ?)').run(transIdA, transIdB);
       await db.prepare('DELETE FROM training_logs WHERE account_id IN (?, ?)').run(accA, accB);
       await db
-        .prepare('DELETE FROM system_config WHERE key IN (?, ?, ?, ?)')
+        .prepare('DELETE FROM system_config WHERE key IN (?, ?, ?, ?, ?)')
         .run(
           `global_persona_config::${accA}`,
           `global_persona_config::${accB}`,
           `evolution_engine_state::${accA}`,
-          `evolution_engine_state::${accB}`
+          `evolution_engine_state::${accB}`,
+          `translation_settings::${accA}`
         );
     } catch {}
     await syncServerCustomLlmConfig(prevCustomCfg || { enabled: true, engineMode: 'cloud', apiKey: '', engineLicenseKey: '' });
@@ -7357,14 +7360,61 @@ test('P2 #7: unifies 30-turn history, 4-msg RAG window, transcripts without hard
     });
     assert.equal(resOk.status, 200);
     const dataOk = (await resOk.json()) as any;
-    assert.ok(cloudRagRequests >= 1, 'Expected /api/persona/test-reply to genuinely call Cloud RAG');
+    assert.ok(cloudRagRequests >= 1, 'Expected /api/persona/test-reply in cloud mode to genuinely call Cloud RAG');
     assert.equal(dataOk.ragSources?.cloudRagEnabled, true);
+    assert.equal(dataOk.ragSources?.localRagEnabled, false);
     assert.equal(dataOk.ragSources?.cloudRagMatchedCount, 1);
-    assert.equal(dataOk.ragSources?.localRagMatchedCount, 1);
+    assert.equal(dataOk.ragSources?.localRagMatchedCount, 0);
     assert.ok(dataOk.matchedKnowledge.some((k: any) => k.source === 'cloud_kb' && k.title === '结算对账标准'));
-    assert.ok(dataOk.matchedKnowledge.some((k: any) => k.source === 'local_rag' && k.title === '本地结算说明'));
+    assert.equal(
+      dataOk.matchedKnowledge.some((k: any) => k.source === 'local_rag'),
+      false,
+      'Cloud mode must strictly skip software-local knowledge_base'
+    );
     assert.ok(capturedSystemPrompt.includes('冷启动客观留白准则'));
     assert.ok(capturedLlmMessages.some((m: any) => m.role === 'assistant' && m.content.includes('请问主要想了解哪部分呢')));
+
+    // Verify Custom LLM mode strictly skips Cloud KB and exclusively uses Local SQL RAG
+    const beforeCustomCloudRequests = cloudRagRequests;
+    const customOnlyConfig = {
+      enabled: true,
+      explicitlyDisabled: false,
+      engineMode: 'custom',
+      baseUrl: `http://127.0.0.1:${mockCloudPort}/v1`,
+      apiKey: 'test-custom-key',
+      modelName: 'gpt-4o-mini',
+      enableKnowledgeBaseRAG: false,
+    };
+    const resCustomOk = await fetch(`http://127.0.0.1:${appPort}/api/persona/test-reply`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${memberJwt}`,
+        'X-Account-Id': testAcc,
+      },
+      body: JSON.stringify({
+        message: '你们的结算周期是怎样的？',
+        recentChatHistory: [
+          { sender: 'peer', text: '你好，我想了解一下你们的产品服务' },
+          { sender: 'me', text: '你好呀，请问主要想了解哪部分呢？' },
+          { sender: 'peer', text: '主要是结算方面的问题' },
+        ],
+        customConfig: customOnlyConfig,
+      }),
+    });
+    assert.equal(resCustomOk.status, 200);
+    const dataCustomOk = (await resCustomOk.json()) as any;
+    assert.equal(
+      cloudRagRequests,
+      beforeCustomCloudRequests,
+      'Custom LLM mode must strictly skip Railway Cloud KB search'
+    );
+    assert.equal(dataCustomOk.ragSources?.cloudRagEnabled, false);
+    assert.equal(dataCustomOk.ragSources?.localRagEnabled, true);
+    assert.equal(dataCustomOk.ragSources?.cloudRagMatchedCount, 0);
+    assert.equal(dataCustomOk.ragSources?.localRagMatchedCount, 1);
+    assert.ok(dataCustomOk.matchedKnowledge.some((k: any) => k.source === 'local_rag' && k.title === '本地结算说明'));
+    assert.equal(dataCustomOk.matchedKnowledge.some((k: any) => k.source === 'cloud_kb'), false);
 
     // Verify Cloud RAG failure blocks instead of silently degrading
     failCloudRag = true;
@@ -9541,5 +9591,449 @@ test('P0 #2 hardening: single-flight GetDialogs deduplication, protected fallbac
 
   const apiServiceSrc = readFileSync(resolve(process.cwd(), 'src', 'services', 'apiService.ts'), 'utf8');
   assert.match(apiServiceSrc, /function resolveClientFloodKeys/);
+});
+
+test('Stage 1 P0: /api/llm/chat injects full holographic profile (age/occupation/timezone) and railway-brain-server forwards temperature/maxOutputTokens & folds Gemma systemInstruction', async () => {
+  const { readFileSync } = await import('node:fs');
+  const { resolve } = await import('node:path');
+  const http = await import('node:http');
+  const { createHmac } = await import('node:crypto');
+  const { initDatabase, db } = await import('./db.ts');
+  const { app } = await import('../server.ts');
+
+  await initDatabase();
+
+  const prevJwtSecret = process.env.JWT_SECRET;
+  process.env.JWT_SECRET = 'holographic_railway_test_secret';
+
+  let capturedSystemPrompt = '';
+  let capturedTemperature: number | undefined;
+  let capturedMaxTokens: number | undefined;
+
+  const mockGateway = http.createServer(async (req, res) => {
+    const chunks: Buffer[] = [];
+    for await (const c of req) chunks.push(Buffer.from(c));
+    const bodyStr = Buffer.concat(chunks).toString('utf8');
+    let bodyJson: any = {};
+    try {
+      bodyJson = JSON.parse(bodyStr);
+    } catch {}
+
+    if (req.url?.includes('/chat/completions')) {
+      capturedTemperature = bodyJson.temperature;
+      capturedMaxTokens = bodyJson.max_tokens;
+      const msgs = Array.isArray(bodyJson.messages) ? bodyJson.messages : [];
+      capturedSystemPrompt = String(msgs.find((m: any) => m.role === 'system')?.content || '');
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(
+        JSON.stringify({
+          id: 'chatcmpl_holo_1',
+          choices: [{ message: { role: 'assistant', content: '已收到您的新加坡跨区物流咨询，我们马上为您安排对接。' } }],
+        })
+      );
+      return;
+    }
+
+    res.writeHead(404, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'Not Found' }));
+  });
+
+  await new Promise<void>((r) => mockGateway.listen(0, '127.0.0.1', r));
+  const mockPort = (mockGateway.address() as any).port;
+
+  const appSrv = http.createServer(app);
+  await new Promise<void>((r) => appSrv.listen(0, '127.0.0.1', r));
+  const appPort = (appSrv.address() as any).port;
+
+  const headerB64 = Buffer.from(JSON.stringify({ alg: 'HS256', typ: 'JWT' })).toString('base64url');
+  const payloadB64 = Buffer.from(
+    JSON.stringify({ sub: 'holo_tester', username: 'holo_tester', role: 'member', exp: Math.floor(Date.now() / 1000) + 3600 })
+  ).toString('base64url');
+  const sigB64 = createHmac('sha256', process.env.JWT_SECRET).update(`${headerB64}.${payloadB64}`).digest('base64url');
+  const memberJwt = `${headerB64}.${payloadB64}.${sigB64}`;
+
+  const testAcc = `acc_tg_holo_${Date.now()}`;
+  const testChat = `tg_holo_${Date.now()}`;
+
+  try {
+    const saveProfileRes = await fetch(`http://127.0.0.1:${appPort}/api/customer/profile/${testChat}`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${memberJwt}`,
+        'X-Account-Id': testAcc,
+      },
+      body: JSON.stringify({
+        clientName: '陈总',
+        relationshipStage: '深度意向',
+        ageEstimate: '38岁左右',
+        occupation: '东南亚跨境供应链创始人',
+        locationTimezone: '新加坡 UTC+8',
+        toneStyle: '干练直接、注重时效',
+        likesInterests: ['高尔夫', '港口清关时效'],
+        dislikesTaboos: ['虚假承诺'],
+        emotionalNeeds: '希望找到长期稳定的头程合作伙伴',
+        keyMemories: [{ date: '2026-10-01', topic: '样品试发', summary: '首票空运按时签收', emotion: '认可' }],
+      }),
+    });
+    assert.equal(saveProfileRes.status, 200);
+
+    const res = await fetch(`http://127.0.0.1:${appPort}/api/llm/chat`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${memberJwt}`,
+        'X-Account-Id': testAcc,
+      },
+      body: JSON.stringify({
+        chatId: testChat,
+        accountId: testAcc,
+        messages: [{ sender: 'peer', text: '下周新加坡仓的补货舱位能锁定吗？' }],
+        customConfig: {
+          enabled: true,
+          explicitlyDisabled: false,
+          engineMode: 'custom',
+          baseUrl: `http://127.0.0.1:${mockPort}/v1`,
+          apiKey: 'test-custom-key',
+          modelName: 'gpt-4o-mini',
+          temperature: 1.15,
+          enableKnowledgeBaseRAG: false,
+        },
+      }),
+    });
+
+    assert.equal(res.status, 200);
+    assert.ok(capturedSystemPrompt.includes('38岁左右'), 'Expected age_estimate in profileContext prompt');
+    assert.ok(capturedSystemPrompt.includes('东南亚跨境供应链创始人'), 'Expected occupation in profileContext prompt');
+    assert.ok(capturedSystemPrompt.includes('新加坡 UTC+8'), 'Expected location_timezone in profileContext prompt');
+    assert.equal(capturedTemperature, 1.15);
+    assert.equal(capturedMaxTokens, 500);
+  } finally {
+    await db
+      .prepare('DELETE FROM customer_profiles WHERE account_id = ? AND chat_id = ?')
+      .run(testAcc, testChat)
+      .catch(() => {});
+    await new Promise<void>((r) => appSrv.close(() => r()));
+    await new Promise<void>((r) => mockGateway.close(() => r()));
+    if (prevJwtSecret === undefined) delete process.env.JWT_SECRET;
+    else process.env.JWT_SECRET = prevJwtSecret;
+  }
+
+  // Verify deploy/railway-brain-server.ts forwards temperature & maxOutputTokens and folds systemTexts for gemma-*
+  const brainSrc = readFileSync(resolve(process.cwd(), 'deploy', 'railway-brain-server.ts'), 'utf8');
+  assert.match(brainSrc, /const isGemmaModel = geminiModel\.startsWith\('gemma-'\)/);
+  assert.match(brainSrc, /geminiConfig\.temperature = validTemp/);
+  assert.match(brainSrc, /geminiConfig\.maxOutputTokens = validMaxTokens/);
+  assert.match(brainSrc, /if \(systemTexts && !isGemmaModel\)/);
+  assert.match(brainSrc, /if \(isGemmaModel && systemTexts\)/);
+});
+
+test('Stage 2 P0: Per-account translation_settings isolation with global fallback, unified LLM/voiceprint preserved, and strict callRecords filtering', async () => {
+  const { readFileSync } = await import('node:fs');
+  const { resolve } = await import('node:path');
+  const http = await import('node:http');
+  const { createHmac } = await import('node:crypto');
+  const { initDatabase, db, exportDatabaseSnapshot, restoreDatabaseSnapshot } = await import('./db.ts');
+  const { app, syncServerTranslationSettings, getServerTranslationSettings } = await import('../server.ts');
+
+  await initDatabase();
+
+  const prevJwtSecret = process.env.JWT_SECRET;
+  process.env.JWT_SECRET = 'stage2_trans_isolation_secret';
+
+  const appSrv = http.createServer(app);
+  await new Promise<void>((r) => appSrv.listen(0, '127.0.0.1', r));
+  const appPort = (appSrv.address() as any).port;
+
+  const headerB64 = Buffer.from(JSON.stringify({ alg: 'HS256', typ: 'JWT' })).toString('base64url');
+  const payloadB64 = Buffer.from(
+    JSON.stringify({ sub: 'stage2_tester', username: 'stage2_tester', role: 'member', exp: Math.floor(Date.now() / 1000) + 3600 })
+  ).toString('base64url');
+  const sigB64 = createHmac('sha256', process.env.JWT_SECRET).update(`${headerB64}.${payloadB64}`).digest('base64url');
+  const memberJwt = `${headerB64}.${payloadB64}.${sigB64}`;
+
+  const accA = `acc_tg_s2_a_${Date.now()}`;
+  const accB = `acc_tg_s2_b_${Date.now()}`;
+  const accFallback = `acc_tg_s2_fallback_${Date.now()}`;
+  const prevGlobal = await getServerTranslationSettings();
+
+  try {
+    await syncServerTranslationSettings({
+      defaultSourceLang: 'Auto',
+      defaultTargetLang: 'Chinese',
+      preferredEngine: 'gemini',
+      geminiModel: 'gemma-4-26b-a4b-it',
+    });
+
+    const postA = await fetch(`http://127.0.0.1:${appPort}/api/translate/settings?accountId=${accA}`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${memberJwt}`,
+        'X-Account-Id': accA,
+      },
+      body: JSON.stringify({
+        defaultSourceLang: 'English',
+        defaultTargetLang: 'Japanese',
+        preferredEngine: 'google',
+        googleApiKey: 'AIza-stage2-accA-secret',
+        autoTranslateInbound: true,
+        autoTranslateOutbound: false,
+      }),
+    });
+    assert.equal(postA.status, 200);
+
+    const postB = await fetch(`http://127.0.0.1:${appPort}/api/translate/settings?accountId=${accB}`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${memberJwt}`,
+        'X-Account-Id': accB,
+      },
+      body: JSON.stringify({
+        defaultSourceLang: 'Turkish',
+        defaultTargetLang: 'English',
+        preferredEngine: 'gemini',
+        geminiModel: 'gemma-4-31b-it',
+        geminiApiKey: 'AIza-stage2-accB-secret',
+        autoTranslateInbound: false,
+        autoTranslateOutbound: true,
+      }),
+    });
+    assert.equal(postB.status, 200);
+
+    const [getARes, getBRes, getFallbackRes] = await Promise.all([
+      fetch(`http://127.0.0.1:${appPort}/api/translate/settings?accountId=${accA}`, {
+        headers: { Authorization: `Bearer ${memberJwt}`, 'X-Account-Id': accA },
+      }).then((r) => r.json()) as Promise<any>,
+      fetch(`http://127.0.0.1:${appPort}/api/translate/settings?accountId=${accB}`, {
+        headers: { Authorization: `Bearer ${memberJwt}`, 'X-Account-Id': accB },
+      }).then((r) => r.json()) as Promise<any>,
+      fetch(`http://127.0.0.1:${appPort}/api/translate/settings?accountId=${accFallback}`, {
+        headers: { Authorization: `Bearer ${memberJwt}`, 'X-Account-Id': accFallback },
+      }).then((r) => r.json()) as Promise<any>,
+    ]);
+
+    assert.equal(getARes.settings?.defaultTargetLang, 'Japanese');
+    assert.equal(getARes.settings?.preferredEngine, 'google');
+    assert.equal(getBRes.settings?.defaultTargetLang, 'English');
+    assert.equal(getBRes.settings?.preferredEngine, 'gemini');
+    assert.equal(getBRes.settings?.geminiModel, 'gemma-4-31b-it');
+    assert.equal(getFallbackRes.settings?.defaultTargetLang, 'Chinese', 'Unconfigured account must fall back to global translation_settings');
+
+    // Verify DB snapshot strips secrets on translation_settings::* and restore preserves them
+    const snap = await exportDatabaseSnapshot();
+    const exportedA = ((snap.tables as any).system_config || []).find((r: any) => r.key === `translation_settings::${accA}`);
+    assert.ok(exportedA, 'Expected translation_settings::accA in snapshot');
+    assert.equal(JSON.parse(exportedA.value).googleApiKey, undefined);
+
+    await restoreDatabaseSnapshot({
+      tables: {
+        system_config: [exportedA],
+      },
+    });
+    const restoredRowA = (await db.prepare('SELECT value FROM system_config WHERE key = ?').get(`translation_settings::${accA}`)) as any;
+    assert.equal(JSON.parse(restoredRowA.value).googleApiKey, 'AIza-stage2-accA-secret');
+
+    // Verify App.tsx removes !rec.accountId bypass on callRecords & scopes tg_pro_trans_settings, while voiceprint & custom_llm stay unified
+    const appSrc = readFileSync(resolve(process.cwd(), 'src', 'App.tsx'), 'utf8');
+    assert.equal(appSrc.includes('!rec.accountId || !activeAccountId || rec.accountId === activeAccountId'), false);
+    assert.match(appSrc, /callRecords\.filter\(\(rec\) => !activeAccountId \|\| rec\.accountId === activeAccountId\)/);
+    assert.match(appSrc, /tg_pro_trans_settings::\$\{clean\}/);
+
+    const vpSrc = readFileSync(resolve(process.cwd(), 'src', 'services', 'voiceprintStorage.ts'), 'utf8');
+    assert.match(vpSrc, /tg_master_voiceprint'/);
+  } finally {
+    await db.prepare('DELETE FROM system_config WHERE key IN (?, ?)').run(`translation_settings::${accA}`, `translation_settings::${accB}`).catch(() => {});
+    if (prevGlobal) {
+      await syncServerTranslationSettings(prevGlobal).catch(() => {});
+    }
+    await new Promise<void>((r) => appSrv.close(() => r()));
+    if (prevJwtSecret === undefined) delete process.env.JWT_SECRET;
+    else process.env.JWT_SECRET = prevJwtSecret;
+  }
+});
+
+test('Stage 3: Non-functional VoIP call entries offlined while Mic/TTS/STT remain intact and chat input upgraded to auto-resizing textarea', async () => {
+  const { readFileSync } = await import('node:fs');
+  const { resolve } = await import('node:path');
+  const chatAreaSrc = readFileSync(resolve(process.cwd(), 'src', 'components', 'ChatArea.tsx'), 'utf8');
+  const menuDrawerSrc = readFileSync(resolve(process.cwd(), 'src', 'components', 'TelegramMenuDrawer.tsx'), 'utf8');
+  const callsModalSrc = readFileSync(resolve(process.cwd(), 'src', 'components', 'TelegramCallsModal.tsx'), 'utf8');
+  const appSrc = readFileSync(resolve(process.cwd(), 'src', 'App.tsx'), 'utf8');
+
+  // 1. VoIP call triggers are offlined from main UI surfaces
+  assert.equal(chatAreaSrc.includes('onOpenVoiceCall'), false);
+  assert.equal(chatAreaSrc.includes('title="语音通话"'), false);
+  assert.equal(menuDrawerSrc.includes('onOpenCalls'), false);
+  assert.equal(menuDrawerSrc.includes('通话记录'), false);
+  assert.equal(callsModalSrc.includes('回拨语音电话'), false);
+  assert.equal(appSrc.includes('TelegramVoiceCallModal'), false);
+  assert.equal(appSrc.includes('onOpenVoiceCall'), false);
+  assert.equal(appSrc.includes('onOpenCalls'), false);
+
+  // 2. Working voice features (mic voice-note recording, TTS voice studio, STT transcription) remain intact
+  assert.match(chatAreaSrc, /handleToggleRecordMic/);
+  assert.match(chatAreaSrc, /VoiceCloneStudioModal/);
+  assert.match(chatAreaSrc, /handleTranscribeAudio|transcribingMap/);
+
+  // 3. Chat input upgraded from single-line input to auto-resizing textarea with Shift+Enter newline support
+  assert.match(chatAreaSrc, /<textarea\b/);
+  assert.match(chatAreaSrc, /ref=\{textareaRef\}/);
+  assert.match(chatAreaSrc, /React\.KeyboardEvent<HTMLTextAreaElement>/);
+  assert.match(chatAreaSrc, /Shift\+Enter 换行/);
+  assert.equal(chatAreaSrc.includes('<input\n            type="text"\n            value={inputText}'), false);
+});
+
+test('Stage 4: Unified Windows desktop TelegramClient fingerprint, combined DB+memory 20-account quota, and no-.env JWT handshake reconnect', async () => {
+  const { readFileSync } = await import('node:fs');
+  const { resolve } = await import('node:path');
+  const http = await import('node:http');
+  const { createHmac } = await import('node:crypto');
+  const { initDatabase, db } = await import('./db.ts');
+  const {
+    app,
+    connectedUserClients,
+    TELEGRAM_DESKTOP_CLIENT_PARAMS,
+    getRegisteredTelegramAccountsSummary,
+    MAX_TELEGRAM_ACCOUNTS,
+  } = await import('../server.ts');
+
+  await initDatabase();
+
+  // 1. Unified Windows Desktop fingerprint across server.ts
+  assert.equal(TELEGRAM_DESKTOP_CLIENT_PARAMS.deviceModel, 'HumanSense Desktop');
+  assert.equal(TELEGRAM_DESKTOP_CLIENT_PARAMS.systemVersion, 'Windows 11');
+  assert.equal(TELEGRAM_DESKTOP_CLIENT_PARAMS.appVersion, '4.16.8');
+  const serverSrc = readFileSync(resolve(process.cwd(), 'server.ts'), 'utf8');
+  assert.equal(serverSrc.includes("systemVersion: 'Web/Node'"), false);
+  assert.equal(serverSrc.includes('LingXi Context Workstation'), false);
+  assert.equal(serverSrc.includes('Telegram Desktop Pro'), false);
+  assert.match(serverSrc, /if \(!hasCredsPath\) \{\s*telegramSessionRestoreState\.lastError = null;\s*return 0;/);
+
+  // 2. Frontend App.tsx JWT handshake triggers reconnect check and guards against transient false offline
+  const appSrc = readFileSync(resolve(process.cwd(), 'src', 'App.tsx'), 'utf8');
+  assert.match(appSrc, /runHandshakeTelegramReconnect/);
+  assert.match(appSrc, /reconnectTelegramSessionsApi\(false,\s*false\)/);
+  assert.match(appSrc, /startupReconnectInFlightRef\.current/);
+
+  // 3. Combined DB (is_active = 1) + RAM deduplicated 20-account limit enforcement on qr-token and send-code
+  const prevJwtSecret = process.env.JWT_SECRET;
+  const prevApiId = process.env.TELEGRAM_API_ID;
+  const prevApiHash = process.env.TELEGRAM_API_HASH;
+  process.env.JWT_SECRET = 'stage4_quota_secret';
+  process.env.TELEGRAM_API_ID = '123456';
+  process.env.TELEGRAM_API_HASH = '0123456789abcdef0123456789abcdef';
+
+  const insertedPhones: string[] = [];
+  const ramKeys: string[] = [];
+  const appSrv = http.createServer(app);
+  await new Promise<void>((r) => appSrv.listen(0, '127.0.0.1', r));
+  const addr = appSrv.address() as any;
+  const port = addr.port;
+
+  const signJwt = (sub: string) => {
+    const hdr = Buffer.from(JSON.stringify({ alg: 'HS256', typ: 'JWT' })).toString('base64url');
+    const pld = Buffer.from(
+      JSON.stringify({
+        sub,
+        username: sub,
+        role: 'member',
+        plan: 'vip_permanent',
+        vipExpiresAt: Date.now() + 86_400_000,
+        exp: Math.floor(Date.now() / 1000) + 3600,
+      })
+    ).toString('base64url');
+    const sig = createHmac('sha256', process.env.JWT_SECRET!).update(`${hdr}.${pld}`).digest('base64url');
+    return `${hdr}.${pld}.${sig}`;
+  };
+  const memberJwt = signJwt('stage4_member');
+
+  try {
+    // Ensure clean table start for our test phones
+    const baseline = await getRegisteredTelegramAccountsSummary();
+    const needed = Math.max(0, MAX_TELEGRAM_ACCOUNTS - baseline.totalUniqueCount);
+    const now = Date.now();
+
+    // Insert (needed - 1) active DB rows + 1 active overlapping RAM+DB row + 1 expired row (is_active = 0)
+    // Total active unique accounts = MAX_TELEGRAM_ACCOUNTS (20), expired row must NOT count
+    for (let i = 0; i < needed; i++) {
+      const uid = `900400${i}`;
+      const phone = `+861390040${String(i).padStart(4, '0')}`;
+      insertedPhones.push(phone);
+      await db
+        .prepare(
+          `INSERT OR REPLACE INTO telegram_user_sessions (phone, session_string, user_id, username, first_name, is_active, created_at, updated_at)
+           VALUES (?, 'dummy_session', ?, ?, ?, 1, ?, ?)`
+        )
+        .run(phone, uid, `u_${uid}`, `User${i}`, now, now);
+
+      // Overlap the first row into RAM to prove DB + RAM deduplication doesn't double-count
+      if (i === 0) {
+        const fakeUser: any = {
+          client: { connected: true },
+          phone,
+          userId: uid,
+          username: `@u_${uid}`,
+          firstName: `User${i}`,
+          avatarInitial: 'U0',
+          avatarBg: '#2481cc',
+          apiId: 123456,
+          apiHash: '0123456789abcdef0123456789abcdef',
+          connectedAt: now,
+          dialogs: [],
+        };
+        connectedUserClients.set(uid, fakeUser);
+        connectedUserClients.set(phone, fakeUser);
+        connectedUserClients.set(`acc_tg_${uid}`, fakeUser);
+        ramKeys.push(uid, phone, `acc_tg_${uid}`);
+      }
+    }
+
+    // Add an expired (is_active = 0) session — must not push count past limit or be counted
+    const expiredPhone = '+8613900409999';
+    insertedPhones.push(expiredPhone);
+    await db
+      .prepare(
+        `INSERT OR REPLACE INTO telegram_user_sessions (phone, session_string, user_id, username, first_name, is_active, expired_reason, created_at, updated_at)
+         VALUES (?, '', '90049999', 'expired_u', 'Expired', 0, 'AUTH_KEY_UNREGISTERED', ?, ?)`
+      )
+      .run(expiredPhone, now, now);
+
+    const summaryAfterSeed = await getRegisteredTelegramAccountsSummary();
+    assert.equal(summaryAfterSeed.totalUniqueCount, MAX_TELEGRAM_ACCOUNTS);
+
+    // Clear RAM for non-first accounts so only 1 account is in RAM while 20 are active in DB
+    // Both qr-token and send-code for a 21st new phone MUST be blocked!
+    const qrLimitRes = await fetch(`http://127.0.0.1:${port}/api/telegram/user/qr-token`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${memberJwt}` },
+      body: JSON.stringify({}),
+    });
+    assert.equal(qrLimitRes.status, 400);
+    const qrLimitJson = (await qrLimitRes.json()) as any;
+    assert.match(String(qrLimitJson.error), /20 个账号/);
+
+    const sendCodeLimitRes = await fetch(`http://127.0.0.1:${port}/api/telegram/user/send-code`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${memberJwt}` },
+      body: JSON.stringify({ phone: '+8613999998888' }),
+    });
+    assert.equal(sendCodeLimitRes.status, 400);
+    const sendCodeLimitJson = (await sendCodeLimitRes.json()) as any;
+    assert.match(String(sendCodeLimitJson.error), /20 个账号/);
+  } finally {
+    for (const k of ramKeys) connectedUserClients.delete(k);
+    for (const p of insertedPhones) {
+      await db.prepare('DELETE FROM telegram_user_sessions WHERE phone = ?').run(p).catch(() => {});
+    }
+    await new Promise<void>((r) => appSrv.close(() => r()));
+    if (prevJwtSecret === undefined) delete process.env.JWT_SECRET;
+    else process.env.JWT_SECRET = prevJwtSecret;
+    if (prevApiId === undefined) delete process.env.TELEGRAM_API_ID;
+    else process.env.TELEGRAM_API_ID = prevApiId;
+    if (prevApiHash === undefined) delete process.env.TELEGRAM_API_HASH;
+    else process.env.TELEGRAM_API_HASH = prevApiHash;
+  }
 });
 

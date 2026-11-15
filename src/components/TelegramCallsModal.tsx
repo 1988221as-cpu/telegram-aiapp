@@ -6,14 +6,13 @@ interface TelegramCallsModalProps {
   isOpen: boolean;
   onClose: () => void;
   callRecords: TelegramCallRecord[];
-  onStartCall: (contactName: string) => void;
+  onStartCall?: (contactName: string) => void;
 }
 
 export const TelegramCallsModal: React.FC<TelegramCallsModalProps> = ({
   isOpen,
   onClose,
   callRecords,
-  onStartCall,
 }) => {
   const [filter, setFilter] = useState<'all' | 'missed'>('all');
 
@@ -108,17 +107,6 @@ export const TelegramCallsModal: React.FC<TelegramCallsModalProps> = ({
                     </div>
                   </div>
                 </div>
-
-                <button
-                  onClick={() => {
-                    onStartCall(record.contactName);
-                    onClose();
-                  }}
-                  className="w-8 h-8 rounded-full flex items-center justify-center text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf] hover:bg-[#e8f3ff] dark:hover:bg-[#2ba0ff]/15 aurora:hover:bg-[#112d36] transition-colors cursor-pointer"
-                  title="回拨语音电话"
-                >
-                  <Phone className="w-4 h-4" />
-                </button>
               </div>
             ))
           )}

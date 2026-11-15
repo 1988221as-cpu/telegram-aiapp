@@ -1226,13 +1226,20 @@ export async function fetchCustomLLMConfigApi(): Promise<CustomLLMConfig | null>
   return null;
 }
 
-export async function syncTranslationSettingsApi(settings: TranslationSettings): Promise<boolean> {
+export async function syncTranslationSettingsApi(
+  settings: TranslationSettings,
+  accountId?: string
+): Promise<boolean> {
   try {
+    const effectiveAcc = (accountId || currentActiveAccountId || '').trim();
+    const endpoint = effectiveAcc
+      ? `/api/translate/settings?accountId=${encodeURIComponent(effectiveAcc)}`
+      : '/api/translate/settings';
     const res = await fetchWithTimeout(
-      '/api/translate/settings',
+      endpoint,
       {
         method: 'POST',
-        headers: getAuthHeaders(),
+        headers: getAuthHeaders(effectiveAcc || undefined),
         body: JSON.stringify(settings),
       },
       10000
@@ -1244,12 +1251,16 @@ export async function syncTranslationSettingsApi(settings: TranslationSettings):
   }
 }
 
-export async function fetchTranslationSettingsApi(): Promise<TranslationSettings | null> {
+export async function fetchTranslationSettingsApi(accountId?: string): Promise<TranslationSettings | null> {
   try {
+    const effectiveAcc = (accountId || currentActiveAccountId || '').trim();
+    const endpoint = effectiveAcc
+      ? `/api/translate/settings?accountId=${encodeURIComponent(effectiveAcc)}`
+      : '/api/translate/settings';
     const res = await fetchWithTimeout(
-      '/api/translate/settings',
+      endpoint,
       {
-        headers: getAuthHeaders(),
+        headers: getAuthHeaders(effectiveAcc || undefined),
       },
       10000
     );

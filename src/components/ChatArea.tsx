@@ -10,7 +10,6 @@ import {
   ChevronDown,
   MoreVertical,
   Paperclip,
-  Phone,
   Search,
   Play,
   Pause,
@@ -447,7 +446,6 @@ interface ChatAreaProps {
   onAddContact?: (contact: TelegramContact) => void;
   onRemoveContact?: (contactId: string) => void;
   onCloseChat?: () => void;
-  onOpenVoiceCall?: () => void;
   onOpenCustomLLM?: () => void;
   activeRightPanel?: RightPanelTab | null;
   isChatInfoOpenExternal?: boolean;
@@ -531,7 +529,6 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
   onAddContact,
   onRemoveContact,
   onCloseChat,
-  onOpenVoiceCall,
   onOpenCustomLLM,
   activeRightPanel,
   isChatInfoOpenExternal,
@@ -540,6 +537,17 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
   onRefreshMediaUrls,
 }) => {
   const [inputText, setInputText] = useState('');
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+
+  useEffect(() => {
+    const el = textareaRef.current;
+    if (!el) return;
+    el.style.height = 'auto';
+    const maxHeight = 144;
+    const nextHeight = Math.min(el.scrollHeight, maxHeight);
+    el.style.height = `${nextHeight}px`;
+    el.style.overflowY = el.scrollHeight > maxHeight ? 'auto' : 'hidden';
+  }, [inputText, chat?.id]);
   const [translatedPreview, setTranslatedPreview] = useState('');
   const [translatedPreviewSource, setTranslatedPreviewSource] = useState('');
   const [previewError, setPreviewError] = useState('');
@@ -1852,7 +1860,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
     });
   };
 
-  const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     const isSendTrigger = sendWithEnter
       ? e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing
       : e.key === 'Enter' && (e.ctrlKey || e.metaKey) && !e.nativeEvent.isComposing;
@@ -2660,18 +2668,6 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
             <Sparkles className="w-3.5 h-3.5" />
             <span className="hidden lg:inline font-semibold">人设资料</span>
           </button>
-
-          {/* Voice Call Button */}
-          {onOpenVoiceCall && (
-            <button
-              type="button"
-              onClick={onOpenVoiceCall}
-              title="语音通话"
-              className="w-8 h-8 rounded-lg hover:bg-[#f1f5f9] dark:hover:bg-[#142236] aurora:hover:bg-[#15252e] flex items-center justify-center hover:text-[#2481cc] dark:hover:text-[#2ba0ff] aurora:hover:text-[#5eead4] transition-colors cursor-pointer"
-            >
-              <Phone className="w-4 h-4" />
-            </button>
-          )}
 
           {/* More Options / Chat Info Drawer */}
           <button
@@ -4244,8 +4240,9 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
 
         {/* Main Input Container + Bottom Compact Action Row */}
         <div className="rounded-xl border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#1e343e] bg-[#f8fafc] dark:bg-[#0e1726] aurora:bg-[#111d24] focus-within:bg-white dark:focus-within:bg-[#101b2c] aurora:focus-within:bg-[#13222b] focus-within:border-[#2481cc] dark:focus-within:border-[#2ba0ff] aurora:focus-within:border-[#2dd4bf] transition-all">
-          <input
-            type="text"
+          <textarea
+            ref={textareaRef}
+            rows={1}
             value={inputText}
             onChange={(e) => setInputText(e.target.value)}
             onKeyDown={handleKeyDown}
@@ -4255,9 +4252,9 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                 ? '修改消息...'
                 : pastedImage
                 ? '添加图片说明（可选）...'
-                : '输入消息（支持自动翻译与 Ctrl+V 粘贴图片）...'
+                : '输入消息（支持自动翻译、Shift+Enter 换行与 Ctrl+V 粘贴图片）...'
             }
-            className="w-full bg-transparent text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] text-[13.5px] px-3.5 pt-2.5 pb-1.5 focus:outline-none placeholder-[#94a3b8] dark:placeholder-[#566d85] aurora:placeholder-[#5a7782]"
+            className="w-full max-h-36 resize-none bg-transparent text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] text-[13.5px] leading-relaxed px-3.5 pt-2.5 pb-1.5 focus:outline-none placeholder-[#94a3b8] dark:placeholder-[#566d85] aurora:placeholder-[#5a7782] overflow-y-hidden"
           />
 
           <div className="px-2.5 pb-2 pt-1 flex items-center justify-between border-t border-[#e2e8f0]/60 dark:border-white/5 aurora:border-[#182b34]">
@@ -4317,7 +4314,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
             {/* Right Actions: Shortcut hint + Mic / Send Button */}
             <div className="flex items-center gap-2">
               <span className="hidden sm:inline text-[11px] text-[#94a3b8] dark:text-[#7b93ad] aurora:text-[#7e9aa5] select-none">
-                {sendWithEnter ? 'Enter 发送' : 'Ctrl+Enter 发送'}
+                {sendWithEnter ? 'Enter 发送 · Shift+Enter 换行' : 'Ctrl+Enter 发送 · Enter 换行'}
               </span>
 
               {inputText.trim() || pastedImage ? (

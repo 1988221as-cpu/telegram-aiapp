@@ -422,10 +422,58 @@ app.post('/v1/chat/completions', requireCloudAuth, async (req: Request, res: Res
         .filter((t: any) => t.parts[0].text.trim().length > 0);
 
       const geminiModel = isNativeGeminiOrGemmaModel ? upstreamModel : 'gemini-4-hydrogen';
+      const isGemmaModel = geminiModel.startsWith('gemma-');
+
+      const rawTemp = req.body?.temperature;
+      const parsedTemp = typeof rawTemp === 'number' ? rawTemp : Number(rawTemp);
+      const validTemp =
+        rawTemp !== undefined && rawTemp !== null && rawTemp !== '' && Number.isFinite(parsedTemp)
+          ? Math.min(Math.max(parsedTemp, 0), 2)
+          : undefined;
+
+      const rawMaxTokens = req.body?.max_tokens ?? req.body?.maxOutputTokens;
+      const parsedMaxTokens = typeof rawMaxTokens === 'number' ? rawMaxTokens : Number(rawMaxTokens);
+      const validMaxTokens =
+        rawMaxTokens !== undefined &&
+        rawMaxTokens !== null &&
+        rawMaxTokens !== '' &&
+        Number.isFinite(parsedMaxTokens) &&
+        parsedMaxTokens > 0
+          ? Math.floor(parsedMaxTokens)
+          : undefined;
+
+      let effectiveTurns =
+        dialogueTurns.length > 0 ? dialogueTurns : [{ role: 'user', parts: [{ text: '你好' }] }];
+      if (isGemmaModel && systemTexts) {
+        if (effectiveTurns[0]?.role === 'user') {
+          const firstText = String(effectiveTurns[0]?.parts?.[0]?.text || '');
+          effectiveTurns = [
+            { role: 'user', parts: [{ text: `${systemTexts}\n\n${firstText}`.trim() }] },
+            ...effectiveTurns.slice(1),
+          ];
+        } else {
+          effectiveTurns = [
+            { role: 'user', parts: [{ text: systemTexts }] },
+            ...effectiveTurns,
+          ];
+        }
+      }
+
+      const geminiConfig: Record<string, any> = {};
+      if (systemTexts && !isGemmaModel) {
+        geminiConfig.systemInstruction = systemTexts;
+      }
+      if (validTemp !== undefined) {
+        geminiConfig.temperature = validTemp;
+      }
+      if (validMaxTokens !== undefined) {
+        geminiConfig.maxOutputTokens = validMaxTokens;
+      }
+
       const geminiRes = await ai.models.generateContent({
         model: geminiModel,
-        contents: dialogueTurns.length > 0 ? dialogueTurns : [{ role: 'user', parts: [{ text: '你好' }] }],
-        config: systemTexts ? { systemInstruction: systemTexts } : undefined,
+        contents: effectiveTurns,
+        config: Object.keys(geminiConfig).length > 0 ? geminiConfig : undefined,
       });
 
       const replyText = geminiRes.text?.trim() || '';
