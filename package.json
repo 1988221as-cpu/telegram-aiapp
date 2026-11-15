@@ -2,7 +2,7 @@
   "name": "lingxi-context",
   "private": true,
   "version": "1.0.0",
-  "description": "HumanSense · 智能多开翻译与全天候客服系统",
+  "description": "HumanSense",
   "author": "HumanSense团队",
   "type": "module",
   "main": "main.cjs",
