@@ -47,6 +47,9 @@ export interface Env {
   KNOWLEDGE_SERVER_URL?: string;
   RAILWAY_BRAIN_URL?: string;
   BRAIN_UPSTREAM_KEY?: string;
+  ENGINE_LICENSE_KEYS?: string;
+  ALLOWED_ENGINE_KEYS?: string;
+  ALLOWED_ORIGINS?: string;
 }
 
 const DEFAULT_JWT_PUBLIC_KEY = `-----BEGIN PUBLIC KEY-----
@@ -62,19 +65,106 @@ UwIDAQAB
 const MAX_ACCOUNTS_PER_DEVICE = 20;
 const DAY_MS = 24 * 60 * 60 * 1000;
 
-const CORS_HEADERS: Record<string, string> = {
-  'Access-Control-Allow-Origin': '*',
+const BASE_CORS_HEADERS: Record<string, string> = {
   'Access-Control-Allow-Methods': 'GET, POST, PUT, PATCH, DELETE, OPTIONS',
   'Access-Control-Allow-Headers':
     'Content-Type, Authorization, X-Admin-Secret, X-Client-Brand, X-Engine-Key, X-Engine-License, X-License-Key, x-api-key, X-User-JWT',
 };
+
+function constantTimeEqual(a: string, b: string): boolean {
+  if (!a || !b || a.length !== b.length) return false;
+  let diff = 0;
+  for (let i = 0; i < a.length; i++) {
+    diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  }
+  return diff === 0;
+}
+
+function resolveAllowedEngineKeys(env: Env): string[] {
+  const keys: string[] = [];
+  const rawList = [env.ENGINE_LICENSE_KEYS, env.ALLOWED_ENGINE_KEYS].filter(Boolean).join(',');
+  for (const entry of rawList.split(',')) {
+    const trimmed = entry.trim();
+    if (trimmed && !keys.includes(trimmed)) keys.push(trimmed);
+  }
+  const masterKey = (env.BRAIN_UPSTREAM_KEY || '').trim();
+  if (masterKey && !keys.includes(masterKey)) {
+    keys.push(masterKey);
+  }
+  return keys;
+}
+
+function resolveCorsHeaders(request: Request, env: Env, path: string): Record<string, string> {
+  const originHeader = (request.headers.get('Origin') || '').trim();
+  if (!originHeader) {
+    return { ...BASE_CORS_HEADERS };
+  }
+  let parsedOrigin: URL;
+  try {
+    parsedOrigin = new URL(originHeader);
+  } catch {
+    return { Vary: 'Origin' };
+  }
+  if (
+    (parsedOrigin.protocol !== 'http:' && parsedOrigin.protocol !== 'https:') ||
+    parsedOrigin.username ||
+    parsedOrigin.password
+  ) {
+    return { Vary: 'Origin' };
+  }
+  const normalizedOrigin = parsedOrigin.origin;
+  const allowedList = String(env.ALLOWED_ORIGINS || '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
+  let isAllowed = allowedList.some((entry) => {
+    try {
+      const u = new URL(entry);
+      return (
+        (u.protocol === 'http:' || u.protocol === 'https:') &&
+        u.origin.toLowerCase() === normalizedOrigin.toLowerCase()
+      );
+    } catch {
+      return false;
+    }
+  });
+  if (!isAllowed && !path.startsWith('/api/admin/')) {
+    const host = parsedOrigin.hostname.toLowerCase();
+    if (host === 'localhost' || host === '127.0.0.1' || host === '::1' || host === '[::1]') {
+      isAllowed = true;
+    }
+  }
+  if (!isAllowed) {
+    return { Vary: 'Origin' };
+  }
+  return {
+    ...BASE_CORS_HEADERS,
+    'Access-Control-Allow-Origin': normalizedOrigin,
+    Vary: 'Origin',
+  };
+}
+
+function applyCorsHeaders(response: Response, request: Request, env: Env, path: string): Response {
+  const corsHeaders = resolveCorsHeaders(request, env, path);
+  const nextHeaders = new Headers(response.headers);
+  nextHeaders.delete('Access-Control-Allow-Origin');
+  nextHeaders.delete('Access-Control-Allow-Methods');
+  nextHeaders.delete('Access-Control-Allow-Headers');
+  for (const [k, v] of Object.entries(corsHeaders)) {
+    nextHeaders.set(k, v);
+  }
+  return new Response(response.body, {
+    status: response.status,
+    headers: nextHeaders,
+  });
+}
 
 function jsonResponse(data: unknown, status = 200): Response {
   return new Response(JSON.stringify(data), {
     status,
     headers: {
       'Content-Type': 'application/json; charset=utf-8',
-      ...CORS_HEADERS,
+      ...BASE_CORS_HEADERS,
     },
   });
 }
@@ -487,13 +577,15 @@ async function forwardToKnowledgeBrain(request: Request, env: Env, url: URL): Pr
   const bearerToken = bearerMatch?.[1]?.trim() || '';
 
   let edgeAuthenticated = false;
+  let authenticatedByAdmin = false;
   let verifiedUserJwt = '';
 
   if (adminSecret) {
-    if (!env.ADMIN_SECRET || adminSecret !== env.ADMIN_SECRET) {
+    if (!env.ADMIN_SECRET || !constantTimeEqual(adminSecret, env.ADMIN_SECRET)) {
       return jsonResponse({ ok: false, code: 'UNAUTHORIZED_ADMIN', error: 'Unauthorized admin request' }, 401);
     }
     edgeAuthenticated = true;
+    authenticatedByAdmin = true;
   } else {
     const jwtCandidate = explicitUserJwt || (bearerToken.split('.').length === 3 ? bearerToken : '');
     if (jwtCandidate) {
@@ -513,11 +605,27 @@ async function forwardToKnowledgeBrain(request: Request, env: Env, url: URL): Pr
       }
       edgeAuthenticated = true;
       verifiedUserJwt = jwtCandidate;
-    } else if (!engineKey && !bearerToken) {
-      return jsonResponse(
-        { ok: false, code: 'MISSING_AUTH', error: '缺少有效的会员 RS256 令牌或引擎授权密钥' },
-        401
-      );
+    } else {
+      const engineCandidate = engineKey || bearerToken;
+      if (!engineCandidate) {
+        return jsonResponse(
+          { ok: false, code: 'MISSING_AUTH', error: '缺少有效的会员 RS256 令牌或引擎授权密钥' },
+          401
+        );
+      }
+      const allowedEngineKeys = resolveAllowedEngineKeys(env);
+      const matchedEngineKey = allowedEngineKeys.some((k) => constantTimeEqual(engineCandidate, k));
+      if (!matchedEngineKey) {
+        return jsonResponse(
+          {
+            ok: false,
+            code: engineKey ? 'INVALID_ENGINE_KEY' : 'INVALID_TOKEN',
+            error: engineKey ? '无效的引擎授权密钥' : '无效的认证令牌格式或未授权密钥',
+          },
+          401
+        );
+      }
+      edgeAuthenticated = true;
     }
   }
 
@@ -542,6 +650,12 @@ async function forwardToKnowledgeBrain(request: Request, env: Env, url: URL): Pr
     if (val) upstreamHeaders.set(name, val);
   }
 
+  if (!authenticatedByAdmin) {
+    upstreamHeaders.delete('X-Admin-Secret');
+  }
+  if (!verifiedUserJwt) {
+    upstreamHeaders.delete('X-User-JWT');
+  }
   if (verifiedUserJwt && !upstreamHeaders.has('X-User-JWT')) {
     upstreamHeaders.set('X-User-JWT', verifiedUserJwt);
   }
@@ -567,7 +681,7 @@ async function forwardToKnowledgeBrain(request: Request, env: Env, url: URL): Pr
       redirect: 'follow',
     });
 
-    const respHeaders = new Headers(CORS_HEADERS);
+    const respHeaders = new Headers(BASE_CORS_HEADERS);
     respHeaders.set('Content-Type', upstreamRes.headers.get('Content-Type') || 'application/json; charset=utf-8');
 
     return new Response(upstreamRes.body, {
@@ -583,13 +697,7 @@ async function forwardToKnowledgeBrain(request: Request, env: Env, url: URL): Pr
   }
 }
 
-export default {
-  async fetch(request: Request, env: Env): Promise<Response> {
-    if (request.method === 'OPTIONS') {
-      return new Response(null, { status: 204, headers: CORS_HEADERS });
-    }
-
-    const url = new URL(request.url);
+async function handleWorkerRequest(request: Request, env: Env, url: URL): Promise<Response> {
     const path = url.pathname;
 
     if (request.method === 'GET' && (path === '/' || path === '/health')) {
@@ -967,7 +1075,7 @@ export default {
       // 4. 管理员批量制卡接口
       if (request.method === 'POST' && path === '/api/admin/cards/generate') {
         const adminSecret = request.headers.get('X-Admin-Secret') || '';
-        if (!env.ADMIN_SECRET || adminSecret !== env.ADMIN_SECRET) {
+        if (!env.ADMIN_SECRET || !constantTimeEqual(adminSecret, env.ADMIN_SECRET)) {
           return jsonResponse({ ok: false, error: 'Unauthorized admin request' }, 401);
         }
 
@@ -998,7 +1106,7 @@ export default {
       // 5. 管理员换机解绑接口
       if (request.method === 'POST' && path === '/api/admin/unbind-device') {
         const adminSecret = request.headers.get('X-Admin-Secret') || '';
-        if (!env.ADMIN_SECRET || adminSecret !== env.ADMIN_SECRET) {
+        if (!env.ADMIN_SECRET || !constantTimeEqual(adminSecret, env.ADMIN_SECRET)) {
           return jsonResponse({ ok: false, error: 'Unauthorized admin request' }, 401);
         }
 
@@ -1163,7 +1271,7 @@ export default {
       // 7. 管理员管理云端 Telegram API 凭据池 (写入/查询 Turso 或 D1)
       if (path === '/api/admin/telegram-pool') {
         const adminSecret = request.headers.get('X-Admin-Secret') || '';
-        if (!env.ADMIN_SECRET || adminSecret !== env.ADMIN_SECRET) {
+        if (!env.ADMIN_SECRET || !constantTimeEqual(adminSecret, env.ADMIN_SECRET)) {
           return jsonResponse({ ok: false, error: 'Unauthorized admin request' }, 401);
         }
 
@@ -1240,5 +1348,22 @@ export default {
     } catch (err: any) {
       return jsonResponse({ ok: false, error: err?.message || 'Worker Internal Error' }, 500);
     }
+}
+
+export default {
+  async fetch(request: Request, env: Env): Promise<Response> {
+    const url = new URL(request.url);
+    const path = url.pathname;
+
+    if (request.method === 'OPTIONS') {
+      const corsHeaders = resolveCorsHeaders(request, env, path);
+      if (request.headers.get('Origin') && !corsHeaders['Access-Control-Allow-Origin']) {
+        return new Response(null, { status: 403, headers: { Vary: 'Origin' } });
+      }
+      return new Response(null, { status: 204, headers: corsHeaders });
+    }
+
+    const response = await handleWorkerRequest(request, env, url);
+    return applyCorsHeaders(response, request, env, path);
   },
 };

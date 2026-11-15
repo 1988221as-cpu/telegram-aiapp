@@ -2890,6 +2890,48 @@ export function inferMediaMimeFromExt(filePathOrName: string): string {
   return EXT_TO_MIME[ext] || 'application/octet-stream';
 }
 
+export function inferAudioMimeFromBuffer(buf: Buffer): string | null {
+  if (!buf || buf.length < 2) return null;
+  if (buf.length >= 4 && buf[0] === 0x4f && buf[1] === 0x67 && buf[2] === 0x67 && buf[3] === 0x53) {
+    return 'audio/ogg';
+  }
+  if (buf.length >= 4 && buf[0] === 0x66 && buf[1] === 0x4c && buf[2] === 0x61 && buf[3] === 0x43) {
+    return 'audio/flac';
+  }
+  if (buf.length >= 12 && buf.subarray(0, 4).toString('ascii') === 'RIFF' && buf.subarray(8, 12).toString('ascii') === 'WAVE') {
+    return 'audio/wav';
+  }
+  if (buf.length >= 8 && buf.subarray(4, 8).toString('ascii') === 'ftyp') {
+    return 'audio/mp4';
+  }
+  if (buf.length >= 4 && buf[0] === 0x1a && buf[1] === 0x45 && buf[2] === 0xdf && buf[3] === 0xa3) {
+    return 'audio/webm';
+  }
+  if (buf.length >= 3 && buf[0] === 0x49 && buf[1] === 0x44 && buf[2] === 0x33) {
+    return 'audio/mpeg';
+  }
+  if (buf.length >= 5 && buf.subarray(0, 5).toString('ascii') === '#!AMR') {
+    return 'audio/amr';
+  }
+  if (buf[0] === 0xff && (buf[1] & 0xe0) === 0xe0) {
+    if ((buf[1] & 0xf6) === 0xf0) return 'audio/aac';
+    if ((buf[1] & 0x06) !== 0x00) return 'audio/mpeg';
+  }
+  return null;
+}
+
+function inferAudioExtensionFromMime(mimeType: string): string {
+  const clean = String(mimeType || '').split(';')[0].trim().toLowerCase();
+  if (clean.includes('ogg') || clean.includes('opus')) return 'ogg';
+  if (clean.includes('mpeg') || clean.includes('mp3')) return 'mp3';
+  if (clean.includes('wav')) return 'wav';
+  if (clean.includes('mp4') || clean.includes('m4a')) return 'm4a';
+  if (clean.includes('flac')) return 'flac';
+  if (clean.includes('aac')) return 'aac';
+  if (clean.includes('amr')) return 'amr';
+  return 'webm';
+}
+
 export function buildOutboundLocalMediaUrl(diskFileName: string, accountScope = ''): string {
   const safeKey = path.basename(String(diskFileName || '').trim());
   return signTelegramResourceUrl(`/api/messages/local-media/${encodeURIComponent(safeKey)}`, accountScope);
@@ -5016,6 +5058,26 @@ export async function getScopedChatTargetLang(
   }
 }
 
+export async function countScopedChatMessages(chatId: string, accountId?: string): Promise<number> {
+  const effAcc = String(accountId || 'acc_1').trim() || 'acc_1';
+  const variants = getScopedAccountIdVariants(effAcc);
+  const canonicalId = canonicalizeCustomerChatId(chatId);
+  const altChatId = canonicalId.startsWith('tg_') ? canonicalId.replace(/^tg_/, '') : `tg_${canonicalId}`;
+  const rawInput = String(chatId || '').trim();
+  const chatCandidates = Array.from(new Set([canonicalId, altChatId, rawInput].filter(Boolean)));
+  if (chatCandidates.length === 0) return 0;
+  const chatPh = chatCandidates.map(() => '?').join(', ');
+  const accPh = variants.map(() => '?').join(', ');
+  try {
+    const row = (await db
+      .prepare(`SELECT COUNT(*) as cnt FROM messages WHERE chat_id IN (${chatPh}) AND account_id IN (${accPh})`)
+      .get(...chatCandidates, ...variants)) as any;
+    return Math.max(0, Number(row?.cnt) || 0);
+  } catch {
+    return 0;
+  }
+}
+
 export async function upsertScopedCustomerProfile(params: {
   chatId: string;
   accountId: string;
@@ -5055,6 +5117,7 @@ export async function upsertScopedCustomerProfile(params: {
         dislikes_taboos = excluded.dislikes_taboos,
         emotional_needs = excluded.emotional_needs,
         key_memories = excluded.key_memories,
+        total_messages_count = CASE WHEN excluded.total_messages_count > account_customer_profiles.total_messages_count THEN excluded.total_messages_count ELSE account_customer_profiles.total_messages_count END,
         last_analyzed_at = CASE WHEN excluded.last_analyzed_at > 0 THEN excluded.last_analyzed_at ELSE account_customer_profiles.last_analyzed_at END,
         updated_at = excluded.updated_at`
     )
@@ -5087,49 +5150,59 @@ export async function upsertScopedCustomerProfile(params: {
 
   // Preserve compatibility with legacy customer_profiles table for single-account / bot records
   if (effAcc === 'acc_1' || effAcc === 'acc_telegram_bot') {
-    await db
-      .prepare(
-        `INSERT INTO customer_profiles (
-          chat_id, account_id, client_name, relationship_stage, age_estimate, occupation,
-          location_timezone, tone_style, likes_interests, dislikes_taboos, emotional_needs,
-          key_memories, total_messages_count, last_analyzed_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(chat_id) DO UPDATE SET
-          account_id = excluded.account_id,
-          client_name = excluded.client_name,
-          relationship_stage = excluded.relationship_stage,
-          age_estimate = excluded.age_estimate,
-          occupation = excluded.occupation,
-          location_timezone = excluded.location_timezone,
-          tone_style = excluded.tone_style,
-          likes_interests = excluded.likes_interests,
-          dislikes_taboos = excluded.dislikes_taboos,
-          emotional_needs = excluded.emotional_needs,
-          key_memories = excluded.key_memories,
-          last_analyzed_at = CASE WHEN excluded.last_analyzed_at > 0 THEN excluded.last_analyzed_at ELSE customer_profiles.last_analyzed_at END,
-          updated_at = excluded.updated_at`
-      )
-      .run(
-        canonicalChatId,
-        effAcc,
-        params.clientName,
-        params.relationshipStage,
-        params.ageEstimate,
-        params.occupation,
-        params.locationTimezone,
-        params.toneStyle,
-        params.likesInterests,
-        params.dislikesTaboos,
-        params.emotionalNeeds,
-        params.keyMemories,
-        params.totalMessagesCount ?? 0,
-        params.lastAnalyzedAt ?? 0,
-        params.updatedAt
-      );
-    if (altChatId && altChatId !== canonicalChatId) {
-      try {
-        await db.prepare('DELETE FROM customer_profiles WHERE chat_id = ? AND account_id = ?').run(altChatId, effAcc);
-      } catch {}
+    const existingLegacy = (await db
+      .prepare('SELECT account_id FROM customer_profiles WHERE chat_id = ?')
+      .get(canonicalChatId)) as any;
+    if (
+      !existingLegacy ||
+      !existingLegacy.account_id ||
+      existingLegacy.account_id === effAcc
+    ) {
+      await db
+        .prepare(
+          `INSERT INTO customer_profiles (
+            chat_id, account_id, client_name, relationship_stage, age_estimate, occupation,
+            location_timezone, tone_style, likes_interests, dislikes_taboos, emotional_needs,
+            key_memories, total_messages_count, last_analyzed_at, updated_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          ON CONFLICT(chat_id) DO UPDATE SET
+            account_id = excluded.account_id,
+            client_name = excluded.client_name,
+            relationship_stage = excluded.relationship_stage,
+            age_estimate = excluded.age_estimate,
+            occupation = excluded.occupation,
+            location_timezone = excluded.location_timezone,
+            tone_style = excluded.tone_style,
+            likes_interests = excluded.likes_interests,
+            dislikes_taboos = excluded.dislikes_taboos,
+            emotional_needs = excluded.emotional_needs,
+            key_memories = excluded.key_memories,
+            total_messages_count = CASE WHEN excluded.total_messages_count > customer_profiles.total_messages_count THEN excluded.total_messages_count ELSE customer_profiles.total_messages_count END,
+            last_analyzed_at = CASE WHEN excluded.last_analyzed_at > 0 THEN excluded.last_analyzed_at ELSE customer_profiles.last_analyzed_at END,
+            updated_at = excluded.updated_at`
+        )
+        .run(
+          canonicalChatId,
+          effAcc,
+          params.clientName,
+          params.relationshipStage,
+          params.ageEstimate,
+          params.occupation,
+          params.locationTimezone,
+          params.toneStyle,
+          params.likesInterests,
+          params.dislikesTaboos,
+          params.emotionalNeeds,
+          params.keyMemories,
+          params.totalMessagesCount ?? 0,
+          params.lastAnalyzedAt ?? 0,
+          params.updatedAt
+        );
+      if (altChatId && altChatId !== canonicalChatId) {
+        try {
+          await db.prepare('DELETE FROM customer_profiles WHERE chat_id = ? AND account_id = ?').run(altChatId, effAcc);
+        } catch {}
+      }
     }
   }
 }
@@ -5659,19 +5732,20 @@ app.get('/api/chats', requireTenantAuth, async (req: Request, res: Response) => 
         SELECT chat_id, account_id, client_name, relationship_stage, total_messages_count, updated_at
         FROM customer_profiles
         WHERE account_id IN (${accPlaceholders})
-           OR (account_id = 'acc_telegram_bot' AND ? IN ('acc_telegram_bot', 'acc_1'))
         ORDER BY updated_at DESC
-      `).all(...accVariants, effectiveAccountId) as Promise<any[]>,
+      `).all(...accVariants) as Promise<any[]>,
     ]);
 
     const mergedProfilesMap = new Map<string, any>();
     for (const row of legacyRows || []) {
-      const key = `${row.account_id}::${row.chat_id}`;
-      mergedProfilesMap.set(key, row);
+      const canonChatId = canonicalizeCustomerChatId(row.chat_id) || row.chat_id;
+      const key = `${row.account_id}::${canonChatId}`;
+      mergedProfilesMap.set(key, { ...row, chat_id: canonChatId });
     }
     for (const row of scopedRows || []) {
-      const key = `${row.account_id}::${row.chat_id}`;
-      mergedProfilesMap.set(key, row);
+      const canonChatId = canonicalizeCustomerChatId(row.chat_id) || row.chat_id;
+      const key = `${row.account_id}::${canonChatId}`;
+      mergedProfilesMap.set(key, { ...row, chat_id: canonChatId });
     }
     const profiles = Array.from(mergedProfilesMap.values()).sort(
       (a, b) => Number(b?.updated_at || 0) - Number(a?.updated_at || 0)
@@ -5821,7 +5895,7 @@ app.get('/api/messages/:chatId', requireTenantAuth, async (req: Request, res: Re
     const isMaster = authContext?.session?.isMaster;
 
     const accVariants = getScopedAccountIdVariants(effectiveAccountId);
-    const includeBotFallback = effectiveAccountId === 'acc_telegram_bot' || effectiveAccountId === 'acc_1';
+    const includeBotFallback = effectiveAccountId === 'acc_telegram_bot';
     if (includeBotFallback && !accVariants.includes('acc_telegram_bot')) {
       accVariants.push('acc_telegram_bot');
     }
@@ -5829,7 +5903,17 @@ app.get('/api/messages/:chatId', requireTenantAuth, async (req: Request, res: Re
     // Verify whether this chat belongs to effectiveAccountId
     const scopedProfile = await getScopedCustomerProfile(chatId, effectiveAccountId);
     if (!scopedProfile && !isMaster) {
-      const foreignProfile = (await db.prepare('SELECT account_id FROM customer_profiles WHERE chat_id = ?').get(chatId)) as any;
+      const canonChatId = canonicalizeCustomerChatId(chatId);
+      const altId = canonChatId.startsWith('tg_') ? canonChatId.replace(/^tg_/, '') : `tg_${canonChatId}`;
+      const chatCandidates = Array.from(new Set([canonChatId, altId, String(chatId || '').trim()].filter(Boolean)));
+      const chatPh = chatCandidates.map(() => '?').join(', ');
+      const foreignProfile =
+        ((await db
+          .prepare(`SELECT account_id FROM account_customer_profiles WHERE chat_id IN (${chatPh}) LIMIT 1`)
+          .get(...chatCandidates)) as any) ||
+        ((await db
+          .prepare(`SELECT account_id FROM customer_profiles WHERE chat_id IN (${chatPh}) LIMIT 1`)
+          .get(...chatCandidates)) as any);
       if (foreignProfile && !accVariants.includes(foreignProfile.account_id)) {
         return res.status(403).json({ error: '无权查看不属于当前账号的聊天记录' });
       }
@@ -7155,11 +7239,16 @@ app.get('/api/customer/profile/:chatId', requireTenantAuth, async (req: Request,
     }
     const effectiveAccountId = scope.accountId;
     let profile = await getScopedCustomerProfile(canonicalChatId, effectiveAccountId);
+    const reqTitle =
+      (typeof req.query.title === 'string' && req.query.title.trim()) ||
+      (typeof req.query.clientName === 'string' && req.query.clientName.trim()) ||
+      '';
+    const dbMsgCount = await countScopedChatMessages(canonicalChatId, effectiveAccountId);
 
     if (!profile) {
       // Create a clean baseline profile without any fabricated attributes
       const now = Date.now();
-      const defaultName = (req.query.title as string) || (req.query.clientName as string) || '新联系人';
+      const defaultName = reqTitle || '新联系人';
       await upsertScopedCustomerProfile({
         chatId: canonicalChatId,
         accountId: effectiveAccountId,
@@ -7173,14 +7262,27 @@ app.get('/api/customer/profile/:chatId', requireTenantAuth, async (req: Request,
         dislikesTaboos: JSON.stringify([]),
         emotionalNeeds: '暂无记录（待真实沟通后提炼）',
         keyMemories: JSON.stringify([]),
-        totalMessagesCount: 0,
+        totalMessagesCount: dbMsgCount,
         lastAnalyzedAt: now,
         updatedAt: now,
       });
 
       profile = await getScopedCustomerProfile(canonicalChatId, effectiveAccountId);
+    } else if (
+      reqTitle &&
+      (!profile.client_name ||
+        ['新联系人', '联系人', '客户', 'VIP客户'].includes(String(profile.client_name).trim()))
+    ) {
+      profile = { ...profile, client_name: reqTitle };
+      const accVariants = getScopedAccountIdVariants(effectiveAccountId);
+      const accPh = accVariants.map(() => '?').join(', ');
+      await db
+        .prepare(`UPDATE account_customer_profiles SET client_name = ? WHERE account_id IN (${accPh}) AND chat_id = ?`)
+        .run(reqTitle, ...accVariants, canonicalChatId)
+        .catch(() => {});
     }
 
+    const resolvedTotalMessagesCount = Math.max(Number(profile?.total_messages_count) || 0, dbMsgCount);
     res.json({
       chatId: canonicalChatId,
       accountId: profile.account_id || effectiveAccountId,
@@ -7194,7 +7296,7 @@ app.get('/api/customer/profile/:chatId', requireTenantAuth, async (req: Request,
       dislikesTaboos: safeJsonParse(profile.dislikes_taboos, []),
       emotionalNeeds: profile.emotional_needs,
       keyMemories: safeJsonParse(profile.key_memories, []),
-      totalMessagesCount: profile.total_messages_count,
+      totalMessagesCount: resolvedTotalMessagesCount,
       lastAnalyzedAt: profile.last_analyzed_at,
       updatedAt: profile.updated_at,
     });
@@ -7217,22 +7319,46 @@ app.post('/api/customer/profile/:chatId', requireTenantAuth, async (req: Request
       toneStyle, likesInterests, dislikesTaboos, emotionalNeeds, keyMemories
     } = req.body;
     const effectiveAccountId = scope.accountId;
+    const bodyObj = req.body && typeof req.body === 'object' ? req.body : {};
+    const hasField = (k: string) => Object.prototype.hasOwnProperty.call(bodyObj, k) && bodyObj[k] !== undefined;
+    const existing = await getScopedCustomerProfile(canonicalChatId, effectiveAccountId);
+    const dbMsgCount = await countScopedChatMessages(canonicalChatId, effectiveAccountId);
 
     const now = Date.now();
     await upsertScopedCustomerProfile({
       chatId: canonicalChatId,
       accountId: effectiveAccountId,
-      clientName: clientName || 'VIP客户',
-      relationshipStage: relationshipStage || '初次结识',
-      ageEstimate: ageEstimate || '',
-      occupation: occupation || '',
-      locationTimezone: locationTimezone || '',
-      toneStyle: toneStyle || '',
-      likesInterests: JSON.stringify(likesInterests || []),
-      dislikesTaboos: JSON.stringify(dislikesTaboos || []),
-      emotionalNeeds: emotionalNeeds || '',
-      keyMemories: JSON.stringify(keyMemories || []),
-      totalMessagesCount: 0,
+      clientName: hasField('clientName')
+        ? String(clientName || '').trim() || existing?.client_name || 'VIP客户'
+        : existing?.client_name || 'VIP客户',
+      relationshipStage: hasField('relationshipStage')
+        ? String(relationshipStage || '').trim() || existing?.relationship_stage || '初次结识'
+        : existing?.relationship_stage || '初次结识',
+      ageEstimate: hasField('ageEstimate') ? String(ageEstimate ?? '') : String(existing?.age_estimate ?? ''),
+      occupation: hasField('occupation') ? String(occupation ?? '') : String(existing?.occupation ?? ''),
+      locationTimezone: hasField('locationTimezone')
+        ? String(locationTimezone ?? '')
+        : String(existing?.location_timezone ?? ''),
+      toneStyle: hasField('toneStyle') ? String(toneStyle ?? '') : String(existing?.tone_style ?? ''),
+      likesInterests: hasField('likesInterests')
+        ? JSON.stringify(Array.isArray(likesInterests) ? likesInterests : [])
+        : typeof existing?.likes_interests === 'string'
+          ? existing.likes_interests
+          : '[]',
+      dislikesTaboos: hasField('dislikesTaboos')
+        ? JSON.stringify(Array.isArray(dislikesTaboos) ? dislikesTaboos : [])
+        : typeof existing?.dislikes_taboos === 'string'
+          ? existing.dislikes_taboos
+          : '[]',
+      emotionalNeeds: hasField('emotionalNeeds')
+        ? String(emotionalNeeds ?? '')
+        : String(existing?.emotional_needs ?? ''),
+      keyMemories: hasField('keyMemories')
+        ? JSON.stringify(Array.isArray(keyMemories) ? keyMemories : [])
+        : typeof existing?.key_memories === 'string'
+          ? existing.key_memories
+          : '[]',
+      totalMessagesCount: Math.max(Number(existing?.total_messages_count) || 0, dbMsgCount),
       lastAnalyzedAt: 0,
       updatedAt: now,
     });
@@ -7304,12 +7430,42 @@ app.post('/api/customer/analyze/:chatId', requireTenantAuth, async (req: Request
       syncCloud: true,
       persistClientMessages: true,
     });
-    const messageList = resolved.messages.map((m) => ({
-      sender: m.sender,
-      sender_name: m.senderName || (m.sender === 'peer' ? (chatTitle || '客户') : '我方'),
-      text: m.text || '',
-      stt_text: m.sttText || '',
-    }));
+    const messageList = resolved.messages.map((m) => {
+      const rawText = String(m.text || '').trim();
+      const sttText = String(m.sttText || '').trim();
+      const imageCaption = String(m.imageCaption || '').trim();
+      const translatedText = String(m.translatedText || '').trim();
+      const isGenericVoicePlaceholder =
+        !rawText ||
+        rawText === 'Voice Message' ||
+        rawText === 'Voice message' ||
+        rawText === '[语音]' ||
+        rawText === '🎤 语音消息';
+      const isGenericImagePlaceholder =
+        !rawText || rawText === 'Image' || rawText === '[图片]' || rawText === '📷 图片';
+      let contentText = rawText;
+      if (sttText && (isGenericVoicePlaceholder || m.isAudio)) {
+        contentText = `[语音]: ${sttText}`;
+      } else if (imageCaption && (isGenericImagePlaceholder || m.isImage)) {
+        contentText = `[图片说明]: ${imageCaption}`;
+      } else if (sttText) {
+        contentText = `${rawText} [语音转写]: ${sttText}`;
+      } else if (imageCaption) {
+        contentText = `${rawText} [图片说明]: ${imageCaption}`;
+      }
+      if (translatedText && translatedText !== contentText && !contentText.includes(translatedText)) {
+        contentText = contentText ? `${contentText} (译文: ${translatedText})` : translatedText;
+      }
+      return {
+        sender: m.sender,
+        sender_name: m.senderName || (m.sender === 'peer' ? (chatTitle || '客户') : '我方'),
+        text: rawText,
+        stt_text: sttText,
+        effective_text: contentText.trim(),
+      };
+    });
+    const dbTotalMsgCount = await countScopedChatMessages(canonicalChatId, effectiveAccountId);
+    const actualMessageCount = Math.max(Number(existingProfile?.total_messages_count) || 0, dbTotalMsgCount, messageList.length);
 
     const now = Date.now();
 
@@ -7346,6 +7502,7 @@ app.post('/api/customer/analyze/:chatId', requireTenantAuth, async (req: Request
         dislikesTaboos: JSON.stringify(mergedEmpty.dislikesTaboos),
         emotionalNeeds: mergedEmpty.emotionalNeeds,
         keyMemories: JSON.stringify(mergedEmpty.keyMemories),
+        totalMessagesCount: actualMessageCount,
         lastAnalyzedAt: now,
         updatedAt: now,
       });
@@ -7356,6 +7513,7 @@ app.post('/api/customer/analyze/:chatId', requireTenantAuth, async (req: Request
           chatId: canonicalChatId,
           accountId: effectiveAccountId,
           ...mergedEmpty,
+          totalMessagesCount: actualMessageCount,
           lastAnalyzedAt: now,
         },
         message: '当前会话暂无对话记录。已保留现有人工记录，真实沟通后系统将自动提炼补充全息画像与长效记忆。',
@@ -7363,7 +7521,7 @@ app.post('/api/customer/analyze/:chatId', requireTenantAuth, async (req: Request
     }
 
     // If conversation is too sparse (fewer than 2 messages or under 12 characters), preserve existing manual entries without AI hallucination
-    const totalCharCount = messageList.reduce((acc, m) => acc + (m.text || '').length, 0);
+    const totalCharCount = messageList.reduce((acc, m) => acc + (m.effective_text || m.text || '').length, 0);
     if (messageList.length < 2 || totalCharCount < 12) {
       const mergedSparse = mergeCustomerProfileWithManualData({
         existingProfile,
@@ -7396,6 +7554,7 @@ app.post('/api/customer/analyze/:chatId', requireTenantAuth, async (req: Request
         dislikesTaboos: JSON.stringify(mergedSparse.dislikesTaboos),
         emotionalNeeds: mergedSparse.emotionalNeeds,
         keyMemories: JSON.stringify(mergedSparse.keyMemories),
+        totalMessagesCount: actualMessageCount,
         lastAnalyzedAt: now,
         updatedAt: now,
       });
@@ -7406,6 +7565,7 @@ app.post('/api/customer/analyze/:chatId', requireTenantAuth, async (req: Request
           chatId: canonicalChatId,
           accountId: effectiveAccountId,
           ...mergedSparse,
+          totalMessagesCount: actualMessageCount,
           lastAnalyzedAt: now,
         },
         message: '当前会话对话记录过少（少于2条），已保留人工记忆并初始化基础档案，待深入沟通后提炼。',
@@ -7414,7 +7574,7 @@ app.post('/api/customer/analyze/:chatId', requireTenantAuth, async (req: Request
 
     const conversationTranscript = messageList.map((m) => {
       const sender = m.sender === 'peer' ? (m.sender_name || '客户') : '我方';
-      const content = m.text === 'Voice Message' && m.stt_text ? `[语音]: ${m.stt_text}` : m.text;
+      const content = m.effective_text || m.text;
       return `${sender}: ${content}`;
     }).join('\n');
 
@@ -7612,6 +7772,7 @@ ${conversationTranscript}`;
       dislikesTaboos: JSON.stringify(mergedProfile.dislikesTaboos),
       emotionalNeeds: mergedProfile.emotionalNeeds,
       keyMemories: JSON.stringify(mergedProfile.keyMemories),
+      totalMessagesCount: actualMessageCount,
       lastAnalyzedAt: now,
       updatedAt: now,
     });
@@ -7622,6 +7783,7 @@ ${conversationTranscript}`;
         chatId: canonicalChatId,
         accountId: effectiveAccountId,
         ...mergedProfile,
+        totalMessagesCount: actualMessageCount,
         lastAnalyzedAt: now,
       },
     });
@@ -11228,22 +11390,34 @@ app.post('/api/audio/transcribe', aiGenerationLimiter, requireTenantAuth, async 
     );
 
     let cleanBase64 = String(audioBase64);
-    let effectiveMimeType = mimeType;
+    const reqMimeClean = String(mimeType || '').split(';')[0].trim().toLowerCase();
+    let effectiveMimeType = reqMimeClean || 'audio/webm';
     let audioBuf: Buffer;
     const localAudioPath = resolveLocalMediaDiskPath(cleanBase64);
     if (localAudioPath) {
       audioBuf = await fs.promises.readFile(localAudioPath);
       cleanBase64 = audioBuf.toString('base64');
-      effectiveMimeType = inferMediaMimeFromExt(localAudioPath);
+      const sniffedMime = inferAudioMimeFromBuffer(audioBuf);
+      const extMime = inferMediaMimeFromExt(localAudioPath);
+      effectiveMimeType =
+        sniffedMime ||
+        (extMime && extMime !== 'application/octet-stream' ? extMime : 'audio/webm');
     } else {
-      const dataMatch = cleanBase64.match(/^data:([^;]+);base64,(.+)$/);
+      const dataMatch = cleanBase64.match(/^data:([^;,]+)?(?:;[^,]*)?;base64,(.+)$/i);
+      let headerMime = '';
       if (dataMatch) {
-        effectiveMimeType = dataMatch[1] || mimeType;
+        headerMime = String(dataMatch[1] || '').split(';')[0].trim().toLowerCase();
         cleanBase64 = dataMatch[2];
       } else {
         cleanBase64 = cleanBase64.replace(/^data:audio\/[^;]+;base64,/, '');
       }
       audioBuf = Buffer.from(cleanBase64, 'base64');
+      const sniffedMime = inferAudioMimeFromBuffer(audioBuf);
+      effectiveMimeType =
+        sniffedMime ||
+        (headerMime && headerMime !== 'application/octet-stream' ? headerMime : undefined) ||
+        (reqMimeClean && reqMimeClean !== 'application/octet-stream' ? reqMimeClean : undefined) ||
+        'audio/webm';
     }
 
     if (!audioBuf || audioBuf.length === 0) {
@@ -11321,15 +11495,7 @@ app.post('/api/audio/transcribe', aiGenerationLimiter, requireTenantAuth, async 
       // OpenAI-compatible /audio/transcriptions (Whisper): never leak gemini-* model names to OpenAI relays
       const rawSttModel = typeof model === 'string' ? model.trim() : '';
       const sttModel = rawSttModel && !/^gemini-/i.test(rawSttModel) ? rawSttModel : 'whisper-1';
-      const ext = effectiveMimeType.includes('ogg')
-        ? 'ogg'
-        : effectiveMimeType.includes('mpeg') || effectiveMimeType.includes('mp3')
-        ? 'mp3'
-        : effectiveMimeType.includes('wav')
-        ? 'wav'
-        : effectiveMimeType.includes('mp4') || effectiveMimeType.includes('m4a')
-        ? 'm4a'
-        : 'webm';
+      const ext = inferAudioExtensionFromMime(effectiveMimeType);
       const candidateUrls = cleanBaseUrl.endsWith('/audio/transcriptions')
         ? [cleanBaseUrl]
         : cleanBaseUrl.endsWith('/v1')
@@ -11407,15 +11573,7 @@ app.post('/api/audio/transcribe', aiGenerationLimiter, requireTenantAuth, async 
     let cloudSttErr = '';
     if (bearerJwt || effectiveEngineKey) {
       try {
-        const ext = effectiveMimeType.includes('ogg')
-          ? 'ogg'
-          : effectiveMimeType.includes('mpeg') || effectiveMimeType.includes('mp3')
-          ? 'mp3'
-          : effectiveMimeType.includes('wav')
-          ? 'wav'
-          : effectiveMimeType.includes('mp4') || effectiveMimeType.includes('m4a')
-          ? 'm4a'
-          : 'webm';
+        const ext = inferAudioExtensionFromMime(effectiveMimeType);
         const form = new FormData();
         form.append('file', new Blob([new Uint8Array(audioBuf)], { type: effectiveMimeType }), `audio.${ext}`);
         form.append('model', resolveGeminiModel(model, 'transcribe'));
@@ -16667,14 +16825,33 @@ async function processIncomingBotUpdate(
     videoDuration,
   });
 
+  const canonicalBotChatId = canonicalizeCustomerChatId(tgChatId) || tgChatId;
   await db.prepare(`
-    INSERT INTO customer_profiles (
-      chat_id, account_id, client_name, relationship_stage, total_messages_count, updated_at
+    INSERT INTO account_customer_profiles (
+      account_id, chat_id, client_name, relationship_stage, total_messages_count, updated_at
     ) VALUES (?, ?, ?, '初次结识', 1, ?)
-    ON CONFLICT(chat_id) DO UPDATE SET
-      total_messages_count = total_messages_count + 1,
+    ON CONFLICT(account_id, chat_id) DO UPDATE SET
+      total_messages_count = account_customer_profiles.total_messages_count + 1,
       updated_at = excluded.updated_at
-  `).run(tgChatId, 'acc_telegram_bot', senderName, now);
+  `).run('acc_telegram_bot', canonicalBotChatId, senderName, now);
+
+  const existingLegacyBotProfile = (await db
+    .prepare('SELECT account_id FROM customer_profiles WHERE chat_id = ?')
+    .get(canonicalBotChatId)) as any;
+  if (
+    !existingLegacyBotProfile ||
+    !existingLegacyBotProfile.account_id ||
+    existingLegacyBotProfile.account_id === 'acc_telegram_bot'
+  ) {
+    await db.prepare(`
+      INSERT INTO customer_profiles (
+        chat_id, account_id, client_name, relationship_stage, total_messages_count, updated_at
+      ) VALUES (?, ?, ?, '初次结识', 1, ?)
+      ON CONFLICT(chat_id) DO UPDATE SET
+        total_messages_count = customer_profiles.total_messages_count + 1,
+        updated_at = excluded.updated_at
+    `).run(canonicalBotChatId, 'acc_telegram_bot', senderName, now);
+  }
 
   setImmediate(() => {
     chatQueueManager
@@ -22769,13 +22946,18 @@ app.post('/api/telegram/user/contacts/rename', requireTenantAuth, async (req: Re
         (req.body?.accountId as string) ||
         (req.headers['x-account-id'] as string) ||
         `acc_tg_${connected.userId}`;
+      const accVariants = getScopedAccountIdVariants(scopedAccountId);
+      const accPh = accVariants.map(() => '?').join(', ');
+      const canonicalChatId = canonicalizeCustomerChatId(chatId);
+      const chatCandidates = Array.from(new Set([canonicalChatId, String(chatId || '').trim()].filter(Boolean)));
+      const chatPh = chatCandidates.map(() => '?').join(', ');
       const now = Date.now();
       await db
-        .prepare('UPDATE account_customer_profiles SET client_name = ?, updated_at = ? WHERE account_id = ? AND chat_id = ?')
-        .run(cleanTitle, now, scopedAccountId, chatId);
+        .prepare(`UPDATE account_customer_profiles SET client_name = ?, updated_at = ? WHERE account_id IN (${accPh}) AND chat_id IN (${chatPh})`)
+        .run(cleanTitle, now, ...accVariants, ...chatCandidates);
       await db
-        .prepare('UPDATE customer_profiles SET client_name = ?, updated_at = ? WHERE chat_id = ? AND account_id = ?')
-        .run(cleanTitle, now, chatId, scopedAccountId);
+        .prepare(`UPDATE customer_profiles SET client_name = ?, updated_at = ? WHERE chat_id IN (${chatPh}) AND account_id IN (${accPh})`)
+        .run(cleanTitle, now, ...chatCandidates, ...accVariants);
     } catch {}
 
     return res.json({ ok: true, cloudSynced: true, title: cleanTitle });

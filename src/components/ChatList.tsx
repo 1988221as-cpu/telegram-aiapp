@@ -17,7 +17,7 @@ import {
   Bell,
   BellOff,
   Trash2,
-  ExternalLink,
+  MessageCircle,
   ChevronLeft,
   Bot,
   AlertTriangle,
@@ -829,7 +829,7 @@ export const ChatList: React.FC<ChatListProps> = ({
           className="fixed z-[9995] w-52 max-h-[calc(100vh-24px)] overflow-y-auto bg-white dark:bg-[#0e1726] aurora:bg-[#101c23] rounded-2xl shadow-2xl border border-[#e2e8f0] dark:border-[#1e3148] aurora:border-[#203742] py-1.5 animate-in fade-in zoom-in-95 duration-100 text-xs text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] select-none"
           onClick={(e) => e.stopPropagation()}
         >
-          {/* Open in New Tab */}
+          {/* Switch to Chat */}
           <button
             type="button"
             onClick={() => {
@@ -838,8 +838,8 @@ export const ChatList: React.FC<ChatListProps> = ({
             }}
             className="w-full flex items-center gap-3 px-3.5 py-2 hover:bg-[#f1f5f9] dark:hover:bg-[#152438] aurora:hover:bg-[#152934] transition-colors text-left cursor-pointer"
           >
-            <ExternalLink className="w-4 h-4 text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5]" />
-            <span className="font-medium">在新标签页打开</span>
+            <MessageCircle className="w-4 h-4 text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5]" />
+            <span className="font-medium">切换到此会话</span>
           </button>
 
           {/* Quick Preview */}

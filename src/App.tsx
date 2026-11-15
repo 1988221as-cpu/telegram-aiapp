@@ -16,6 +16,8 @@ import {
   TelegramSettingsModal,
   TelegramClientPrefs,
   DEFAULT_TELEGRAM_CLIENT_PREFS,
+  getScopedClientPrefsStorageKey,
+  loadStoredClientPrefs,
 } from './components/TelegramSettingsModal';
 import { MemberAuthModal } from './components/MemberAuthModal';
 import { getMasterVoiceprint, hydrateMasterVoiceprint } from './services/voiceprintStorage';
@@ -70,6 +72,8 @@ import {
   markTelegramDialogReadApi,
   getLocalCustomerProfile,
   saveLocalCustomerProfile,
+  clearLocalCustomerProfile,
+  normalizeProfileChatId,
   translateText,
   syncCustomLLMConfigApi,
   fetchCustomLLMConfigApi,
@@ -354,6 +358,45 @@ function getScopedTranslationSettingsKey(accountId?: string): string {
   return clean ? `tg_pro_trans_settings::${clean}` : 'tg_pro_trans_settings';
 }
 
+function getScopedCallRecordsKey(accountId?: string): string {
+  const clean = typeof accountId === 'string' ? accountId.trim() : '';
+  return clean ? `tg_pro_call_records::${clean}` : '';
+}
+
+function loadScopedCallRecordsSync(accountId?: string): TelegramCallRecord[] {
+  const clean = typeof accountId === 'string' ? accountId.trim() : '';
+  if (!clean) return [];
+  try {
+    const scopedKey = getScopedCallRecordsKey(clean);
+    const scopedSaved = scopedKey ? secureGetItemSync<TelegramCallRecord[]>(scopedKey) : null;
+    if (Array.isArray(scopedSaved)) {
+      return sanitizeCallRecords(scopedSaved).filter((rec) => rec.accountId === clean);
+    }
+    const legacySaved = secureGetItemSync<TelegramCallRecord[]>('tg_pro_call_records');
+    if (Array.isArray(legacySaved)) {
+      return sanitizeCallRecords(legacySaved).filter((rec) => rec.accountId === clean);
+    }
+  } catch {}
+  return [];
+}
+
+async function loadScopedCallRecordsAsync(accountId?: string): Promise<TelegramCallRecord[]> {
+  const clean = typeof accountId === 'string' ? accountId.trim() : '';
+  if (!clean) return [];
+  try {
+    const scopedKey = getScopedCallRecordsKey(clean);
+    const scopedSaved = scopedKey ? await secureGetItemAsync<TelegramCallRecord[]>(scopedKey) : null;
+    if (Array.isArray(scopedSaved)) {
+      return sanitizeCallRecords(scopedSaved).filter((rec) => rec.accountId === clean);
+    }
+    const legacySaved = await secureGetItemAsync<TelegramCallRecord[]>('tg_pro_call_records');
+    if (Array.isArray(legacySaved)) {
+      return sanitizeCallRecords(legacySaved).filter((rec) => rec.accountId === clean);
+    }
+  } catch {}
+  return [];
+}
+
 function normalizeLoadedTranslationSettings(raw: any): TranslationSettings {
   if (!raw || typeof raw !== 'object') return INITIAL_TRANSLATION_SETTINGS;
   const rawEngine = raw.preferredEngine;
@@ -496,13 +539,10 @@ export default function App() {
     const saved = localStorage.getItem('tg_pro_theme');
     return saved === 'dark' || saved === 'aurora' || saved === 'light' ? saved : 'light';
   });
-  const [clientPrefs, setClientPrefs] = useState<TelegramClientPrefs>(() => {
-    try {
-      const raw = localStorage.getItem('tg_pro_client_prefs');
-      if (raw) return { ...DEFAULT_TELEGRAM_CLIENT_PREFS, ...JSON.parse(raw) };
-    } catch {}
-    return DEFAULT_TELEGRAM_CLIENT_PREFS;
-  });
+  const [clientPrefs, setClientPrefs] = useState<TelegramClientPrefs>(() =>
+    loadStoredClientPrefs(activeAccountId)
+  );
+  const clientPrefsScopeRef = useRef<string>(activeAccountId);
   const [isMultiAccountOpen, setIsMultiAccountOpen] = useState(false);
   const [reloginAccount, setReloginAccount] = useState<Account | null>(null);
   const [isDatabaseOpen, setIsDatabaseOpen] = useState(false);
@@ -626,21 +666,32 @@ export default function App() {
     return getScopedContacts(activeAccountId || accounts[0]?.id || '');
   });
 
+  const initialCallsAccId = activeAccountId || accounts[0]?.id || '';
+  const callRecordsScopeRef = useRef<string>(initialCallsAccId);
   const [callRecords, setCallRecords] = useState<TelegramCallRecord[]>(() => {
-    try {
-      const saved = secureGetItemSync<TelegramCallRecord[]>('tg_pro_call_records');
-      return saved ? sanitizeCallRecords(saved) : [];
-    } catch {
-      return [];
-    }
+    return loadScopedCallRecordsSync(initialCallsAccId);
   });
 
   const [isHydrated, setIsHydrated] = useState(false);
 
   useEffect(() => {
     if (!isHydrated) return;
+    const targetAcc = activeAccountIdRef.current;
+    if (!targetAcc || callRecordsScopeRef.current !== targetAcc) return;
+    const scopedKey = getScopedCallRecordsKey(targetAcc);
+    if (!scopedKey) return;
     try {
-      secureSetItemSync('tg_pro_call_records', callRecords);
+      const scopedRecords = sanitizeCallRecords(callRecords).filter((rec) => rec.accountId === targetAcc);
+      secureSetItemSync(scopedKey, scopedRecords);
+      const legacyCalls = secureGetItemSync<TelegramCallRecord[]>('tg_pro_call_records');
+      if (Array.isArray(legacyCalls)) {
+        const remainingLegacy = legacyCalls.filter((rec) => rec && rec.accountId !== targetAcc);
+        if (remainingLegacy.length === 0) {
+          secureRemoveItem('tg_pro_call_records');
+        } else if (remainingLegacy.length !== legacyCalls.length) {
+          secureSetItemSync('tg_pro_call_records', remainingLegacy);
+        }
+      }
     } catch {}
   }, [callRecords, isHydrated]);
 
@@ -686,8 +737,10 @@ export default function App() {
   }, [theme]);
 
   useEffect(() => {
+    const targetAcc = activeAccountIdRef.current;
+    if (clientPrefsScopeRef.current !== targetAcc) return;
     try {
-      localStorage.setItem('tg_pro_client_prefs', JSON.stringify(clientPrefs));
+      localStorage.setItem(getScopedClientPrefsStorageKey(targetAcc), JSON.stringify(clientPrefs));
     } catch {}
   }, [clientPrefs]);
 
@@ -927,9 +980,11 @@ export default function App() {
         setTranslationSettings((prev) => enforceTranslationEngineForLlm(normalizedSavedLlm, prev));
       }
 
-      const hydratedCalls = await secureGetItemAsync<TelegramCallRecord[]>('tg_pro_call_records');
-      if (hydratedCalls) {
-        setCallRecords(sanitizeCallRecords(hydratedCalls));
+      const callsAccId = resolvedActiveAccId || activeAccountIdRef.current || nextAccounts?.[0]?.id || '';
+      const hydratedCalls = await loadScopedCallRecordsAsync(callsAccId);
+      if (callsAccId) {
+        callRecordsScopeRef.current = callsAccId;
+        setCallRecords(hydratedCalls);
       }
 
       if (isRestore) {
@@ -938,12 +993,9 @@ export default function App() {
         if (savedTheme === 'dark' || savedTheme === 'light' || savedTheme === 'aurora') {
           setTheme(savedTheme);
         }
-        try {
-          const savedPrefs = localStorage.getItem('tg_pro_client_prefs');
-          if (savedPrefs) {
-            setClientPrefs({ ...DEFAULT_TELEGRAM_CLIENT_PREFS, ...JSON.parse(savedPrefs) });
-          }
-        } catch {}
+        const prefsAccId = resolvedActiveAccId || activeAccountIdRef.current || nextAccounts?.[0]?.id || '';
+        clientPrefsScopeRef.current = prefsAccId;
+        setClientPrefs(loadStoredClientPrefs(prefsAccId));
         const mv = (await hydrateMasterVoiceprint()) || getMasterVoiceprint();
         setIsMasterVoiceActive(!!mv?.enabledAsDefault);
 
@@ -1203,6 +1255,11 @@ export default function App() {
     setAccounts([]);
     setChats([]);
     setMessagesMap({});
+    setContacts([]);
+    callRecordsScopeRef.current = '';
+    setCallRecords([]);
+    clientPrefsScopeRef.current = '';
+    setClientPrefs({ ...DEFAULT_TELEGRAM_CLIENT_PREFS });
     setActiveAccountId('');
     setActiveApiAccount('');
     setActiveChatId(null);
@@ -1418,6 +1475,8 @@ export default function App() {
     let isMounted = true;
     const targetAccId = activeAccountId;
     setContacts(getScopedContacts(targetAccId));
+    callRecordsScopeRef.current = targetAccId;
+    setCallRecords(loadScopedCallRecordsSync(targetAccId));
     (async () => {
       try {
         const localScopedTrans = await secureGetItemAsync<TranslationSettings>(
@@ -1761,7 +1820,10 @@ export default function App() {
     } else {
       setCustomerProfile(null);
     }
-    fetchCustomerProfile(targetChatId, targetAccId).then((prof) => {
+    const targetChatMeta = chatsRef.current.find(
+      (c) => c.id === targetChatId && (!targetAccId || c.accountId === targetAccId)
+    );
+    fetchCustomerProfile(targetChatId, targetAccId, targetChatMeta?.title).then((prof) => {
       if (
         isMounted &&
         activeAccountIdRef.current === targetAccId &&
@@ -3098,6 +3160,10 @@ export default function App() {
     pendingAutoSelectAccountRef.current = accountId;
     activeAccountIdRef.current = accountId;
     activeChatIdRef.current = null;
+    clientPrefsScopeRef.current = accountId;
+    setClientPrefs(loadStoredClientPrefs(accountId));
+    callRecordsScopeRef.current = accountId;
+    setCallRecords(loadScopedCallRecordsSync(accountId));
     translationAccountScopeRef.current = accountId;
     const nextLocalTrans =
       secureGetItemSync<any>(getScopedTranslationSettingsKey(accountId)) ??
@@ -3198,14 +3264,22 @@ export default function App() {
       if (remaining.length > 0) {
         handleSelectAccount(remaining[0].id);
       } else {
+        setContacts([]);
+        callRecordsScopeRef.current = '';
+        setCallRecords([]);
+        clientPrefsScopeRef.current = '';
+        setClientPrefs({ ...DEFAULT_TELEGRAM_CLIENT_PREFS });
         setActiveAccountId('');
         setActiveApiAccount('');
         setActiveChatId(null);
         setCustomerProfile(null);
       }
-    } else if (activeChatId && unsharedRemovedChatIds.includes(activeChatId)) {
-      setActiveChatId(null);
-      setCustomerProfile(null);
+    } else {
+      setCallRecords((prev) => prev.filter((rec) => rec.accountId !== id));
+      if (activeChatId && unsharedRemovedChatIds.includes(activeChatId)) {
+        setActiveChatId(null);
+        setCustomerProfile(null);
+      }
     }
   };
 
@@ -4177,6 +4251,7 @@ export default function App() {
     scheduleRevokeBlobUrls(deletedChatBlobUrls);
     void clearChatPendingMediaBlobs(targetAccountId, chatId);
     clearLocalMessages(chatId, deletedChatMsgs, targetAccountId);
+    clearLocalCustomerProfile(chatId, targetAccountId);
     setMessagesMap((prev) => {
       const next = { ...prev };
       delete next[bucketKey];
@@ -4188,6 +4263,7 @@ export default function App() {
     if (activeChatIdRef.current === chatId) {
       activeChatIdRef.current = null;
       setActiveChatId(null);
+      setCustomerProfile(null);
     }
   };
 
@@ -4625,7 +4701,7 @@ export default function App() {
               updated.chatId &&
               updated.chatId !== 'current' &&
               activeChatIdRef.current &&
-              updated.chatId !== activeChatIdRef.current
+              normalizeProfileChatId(updated.chatId) !== normalizeProfileChatId(activeChatIdRef.current)
             ) {
               return;
             }
@@ -4654,7 +4730,7 @@ export default function App() {
               updated.chatId &&
               updated.chatId !== 'current' &&
               activeChatIdRef.current &&
-              updated.chatId !== activeChatIdRef.current
+              normalizeProfileChatId(updated.chatId) !== normalizeProfileChatId(activeChatIdRef.current)
             ) {
               return;
             }

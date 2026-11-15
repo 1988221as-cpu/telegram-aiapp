@@ -1168,9 +1168,128 @@ export async function translateText(
   return await runQueuedTranslation(executeRequest, options?.signal, queuePurpose);
 }
 
-export async function transcribeAudio(audioBase64: string, mimeType: string = 'audio/webm', customConfig?: CustomLLMConfig): Promise<string> {
+function normalizeAudioMime(mime?: string | null): string | undefined {
+  const clean = String(mime || '').split(';')[0].trim().toLowerCase();
+  if (!clean) return undefined;
+  if (clean === 'audio/opus') return 'audio/ogg';
+  if (clean === 'audio/mp3') return 'audio/mpeg';
+  if (clean === 'audio/x-wav') return 'audio/wav';
+  if (clean === 'audio/x-m4a' || clean === 'audio/m4a') return 'audio/mp4';
+  return clean;
+}
+
+function isGenericMime(mime?: string): boolean {
+  return !mime || mime === 'application/octet-stream' || mime === 'binary/octet-stream';
+}
+
+export function detectAudioMimeTypeFromBytes(bytes: Uint8Array): string | null {
+  if (!bytes || bytes.length < 2) return null;
+  if (
+    bytes.length >= 4 &&
+    bytes[0] === 0x4f &&
+    bytes[1] === 0x67 &&
+    bytes[2] === 0x67 &&
+    bytes[3] === 0x53
+  ) {
+    return 'audio/ogg'; // OggS (Opus / Vorbis)
+  }
+  if (
+    bytes.length >= 4 &&
+    bytes[0] === 0x66 &&
+    bytes[1] === 0x4c &&
+    bytes[2] === 0x61 &&
+    bytes[3] === 0x43
+  ) {
+    return 'audio/flac'; // fLaC
+  }
+  if (
+    bytes.length >= 12 &&
+    bytes[0] === 0x52 &&
+    bytes[1] === 0x49 &&
+    bytes[2] === 0x46 &&
+    bytes[3] === 0x46 &&
+    bytes[8] === 0x57 &&
+    bytes[9] === 0x41 &&
+    bytes[10] === 0x56 &&
+    bytes[11] === 0x45
+  ) {
+    return 'audio/wav'; // RIFF....WAVE
+  }
+  if (
+    bytes.length >= 8 &&
+    bytes[4] === 0x66 &&
+    bytes[5] === 0x74 &&
+    bytes[6] === 0x79 &&
+    bytes[7] === 0x70
+  ) {
+    return 'audio/mp4'; // ISO BMFF ftyp (M4A / MP4)
+  }
+  if (
+    bytes.length >= 4 &&
+    bytes[0] === 0x1a &&
+    bytes[1] === 0x45 &&
+    bytes[2] === 0xdf &&
+    bytes[3] === 0xa3
+  ) {
+    return 'audio/webm'; // EBML (WebM / Matroska)
+  }
+  if (bytes.length >= 3 && bytes[0] === 0x49 && bytes[1] === 0x44 && bytes[2] === 0x33) {
+    return 'audio/mpeg'; // ID3 (MP3)
+  }
+  if (
+    bytes.length >= 5 &&
+    bytes[0] === 0x23 &&
+    bytes[1] === 0x21 &&
+    bytes[2] === 0x41 &&
+    bytes[3] === 0x4d &&
+    bytes[4] === 0x52
+  ) {
+    return 'audio/amr'; // #!AMR
+  }
+  if (bytes[0] === 0xff && (bytes[1] & 0xe0) === 0xe0) {
+    if ((bytes[1] & 0xf6) === 0xf0) return 'audio/aac'; // ADTS AAC
+    if ((bytes[1] & 0x06) !== 0x00) return 'audio/mpeg'; // MPEG audio frame
+  }
+  return null;
+}
+
+function inferAudioMimeFromUrlExt(urlOrPath: string): string | null {
+  const cleanPath = String(urlOrPath || '').split(/[?#]/)[0].toLowerCase();
+  if (cleanPath.endsWith('.ogg') || cleanPath.endsWith('.oga') || cleanPath.endsWith('.opus')) return 'audio/ogg';
+  if (cleanPath.endsWith('.mp3')) return 'audio/mpeg';
+  if (cleanPath.endsWith('.m4a') || cleanPath.endsWith('.mp4')) return 'audio/mp4';
+  if (cleanPath.endsWith('.wav')) return 'audio/wav';
+  if (cleanPath.endsWith('.flac')) return 'audio/flac';
+  if (cleanPath.endsWith('.aac')) return 'audio/aac';
+  if (cleanPath.endsWith('.amr')) return 'audio/amr';
+  if (cleanPath.endsWith('.webm')) return 'audio/webm';
+  return null;
+}
+
+function decodeBase64PrefixBytes(base64Data: string): Uint8Array | null {
+  try {
+    const normalized = base64Data
+      .slice(0, 64)
+      .replace(/\s+/g, '')
+      .replace(/-/g, '+')
+      .replace(/_/g, '/');
+    const usableLen = Math.floor(normalized.length / 4) * 4;
+    if (usableLen < 4) return null;
+    const bin = atob(normalized.slice(0, usableLen));
+    const bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i += 1) {
+      bytes[i] = bin.charCodeAt(i);
+    }
+    return bytes;
+  } catch {
+    return null;
+  }
+}
+
+export async function transcribeAudio(audioBase64: string, mimeType?: string, customConfig?: CustomLLMConfig): Promise<string> {
   let payloadAudio = audioBase64;
-  let effectiveMime = mimeType;
+  const explicitMime = normalizeAudioMime(mimeType);
+  let effectiveMime = (!isGenericMime(explicitMime) ? explicitMime : undefined) || 'audio/webm';
   if (
     typeof audioBase64 === 'string' &&
     (audioBase64.startsWith('blob:') ||
@@ -1204,13 +1323,36 @@ export async function transcribeAudio(audioBase64: string, mimeType: string = 'a
       throw new Error(`读取语音音频失败 (HTTP ${mediaRes.status})`);
     }
     const blob = await mediaRes.blob();
-    effectiveMime = blob.type || mimeType;
+    const headerBytes = new Uint8Array(await blob.slice(0, 32).arrayBuffer());
+    const sniffedMime = detectAudioMimeTypeFromBytes(headerBytes);
+    const blobMime = normalizeAudioMime(blob.type);
+    const extMime = inferAudioMimeFromUrlExt(targetAudioUrl);
+    effectiveMime =
+      sniffedMime ||
+      (!isGenericMime(blobMime) ? blobMime : undefined) ||
+      extMime ||
+      (!isGenericMime(explicitMime) ? explicitMime : undefined) ||
+      'audio/webm';
     payloadAudio = await new Promise<string>((resolve, reject) => {
       const reader = new FileReader();
       reader.onloadend = () => resolve(typeof reader.result === 'string' ? reader.result : '');
       reader.onerror = () => reject(new Error('读取本地语音缓存失败'));
       reader.readAsDataURL(blob);
     });
+    if (payloadAudio.startsWith('data:')) {
+      payloadAudio = payloadAudio.replace(/^data:[^;]*;base64,/i, `data:${effectiveMime};base64,`);
+    }
+  } else if (typeof audioBase64 === 'string') {
+    const dataMatch = audioBase64.match(/^data:([^;,]+)?(?:;[^,]*)?;base64,(.+)$/i);
+    const dataMime = normalizeAudioMime(dataMatch?.[1]);
+    const rawB64 = dataMatch ? dataMatch[2] : audioBase64;
+    const headerBytes = decodeBase64PrefixBytes(rawB64);
+    const sniffedMime = headerBytes ? detectAudioMimeTypeFromBytes(headerBytes) : null;
+    effectiveMime =
+      sniffedMime ||
+      (!isGenericMime(dataMime) ? dataMime : undefined) ||
+      (!isGenericMime(explicitMime) ? explicitMime : undefined) ||
+      'audio/webm';
   }
   const res = await fetchWithTimeout(
     '/api/audio/transcribe',
@@ -2227,10 +2369,18 @@ export async function retryMessageDelivery(
   }
 }
 
-export async function fetchCustomerProfile(chatId: string, accountId?: string): Promise<CustomerProfile | null> {
+export async function fetchCustomerProfile(
+  chatId: string,
+  accountId?: string,
+  chatTitle?: string
+): Promise<CustomerProfile | null> {
   const effectiveAccountId = accountId || currentActiveAccountId;
   try {
-    const query = effectiveAccountId ? `?accountId=${encodeURIComponent(effectiveAccountId)}` : '';
+    const params = new URLSearchParams();
+    if (effectiveAccountId) params.set('accountId', effectiveAccountId);
+    if (chatTitle && chatTitle.trim()) params.set('title', chatTitle.trim());
+    const qs = params.toString();
+    const query = qs ? `?${qs}` : '';
     const res = await fetchWithTimeout(
       `/api/customer/profile/${encodeURIComponent(chatId)}${query}`,
       {
@@ -2349,7 +2499,8 @@ export async function analyzeCustomerMemory(
   customConfig?: CustomLLMConfig,
   accountId?: string,
   messages?: any[],
-  chatTitle?: string
+  chatTitle?: string,
+  onInfoNotice?: (msg: string) => void
 ): Promise<CustomerProfile | null> {
   try {
     const res = await fetchWithTimeout(
@@ -2368,6 +2519,9 @@ export async function analyzeCustomerMemory(
     );
     if (res.ok) {
       const data = await res.json();
+      if (typeof data?.message === 'string' && data.message.trim() && onInfoNotice) {
+        onInfoNotice(data.message.trim());
+      }
       return data.profile;
     }
     const errData = await res.json().catch(() => null);
@@ -3108,13 +3262,29 @@ export function saveLocalMessage(chatId: string, message: Message, accountId?: s
   }
 }
 
+export function normalizeProfileChatId(chatId?: string | number | null): string {
+  const raw = String(chatId ?? '').trim();
+  if (!raw) return '';
+  if (/^-?\d+$/.test(raw)) return `tg_${raw}`;
+  return raw;
+}
+
 export function getLocalCustomerProfile(chatId: string, accountId?: string): CustomerProfile | null {
   try {
     const acc = accountId || currentActiveAccountId;
-    const scopedKey = acc ? `tg_desktop_profile_${acc}_${chatId}` : null;
+    const canonicalId = normalizeProfileChatId(chatId) || chatId;
+    const scopedKey = acc ? `tg_desktop_profile_${acc}_${canonicalId}` : null;
     let prof = scopedKey ? secureGetItemSync<CustomerProfile>(scopedKey) : null;
+    if (!prof && acc && canonicalId !== chatId) {
+      const altProf = secureGetItemSync<CustomerProfile>(`tg_desktop_profile_${acc}_${chatId}`);
+      if (altProf && (!altProf.accountId || altProf.accountId === acc)) {
+        prof = altProf;
+      }
+    }
     if (!prof) {
-      const legacy = secureGetItemSync<CustomerProfile>(`tg_desktop_profile_${chatId}`);
+      const legacy =
+        secureGetItemSync<CustomerProfile>(`tg_desktop_profile_${canonicalId}`) ||
+        (canonicalId !== chatId ? secureGetItemSync<CustomerProfile>(`tg_desktop_profile_${chatId}`) : null);
       if (legacy && (!acc || legacy.accountId === acc)) {
         prof = legacy;
       }
@@ -3128,11 +3298,40 @@ export function getLocalCustomerProfile(chatId: string, accountId?: string): Cus
 export function saveLocalCustomerProfile(chatId: string, profile: CustomerProfile, accountId?: string): void {
   try {
     const acc = accountId || profile.accountId || currentActiveAccountId;
-    const scopedKey = acc ? `tg_desktop_profile_${acc}_${chatId}` : `tg_desktop_profile_${chatId}`;
-    secureSetItemSync(scopedKey, profile);
+    const canonicalId = normalizeProfileChatId(chatId) || chatId;
+    const scopedKey = acc ? `tg_desktop_profile_${acc}_${canonicalId}` : `tg_desktop_profile_${canonicalId}`;
+    secureSetItemSync(scopedKey, {
+      ...profile,
+      chatId: canonicalId,
+      ...(acc ? { accountId: acc } : {}),
+    });
+    if (acc && canonicalId !== chatId) {
+      secureRemoveItem(`tg_desktop_profile_${acc}_${chatId}`);
+    }
   } catch (e) {
     console.error('Failed to save encrypted profile to local storage', e);
   }
+}
+
+export function clearLocalCustomerProfile(chatId: string, accountId?: string): void {
+  if (!chatId) return;
+  try {
+    const acc = accountId || currentActiveAccountId;
+    const canonicalId = normalizeProfileChatId(chatId) || chatId;
+    const keysToRemove: string[] = [];
+    if (acc) {
+      keysToRemove.push(`tg_desktop_profile_${acc}_${canonicalId}`, `tg_desktop_profile_${acc}_${chatId}`);
+    }
+    const legacyCanon = secureGetItemSync<CustomerProfile>(`tg_desktop_profile_${canonicalId}`);
+    if (!acc || !legacyCanon?.accountId || legacyCanon.accountId === acc) {
+      keysToRemove.push(`tg_desktop_profile_${canonicalId}`);
+    }
+    const legacyRaw = canonicalId !== chatId ? secureGetItemSync<CustomerProfile>(`tg_desktop_profile_${chatId}`) : null;
+    if (canonicalId !== chatId && (!acc || !legacyRaw?.accountId || legacyRaw.accountId === acc)) {
+      keysToRemove.push(`tg_desktop_profile_${chatId}`);
+    }
+    new Set(keysToRemove).forEach((k) => secureRemoveItem(k));
+  } catch {}
 }
 
 export function getLocalStorageMetrics(): { totalMessages: number; totalChats: number; approxBytes: number } {
@@ -3159,9 +3358,28 @@ export function getLocalStorageMetrics(): { totalMessages: number; totalChats: n
 export function clearAccountLocalCache(accountId: string, unsharedChatIds: string[] = []): void {
   if (!accountId) return;
   try {
+    const cleanAcc = accountId.trim();
+    const accVariants = Array.from(
+      new Set(
+        [
+          cleanAcc,
+          cleanAcc.startsWith('acc_tg_') ? cleanAcc.slice('acc_tg_'.length) : /^\d+$/.test(cleanAcc) ? `acc_tg_${cleanAcc}` : '',
+        ].filter(Boolean)
+      )
+    );
     const msgsPrefix = `tg_desktop_msgs_${accountId}_`;
     const profilePrefix = `tg_desktop_profile_${accountId}_`;
-    const keysToRemove: string[] = [`tg_deleted_message_ids_${accountId}`];
+    const keysToRemove: string[] = [
+      `tg_deleted_message_ids_${accountId}`,
+      `tg_pro_client_prefs::${accountId}`,
+    ];
+    for (const accVar of accVariants) {
+      keysToRemove.push(
+        `tg_desktop_contacts_${accVar}`,
+        `tg_pro_trans_settings::${accVar}`,
+        `tg_pro_call_records::${accVar}`
+      );
+    }
 
     for (let i = 0; i < localStorage.length; i++) {
       const key = localStorage.key(i) || '';
@@ -3171,16 +3389,33 @@ export function clearAccountLocalCache(accountId: string, unsharedChatIds: strin
     }
 
     for (const chatId of unsharedChatIds) {
+      const canonicalId = normalizeProfileChatId(chatId) || chatId;
       keysToRemove.push(
         `${msgsPrefix}${chatId}`,
         `${profilePrefix}${chatId}`,
+        `${profilePrefix}${canonicalId}`,
         `tg_desktop_msgs_${chatId}`,
         `tg_desktop_profile_${chatId}`,
+        `tg_desktop_profile_${canonicalId}`,
         `tg_local_msgs_${chatId}`
       );
     }
 
     new Set(keysToRemove).forEach((k) => secureRemoveItem(k));
+
+    try {
+      const legacyCalls = secureGetItemSync<any[]>('tg_pro_call_records');
+      if (Array.isArray(legacyCalls)) {
+        const variantSet = new Set(accVariants);
+        const remainingCalls = legacyCalls.filter((rec) => !rec || !variantSet.has(String(rec.accountId || '').trim()));
+        if (remainingCalls.length === 0) {
+          secureRemoveItem('tg_pro_call_records');
+        } else if (remainingCalls.length !== legacyCalls.length) {
+          secureSetItemSync('tg_pro_call_records', remainingCalls);
+        }
+      }
+    } catch {}
+
     void clearAccountPendingMediaBlobs(accountId);
 
     if (localStorage.getItem(ACTIVE_ACCOUNT_STORAGE_KEY) === accountId) {

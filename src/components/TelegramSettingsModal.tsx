@@ -69,16 +69,21 @@ export const DEFAULT_TELEGRAM_CLIENT_PREFS: TelegramClientPrefs = {
   sendWithEnter: true,
 };
 
-const CLIENT_PREFS_STORAGE_KEY = 'tg_pro_client_prefs';
+export const CLIENT_PREFS_STORAGE_KEY = 'tg_pro_client_prefs';
 
-function loadStoredClientPrefs(): TelegramClientPrefs {
+export function getScopedClientPrefsStorageKey(accountId?: string | null): string {
+  const cleanId = String(accountId || '').trim();
+  return cleanId ? `${CLIENT_PREFS_STORAGE_KEY}::${cleanId}` : CLIENT_PREFS_STORAGE_KEY;
+}
+
+export function loadStoredClientPrefs(accountId?: string | null): TelegramClientPrefs {
   try {
-    const raw = localStorage.getItem(CLIENT_PREFS_STORAGE_KEY);
+    const raw = localStorage.getItem(getScopedClientPrefsStorageKey(accountId));
     if (raw) {
       return { ...DEFAULT_TELEGRAM_CLIENT_PREFS, ...JSON.parse(raw) };
     }
   } catch {}
-  return DEFAULT_TELEGRAM_CLIENT_PREFS;
+  return { ...DEFAULT_TELEGRAM_CLIENT_PREFS };
 }
 
 interface TelegramSettingsModalProps {
@@ -186,16 +191,23 @@ export const TelegramSettingsModal: React.FC<TelegramSettingsModalProps> = ({
     excludeArchived: boolean;
   } | null>(null);
 
-  const [localPrefs, setLocalPrefs] = useState<TelegramClientPrefs>(() => loadStoredClientPrefs());
+  const currentAccountIdRef = useRef<string | undefined>(currentAccount?.id);
+  currentAccountIdRef.current = currentAccount?.id;
+
+  const [localPrefs, setLocalPrefs] = useState<TelegramClientPrefs>(() => loadStoredClientPrefs(currentAccount?.id));
   const effectivePrefs = externalPrefs || localPrefs;
 
-  const updatePref = (patch: Partial<TelegramClientPrefs>) => {
-    const next = { ...effectivePrefs, ...patch };
+  const updatePref = (patch: Partial<TelegramClientPrefs>, expectedAccountId?: string) => {
+    const targetAccId = expectedAccountId !== undefined ? expectedAccountId : currentAccount?.id;
+    const basePrefs = expectedAccountId !== undefined ? loadStoredClientPrefs(targetAccId) : effectivePrefs;
+    const next = { ...basePrefs, ...patch };
     setLocalPrefs(next);
     try {
-      localStorage.setItem(CLIENT_PREFS_STORAGE_KEY, JSON.stringify(next));
+      localStorage.setItem(getScopedClientPrefsStorageKey(targetAccId), JSON.stringify(next));
     } catch {}
-    onUpdateClientPrefs?.(next);
+    if (expectedAccountId === undefined || currentAccountIdRef.current === targetAccId) {
+      onUpdateClientPrefs?.(next);
+    }
   };
 
   const loadOfficialCloudSettings = async () => {
@@ -204,10 +216,12 @@ export const TelegramSettingsModal: React.FC<TelegramSettingsModalProps> = ({
       setCloudError('当前尚未登录/关联任何在线 Telegram 账号，请先在左侧点击「+ 添加账号」登录您的 Telegram 账号后再修改云端设置。');
       return;
     }
+    const targetAccountId = currentAccount.id;
     setIsLoadingCloud(true);
     setCloudError('');
     try {
-      const res = await fetchTelegramUserSettingsApi(currentAccount.id, currentAccount.phone);
+      const res = await fetchTelegramUserSettingsApi(targetAccountId, currentAccount.phone);
+      if (currentAccountIdRef.current !== targetAccountId) return;
       if (!res.ok) {
         setCloudSettings(null);
         setCloudError(res.error || '拉取 Telegram 官方云端设置失败');
@@ -227,30 +241,41 @@ export const TelegramSettingsModal: React.FC<TelegramSettingsModalProps> = ({
             phone: res.profile.phone,
             ...(res.profile.hasAvatar ? { avatarUrl: res.profile.avatarUrl } : {}),
           },
-          currentAccount.id
+          targetAccountId
         );
       }
-      updatePref({
-        twoFactorAuth: Boolean(res.twoFactor?.hasPassword),
-        showLastSeen: res.privacy?.lastSeen !== 'nobody',
-        notificationsSound: Boolean(res.notifications?.users?.enabled),
-        previewText: Boolean(res.notifications?.users?.showPreviews),
-      });
+      updatePref(
+        {
+          twoFactorAuth: Boolean(res.twoFactor?.hasPassword),
+          showLastSeen: res.privacy?.lastSeen !== 'nobody',
+          notificationsSound: Boolean(res.notifications?.users?.enabled),
+          previewText: Boolean(res.notifications?.users?.showPreviews),
+        },
+        targetAccountId
+      );
     } catch (err: any) {
+      if (currentAccountIdRef.current !== targetAccountId) return;
       setCloudSettings(null);
       setCloudError(err?.message || '拉取 Telegram 官方云端设置失败');
     } finally {
-      setIsLoadingCloud(false);
+      if (currentAccountIdRef.current === targetAccountId) {
+        setIsLoadingCloud(false);
+      }
     }
-    if (currentAccount.id.startsWith('acc_tg_')) {
+    if (targetAccountId.startsWith('acc_tg_')) {
       setIsLoadingBlocked(true);
-      fetchTelegramBlockedContactsApi(currentAccount.id)
+      fetchTelegramBlockedContactsApi(targetAccountId)
         .then((blkRes) => {
+          if (currentAccountIdRef.current !== targetAccountId) return;
           if (blkRes.ok && Array.isArray(blkRes.blocked)) {
             setBlockedUsers(blkRes.blocked);
           }
         })
-        .finally(() => setIsLoadingBlocked(false));
+        .finally(() => {
+          if (currentAccountIdRef.current === targetAccountId) {
+            setIsLoadingBlocked(false);
+          }
+        });
     } else {
       setBlockedUsers([]);
     }
@@ -282,10 +307,11 @@ export const TelegramSettingsModal: React.FC<TelegramSettingsModalProps> = ({
     setChangePhoneHash('');
     setChangePhoneCode('');
     setPhoneFeedback('');
+    setCloudSettings(null);
+    setCloudError('');
+    setBlockedUsers([]);
     setEditingFolder(null);
-    if (!externalPrefs) {
-      setLocalPrefs(loadStoredClientPrefs());
-    }
+    setLocalPrefs(loadStoredClientPrefs(currentAccount?.id));
     loadOfficialCloudSettings();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isOpen, currentAccount?.id]);

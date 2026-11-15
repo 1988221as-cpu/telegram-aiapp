@@ -638,6 +638,13 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
   onRefreshMediaUrls,
 }) => {
   const [inputText, setInputText] = useState('');
+  const activeChatIdRef = useRef<string | null>(chat?.id || null);
+  activeChatIdRef.current = chat?.id || null;
+  const activeAccountIdRef = useRef<string | undefined>(currentAccountId);
+  activeAccountIdRef.current = currentAccountId;
+  const isSameOriginScope = (originChatId: string, originAccountId?: string) =>
+    activeChatIdRef.current === originChatId && activeAccountIdRef.current === originAccountId;
+
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   useEffect(() => {
@@ -1759,12 +1766,13 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
     setReplyingTo(null);
     setEditingMessage(null);
     setTranslateOnEdit(false);
+    clearPastedImage(true);
     if (syncNoticeTimerRef.current) {
       clearTimeout(syncNoticeTimerRef.current);
       syncNoticeTimerRef.current = null;
     }
     setSyncNotice(null);
-  }, [chat?.id]);
+  }, [chat?.id, currentAccountId]);
 
   // Real-time input translation preview (auto for free Google Translate; manual on-demand for LLM engines)
   useEffect(() => {
@@ -1938,6 +1946,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
     if (!textToSend || !chat) return;
     const originChatId = chat.id;
     const originAccountId = currentAccountId;
+    const originReplyPayload = replyingTo ? buildReplyPayload(replyingTo, chat.title) : undefined;
 
     setIsSending(true);
     try {
@@ -1959,7 +1968,9 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
 
         if (!isAlreadyTargetLang) {
           if (previewError && translatedPreviewSource === textToSend) {
-            showSyncNotice('翻译预览失败，可点击输入框上方「重试」或「直接发送原文」', 5000);
+            if (isSameOriginScope(originChatId, originAccountId)) {
+              showSyncNotice('翻译预览失败，可点击输入框上方「重试」或「直接发送原文」', 5000);
+            }
             return;
           }
 
@@ -1984,10 +1995,12 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
               );
             } catch {
               const errMsg = '翻译失败，请检查翻译通道';
-              setPreviewError(errMsg);
-              setTranslatedPreview('');
-              setTranslatedPreviewSource(textToSend);
-              showSyncNotice(errMsg, 5000);
+              if (isSameOriginScope(originChatId, originAccountId)) {
+                setPreviewError(errMsg);
+                setTranslatedPreview('');
+                setTranslatedPreviewSource(textToSend);
+                showSyncNotice(errMsg, 5000);
+              }
               return;
             }
           }
@@ -2010,7 +2023,9 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
               );
             } catch {
               translationOfTarget = '';
-              showSyncNotice('翻译失败，请检查翻译通道', 4000);
+              if (isSameOriginScope(originChatId, originAccountId)) {
+                showSyncNotice('翻译失败，请检查翻译通道', 4000);
+              }
             }
           }
         }
@@ -2026,15 +2041,19 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
           shouldAutoTranslate ? { translatedText: translationOfTarget } : undefined
         );
         if (editRes && typeof editRes === 'object' && editRes.ok === false) {
-          showSyncNotice(`云端编辑失败：${editRes.error || '请检查 Telegram 在线状态'}`);
+          if (isSameOriginScope(originChatId, originAccountId)) {
+            showSyncNotice(`云端编辑失败：${editRes.error || '请检查 Telegram 在线状态'}`);
+          }
           return;
         }
-        setEditingMessage(null);
-        setTranslateOnEdit(false);
-        setInputText('');
-        setTranslatedPreview('');
-        setTranslatedPreviewSource('');
-        setPreviewError('');
+        if (isSameOriginScope(originChatId, originAccountId)) {
+          setEditingMessage(null);
+          setTranslateOnEdit(false);
+          setInputText('');
+          setTranslatedPreview('');
+          setTranslatedPreviewSource('');
+          setPreviewError('');
+        }
         return;
       }
 
@@ -2044,15 +2063,17 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
         sender: 'me',
         text: targetText,
         translatedText: translationOfTarget,
-        replyTo: replyingTo ? buildReplyPayload(replyingTo, chat.title) : undefined,
+        replyTo: originReplyPayload,
         timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false }),
       });
 
-      setReplyingTo(null);
-      setInputText('');
-      setTranslatedPreview('');
-      setTranslatedPreviewSource('');
-      setPreviewError('');
+      if (isSameOriginScope(originChatId, originAccountId)) {
+        setReplyingTo(null);
+        setInputText('');
+        setTranslatedPreview('');
+        setTranslatedPreviewSource('');
+        setPreviewError('');
+      }
     } finally {
       setIsSending(false);
     }
@@ -2060,7 +2081,10 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
 
   const handleImageSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
-    if (!file) return;
+    if (!file || !chat) return;
+    const originChatId = chat.id;
+    const originAccountId = currentAccountId;
+    const originReplyPayload = replyingTo ? buildReplyPayload(replyingTo, chat.title) : undefined;
     try {
       if (file.size > TELEGRAM_MAX_MEDIA) {
         const maxMb = Math.round(TELEGRAM_MAX_MEDIA / (1024 * 1024));
@@ -2070,24 +2094,28 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
       const previewUrl = URL.createObjectURL(file);
       const userCaption = inputText.trim();
       onSendMessage({
+        chatId: originChatId,
+        accountId: originAccountId,
         sender: 'me',
         isImage: true,
         imageUrl: previewUrl,
         imageCaption: userCaption || undefined,
         text: userCaption || '',
         mediaFile: file,
-        replyTo: replyingTo ? buildReplyPayload(replyingTo, chat?.title) : undefined,
+        replyTo: originReplyPayload,
         timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false }),
       });
-      if (replyingTo) setReplyingTo(null);
-      if (userCaption) {
+      if (originReplyPayload && isSameOriginScope(originChatId, originAccountId)) setReplyingTo(null);
+      if (userCaption && isSameOriginScope(originChatId, originAccountId)) {
         setInputText('');
         setTranslatedPreview('');
         setTranslatedPreviewSource('');
       }
     } catch (err: any) {
       console.warn('Failed to upload image', err);
-      showSyncNotice(`图片读取失败：${err?.message || '请检查图片文件是否损坏或有读取权限'}`);
+      if (isSameOriginScope(originChatId, originAccountId)) {
+        showSyncNotice(`图片读取失败：${err?.message || '请检查图片文件是否损坏或有读取权限'}`);
+      }
     } finally {
       setIsAttachmentMenuOpen(false);
       if (e.target) e.target.value = '';
@@ -2099,6 +2127,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
     if (!file || !chat) return;
     const originChatId = chat.id;
     const originAccountId = currentAccountId;
+    const originReplyPayload = replyingTo ? buildReplyPayload(replyingTo, chat.title) : undefined;
     try {
       if (file.size > TELEGRAM_MAX_MEDIA) {
         const maxMb = Math.round(TELEGRAM_MAX_MEDIA / (1024 * 1024));
@@ -2132,18 +2161,22 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
         videoDuration: duration,
         text: userCaption || `[视频] ${file.name}`,
         mediaFile: file,
-        replyTo: replyingTo ? buildReplyPayload(replyingTo, chat?.title) : undefined,
+        replyTo: originReplyPayload,
         timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false }),
       });
-      if (replyingTo) setReplyingTo(null);
-      if (userCaption) {
-        setInputText('');
-        setTranslatedPreview('');
-        setTranslatedPreviewSource('');
+      if (isSameOriginScope(originChatId, originAccountId)) {
+        if (originReplyPayload) setReplyingTo(null);
+        if (userCaption) {
+          setInputText('');
+          setTranslatedPreview('');
+          setTranslatedPreviewSource('');
+        }
       }
     } catch (err: any) {
       console.warn('Failed to upload video', err);
-      showSyncNotice(`视频读取失败：${err?.message || '请检查视频文件是否损坏或有读取权限'}`);
+      if (isSameOriginScope(originChatId, originAccountId)) {
+        showSyncNotice(`视频读取失败：${err?.message || '请检查视频文件是否损坏或有读取权限'}`);
+      }
     } finally {
       setIsAttachmentMenuOpen(false);
       if (e.target) e.target.value = '';
@@ -2155,6 +2188,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
     if (!file || !chat) return;
     const originChatId = chat.id;
     const originAccountId = currentAccountId;
+    const originReplyPayload = replyingTo ? buildReplyPayload(replyingTo, chat.title) : undefined;
     try {
       if (file.size > TELEGRAM_MAX_MEDIA) {
         const maxMb = Math.round(TELEGRAM_MAX_MEDIA / (1024 * 1024));
@@ -2192,13 +2226,15 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
         audioDuration: duration,
         text: '🎤 语音消息',
         mediaFile: file,
-        replyTo: replyingTo ? buildReplyPayload(replyingTo, chat?.title) : undefined,
+        replyTo: originReplyPayload,
         timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false }),
       });
-      if (replyingTo) setReplyingTo(null);
+      if (originReplyPayload && isSameOriginScope(originChatId, originAccountId)) setReplyingTo(null);
     } catch (err: any) {
       console.warn('Failed to upload audio', err);
-      showSyncNotice(`音频读取失败：${err?.message || '请检查音频文件是否损坏或有读取权限'}`);
+      if (isSameOriginScope(originChatId, originAccountId)) {
+        showSyncNotice(`音频读取失败：${err?.message || '请检查音频文件是否损坏或有读取权限'}`);
+      }
     } finally {
       setIsAttachmentMenuOpen(false);
       if (e.target) e.target.value = '';
@@ -2207,7 +2243,9 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
 
   const handleFileSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
-    if (!file) return;
+    if (!file || !chat) return;
+    const originChatId = chat.id;
+    const originAccountId = currentAccountId;
     try {
       if (file.size > TELEGRAM_MAX_MEDIA) {
         const maxMb = Math.round(TELEGRAM_MAX_MEDIA / (1024 * 1024));
@@ -2218,11 +2256,13 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
       const isVid = file.type.startsWith('video/') || /\.(mp4|mov|webm|mkv|avi|m4v)$/i.test(file.name);
       const isAud = file.type.startsWith('audio/') || /\.(mp3|ogg|wav|m4a|aac|flac)$/i.test(file.name);
       const previewUrl = URL.createObjectURL(file);
-      const replyPayload = replyingTo ? buildReplyPayload(replyingTo, chat?.title) : undefined;
+      const replyPayload = replyingTo ? buildReplyPayload(replyingTo, chat.title) : undefined;
 
       if (isImg) {
         const userCaption = inputText.trim();
         onSendMessage({
+          chatId: originChatId,
+          accountId: originAccountId,
           sender: 'me',
           isImage: true,
           imageUrl: previewUrl,
@@ -2232,7 +2272,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
           replyTo: replyPayload,
           timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false }),
         });
-        if (userCaption) {
+        if (userCaption && isSameOriginScope(originChatId, originAccountId)) {
           setInputText('');
           setTranslatedPreview('');
           setTranslatedPreviewSource('');
@@ -2254,6 +2294,8 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
           });
         } catch {}
         onSendMessage({
+          chatId: originChatId,
+          accountId: originAccountId,
           sender: 'me',
           isVideo: true,
           videoUrl: previewUrl,
@@ -2263,7 +2305,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
           replyTo: replyPayload,
           timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false }),
         });
-        if (userCaption) {
+        if (userCaption && isSameOriginScope(originChatId, originAccountId)) {
           setInputText('');
           setTranslatedPreview('');
           setTranslatedPreviewSource('');
@@ -2290,6 +2332,8 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
           });
         } catch {}
         onSendMessage({
+          chatId: originChatId,
+          accountId: originAccountId,
           sender: 'me',
           isAudio: true,
           audioUrl: previewUrl,
@@ -2301,6 +2345,8 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
         });
       } else {
         onSendMessage({
+          chatId: originChatId,
+          accountId: originAccountId,
           sender: 'me',
           isFile: true,
           fileName: file.name,
@@ -2312,10 +2358,12 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
           timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false }),
         });
       }
-      if (replyingTo) setReplyingTo(null);
+      if (replyPayload && isSameOriginScope(originChatId, originAccountId)) setReplyingTo(null);
     } catch (err: any) {
       console.warn('Failed to upload file', err);
-      showSyncNotice(`文件读取失败：${err?.message || '请检查文件是否损坏或有读取权限'}`);
+      if (isSameOriginScope(originChatId, originAccountId)) {
+        showSyncNotice(`文件读取失败：${err?.message || '请检查文件是否损坏或有读取权限'}`);
+      }
     } finally {
       setIsAttachmentMenuOpen(false);
       if (e.target) e.target.value = '';
@@ -2324,7 +2372,9 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
 
   const handleSendSticker = async (sticker: TelegramStickerItem, packTitle?: string) => {
     if (!chat) return;
-    if (!chat.id.startsWith('tg_') || currentAccountId === 'acc_telegram_bot') {
+    const originChatId = chat.id;
+    const originAccountId = currentAccountId;
+    if (!originChatId.startsWith('tg_') || originAccountId === 'acc_telegram_bot') {
       showSyncNotice('仅已连接的 Telegram 个人账号支持发送官方云端贴纸');
       return;
     }
@@ -2332,24 +2382,28 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
     const replyToMsgId = replyingTo?.telegramMessageId;
     const replyPayload = replyingTo ? buildReplyPayload(replyingTo, chat.title) : undefined;
     const res = await sendTelegramStickerApi({
-      accountId: currentAccountId,
-      chatId: chat.id,
+      accountId: originAccountId,
+      chatId: originChatId,
       sticker,
       packTitle,
       replyToMsgId,
       replyTo: replyPayload,
     });
     if (!res.ok) {
-      showSyncNotice(res.error || '发送官方贴纸失败');
+      if (isSameOriginScope(originChatId, originAccountId)) {
+        showSyncNotice(res.error || '发送官方贴纸失败');
+      }
       return;
     }
-    if (replyingTo) {
+    if (replyPayload && isSameOriginScope(originChatId, originAccountId)) {
       setReplyingTo(null);
     }
     const isVideoSticker = Boolean(res.videoUrl || res.isVideo || sticker.isVideo);
     const fallbackText = res.text || `${sticker.emoji} [贴纸]`;
     onSendMessage({
       ...(res.id ? { id: res.id } : {}),
+      chatId: originChatId,
+      accountId: originAccountId,
       sender: 'me',
       isImage: res.isImage ?? !isVideoSticker,
       imageUrl: res.imageUrl ?? (isVideoSticker ? undefined : sticker.thumbUrl),
@@ -2543,8 +2597,12 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
 
   const handleSendPastedImage = () => {
     if (!pastedImage || !chat) return;
+    const originChatId = chat.id;
+    const originAccountId = currentAccountId;
     const userCaption = inputText.trim() || pastedImage.caption || '';
     onSendMessage({
+      chatId: originChatId,
+      accountId: originAccountId,
       sender: 'me',
       isImage: true,
       imageUrl: pastedImage.dataUrl,
@@ -2606,7 +2664,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
     try {
       let transcribed = msg.sttText;
       if (!transcribed && msg.audioUrl) {
-        transcribed = await transcribeAudio(msg.audioUrl, 'audio/webm', customLLMConfig);
+        transcribed = await transcribeAudio(msg.audioUrl, undefined, customLLMConfig);
       }
 
       if (!transcribed || !transcribed.trim()) {
@@ -2826,6 +2884,10 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
       clearInterval(recordTimerRef.current);
       setIsRecordingMic(false);
     } else {
+      if (!chat) return;
+      const originChatId = chat.id;
+      const originAccountId = currentAccountId;
+      const originReplyPayload = replyingTo ? buildReplyPayload(replyingTo, chat.title) : undefined;
       try {
         const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
         mediaRecorderRef.current = new MediaRecorder(stream);
@@ -2840,8 +2902,10 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
         mediaRecorderRef.current.onstop = async () => {
           const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
           if (!audioBlob || audioBlob.size === 0) {
-            setSyncNotice('麦克风录音数据为空，已取消发送');
-            setTimeout(() => setSyncNotice(null), 3000);
+            if (isSameOriginScope(originChatId, originAccountId)) {
+              setSyncNotice('麦克风录音数据为空，已取消发送');
+              setTimeout(() => setSyncNotice(null), 3000);
+            }
             stream.getTracks().forEach((track) => track.stop());
             return;
           }
@@ -2873,18 +2937,18 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
           } catch {}
 
           onSendMessage({
-            chatId: chat?.id,
-            accountId: currentAccountId,
+            chatId: originChatId,
+            accountId: originAccountId,
             sender: 'me',
             isAudio: true,
             audioDuration: recordedSeconds,
             audioUrl,
             mediaFile: audioFile,
             text: '🎤 语音消息',
-            replyTo: replyingTo ? buildReplyPayload(replyingTo, chat?.title) : undefined,
+            replyTo: originReplyPayload,
             timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false }),
           });
-          if (replyingTo) setReplyingTo(null);
+          if (originReplyPayload && isSameOriginScope(originChatId, originAccountId)) setReplyingTo(null);
           stream.getTracks().forEach((track) => track.stop());
         };
 
@@ -2938,6 +3002,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
     isMasterVoice?: boolean;
     chatId?: string;
     accountId?: string;
+    replyTo?: Message['replyTo'];
   }) => {
     if (!voiceData.audioUrl) {
       setSyncNotice('缺少有效合成音频，已中止发送');
@@ -2945,10 +3010,19 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
       return;
     }
 
+    const targetChatId = voiceData.chatId ?? chat?.id;
+    const targetAccountId = voiceData.accountId ?? currentAccountId;
+    const targetReplyTo =
+      voiceData.replyTo !== undefined
+        ? voiceData.replyTo
+        : replyingTo
+        ? buildReplyPayload(replyingTo, chat?.title)
+        : undefined;
+
     setIsVoiceStudioOpen(false);
     onSendMessage({
-      chatId: voiceData.chatId,
-      accountId: voiceData.accountId,
+      chatId: targetChatId,
+      accountId: targetAccountId,
       sender: 'me',
       isAudio: true,
       audioDuration: voiceData.audioDuration,
@@ -2958,15 +3032,16 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
       voiceName: voiceData.voiceName,
       voiceTone: voiceData.voiceTone,
       isMasterVoice: voiceData.isMasterVoice,
-      replyTo: replyingTo ? buildReplyPayload(replyingTo, chat?.title) : undefined,
+      replyTo: targetReplyTo,
       timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false }),
     });
-    if (replyingTo) setReplyingTo(null);
-
-    setInputText('');
-    setTranslatedPreview('');
-    setTranslatedPreviewSource('');
-    setPreviewError('');
+    if (!targetChatId || isSameOriginScope(targetChatId, targetAccountId)) {
+      if (replyingTo) setReplyingTo(null);
+      setInputText('');
+      setTranslatedPreview('');
+      setTranslatedPreviewSource('');
+      setPreviewError('');
+    }
   };
 
   const handleDirectVoiceSynthesis = async () => {
@@ -2980,6 +3055,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
 
     const originChatId = chat.id;
     const originAccountId = currentAccountId;
+    const originReplyPayload = replyingTo ? buildReplyPayload(replyingTo, chat.title) : undefined;
     const mv = masterVoiceprint || getMasterVoiceprint();
     const isMasterVoiceClone = Boolean(
       mv?.cloneMode === 'voice_clone' && (mv.sampleId || mv.sampleAudioUrl || mv.cloneVoiceId)
@@ -3136,9 +3212,12 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
         isMasterVoice: true,
         chatId: originChatId,
         accountId: originAccountId,
+        replyTo: originReplyPayload,
       });
     } catch {
-      showSyncNotice('请检查合成通道', 4000);
+      if (isSameOriginScope(originChatId, originAccountId)) {
+        showSyncNotice('请检查合成通道', 4000);
+      }
     } finally {
       setIsSynthesizingVoice(false);
     }
@@ -4682,6 +4761,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                   if (isSending || !chat) return;
                   const originChatId = chat.id;
                   const originAccountId = currentAccountId;
+                  const originReplyPayload = replyingTo ? buildReplyPayload(replyingTo, chat.title) : undefined;
                   setIsSending(true);
                   const targetSuggestion = aiSuggestion;
                   const targetTranslation = aiSuggestionTranslation;
@@ -4724,8 +4804,10 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                           isGroupOrChannelChat ? { purpose: 'group', isGroup: true } : undefined
                         );
                       } catch {
-                        setSyncNotice('翻译失败，请检查翻译通道');
-                        setTimeout(() => setSyncNotice(null), 4000);
+                        if (isSameOriginScope(originChatId, originAccountId)) {
+                          setSyncNotice('翻译失败，请检查翻译通道');
+                          setTimeout(() => setSyncNotice(null), 4000);
+                        }
                       }
                     }
                     onSendMessage({
@@ -4734,10 +4816,10 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                       sender: 'me',
                       text: targetSuggestion,
                       translatedText: cnTranslation,
-                      replyTo: replyingTo ? buildReplyPayload(replyingTo, chat.title) : undefined,
+                      replyTo: originReplyPayload,
                       timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false }),
                     });
-                    if (replyingTo) setReplyingTo(null);
+                    if (originReplyPayload && isSameOriginScope(originChatId, originAccountId)) setReplyingTo(null);
                     let peerCueText = '';
                     for (let i = messages.length - 1; i >= 0; i--) {
                       const pm = messages[i];

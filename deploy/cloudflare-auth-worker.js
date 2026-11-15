@@ -9,17 +9,90 @@ UwIDAQAB
 -----END PUBLIC KEY-----`;
 const MAX_ACCOUNTS_PER_DEVICE = 20;
 const DAY_MS = 24 * 60 * 60 * 1e3;
-const CORS_HEADERS = {
-  "Access-Control-Allow-Origin": "*",
+const BASE_CORS_HEADERS = {
   "Access-Control-Allow-Methods": "GET, POST, PUT, PATCH, DELETE, OPTIONS",
   "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Admin-Secret, X-Client-Brand, X-Engine-Key, X-Engine-License, X-License-Key, x-api-key, X-User-JWT"
 };
+function constantTimeEqual(a, b) {
+  if (!a || !b || a.length !== b.length) return false;
+  let diff = 0;
+  for (let i = 0; i < a.length; i++) {
+    diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  }
+  return diff === 0;
+}
+function resolveAllowedEngineKeys(env) {
+  const keys = [];
+  const rawList = [env.ENGINE_LICENSE_KEYS, env.ALLOWED_ENGINE_KEYS].filter(Boolean).join(",");
+  for (const entry of rawList.split(",")) {
+    const trimmed = entry.trim();
+    if (trimmed && !keys.includes(trimmed)) keys.push(trimmed);
+  }
+  const masterKey = (env.BRAIN_UPSTREAM_KEY || "").trim();
+  if (masterKey && !keys.includes(masterKey)) {
+    keys.push(masterKey);
+  }
+  return keys;
+}
+function resolveCorsHeaders(request, env, path) {
+  const originHeader = (request.headers.get("Origin") || "").trim();
+  if (!originHeader) {
+    return { ...BASE_CORS_HEADERS };
+  }
+  let parsedOrigin;
+  try {
+    parsedOrigin = new URL(originHeader);
+  } catch {
+    return { Vary: "Origin" };
+  }
+  if (parsedOrigin.protocol !== "http:" && parsedOrigin.protocol !== "https:" || parsedOrigin.username || parsedOrigin.password) {
+    return { Vary: "Origin" };
+  }
+  const normalizedOrigin = parsedOrigin.origin;
+  const allowedList = String(env.ALLOWED_ORIGINS || "").split(",").map((s) => s.trim()).filter(Boolean);
+  let isAllowed = allowedList.some((entry) => {
+    try {
+      const u = new URL(entry);
+      return (u.protocol === "http:" || u.protocol === "https:") && u.origin.toLowerCase() === normalizedOrigin.toLowerCase();
+    } catch {
+      return false;
+    }
+  });
+  if (!isAllowed && !path.startsWith("/api/admin/")) {
+    const host = parsedOrigin.hostname.toLowerCase();
+    if (host === "localhost" || host === "127.0.0.1" || host === "::1" || host === "[::1]") {
+      isAllowed = true;
+    }
+  }
+  if (!isAllowed) {
+    return { Vary: "Origin" };
+  }
+  return {
+    ...BASE_CORS_HEADERS,
+    "Access-Control-Allow-Origin": normalizedOrigin,
+    Vary: "Origin"
+  };
+}
+function applyCorsHeaders(response, request, env, path) {
+  const corsHeaders = resolveCorsHeaders(request, env, path);
+  const nextHeaders = new Headers(response.headers);
+  nextHeaders.delete("Access-Control-Allow-Origin");
+  nextHeaders.delete("Access-Control-Allow-Methods");
+  nextHeaders.delete("Access-Control-Allow-Headers");
+  for (const [k, v] of Object.entries(corsHeaders)) {
+    nextHeaders.set(k, v);
+  }
+  return new Response(response.body, {
+    status: response.status,
+    headers: nextHeaders
+  });
+}
 function jsonResponse(data, status = 200) {
   return new Response(JSON.stringify(data), {
     status,
     headers: {
       "Content-Type": "application/json; charset=utf-8",
-      ...CORS_HEADERS
+      ...BASE_CORS_HEADERS
     }
   });
 }
@@ -355,12 +428,14 @@ async function forwardToKnowledgeBrain(request, env, url) {
   const bearerMatch = authHeader.match(/^Bearer\s+(.+)$/i);
   const bearerToken = bearerMatch?.[1]?.trim() || "";
   let edgeAuthenticated = false;
+  let authenticatedByAdmin = false;
   let verifiedUserJwt = "";
   if (adminSecret) {
-    if (!env.ADMIN_SECRET || adminSecret !== env.ADMIN_SECRET) {
+    if (!env.ADMIN_SECRET || !constantTimeEqual(adminSecret, env.ADMIN_SECRET)) {
       return jsonResponse({ ok: false, code: "UNAUTHORIZED_ADMIN", error: "Unauthorized admin request" }, 401);
     }
     edgeAuthenticated = true;
+    authenticatedByAdmin = true;
   } else {
     const jwtCandidate = explicitUserJwt || (bearerToken.split(".").length === 3 ? bearerToken : "");
     if (jwtCandidate) {
@@ -380,11 +455,27 @@ async function forwardToKnowledgeBrain(request, env, url) {
       }
       edgeAuthenticated = true;
       verifiedUserJwt = jwtCandidate;
-    } else if (!engineKey && !bearerToken) {
-      return jsonResponse(
-        { ok: false, code: "MISSING_AUTH", error: "\u7F3A\u5C11\u6709\u6548\u7684\u4F1A\u5458 RS256 \u4EE4\u724C\u6216\u5F15\u64CE\u6388\u6743\u5BC6\u94A5" },
-        401
-      );
+    } else {
+      const engineCandidate = engineKey || bearerToken;
+      if (!engineCandidate) {
+        return jsonResponse(
+          { ok: false, code: "MISSING_AUTH", error: "\u7F3A\u5C11\u6709\u6548\u7684\u4F1A\u5458 RS256 \u4EE4\u724C\u6216\u5F15\u64CE\u6388\u6743\u5BC6\u94A5" },
+          401
+        );
+      }
+      const allowedEngineKeys = resolveAllowedEngineKeys(env);
+      const matchedEngineKey = allowedEngineKeys.some((k) => constantTimeEqual(engineCandidate, k));
+      if (!matchedEngineKey) {
+        return jsonResponse(
+          {
+            ok: false,
+            code: engineKey ? "INVALID_ENGINE_KEY" : "INVALID_TOKEN",
+            error: engineKey ? "\u65E0\u6548\u7684\u5F15\u64CE\u6388\u6743\u5BC6\u94A5" : "\u65E0\u6548\u7684\u8BA4\u8BC1\u4EE4\u724C\u683C\u5F0F\u6216\u672A\u6388\u6743\u5BC6\u94A5"
+          },
+          401
+        );
+      }
+      edgeAuthenticated = true;
     }
   }
   const upstreamPath = url.pathname === "/api/brain/health" ? "/health" : url.pathname;
@@ -406,6 +497,12 @@ async function forwardToKnowledgeBrain(request, env, url) {
     const val = request.headers.get(name);
     if (val) upstreamHeaders.set(name, val);
   }
+  if (!authenticatedByAdmin) {
+    upstreamHeaders.delete("X-Admin-Secret");
+  }
+  if (!verifiedUserJwt) {
+    upstreamHeaders.delete("X-User-JWT");
+  }
   if (verifiedUserJwt && !upstreamHeaders.has("X-User-JWT")) {
     upstreamHeaders.set("X-User-JWT", verifiedUserJwt);
   }
@@ -425,7 +522,7 @@ async function forwardToKnowledgeBrain(request, env, url) {
       body: bodyBuffer,
       redirect: "follow"
     });
-    const respHeaders = new Headers(CORS_HEADERS);
+    const respHeaders = new Headers(BASE_CORS_HEADERS);
     respHeaders.set("Content-Type", upstreamRes.headers.get("Content-Type") || "application/json; charset=utf-8");
     return new Response(upstreamRes.body, {
       status: upstreamRes.status,
@@ -438,12 +535,7 @@ async function forwardToKnowledgeBrain(request, env, url) {
     );
   }
 }
-var cloudflare_auth_worker_default = {
-  async fetch(request, env) {
-    if (request.method === "OPTIONS") {
-      return new Response(null, { status: 204, headers: CORS_HEADERS });
-    }
-    const url = new URL(request.url);
+async function handleWorkerRequest(request, env, url) {
     const path = url.pathname;
     if (request.method === "GET" && (path === "/" || path === "/health")) {
       const brainProxyConfigured = Boolean(
@@ -724,7 +816,7 @@ var cloudflare_auth_worker_default = {
       }
       if (request.method === "POST" && path === "/api/admin/cards/generate") {
         const adminSecret = request.headers.get("X-Admin-Secret") || "";
-        if (!env.ADMIN_SECRET || adminSecret !== env.ADMIN_SECRET) {
+        if (!env.ADMIN_SECRET || !constantTimeEqual(adminSecret, env.ADMIN_SECRET)) {
           return jsonResponse({ ok: false, error: "Unauthorized admin request" }, 401);
         }
         const body = await request.json().catch(() => ({}));
@@ -749,7 +841,7 @@ var cloudflare_auth_worker_default = {
       }
       if (request.method === "POST" && path === "/api/admin/unbind-device") {
         const adminSecret = request.headers.get("X-Admin-Secret") || "";
-        if (!env.ADMIN_SECRET || adminSecret !== env.ADMIN_SECRET) {
+        if (!env.ADMIN_SECRET || !constantTimeEqual(adminSecret, env.ADMIN_SECRET)) {
           return jsonResponse({ ok: false, error: "Unauthorized admin request" }, 401);
         }
         const body = await request.json().catch(() => ({}));
@@ -865,7 +957,7 @@ var cloudflare_auth_worker_default = {
       }
       if (path === "/api/admin/telegram-pool") {
         const adminSecret = request.headers.get("X-Admin-Secret") || "";
-        if (!env.ADMIN_SECRET || adminSecret !== env.ADMIN_SECRET) {
+        if (!env.ADMIN_SECRET || !constantTimeEqual(adminSecret, env.ADMIN_SECRET)) {
           return jsonResponse({ ok: false, error: "Unauthorized admin request" }, 401);
         }
         if (request.method === "GET") {
@@ -933,6 +1025,20 @@ var cloudflare_auth_worker_default = {
     } catch (err) {
       return jsonResponse({ ok: false, error: err?.message || "Worker Internal Error" }, 500);
     }
+}
+var cloudflare_auth_worker_default = {
+  async fetch(request, env) {
+    const url = new URL(request.url);
+    const path = url.pathname;
+    if (request.method === "OPTIONS") {
+      const corsHeaders = resolveCorsHeaders(request, env, path);
+      if (request.headers.get("Origin") && !corsHeaders["Access-Control-Allow-Origin"]) {
+        return new Response(null, { status: 403, headers: { Vary: "Origin" } });
+      }
+      return new Response(null, { status: 204, headers: corsHeaders });
+    }
+    const response = await handleWorkerRequest(request, env, url);
+    return applyCorsHeaders(response, request, env, path);
   }
 };
 export {

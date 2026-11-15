@@ -15,7 +15,12 @@ import {
   Edit3,
 } from 'lucide-react';
 import { CustomerProfile, CustomerMemoryItem, CustomLLMConfig } from '../types';
-import { analyzeCustomerMemory, saveCustomerProfile, saveLocalCustomerProfile } from '../services/apiService';
+import {
+  analyzeCustomerMemory,
+  saveCustomerProfile,
+  saveLocalCustomerProfile,
+  normalizeProfileChatId,
+} from '../services/apiService';
 
 interface CustomerMemoryDrawerProps {
   isOpen: boolean;
@@ -53,6 +58,7 @@ export const CustomerMemoryDrawer: React.FC<CustomerMemoryDrawerProps> = ({
   const [memSummary, setMemSummary] = useState('');
   const [memEmotion, setMemEmotion] = useState('日常交流');
   const [saveSuccessMsg, setSaveSuccessMsg] = useState(false);
+  const [infoNotice, setInfoNotice] = useState<string | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
   // Manual attributes editing
@@ -66,27 +72,77 @@ export const CustomerMemoryDrawer: React.FC<CustomerMemoryDrawerProps> = ({
   const activeScope = `${chatId || ''}::${currentAccountId || ''}`;
   const activeScopeRef = useRef(activeScope);
   activeScopeRef.current = activeScope;
+  const analyzeSeqRef = useRef(0);
+  const feedbackTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const errorTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const showTransientError = (msg: string, durationMs = 4500) => {
+    if (errorTimerRef.current) clearTimeout(errorTimerRef.current);
+    setErrorMessage(msg);
+    errorTimerRef.current = setTimeout(() => {
+      setErrorMessage(null);
+      errorTimerRef.current = null;
+    }, durationMs);
+  };
+
+  const showTransientSuccess = (noticeText: string | null, durationMs = 3000) => {
+    if (feedbackTimerRef.current) clearTimeout(feedbackTimerRef.current);
+    if (noticeText) {
+      setSaveSuccessMsg(false);
+      setInfoNotice(noticeText);
+      feedbackTimerRef.current = setTimeout(() => {
+        setInfoNotice(null);
+        feedbackTimerRef.current = null;
+      }, durationMs);
+    } else {
+      setInfoNotice(null);
+      setSaveSuccessMsg(true);
+      feedbackTimerRef.current = setTimeout(() => {
+        setSaveSuccessMsg(false);
+        feedbackTimerRef.current = null;
+      }, durationMs);
+    }
+  };
 
   useEffect(() => {
+    analyzeSeqRef.current += 1;
+    if (feedbackTimerRef.current) {
+      clearTimeout(feedbackTimerRef.current);
+      feedbackTimerRef.current = null;
+    }
+    if (errorTimerRef.current) {
+      clearTimeout(errorTimerRef.current);
+      errorTimerRef.current = null;
+    }
+    setIsAnalyzing(false);
     setIsEditingAttributes(false);
     setIsAddingMemory(false);
+    setMemDate(new Date().toISOString().split('T')[0]);
+    setMemTopic('');
+    setMemSummary('');
+    setMemEmotion('日常交流');
     setNewLikeInput('');
     setNewTabooInput('');
     setErrorMessage(null);
+    setInfoNotice(null);
     setSaveSuccessMsg(false);
+    return () => {
+      if (feedbackTimerRef.current) clearTimeout(feedbackTimerRef.current);
+      if (errorTimerRef.current) clearTimeout(errorTimerRef.current);
+    };
   }, [chatId, currentAccountId]);
 
   if (!isOpen) return null;
 
   const effectiveAccountId =
     currentAccountId ||
-    (profile && (!chatId || profile.chatId === chatId) ? profile.accountId : '') ||
+    (profile && (!chatId || normalizeProfileChatId(profile.chatId) === normalizeProfileChatId(chatId)) ? profile.accountId : '') ||
     '';
 
   const scopedProfile =
     profile &&
-    (!chatId || profile.chatId === chatId) &&
-    (!effectiveAccountId || !profile.accountId || profile.accountId === effectiveAccountId)
+    (!chatId || normalizeProfileChatId(profile.chatId) === normalizeProfileChatId(chatId)) &&
+    (!effectiveAccountId || profile.accountId === effectiveAccountId)
       ? { ...profile, accountId: profile.accountId || effectiveAccountId }
       : null;
 
@@ -116,32 +172,40 @@ export const CustomerMemoryDrawer: React.FC<CustomerMemoryDrawerProps> = ({
       accountId: targetAccId,
     };
     onUpdateProfile(scopedUpdated, options);
-    if (!embedded && !options?.skipRemoteSave && targetChatId && targetChatId !== 'current') {
-      void saveCustomerProfile(targetChatId, scopedUpdated, targetAccId);
+    if (!embedded && targetChatId && targetChatId !== 'current') {
+      saveLocalCustomerProfile(targetChatId, scopedUpdated, targetAccId);
+      if (!options?.skipRemoteSave) {
+        void saveCustomerProfile(targetChatId, scopedUpdated, targetAccId);
+      }
     }
   };
 
   // Run AI Deep Analysis over unified cloud + local conversation history
   const handleTriggerAnalysis = async () => {
     if ((!messages || messages.length === 0) && (!currentProfile.chatId || currentProfile.chatId === 'current')) {
-      setErrorMessage('当前联系人暂无真实对话记录。请在与客户进行真实沟通后，再执行全息画像与长效记忆提炼。');
-      setTimeout(() => setErrorMessage(null), 4000);
+      showTransientError('当前联系人暂无真实对话记录。请在与客户进行真实沟通后，再执行全息画像与长效记忆提炼。', 4000);
       return;
     }
 
     const requestChatId = currentProfile.chatId;
     const requestAccountId = effectiveAccountId;
     const requestScope = activeScope;
+    const requestSeq = ++analyzeSeqRef.current;
 
     setIsAnalyzing(true);
     setErrorMessage(null);
+    setInfoNotice(null);
     try {
+      let sparseNotice: string | null = null;
       const freshProfile = await analyzeCustomerMemory(
         requestChatId,
         customConfig,
         requestAccountId,
         messages,
-        chatTitle
+        chatTitle,
+        (msg) => {
+          sparseNotice = msg;
+        }
       );
       if (freshProfile) {
         const scopedFresh: CustomerProfile = {
@@ -154,16 +218,14 @@ export const CustomerMemoryDrawer: React.FC<CustomerMemoryDrawerProps> = ({
           return;
         }
         commitProfileUpdate(scopedFresh, { skipRemoteSave: true });
-        setSaveSuccessMsg(true);
-        setTimeout(() => setSaveSuccessMsg(false), 3000);
+        showTransientSuccess(sparseNotice, sparseNotice ? 4500 : 3000);
       }
     } catch (err: any) {
       if (activeScopeRef.current === requestScope) {
-        setErrorMessage(err?.message || 'AI 记忆提炼失败，请检查网络或模型配置');
-        setTimeout(() => setErrorMessage(null), 5000);
+        showTransientError(err?.message || 'AI 记忆提炼失败，请检查网络或模型配置', 5000);
       }
     } finally {
-      if (activeScopeRef.current === requestScope) {
+      if (activeScopeRef.current === requestScope && analyzeSeqRef.current === requestSeq) {
         setIsAnalyzing(false);
       }
     }
@@ -212,8 +274,7 @@ export const CustomerMemoryDrawer: React.FC<CustomerMemoryDrawerProps> = ({
   // Add memory
   const handleSaveNewMemory = () => {
     if (!memTopic.trim() || !memSummary.trim()) {
-      setErrorMessage('请填写记忆主题与摘要');
-      setTimeout(() => setErrorMessage(null), 3000);
+      showTransientError('请填写记忆主题与摘要', 3000);
       return;
     }
 
@@ -267,8 +328,7 @@ export const CustomerMemoryDrawer: React.FC<CustomerMemoryDrawerProps> = ({
     };
     commitProfileUpdate(updated);
     setIsEditingAttributes(false);
-    setSaveSuccessMsg(true);
-    setTimeout(() => setSaveSuccessMsg(false), 2500);
+    showTransientSuccess(null, 2500);
   };
 
   // Export customer chat data
@@ -340,6 +400,13 @@ export const CustomerMemoryDrawer: React.FC<CustomerMemoryDrawerProps> = ({
           <div className="px-5 py-2 bg-emerald-500/10 border-b border-emerald-500/25 text-emerald-700 dark:text-emerald-300 text-xs flex items-center gap-2">
             <CheckCircle2 className="w-4 h-4 text-emerald-600 dark:text-emerald-400 shrink-0" />
             <span>已成功从历史记录更新客户全息画像与记忆！</span>
+          </div>
+        )}
+
+        {infoNotice && !saveSuccessMsg && (
+          <div className="px-5 py-2 bg-amber-500/10 border-b border-amber-500/25 text-amber-700 dark:text-amber-300 text-xs flex items-center gap-2">
+            <ShieldAlert className="w-4 h-4 text-amber-600 dark:text-amber-400 shrink-0" />
+            <span>{infoNotice}</span>
           </div>
         )}
 
