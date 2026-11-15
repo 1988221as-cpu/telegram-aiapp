@@ -823,6 +823,40 @@ test('performStrictTranslation rejects engine=auto cascade and supports keyless 
     assert.equal(translated, '你好世界');
     assert.ok(capturedUrl.includes('translate.googleapis.com/translate_a/single'));
     assert.ok(capturedUrl.includes('tl=zh-CN'));
+
+    // Same source text with different target language must NOT hit wrong-language LRU cache
+    let fetchCallsForSameText = 0;
+    globalThis.fetch = (async (input: any) => {
+      fetchCallsForSameText += 1;
+      const u = String(input);
+      if (u.includes('tl=tr')) {
+        return new Response(JSON.stringify([[['Merhaba dünya', 'Hello world', null, null, 10]], null, 'en']), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      throw new Error(`Unexpected url: ${u}`);
+    }) as any;
+    const translatedTr = await performGoogleTranslate('Hello world', 'Auto', 'Turkish', '');
+    assert.equal(translatedTr, 'Merhaba dünya');
+    assert.equal(fetchCallsForSameText, 1);
+
+    // 429 on primary gtx endpoint should fall back to secondary Google endpoint
+    let fallbackAttempts = 0;
+    globalThis.fetch = (async (input: any) => {
+      fallbackAttempts += 1;
+      const u = String(input);
+      if (u.includes('client=gtx')) {
+        return new Response('Too Many Requests', { status: 429 });
+      }
+      return new Response(JSON.stringify([[['Fallback ok', 'Test fallback', null, null, 10]], null, 'en']), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }) as any;
+    const fallbackRes = await performGoogleTranslate('Test fallback 429', 'Auto', 'Chinese', '');
+    assert.equal(fallbackRes, 'Fallback ok');
+    assert.ok(fallbackAttempts >= 2);
   } finally {
     globalThis.fetch = prevFetch;
     if (prevGoogleKey !== undefined) process.env.GOOGLE_TRANSLATE_API_KEY = prevGoogleKey;
@@ -2134,12 +2168,12 @@ test('Priority Custom Key mode: mutually exclusive with Cloud RAG and routes cha
   const apiServiceSrc = readFileSync(resolve(process.cwd(), 'src/services/apiService.ts'), 'utf8');
   assert.match(apiServiceSrc, /isDualOff\s*=\s*Boolean\(/);
   assert.match(apiServiceSrc, /isPriorityCustom\s*=\s*Boolean\(/);
-  assert.match(apiServiceSrc, /if\s*\(isPriorityCustom && strictEngine !== 'custom_llm'\)\s*\{\s*throw new Error/);
+  assert.match(apiServiceSrc, /if\s*\(isPriorityCustom && strictEngine === 'gemini'\)\s*\{\s*throw new Error/);
   assert.match(apiServiceSrc, /if\s*\(isDualOff && strictEngine !== 'google'\)\s*\{\s*throw new Error/);
 
   const serverSrc = readFileSync(resolve(process.cwd(), 'server.ts'), 'utf8');
   assert.match(serverSrc, /app\.post\('\/api\/customer\/analyze\/:chatId'[\s\S]*?useCustomPriorityMemory[\s\S]*?engineMode:\s*'custom'[\s\S]*?analysisPrompt/);
-  assert.match(serverSrc, /app\.post\('\/api\/translate'[\s\S]*?isPriorityCustomGateway[\s\S]*?'custom_llm'/);
+  assert.match(serverSrc, /app\.post\('\/api\/translate'[\s\S]*?isPriorityCustomGateway[\s\S]*?'gemini'/);
   assert.match(
     serverSrc,
     /getCnTranslationIfForeign\(\s*replyText,\s*effectiveChatConfig,\s*userJwt,\s*chatTranslationTargetLang(?:\s*,\s*accountId)?\s*\)/
@@ -4102,7 +4136,7 @@ test('3-state LLM & Translation mutual exclusion, Dual-Off LLM refusal, 130+ lan
     });
     assert.equal(state1CustomRes.status, 400);
 
-    // 4c. State 2 (Custom Priority): /api/translate rejects google and gemini with 400
+    // 4c. State 2 (Custom Priority): /api/translate rejects gemini with 400 while allowing universal google
     await syncServerCustomLlmConfig({
       enabled: true,
       explicitlyDisabled: false,
@@ -4112,14 +4146,19 @@ test('3-state LLM & Translation mutual exclusion, Dual-Off LLM refusal, 130+ lan
       apiKey: 'sk-test-custom-only',
       modelName: 'gpt-4o-mini',
     });
-    for (const forbiddenEngine of ['google', 'gemini']) {
-      const state2Res = await fetch(`http://127.0.0.1:${port}/api/translate`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-        body: JSON.stringify({ text: 'Hello', targetLang: 'Chinese', engine: forbiddenEngine }),
-      });
-      assert.equal(state2Res.status, 400, `State 2 must reject ${forbiddenEngine}`);
-    }
+    const state2GeminiRes = await fetch(`http://127.0.0.1:${port}/api/translate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      body: JSON.stringify({ text: 'Hello', targetLang: 'Chinese', engine: 'gemini' }),
+    });
+    assert.equal(state2GeminiRes.status, 400, 'State 2 must reject gemini');
+
+    const state2GoogleRes = await fetch(`http://127.0.0.1:${port}/api/translate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      body: JSON.stringify({ text: 'Hello', sourceLang: 'English', targetLang: 'English', engine: 'google' }),
+    });
+    assert.equal(state2GoogleRes.status, 200, 'State 2 must allow universal google');
 
     // 4d. State 3 (Dual-Off): /api/translate rejects gemini & custom_llm with 400
     await syncServerCustomLlmConfig({
@@ -4552,13 +4591,13 @@ test('Historical message backfill strictly uses Google Translate across all 3 st
       assert.match(String(body.error), /谷歌机翻/);
     }
 
-    // Realtime google under Custom Priority must still return 400
+    // Realtime google under Custom Priority must succeed (universal Google Machine Translation)
     const realtimeGoogleRes = await fetch(`http://127.0.0.1:${port}/api/translate`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-      body: JSON.stringify({ text: 'Hello world', targetLang: 'Chinese', engine: 'google' }),
+      body: JSON.stringify({ text: 'Hello', sourceLang: 'English', targetLang: 'English', engine: 'google' }),
     });
-    assert.equal(realtimeGoogleRes.status, 400);
+    assert.equal(realtimeGoogleRes.status, 200);
 
     // History google under Custom Priority must pass the 3-state guard
     const histGoogleRes = await fetch(`http://127.0.0.1:${port}/api/translate`, {
@@ -10036,4 +10075,465 @@ test('Stage 4: Unified Windows desktop TelegramClient fingerprint, combined DB+m
     else process.env.TELEGRAM_API_HASH = prevApiHash;
   }
 });
+
+test('Translation thinking-tag stripping (<thought>/<think>) and same-language Auto short-circuit', async () => {
+  const http = await import('node:http');
+  const {
+    stripModelThinkingText,
+    isSameTranslationLanguage,
+    performStrictTranslation,
+    callCustomLlm,
+  } = await import('../server.ts');
+
+  // 1. Unit tests for stripModelThinkingText
+  assert.equal(
+    stripModelThinkingText(
+      '<thought>* Input: "你来自哪里" (Chinese)\n* Output: Where are you from?</thought>Where are you from?'
+    ),
+    'Where are you from?'
+  );
+  assert.equal(
+    stripModelThinkingText('<think>reasoning step 1\nstep 2</think>\n\n你好吗？'),
+    '你好吗？'
+  );
+  // Truncated unclosed <thought> returns empty rather than leaking reasoning to customer
+  assert.equal(stripModelThinkingText('<thought>* Input: "长文本" * Thinking...'), '');
+  // Stray closing tag without opening tag strips prefix reasoning
+  assert.equal(stripModelThinkingText('* "How are you?"\n* No filler.</thought>How are you?'), 'How are you?');
+  // Normal text untouched
+  assert.equal(stripModelThinkingText('Hello world! <b>bold</b>'), 'Hello world! <b>bold</b>');
+
+  // 2. Unit tests for isSameTranslationLanguage (zh == zh-CN, but zh-CN != zh-TW)
+  assert.equal(isSameTranslationLanguage('zh-CN', 'zh'), true);
+  assert.equal(isSameTranslationLanguage('zh', 'zh-CN'), true);
+  assert.equal(isSameTranslationLanguage('zh-CN', 'zh-TW'), false);
+  assert.equal(isSameTranslationLanguage('en', 'zh-CN'), false);
+
+  // 3. Mock gateway verifying:
+  // (a) Auto same-language ("你好" -> zh-CN) skips LLM call completely
+  // (b) Custom Gemini parts with { thought: true } are filtered out and <thought> tags stripped
+  let gatewayCalls = 0;
+  const mockSrv = http.createServer((_req, res) => {
+    gatewayCalls++;
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(
+      JSON.stringify({
+        candidates: [
+          {
+            content: {
+              parts: [
+                { thought: true, text: 'Internal Gemini thought part' },
+                { text: '<thought>Inline thought block</thought>Where are you from?' },
+              ],
+            },
+          },
+        ],
+      })
+    );
+  });
+  await new Promise<void>((r) => mockSrv.listen(0, '127.0.0.1', () => r()));
+  const mockPort = (mockSrv.address() as any).port;
+
+  try {
+    const mockCfg = {
+      enabled: true,
+      engineMode: 'custom',
+      protocol: 'gemini',
+      baseUrl: `http://127.0.0.1:${mockPort}`,
+      apiKey: 'AIzaTestKey',
+      modelName: 'gemini-2.5-flash',
+    };
+
+    const sameLangRes = await performStrictTranslation({
+      text: '你好',
+      sourceLang: 'Auto',
+      targetLang: 'zh-CN',
+      engine: 'custom_llm',
+      customConfig: mockCfg,
+    });
+    assert.equal(sameLangRes.translatedText, '你好');
+    assert.equal(gatewayCalls, 0, 'Same-language zh-CN message must short-circuit without calling LLM');
+
+    // Even if chat sourceLang was explicitly set to English, Chinese text targeting zh-CN still skips
+    const explicitMismatchSameLang = await performStrictTranslation({
+      text: '你好',
+      sourceLang: 'English',
+      targetLang: 'zh-CN',
+      engine: 'custom_llm',
+      customConfig: mockCfg,
+    });
+    assert.equal(explicitMismatchSameLang.translatedText, '你好');
+    assert.equal(gatewayCalls, 0);
+
+    // Cross-language translation filters thought part & strips <thought> tags
+    const crossRes = await performStrictTranslation({
+      text: '你来自哪里',
+      sourceLang: 'Auto',
+      targetLang: 'English',
+      engine: 'custom_llm',
+      customConfig: mockCfg,
+    });
+    assert.equal(crossRes.translatedText, 'Where are you from?');
+    assert.equal(gatewayCalls, 1);
+
+    // callCustomLlm directly also strips Gemini thought parts & inline <thought>
+    const directOut = await callCustomLlm({
+      customConfig: mockCfg,
+      messages: [{ role: 'user', content: 'hi' }],
+      skipSync: true,
+    });
+    assert.equal(directOut, 'Where are you from?');
+  } finally {
+    await new Promise<void>((r) => mockSrv.close(() => r()));
+  }
+});
+
+test('normalizeCustomModelId resolves Gemma/Gemini display aliases, preserves third-party IDs, and rejects unresolved whitespace with 400', async () => {
+  const http = await import('node:http');
+  const {
+    normalizeCustomModelId,
+    buildCustomGeminiUrl,
+    performStrictTranslation,
+  } = await import('../server.ts');
+  const { normalizeCustomModelIdInput } = await import('../src/services/apiService.ts');
+
+  // 1. Official display alias mapping (backend + frontend parity)
+  assert.equal(normalizeCustomModelId('Gemma 4 26B', 'gemini'), 'gemma-4-26b-a4b-it');
+  assert.equal(normalizeCustomModelId('gemma-4-26b', 'gemini'), 'gemma-4-26b-a4b-it');
+  assert.equal(normalizeCustomModelId('Gemma 4 31B', 'gemini'), 'gemma-4-31b-it');
+  assert.equal(normalizeCustomModelId('models/gemma-4-26b-a4b-it', 'gemini'), 'gemma-4-26b-a4b-it');
+  assert.equal(normalizeCustomModelId('Gemini 2.5 Flash', 'gemini'), 'gemini-2.5-flash');
+  assert.equal(normalizeCustomModelIdInput('Gemma 4 26B', 'gemini'), 'gemma-4-26b-a4b-it');
+  assert.equal(normalizeCustomModelIdInput('models/gemini-2.5-flash', 'gemini'), 'gemini-2.5-flash');
+
+  // 2. Third-party IDs remain untouched
+  assert.equal(normalizeCustomModelId('deepseek-ai/DeepSeek-V3', 'openai'), 'deepseek-ai/DeepSeek-V3');
+  assert.equal(normalizeCustomModelId('qwen2.5:7b', 'openai'), 'qwen2.5:7b');
+  assert.equal(normalizeCustomModelId('ft:gpt-4o-mini:org:custom:123', 'openai'), 'ft:gpt-4o-mini:org:custom:123');
+
+  // 3. buildCustomGeminiUrl normalizes alias and rejects arbitrary whitespace with 400
+  assert.equal(
+    buildCustomGeminiUrl('https://generativelanguage.googleapis.com', 'Gemma 4 26B'),
+    'https://generativelanguage.googleapis.com/v1beta/models/gemma-4-26b-a4b-it:generateContent'
+  );
+  assert.throws(
+    () => buildCustomGeminiUrl('https://generativelanguage.googleapis.com', 'Unknown Broken Model'),
+    (err: any) => err?.statusCode === 400 && /空格/.test(String(err?.message || ''))
+  );
+
+  // 4. End-to-end performStrictTranslation with 'Gemma 4 26B' hits /v1beta/models/gemma-4-26b-a4b-it:generateContent
+  let requestedPath = '';
+  const mockSrv = http.createServer((req, res) => {
+    requestedPath = req.url || '';
+    res.setHeader('Content-Type', 'application/json');
+    res.end(
+      JSON.stringify({
+        candidates: [{ content: { parts: [{ text: 'Hello' }] } }],
+      })
+    );
+  });
+  await new Promise<void>((r) => mockSrv.listen(0, '127.0.0.1', () => r()));
+  const mockPort = (mockSrv.address() as any).port;
+
+  try {
+    const res = await performStrictTranslation({
+      text: '你好',
+      sourceLang: 'Auto',
+      targetLang: 'English',
+      engine: 'custom_llm',
+      customModelName: 'Gemma 4 26B',
+      customConfig: {
+        enabled: true,
+        engineMode: 'custom',
+        protocol: 'gemini',
+        baseUrl: `http://127.0.0.1:${mockPort}`,
+        apiKey: 'AIzaTestKey',
+        modelName: 'Gemma 4 26B',
+      },
+    });
+    assert.equal(requestedPath, '/v1beta/models/gemma-4-26b-a4b-it:generateContent');
+    assert.equal(res.translatedText, 'Hello');
+    assert.equal(res.engine, 'custom_llm:gemma-4-26b-a4b-it');
+
+    await assert.rejects(
+      () =>
+        performStrictTranslation({
+          text: '你好',
+          sourceLang: 'Auto',
+          targetLang: 'English',
+          engine: 'custom_llm',
+          customModelName: 'My Invalid Model Name',
+          customConfig: {
+            enabled: true,
+            engineMode: 'custom',
+            protocol: 'gemini',
+            baseUrl: `http://127.0.0.1:${mockPort}`,
+            apiKey: 'AIzaTestKey',
+            modelName: 'My Invalid Model Name',
+          },
+        }),
+      (err: any) => err?.statusCode === 400 && /空格/.test(String(err?.message || ''))
+    );
+  } finally {
+    await new Promise<void>((r) => mockSrv.close(() => r()));
+  }
+});
+
+test('Personal voiceprint sample upload/fetch/delete and zero-shot voice cloning adapters in /api/audio/tts-clone', async () => {
+  const http = await import('node:http');
+  const { createHmac } = await import('node:crypto');
+  const { app, aiGenerationLimiter } = await import('../server.ts');
+
+  try {
+    aiGenerationLimiter.resetKey('127.0.0.1');
+    aiGenerationLimiter.resetKey('::ffff:127.0.0.1');
+    aiGenerationLimiter.resetKey('::1');
+  } catch {}
+
+  const prevJwtSecret = process.env.JWT_SECRET;
+  process.env.JWT_SECRET = 'vp_clone_test_secret';
+
+  const srv = http.createServer(app);
+  await new Promise<void>((r) => srv.listen(0, '127.0.0.1', () => r()));
+  const port = (srv.address() as any).port;
+
+  const headerB64 = Buffer.from(JSON.stringify({ alg: 'HS256', typ: 'JWT' })).toString('base64url');
+  const payloadB64 = Buffer.from(
+    JSON.stringify({ sub: 'vp_tester', username: 'vp_tester', role: 'admin', exp: Math.floor(Date.now() / 1000) + 3600 })
+  ).toString('base64url');
+  const sigB64 = createHmac('sha256', process.env.JWT_SECRET).update(`${headerB64}.${payloadB64}`).digest('base64url');
+  const token = `${headerB64}.${payloadB64}.${sigB64}`;
+
+  // Minimal valid WAV header + PCM silence (44 + 32 bytes)
+  const wavBuf = Buffer.alloc(76);
+  wavBuf.write('RIFF', 0);
+  wavBuf.writeUInt32LE(68, 4);
+  wavBuf.write('WAVE', 8);
+  wavBuf.write('fmt ', 12);
+  wavBuf.writeUInt32LE(16, 16);
+  wavBuf.writeUInt16LE(1, 20);
+  wavBuf.writeUInt16LE(1, 22);
+  wavBuf.writeUInt32LE(16000, 24);
+  wavBuf.writeUInt32LE(32000, 28);
+  wavBuf.writeUInt16LE(2, 32);
+  wavBuf.writeUInt16LE(16, 34);
+  wavBuf.write('data', 36);
+  wavBuf.writeUInt32LE(32, 40);
+  const wavDataUrl = `data:audio/wav;base64,${wavBuf.toString('base64')}`;
+
+  // Mock upstream voice cloning provider (handles ElevenLabs & Fish Audio routes)
+  let elevenAddCalls = 0;
+  let elevenTtsCalls = 0;
+  let fishTtsPayload: any = null;
+  const mockAudioBytes = Buffer.from('ID3mock-mp3-audio-payload');
+
+  const cloneMockSrv = http.createServer((req, res) => {
+    const chunks: Buffer[] = [];
+    req.on('data', (c) => chunks.push(c));
+    req.on('end', () => {
+      const rawBody = Buffer.concat(chunks);
+      if (req.url === '/v1/voices/add' && req.method === 'POST') {
+        elevenAddCalls += 1;
+        res.setHeader('Content-Type', 'application/json');
+        res.end(JSON.stringify({ voice_id: 'el_voice_999' }));
+        return;
+      }
+      if (req.url === '/v1/text-to-speech/el_voice_999' && req.method === 'POST') {
+        elevenTtsCalls += 1;
+        res.setHeader('Content-Type', 'audio/mpeg');
+        res.end(mockAudioBytes);
+        return;
+      }
+      if (req.url === '/v1/tts' && req.method === 'POST') {
+        fishTtsPayload = JSON.parse(rawBody.toString('utf8'));
+        res.setHeader('Content-Type', 'audio/mpeg');
+        res.end(mockAudioBytes);
+        return;
+      }
+      res.statusCode = 404;
+      res.end('Not Found');
+    });
+  });
+  await new Promise<void>((r) => cloneMockSrv.listen(0, '127.0.0.1', () => r()));
+  const clonePort = (cloneMockSrv.address() as any).port;
+
+  let uploadedSampleId = '';
+
+  try {
+    // 1. Auth required on upload
+    const unauthUp = await fetch(`http://127.0.0.1:${port}/api/audio/voiceprint-sample`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ audioDataUrl: wavDataUrl, fileName: 'my.wav' }),
+    });
+    assert.equal(unauthUp.status, 401);
+
+    // 2. Reject invalid audio payload
+    const badUp = await fetch(`http://127.0.0.1:${port}/api/audio/voiceprint-sample`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      body: JSON.stringify({ audioDataUrl: 'data:text/plain;base64,SGVsbG8=', fileName: 'bad.txt' }),
+    });
+    assert.equal(badUp.status, 400);
+
+    // 3. Upload valid WAV sample -> persisted to disk and retrievable
+    const okUp = await fetch(`http://127.0.0.1:${port}/api/audio/voiceprint-sample`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      body: JSON.stringify({ audioDataUrl: wavDataUrl, fileName: 'my_voice.wav' }),
+    });
+    assert.equal(okUp.status, 200);
+    const upJson: any = await okUp.json();
+    assert.equal(upJson.ok, true);
+    assert.ok(typeof upJson.sampleId === 'string' && upJson.sampleId.startsWith('vp_'));
+    uploadedSampleId = upJson.sampleId;
+
+    const getSampleRes = await fetch(`http://127.0.0.1:${port}/api/audio/voiceprint-sample/${uploadedSampleId}`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    assert.equal(getSampleRes.status, 200);
+    assert.match(getSampleRes.headers.get('content-type') || '', /audio\/wav/);
+    const fetchedBuf = Buffer.from(await getSampleRes.arrayBuffer());
+    assert.equal(Buffer.compare(fetchedBuf, wavBuf), 0);
+
+    // 4. Path traversal safety
+    const traversalGet = await fetch(`http://127.0.0.1:${port}/api/audio/voiceprint-sample/..%2F..%2Fserver.ts`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    assert.equal(traversalGet.status, 404);
+
+    // 5. Dual-Off guard still blocks tts-clone even with voiceClone
+    const dualOffRes = await fetch(`http://127.0.0.1:${port}/api/audio/tts-clone`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      body: JSON.stringify({
+        text: '你好',
+        customConfig: { enabled: false, explicitlyDisabled: true, engineMode: 'cloud' },
+        voiceClone: {
+          cloneMode: 'voice_clone',
+          sampleId: uploadedSampleId,
+          cloneProvider: 'elevenlabs',
+          cloneGatewayUrl: `http://127.0.0.1:${clonePort}`,
+          cloneApiKey: 'el-key',
+        },
+      }),
+    });
+    assert.equal(dualOffRes.status, 400);
+
+    // 6. Honestly reject standard Google/OpenAI gateways when voice_clone is active
+    const activeCloudCustomConfig = { enabled: true, explicitlyDisabled: false, engineMode: 'cloud' };
+    const geminiCloneRes = await fetch(`http://127.0.0.1:${port}/api/audio/tts-clone`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      body: JSON.stringify({
+        text: '你好',
+        customConfig: activeCloudCustomConfig,
+        voiceClone: {
+          cloneMode: 'voice_clone',
+          sampleId: uploadedSampleId,
+          cloneProvider: 'elevenlabs',
+          cloneGatewayUrl: 'https://generativelanguage.googleapis.com',
+          cloneApiKey: 'AIzaFake',
+        },
+      }),
+    });
+    assert.equal(geminiCloneRes.status, 400);
+    const geminiCloneJson: any = await geminiCloneRes.json();
+    assert.match(String(geminiCloneJson.message), /不支持/);
+
+    // 7. ElevenLabs clone flow: 1st call uploads sample & returns clonedVoiceId, 2nd call reuses cached cloneVoiceId
+    const elFirstRes = await fetch(`http://127.0.0.1:${port}/api/audio/tts-clone`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      body: JSON.stringify({
+        text: 'Hello from my cloned voice',
+        model: 'eleven_multilingual_v2',
+        customConfig: activeCloudCustomConfig,
+        voiceClone: {
+          cloneMode: 'voice_clone',
+          sampleId: uploadedSampleId,
+          sampleName: '我的声音',
+          cloneProvider: 'elevenlabs',
+          cloneGatewayUrl: `http://127.0.0.1:${clonePort}`,
+          cloneApiKey: 'el-secret-key',
+        },
+      }),
+    });
+    assert.equal(elFirstRes.status, 200);
+    const elFirstJson: any = await elFirstRes.json();
+    assert.equal(elFirstJson.clonedVoiceId, 'el_voice_999');
+    assert.ok(String(elFirstJson.audioUrl).startsWith('data:audio/'));
+    assert.equal(elevenAddCalls, 1);
+    assert.equal(elevenTtsCalls, 1);
+
+    const elSecondRes = await fetch(`http://127.0.0.1:${port}/api/audio/tts-clone`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      body: JSON.stringify({
+        text: 'Second message reuses cached voice ID',
+        model: 'eleven_multilingual_v2',
+        customConfig: activeCloudCustomConfig,
+        voiceClone: {
+          cloneMode: 'voice_clone',
+          sampleId: uploadedSampleId,
+          cloneVoiceId: 'el_voice_999',
+          sampleName: '我的声音',
+          cloneProvider: 'elevenlabs',
+          cloneGatewayUrl: `http://127.0.0.1:${clonePort}`,
+          cloneApiKey: 'el-secret-key',
+        },
+      }),
+    });
+    assert.equal(elSecondRes.status, 200);
+    assert.equal(elevenAddCalls, 1, 'Cached cloneVoiceId must skip re-uploading sample');
+    assert.equal(elevenTtsCalls, 2);
+
+    // 8. Fish Audio clone flow attaches disk reference audio + transcript
+    const fishRes = await fetch(`http://127.0.0.1:${port}/api/audio/tts-clone`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      body: JSON.stringify({
+        text: '你好，这是克隆后的中文语音',
+        customConfig: activeCloudCustomConfig,
+        voiceClone: {
+          cloneMode: 'voice_clone',
+          sampleId: uploadedSampleId,
+          sampleName: '我的声音',
+          sampleTranscript: '参考音频原话',
+          cloneProvider: 'fish_audio',
+          cloneGatewayUrl: `http://127.0.0.1:${clonePort}`,
+          cloneApiKey: 'fish-secret-key',
+        },
+      }),
+    });
+    assert.equal(fishRes.status, 200);
+    const fishJson: any = await fishRes.json();
+    assert.equal(fishJson.modelUsed, 'fish_audio:voice_clone');
+    assert.equal(fishTtsPayload?.text, '你好，这是克隆后的中文语音');
+    assert.equal(fishTtsPayload?.references?.[0]?.text, '参考音频原话');
+    assert.equal(fishTtsPayload?.references?.[0]?.audio, wavBuf.toString('base64'));
+
+    // 9. Delete sample cleans up disk storage
+    const delRes = await fetch(`http://127.0.0.1:${port}/api/audio/voiceprint-sample/${uploadedSampleId}`, {
+      method: 'DELETE',
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    assert.equal(delRes.status, 200);
+
+    const afterDelGet = await fetch(`http://127.0.0.1:${port}/api/audio/voiceprint-sample/${uploadedSampleId}`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    assert.equal(afterDelGet.status, 404);
+  } finally {
+    srv.closeAllConnections?.();
+    cloneMockSrv.closeAllConnections?.();
+    await new Promise<void>((r) => srv.close(() => r()));
+    await new Promise<void>((r) => cloneMockSrv.close(() => r()));
+    if (prevJwtSecret === undefined) delete process.env.JWT_SECRET;
+    else process.env.JWT_SECRET = prevJwtSecret;
+  }
+});
+
+
+
 

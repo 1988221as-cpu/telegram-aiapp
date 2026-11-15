@@ -245,7 +245,7 @@ export const ChatList: React.FC<ChatListProps> = ({
     } catch {}
   }, [width]);
 
-  // Close context menu on outside click or ESC
+  // Close context menu on outside click, ESC, scroll or resize
   useEffect(() => {
     const handleCloseMenu = () => setContextMenu(null);
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -258,30 +258,50 @@ export const ChatList: React.FC<ChatListProps> = ({
     if (contextMenu) {
       window.addEventListener('click', handleCloseMenu);
       window.addEventListener('keydown', handleKeyDown);
+      window.addEventListener('resize', handleCloseMenu);
+      window.addEventListener('scroll', handleCloseMenu, true);
       return () => {
         window.removeEventListener('click', handleCloseMenu);
         window.removeEventListener('keydown', handleKeyDown);
+        window.removeEventListener('resize', handleCloseMenu);
+        window.removeEventListener('scroll', handleCloseMenu, true);
       };
     }
   }, [contextMenu]);
 
   // Context Menu Trigger
-  const handleOpenContextMenu = (chat: Chat, e: React.MouseEvent) => {
+  const handleOpenContextMenu = (chat: Chat, e: React.MouseEvent, anchorToButton = false) => {
     e.preventDefault();
     e.stopPropagation();
 
     // Bound menu coordinates within window
-    const menuWidth = 210;
-    const menuHeight = 270;
+    const menuWidth = 208;
+    const menuHeight = 296;
+    const margin = 12;
     let x = e.clientX;
     let y = e.clientY;
 
-    if (x + menuWidth > window.innerWidth) {
-      x = window.innerWidth - menuWidth - 12;
+    if (anchorToButton && e.currentTarget instanceof HTMLElement) {
+      const rect = e.currentTarget.getBoundingClientRect();
+      x = rect.right - menuWidth;
+      if (x < margin) {
+        x = rect.left;
+      }
+      y = rect.bottom + 4;
+      if (y + menuHeight > window.innerHeight - margin) {
+        y = rect.top - menuHeight - 4;
+      }
+    } else {
+      if (x + menuWidth > window.innerWidth - margin) {
+        x = e.clientX - menuWidth;
+      }
+      if (y + menuHeight > window.innerHeight - margin) {
+        y = e.clientY - menuHeight;
+      }
     }
-    if (y + menuHeight > window.innerHeight) {
-      y = window.innerHeight - menuHeight - 12;
-    }
+
+    x = Math.max(margin, Math.min(x, window.innerWidth - menuWidth - margin));
+    y = Math.max(margin, Math.min(y, window.innerHeight - menuHeight - margin));
 
     setContextMenu({ chat, x, y });
   };
@@ -709,7 +729,7 @@ export const ChatList: React.FC<ChatListProps> = ({
                       {/* Hover Actions Menu Trigger Button */}
                       <button
                         type="button"
-                        onClick={(e) => handleOpenContextMenu(chat, e)}
+                        onClick={(e) => handleOpenContextMenu(chat, e, true)}
                         title="更多操作 (或右键点击)"
                         className={`p-0.5 rounded-full opacity-0 group-hover:opacity-100 transition-opacity cursor-pointer ${
                           isSelected
@@ -748,7 +768,7 @@ export const ChatList: React.FC<ChatListProps> = ({
       {contextMenu && typeof document !== 'undefined' && createPortal(
         <div
           style={{ top: `${contextMenu.y}px`, left: `${contextMenu.x}px` }}
-          className="fixed z-[9995] w-52 bg-white dark:bg-[#0e1726] aurora:bg-[#101c23] rounded-2xl shadow-2xl border border-[#e2e8f0] dark:border-[#1e3148] aurora:border-[#203742] py-1.5 animate-in fade-in zoom-in-95 duration-100 text-xs text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] select-none"
+          className="fixed z-[9995] w-52 max-h-[calc(100vh-24px)] overflow-y-auto bg-white dark:bg-[#0e1726] aurora:bg-[#101c23] rounded-2xl shadow-2xl border border-[#e2e8f0] dark:border-[#1e3148] aurora:border-[#203742] py-1.5 animate-in fade-in zoom-in-95 duration-100 text-xs text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] select-none"
           onClick={(e) => e.stopPropagation()}
         >
           {/* Open in New Tab */}
@@ -871,8 +891,8 @@ export const ChatList: React.FC<ChatListProps> = ({
       )}
 
       {/* 6. Quick Preview Modal */}
-      {previewChat && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/55 dark:bg-black/75 aurora:bg-black/80 backdrop-blur-xs select-none">
+      {previewChat && typeof document !== 'undefined' && createPortal(
+        <div className="fixed inset-0 z-[9996] flex items-center justify-center p-4 bg-black/55 dark:bg-black/75 aurora:bg-black/80 backdrop-blur-xs select-none">
           <div className="bg-white dark:bg-[#0b131f] aurora:bg-[#0c151b] border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] rounded-2xl w-full max-w-sm overflow-hidden shadow-2xl p-5 animate-in fade-in zoom-in-95 duration-150">
             <div className="flex items-start justify-between mb-4">
               <div className="flex items-center gap-3">
@@ -939,12 +959,13 @@ export const ChatList: React.FC<ChatListProps> = ({
               </button>
             </div>
           </div>
-        </div>
+        </div>,
+        document.body
       )}
 
       {/* 7. Delete Chat Confirmation Modal */}
-      {chatToDelete && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/55 dark:bg-black/75 aurora:bg-black/80 backdrop-blur-xs select-none">
+      {chatToDelete && typeof document !== 'undefined' && createPortal(
+        <div className="fixed inset-0 z-[9996] flex items-center justify-center p-4 bg-black/55 dark:bg-black/75 aurora:bg-black/80 backdrop-blur-xs select-none">
           <div className="bg-white dark:bg-[#0b131f] aurora:bg-[#0c151b] border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] rounded-2xl w-full max-w-sm overflow-hidden shadow-2xl p-5 animate-in fade-in zoom-in-95 duration-150">
             <h4 className="font-bold text-base text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] mb-2">
               {chatToDelete.isGroup || chatToDelete.isChannel
@@ -994,7 +1015,8 @@ export const ChatList: React.FC<ChatListProps> = ({
               </button>
             </div>
           </div>
-        </div>
+        </div>,
+        document.body
       )}
     </div>
   );

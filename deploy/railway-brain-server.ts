@@ -34,6 +34,17 @@ app.use(express.json({ limit: '4mb' }));
 
 const PORT = Number(process.env.PORT || 3000);
 
+function stripCloudThinkingTags(raw: string): string {
+  if (!raw || typeof raw !== 'string') return '';
+  let cleaned = raw
+    .replace(/<(?:thought|think)\b[^>]*>[\s\S]*?<\/(?:thought|think)\s*>/gi, '')
+    .replace(/<(?:thought|think)\b[^>]*>[\s\S]*$/gi, '');
+  if (/<\/(?:thought|think)\s*>/i.test(cleaned)) {
+    cleaned = cleaned.replace(/^[\s\S]*?<\/(?:thought|think)\s*>/i, '');
+  }
+  return cleaned.trim();
+}
+
 const DEFAULT_PUBLIC_KEY = `-----BEGIN PUBLIC KEY-----
 MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA0s5gFU5TfCr7mbuuC/96
 EJJnEbuAC5Vw4+vqrXZrvvmiUZAAlULHV5kP6OFEJI3wXOGKAV5cqGezcYFT/P3m
@@ -476,7 +487,14 @@ app.post('/v1/chat/completions', requireCloudAuth, async (req: Request, res: Res
         config: Object.keys(geminiConfig).length > 0 ? geminiConfig : undefined,
       });
 
-      const replyText = geminiRes.text?.trim() || '';
+      const candidateParts = (geminiRes as any)?.candidates?.[0]?.content?.parts;
+      const nonThoughtText = Array.isArray(candidateParts)
+        ? candidateParts
+            .filter((p: any) => !p?.thought && typeof p?.text === 'string')
+            .map((p: any) => p.text)
+            .join('')
+        : '';
+      const replyText = stripCloudThinkingTags(nonThoughtText || geminiRes.text || '');
       if (!replyText) {
         return res.status(502).json({ ok: false, error: `Gemini(${geminiModel}) returned empty content` });
       }
@@ -525,6 +543,13 @@ app.post('/v1/chat/completions', requireCloudAuth, async (req: Request, res: Res
     });
 
     const data = await upstreamRes.json().catch(() => ({}));
+    if (Array.isArray(data?.choices)) {
+      for (const ch of data.choices) {
+        if (typeof ch?.message?.content === 'string') {
+          ch.message.content = stripCloudThinkingTags(ch.message.content);
+        }
+      }
+    }
     return res.status(upstreamRes.status).json(data);
   } catch (err: any) {
     return res.status(502).json({ ok: false, error: err?.message || 'Upstream LLM gateway error' });

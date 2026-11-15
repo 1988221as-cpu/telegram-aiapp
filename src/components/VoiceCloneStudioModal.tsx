@@ -12,8 +12,8 @@ import {
   Settings,
 } from 'lucide-react';
 import { CustomLLMConfig, MasterVoiceprint } from '../types';
-import { generateTTSVoice } from '../services/apiService';
-import { getMasterVoiceprint } from '../services/voiceprintStorage';
+import { generateTTSVoice, VoiceCloneRequestOptions } from '../services/apiService';
+import { getMasterVoiceprint, saveMasterVoiceprint } from '../services/voiceprintStorage';
 import { MasterVoiceprintModal } from './MasterVoiceprintModal';
 
 export interface VoiceProfile {
@@ -194,16 +194,27 @@ export const VoiceCloneStudioModal: React.FC<VoiceCloneStudioModalProps> = ({
 
       const mv = getMasterVoiceprint();
       setMasterVoiceprint(mv);
+      const mvIsVoiceClone = Boolean(
+        mv?.cloneMode === 'voice_clone' && (mv.sampleId || mv.sampleAudioUrl || mv.cloneVoiceId)
+      );
       const savedTts = mv?.ttsModel?.trim() || '';
-      if (isCustomOpenAiGateway) {
+      if (mvIsVoiceClone) {
+        const cloneFallback =
+          mv?.cloneProvider === 'elevenlabs'
+            ? 'eleven_multilingual_v2'
+            : mv?.cloneProvider === 'siliconflow_cosyvoice'
+            ? 'FunAudioLLM/CosyVoice2-0.5B'
+            : 'tts-1';
+        setTtsEngine(savedTts && !/^gemini-/i.test(savedTts) ? savedTts : cloneFallback);
+      } else if (isCustomOpenAiGateway) {
         setTtsEngine(savedTts && !/^gemini-/i.test(savedTts) ? savedTts : 'tts-1');
       } else {
         setTtsEngine(savedTts || 'gemini-3.8-flash-tts');
       }
-      if (mv?.baseVoice) {
+      if ((mvIsVoiceClone && mv?.enabledAsDefault !== false) || mv?.baseVoice) {
         setSelectedVoice('master_voice');
-        setSpeedRate(typeof mv.rate === 'number' && Number.isFinite(mv.rate) ? mv.rate : 1.0);
-        setPitchRate(typeof mv.pitch === 'number' && Number.isFinite(mv.pitch) ? mv.pitch : 1.0);
+        setSpeedRate(typeof mv?.rate === 'number' && Number.isFinite(mv.rate) ? mv.rate : 1.0);
+        setPitchRate(typeof mv?.pitch === 'number' && Number.isFinite(mv.pitch) ? mv.pitch : 1.0);
       } else {
         setSelectedVoice(VOICE_PROFILES[0].id);
         setSpeedRate(1.0);
@@ -226,21 +237,30 @@ export const VoiceCloneStudioModal: React.FC<VoiceCloneStudioModalProps> = ({
   if (!isOpen) return null;
 
   const isMasterSelected = selectedVoice === 'master_voice';
-  const hasMasterVoice = Boolean(masterVoiceprint && masterVoiceprint.baseVoice);
+  const isMasterVoiceClone = Boolean(
+    masterVoiceprint?.cloneMode === 'voice_clone' &&
+      (masterVoiceprint.sampleId || masterVoiceprint.sampleAudioUrl || masterVoiceprint.cloneVoiceId)
+  );
+  const hasMasterVoice = Boolean(masterVoiceprint && (masterVoiceprint.baseVoice || isMasterVoiceClone));
   const activeProfile = isMasterSelected
     ? {
         id: 'master_voice',
-        name: masterVoiceprint?.name || '个人预设音色档',
+        name: masterVoiceprint?.name || (isMasterVoiceClone ? '我的个人克隆声纹' : '个人预设音色档'),
         gender: (masterVoiceprint?.gender || 'female') as 'female' | 'male',
-        tag: `基于预设 ${masterVoiceprint?.baseVoice || 'Kore'}`,
-        desc: `使用已保存的个人预设音色（基础音色 ${masterVoiceprint?.baseVoice || 'Kore'}）`,
+        tag: isMasterVoiceClone
+          ? `个人声纹克隆 (${masterVoiceprint?.cloneProvider || 'elevenlabs'})`
+          : `基于预设 ${masterVoiceprint?.baseVoice || 'Kore'}`,
+        desc: isMasterVoiceClone
+          ? `使用已采集的个人真实声纹样本克隆合成`
+          : `使用已保存的个人预设音色（基础音色 ${masterVoiceprint?.baseVoice || 'Kore'}）`,
         avatar: '🎙️',
         defaultTone: 'Natural voice with selected emotion style',
       }
     : VOICE_PROFILES.find((v) => v.id === selectedVoice) || VOICE_PROFILES[0];
 
   const activeEmotion = EMOTION_PRESETS[selectedEmotionIdx] || EMOTION_PRESETS[0];
-  const supportsEmotionInstructions = !isCustomOpenAiGateway || /gpt-4o-mini-tts/i.test(ttsEngine);
+  const supportsEmotionInstructions =
+    !(isMasterSelected && isMasterVoiceClone) && (!isCustomOpenAiGateway || /gpt-4o-mini-tts/i.test(ttsEngine));
 
   const handlePreviewVoice = async () => {
     if (!text.trim()) return;
@@ -260,7 +280,9 @@ export const VoiceCloneStudioModal: React.FC<VoiceCloneStudioModalProps> = ({
     setIsGenerating(true);
     setRealAudioDuration(null);
     setStatusNotice(
-      isCustomPriority
+      isMasterSelected && isMasterVoiceClone
+        ? `正在通过个人克隆声纹 (${masterVoiceprint?.cloneProvider || 'voice_clone'}) 合成并处理音频...`
+        : isCustomPriority
         ? `正在通过自有模型网关 (${ttsEngine}) 合成并处理音频...`
         : `正在通过云端/官方引擎 (${ttsEngine}) 合成并处理音频...`
     );
@@ -268,6 +290,20 @@ export const VoiceCloneStudioModal: React.FC<VoiceCloneStudioModalProps> = ({
     try {
       const voiceParam = isMasterSelected ? (masterVoiceprint?.baseVoice || 'Kore') : selectedVoice;
       const toneParam = activeEmotion.tone;
+      const voiceClonePayload: VoiceCloneRequestOptions | undefined =
+        isMasterSelected && isMasterVoiceClone && masterVoiceprint
+          ? {
+              cloneMode: 'voice_clone',
+              sampleId: masterVoiceprint.sampleId,
+              sampleAudioDataUrl: !masterVoiceprint.sampleId ? masterVoiceprint.sampleAudioUrl : undefined,
+              sampleName: masterVoiceprint.name,
+              sampleTranscript: masterVoiceprint.sampleTranscript,
+              cloneProvider: masterVoiceprint.cloneProvider || 'elevenlabs',
+              cloneGatewayUrl: masterVoiceprint.cloneGatewayUrl,
+              cloneApiKey: masterVoiceprint.cloneApiKey,
+              cloneVoiceId: masterVoiceprint.cloneVoiceId,
+            }
+          : undefined;
 
       const res = await generateTTSVoice(
         text.trim(),
@@ -280,10 +316,27 @@ export const VoiceCloneStudioModal: React.FC<VoiceCloneStudioModalProps> = ({
         {
           speechRate: speedRate,
           pitch: pitchRate,
+          ...(voiceClonePayload ? { voiceClone: voiceClonePayload } : {}),
         }
       );
 
       if (res.audioUrl) {
+        if (
+          res.clonedVoiceId &&
+          isMasterSelected &&
+          isMasterVoiceClone &&
+          masterVoiceprint &&
+          res.clonedVoiceId !== masterVoiceprint.cloneVoiceId
+        ) {
+          const updatedVp: MasterVoiceprint = {
+            ...masterVoiceprint,
+            cloneVoiceId: res.clonedVoiceId,
+            updatedAt: Date.now(),
+          };
+          saveMasterVoiceprint(updatedVp);
+          setMasterVoiceprint(updatedVp);
+        }
+
         setAudioUrl(res.audioUrl);
         if (!audioPlayerRef.current) {
           audioPlayerRef.current = new Audio();
@@ -306,7 +359,9 @@ export const VoiceCloneStudioModal: React.FC<VoiceCloneStudioModalProps> = ({
         }
         setIsPlayingPreview(true);
         setStatusNotice(
-          `正在播放真实合成语音 (${voiceParam} · ${res.modelUsed || ttsEngine} · 语速 ${speedRate.toFixed(2)}x · 音高 ${pitchRate.toFixed(2)}x)`
+          isMasterSelected && isMasterVoiceClone
+            ? `正在播放个人声纹克隆语音 (${res.modelUsed || masterVoiceprint?.cloneProvider} · 语速 ${speedRate.toFixed(2)}x · 音高 ${pitchRate.toFixed(2)}x)`
+            : `正在播放真实合成语音 (${voiceParam} · ${res.modelUsed || ttsEngine} · 语速 ${speedRate.toFixed(2)}x · 音高 ${pitchRate.toFixed(2)}x)`
         );
       } else {
         setAudioUrl(null);
@@ -359,7 +414,9 @@ export const VoiceCloneStudioModal: React.FC<VoiceCloneStudioModalProps> = ({
         audioUrl,
         audioDuration: resolvedDuration,
         voiceName: isMasterSelected
-          ? `${masterVoiceprint?.name || '个人预设'} (${masterVoiceprint?.baseVoice || 'Kore'})`
+          ? isMasterVoiceClone
+            ? `${masterVoiceprint?.name || '个人克隆声纹'} (声纹克隆)`
+            : `${masterVoiceprint?.name || '个人预设'} (${masterVoiceprint?.baseVoice || 'Kore'})`
           : activeProfile.name.split('·')[0].trim(),
         voiceTone: activeEmotion.label,
         isMasterVoice: isMasterSelected,
@@ -384,9 +441,13 @@ export const VoiceCloneStudioModal: React.FC<VoiceCloneStudioModalProps> = ({
                 <AudioWaveform className="w-5 h-5" />
               </div>
               <div>
-                <h2 className="text-base font-bold text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] tracking-wide">AI 预设音色语音合成台</h2>
+                <h2 className="text-base font-bold text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] tracking-wide">
+                  {isMasterSelected && isMasterVoiceClone ? '个人声纹克隆语音合成台' : 'AI 预设音色语音合成台'}
+                </h2>
                 <p className="text-[11px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] mt-0.5">
-                  官方预设音色库 · 服务端 ffmpeg 真实变速变调（非真人声纹克隆）
+                  {isMasterSelected && isMasterVoiceClone
+                    ? `已启用个人声纹样本克隆 (${masterVoiceprint?.cloneProvider || 'voice_clone'}) · 服务端 ffmpeg 真实微调`
+                    : '官方预设音色库 / 支持在右上角配置个人真人声纹克隆'}
                 </p>
               </div>
             </div>
@@ -529,7 +590,7 @@ export const VoiceCloneStudioModal: React.FC<VoiceCloneStudioModalProps> = ({
               <div className="flex items-center justify-between">
                 <label className="text-xs font-semibold text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] flex items-center gap-1.5">
                   <AudioWaveform className="w-3.5 h-3.5 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf]" />
-                  选择预设合成音色
+                  选择合成声纹 / 预设音色
                 </label>
                 <button
                   type="button"
@@ -537,7 +598,7 @@ export const VoiceCloneStudioModal: React.FC<VoiceCloneStudioModalProps> = ({
                   className="text-[11px] text-[#0284c7] dark:text-[#2ba0ff] aurora:text-[#2dd4bf] hover:underline flex items-center gap-1 cursor-pointer"
                 >
                   <Settings className="w-3 h-3" />
-                  <span>配置预设音色与参数</span>
+                  <span>{isMasterVoiceClone ? '管理个人克隆声纹 / 样本' : '上传声纹样本 / 预设配置'}</span>
                 </button>
               </div>
 
@@ -562,11 +623,20 @@ export const VoiceCloneStudioModal: React.FC<VoiceCloneStudioModalProps> = ({
                       <AudioWaveform className="w-5 h-5" />
                     </div>
                     <div className="min-w-0">
-                      <div className="text-xs font-bold text-[#0f172a] dark:text-white aurora:text-[#ecf6f8] truncate">
-                        {masterVoiceprint?.name || '个人预设音色档'}
+                      <div className="text-xs font-bold text-[#0f172a] dark:text-white aurora:text-[#ecf6f8] truncate flex items-center gap-1.5">
+                        <span className="truncate">
+                          {masterVoiceprint?.name || (isMasterVoiceClone ? '我的个人克隆声纹' : '个人预设音色档')}
+                        </span>
+                        {isMasterVoiceClone && (
+                          <span className="px-1.5 py-0.5 rounded bg-[#2481cc]/15 dark:bg-[#2ba0ff]/20 aurora:bg-[#0d9488]/25 text-[#0284c7] dark:text-[#7cc4ff] aurora:text-[#5eead4] text-[10px] font-semibold shrink-0">
+                            个人声纹克隆
+                          </span>
+                        )}
                       </div>
                       <p className="text-[11px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] mt-0.5 truncate tabular-nums">
-                        {masterVoiceprint?.baseVoice || 'Kore'} · 语速 {(masterVoiceprint?.rate || 1.0).toFixed(2)}x · 音高 {(masterVoiceprint?.pitch || 1.0).toFixed(2)}x
+                        {isMasterVoiceClone
+                          ? `${masterVoiceprint?.cloneProvider || 'elevenlabs'} · ${masterVoiceprint?.sampleFileName || (masterVoiceprint?.cloneVoiceId ? `ID: ${masterVoiceprint.cloneVoiceId}` : '已绑定样本')}${masterVoiceprint?.duration ? ` (${masterVoiceprint.duration}s)` : ''} · 语速 ${(masterVoiceprint?.rate || 1.0).toFixed(2)}x`
+                          : `${masterVoiceprint?.baseVoice || 'Kore'} · 语速 ${(masterVoiceprint?.rate || 1.0).toFixed(2)}x · 音高 ${(masterVoiceprint?.pitch || 1.0).toFixed(2)}x`}
                       </p>
                     </div>
                   </div>
@@ -792,9 +862,24 @@ export const VoiceCloneStudioModal: React.FC<VoiceCloneStudioModalProps> = ({
         onVoiceprintSaved={(newVp) => {
           setMasterVoiceprint(newVp);
           setSelectedVoice('master_voice');
+          const savedIsClone = Boolean(
+            newVp.cloneMode === 'voice_clone' && (newVp.sampleId || newVp.sampleAudioUrl || newVp.cloneVoiceId)
+          );
           if (newVp.ttsModel) {
             const nextTts = newVp.ttsModel.trim();
-            setTtsEngine(isCustomOpenAiGateway && /^gemini-/i.test(nextTts) ? 'tts-1' : nextTts);
+            setTtsEngine(
+              savedIsClone
+                ? /^gemini-/i.test(nextTts)
+                  ? newVp.cloneProvider === 'elevenlabs'
+                    ? 'eleven_multilingual_v2'
+                    : newVp.cloneProvider === 'siliconflow_cosyvoice'
+                    ? 'FunAudioLLM/CosyVoice2-0.5B'
+                    : 'tts-1'
+                  : nextTts
+                : isCustomOpenAiGateway && /^gemini-/i.test(nextTts)
+                ? 'tts-1'
+                : nextTts
+            );
           }
           setSpeedRate(typeof newVp.rate === 'number' ? newVp.rate : 1.0);
           setPitchRate(typeof newVp.pitch === 'number' ? newVp.pitch : 1.0);

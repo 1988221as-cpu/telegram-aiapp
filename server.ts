@@ -192,6 +192,8 @@ const largeUrlEncodedParser = express.urlencoded({ extended: true, limit: '30mb'
 app.use((req: Request, res: Response, next: NextFunction) => {
   if (
     req.path.startsWith('/api/audio/transcribe') ||
+    req.path.startsWith('/api/audio/voiceprint-sample') ||
+    req.path.startsWith('/api/audio/tts-clone') ||
     req.path.startsWith('/api/knowledge/upload') ||
     req.path.startsWith('/api/database/restore') ||
     req.path.startsWith('/api/telegram/user/upload-avatar')
@@ -525,12 +527,65 @@ export function getGeminiCandidateModels(primaryModel?: string): string[] {
   return [chosen];
 }
 
+const CUSTOM_MODEL_DISPLAY_ALIASES: Record<string, string> = {
+  'gemma 4 26b': 'gemma-4-26b-a4b-it',
+  'gemma-4-26b': 'gemma-4-26b-a4b-it',
+  'gemma 4 26b a4b': 'gemma-4-26b-a4b-it',
+  'gemma 4 26b it': 'gemma-4-26b-a4b-it',
+  'gemma 4 26b a4b it': 'gemma-4-26b-a4b-it',
+  'gemma 4 31b': 'gemma-4-31b-it',
+  'gemma-4-31b': 'gemma-4-31b-it',
+  'gemma 4 31b it': 'gemma-4-31b-it',
+  'gemma 4 e4b': 'gemma-4-e4b-it',
+  'gemma-4-e4b': 'gemma-4-e4b-it',
+  'gemma 4 e2b': 'gemma-4-e2b-it',
+  'gemma-4-e2b': 'gemma-4-e2b-it',
+  'gemini 3 flash': 'gemini-3-flash-preview',
+  'gemini 3 flash preview': 'gemini-3-flash-preview',
+  'gemini 3.1 flash lite': 'gemini-3.1-flash-lite',
+  'gemini flash latest': 'gemini-flash-latest',
+  'gemini pro latest': 'gemini-pro-latest',
+  'gpt 4o': 'gpt-4o',
+  'gpt 4o mini': 'gpt-4o-mini',
+  'deepseek v3': 'deepseek-chat',
+  'deepseek chat': 'deepseek-chat',
+  'deepseek r1': 'deepseek-reasoner',
+  'deepseek reasoner': 'deepseek-reasoner',
+  'claude 3.5 sonnet': 'claude-3-5-sonnet-20241022',
+};
+
+export function normalizeCustomModelId(
+  rawModel?: string,
+  protocol?: 'openai' | 'gemini' | 'anthropic' | 'auto'
+): string {
+  let clean = typeof rawModel === 'string' ? rawModel.trim() : '';
+  if (!clean) return '';
+  if (protocol === 'gemini') {
+    clean = clean.replace(/^models\//i, '').trim();
+  }
+  const aliasKey = clean.toLowerCase().replace(/\s+/g, ' ');
+  if (CUSTOM_MODEL_DISPLAY_ALIASES[aliasKey]) {
+    return CUSTOM_MODEL_DISPLAY_ALIASES[aliasKey];
+  }
+  if (/^gemini\s+\d+(?:\.\d+)?(?:\s+(?:flash|pro|lite|preview|exp|latest|nano|ultra))+$/.test(aliasKey)) {
+    return aliasKey.replace(/\s+/g, '-');
+  }
+  return clean;
+}
+
 export function buildCustomGeminiUrl(baseUrl: string, modelName?: string): string {
   let clean = baseUrl.trim().replace(/\/+$/, '');
   if (clean.includes(':generateContent')) return clean;
-  const cleanModel = typeof modelName === 'string' ? modelName.trim() : '';
+  const cleanModel = normalizeCustomModelId(modelName, 'gemini');
   if (!cleanModel) {
     throw new Error('自有 Gemini 协议网关未填写模型型号 (Model Name)，已拦截空模型请求');
+  }
+  if (/\s/.test(cleanModel)) {
+    const err: any = new Error(
+      `模型型号「${cleanModel}」格式无效：包含空格，请填写无空格的标准模型 ID（如 gemma-4-26b-a4b-it、gemini-3.1-flash-lite）`
+    );
+    err.statusCode = 400;
+    throw err;
   }
   if (/(?:\/v1beta\/models|\/v1\/models)$/i.test(clean)) {
     return `${clean}/${cleanModel}:generateContent`;
@@ -1221,10 +1276,20 @@ export async function callCustomLlm({
 
     try {
       if (!isCloudEngineMode && effectiveProtocol === 'gemini') {
-        const explicitGeminiModel = typeof customConfig.modelName === 'string' ? customConfig.modelName.trim() : '';
+        const explicitGeminiModel = normalizeCustomModelId(customConfig.modelName, 'gemini');
         if (!cleanBaseUrl.includes(':generateContent') && !explicitGeminiModel) {
           lastStatusCode = 400;
           lastErrorMsg = '自有 Gemini 协议网关未填写模型型号 (Model Name)，已拦截空模型请求，请填写具体 Gemini 模型 ID';
+          if (throwOnError) {
+            const err: any = new Error(lastErrorMsg);
+            err.statusCode = 400;
+            throw err;
+          }
+          return null;
+        }
+        if (!cleanBaseUrl.includes(':generateContent') && /\s/.test(explicitGeminiModel)) {
+          lastStatusCode = 400;
+          lastErrorMsg = `模型型号「${explicitGeminiModel}」格式无效：包含空格，请填写无空格的标准模型 ID（如 gemma-4-26b-a4b-it、gemini-3.1-flash-lite）`;
           if (throwOnError) {
             const err: any = new Error(lastErrorMsg);
             err.statusCode = 400;
@@ -1292,7 +1357,14 @@ export async function callCustomLlm({
               lastStatusCode = 502;
               lastErrorMsg = `自定义 Gemini 网关返回错误: ${extractUpstreamErrDetail(cleanRaw)}`;
             } else {
-              const replyText = d?.candidates?.[0]?.content?.parts?.[0]?.text?.trim();
+              const parts = d?.candidates?.[0]?.content?.parts;
+              const rawGeminiText = Array.isArray(parts)
+                ? parts
+                    .filter((p: any) => !p?.thought && typeof p?.text === 'string')
+                    .map((p: any) => p.text)
+                    .join('')
+                : '';
+              const replyText = stripModelThinkingText(rawGeminiText);
               if (replyText) {
                 recordCustomLlmModelUsage({
                   apiKey: cleanKey,
@@ -1332,6 +1404,19 @@ export async function callCustomLlm({
         const rawTemp = Number(customConfig.temperature ?? temperature);
         const anthropicTemp = Number.isFinite(rawTemp) ? Math.min(Math.max(rawTemp, 0), 1) : 0.7;
 
+        const explicitAnthropicModel =
+          normalizeCustomModelId(customConfig.modelName, 'anthropic') || 'claude-3-5-sonnet-20241022';
+        if (/\s/.test(explicitAnthropicModel)) {
+          lastStatusCode = 400;
+          lastErrorMsg = `模型型号「${explicitAnthropicModel}」格式无效：包含空格，请填写无空格的标准模型 ID`;
+          if (throwOnError) {
+            const err: any = new Error(lastErrorMsg);
+            err.statusCode = 400;
+            throw err;
+          }
+          return null;
+        }
+
         for (const targetUrl of candidateUrls) {
           try {
             const response = await fetchWithRetry(
@@ -1340,7 +1425,7 @@ export async function callCustomLlm({
                 method: 'POST',
                 headers,
                 body: JSON.stringify({
-                  model: customConfig.modelName || 'claude-3-5-sonnet-20241022',
+                  model: explicitAnthropicModel,
                   max_tokens: maxTokens,
                   temperature: anthropicTemp,
                   ...(anthropicSystem ? { system: anthropicSystem } : {}),
@@ -1368,18 +1453,18 @@ export async function callCustomLlm({
                 lastErrorMsg = `Anthropic 模型网关返回错误: ${extractUpstreamErrDetail(cleanRaw)}`;
                 break;
               }
-              const replyText = Array.isArray(data?.content)
+              const rawAnthropicText = Array.isArray(data?.content)
                 ? data.content
                     .filter((c: any) => c?.type === 'text' && typeof c?.text === 'string')
                     .map((c: any) => c.text)
                     .join('')
-                    .trim()
                 : '';
+              const replyText = stripModelThinkingText(rawAnthropicText);
               if (replyText) {
                 recordCustomLlmModelUsage({
                   apiKey: cleanKey,
                   baseUrl: cleanBaseUrl,
-                  modelName: customConfig.modelName || 'claude-3-5-sonnet-20241022',
+                  modelName: explicitAnthropicModel,
                   headers: response.headers,
                 }).catch(() => {});
                 return replyText;
@@ -1435,7 +1520,17 @@ export async function callCustomLlm({
           ? (customConfig.modelName && /^(gemini|gemma)/i.test(String(customConfig.modelName).trim())
               ? String(customConfig.modelName).trim()
               : 'gemini-4-hydrogen')
-          : (customConfig.modelName || 'gpt-4o-mini');
+          : (normalizeCustomModelId(customConfig.modelName, 'openai') || 'gpt-4o-mini');
+        if (!isCloudEngineMode && /\s/.test(resolvedRequestModel)) {
+          lastStatusCode = 400;
+          lastErrorMsg = `模型型号「${resolvedRequestModel}」格式无效：包含空格，请填写无空格的标准模型 ID（如 gpt-4o-mini、deepseek-chat）`;
+          if (throwOnError) {
+            const err: any = new Error(lastErrorMsg);
+            err.statusCode = 400;
+            throw err;
+          }
+          return null;
+        }
 
         for (const targetUrl of candidateUrls) {
           try {
@@ -1473,13 +1568,13 @@ export async function callCustomLlm({
                 lastErrorMsg = `自定义模型网关返回错误: ${extractUpstreamErrDetail(cleanRaw)}`;
                 break;
               }
-              const replyText = data?.choices?.[0]?.message?.content?.trim();
+              const replyText = stripModelThinkingText(data?.choices?.[0]?.message?.content || '');
               if (replyText) {
                 if (!isCloudEngineMode) {
                   recordCustomLlmModelUsage({
                     apiKey: cleanKey,
                     baseUrl: cleanBaseUrl,
-                    modelName: customConfig.modelName || 'gpt-4o-mini',
+                    modelName: resolvedRequestModel,
                     headers: response.headers,
                   }).catch(() => {});
                 }
@@ -2722,8 +2817,10 @@ export const TELEGRAM_MAX_MEDIA = Math.max(
   Number(process.env.TELEGRAM_MAX_MEDIA || process.env.TELEGRAM_MAX_MEDIA_BYTES) || 512 * 1024 * 1024
 );
 export const OUTBOUND_MEDIA_DIR = path.join(dbDir, 'outbound_media');
+export const VOICEPRINT_SAMPLES_DIR = path.join(dbDir, 'voiceprint_samples');
 try {
   fs.mkdirSync(OUTBOUND_MEDIA_DIR, { recursive: true });
+  fs.mkdirSync(VOICEPRINT_SAMPLES_DIR, { recursive: true });
 } catch {}
 
 const MIME_TO_EXT: Record<string, string> = {
@@ -10527,6 +10624,76 @@ export function decodeHtmlEntities(str: string): string {
     .replace(/&#38;/g, '&');
 }
 
+export function stripModelThinkingText(raw: string): string {
+  if (!raw || typeof raw !== 'string') return '';
+  let cleaned = raw
+    .replace(/<(?:thought|think)\b[^>]*>[\s\S]*?<\/(?:thought|think)\s*>/gi, '')
+    .replace(/<(?:thought|think)\b[^>]*>[\s\S]*$/gi, '');
+  if (/<\/(?:thought|think)\s*>/i.test(cleaned)) {
+    cleaned = cleaned.replace(/^[\s\S]*?<\/(?:thought|think)\s*>/i, '');
+  }
+  return cleaned.trim();
+}
+
+export function isSameTranslationLanguage(sourceCode?: string, targetCode?: string): boolean {
+  const normalize = (code?: string) => {
+    const lower = String(code || '').trim().toLowerCase();
+    if (!lower || lower === 'auto') return '';
+    if (lower === 'zh') return 'zh-cn';
+    return lower;
+  };
+  const src = normalize(sourceCode);
+  const dst = normalize(targetCode);
+  return Boolean(src && dst && src === dst);
+}
+
+const GOOGLE_TRANSLATE_CACHE_TTL_MS = 5 * 60 * 1000;
+const GOOGLE_TRANSLATE_CACHE_MAX = 500;
+const googleTranslateLruCache = new Map<string, { value: string; expiresAt: number }>();
+
+function getGoogleTranslateCache(key: string): string | null {
+  const hit = googleTranslateLruCache.get(key);
+  if (!hit) return null;
+  if (Date.now() > hit.expiresAt) {
+    googleTranslateLruCache.delete(key);
+    return null;
+  }
+  googleTranslateLruCache.delete(key);
+  googleTranslateLruCache.set(key, hit);
+  return hit.value;
+}
+
+function setGoogleTranslateCache(key: string, value: string): void {
+  if (!value) return;
+  if (googleTranslateLruCache.has(key)) googleTranslateLruCache.delete(key);
+  while (googleTranslateLruCache.size >= GOOGLE_TRANSLATE_CACHE_MAX) {
+    const oldestKey = googleTranslateLruCache.keys().next().value;
+    if (oldestKey === undefined) break;
+    googleTranslateLruCache.delete(oldestKey);
+  }
+  googleTranslateLruCache.set(key, { value, expiresAt: Date.now() + GOOGLE_TRANSLATE_CACHE_TTL_MS });
+}
+
+function parseGoogleTranslateJson(json: any): string {
+  if (Array.isArray(json?.[0])) {
+    return json[0]
+      .map((seg: any) => (Array.isArray(seg) && typeof seg[0] === 'string' ? seg[0] : ''))
+      .join('');
+  }
+  if (Array.isArray(json)) {
+    return json
+      .map((item: any) =>
+        typeof item === 'string'
+          ? item
+          : Array.isArray(item) && typeof item[0] === 'string'
+          ? item[0]
+          : ''
+      )
+      .join('');
+  }
+  return '';
+}
+
 export async function performGoogleTranslate(
   text: string,
   sourceLang: string,
@@ -10537,12 +10704,12 @@ export async function performGoogleTranslate(
   const isAutoSource = !sourceLang || sourceLang === 'Auto';
   const srcCode = isAutoSource ? detectSourceLangCode(text) : mapLanguageCode(sourceLang);
 
-  if (!isAutoSource && srcCode && targetCode && srcCode.toLowerCase() === targetCode.toLowerCase()) {
+  if (isSameTranslationLanguage(srcCode, targetCode)) {
     return text;
   }
 
   // Use Official Google Cloud Translation API v2 if an explicit key is configured,
-  // otherwise use keyless Google Machine Translation endpoint directly.
+  // otherwise use keyless Google Machine Translation endpoints with LRU cache + fallback.
   const apiKey =
     (typeof googleApiKey === 'string' && googleApiKey.trim())
       ? googleApiKey.trim()
@@ -10550,34 +10717,65 @@ export async function performGoogleTranslate(
 
   if (!apiKey) {
     const sl = isAutoSource ? 'auto' : srcCode;
-    const gtxUrl = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=${encodeURIComponent(sl)}&tl=${encodeURIComponent(targetCode)}&dt=t&q=${encodeURIComponent(text)}`;
-    const res = await fetch(gtxUrl, {
-      method: 'GET',
-      headers: {
-        'User-Agent': 'Mozilla/5.0',
-      },
-      signal: AbortSignal.timeout(10000),
-    });
-
-    if (!res.ok) {
-      const err: any = new Error(`谷歌机器翻译请求失败: HTTP ${res.status}`);
-      err.statusCode = res.status >= 400 && res.status < 500 ? res.status : 502;
-      throw err;
+    const cacheKey = `${sl}:${srcCode}:${targetCode}:${text}`;
+    const cached = getGoogleTranslateCache(cacheKey);
+    if (cached !== null) {
+      return cached;
     }
 
-    const json = await res.json();
-    const segments = Array.isArray(json?.[0]) ? json[0] : [];
-    const trans = segments
-      .map((seg: any) => (Array.isArray(seg) && typeof seg[0] === 'string' ? seg[0] : ''))
-      .join('');
+    const endpoints = [
+      `https://translate.googleapis.com/translate_a/single?client=gtx&sl=${encodeURIComponent(sl)}&tl=${encodeURIComponent(targetCode)}&dt=t&q=${encodeURIComponent(text)}`,
+      `https://translate.googleapis.com/translate_a/single?client=dict-chrome-ex&sl=${encodeURIComponent(sl)}&tl=${encodeURIComponent(targetCode)}&dt=t&q=${encodeURIComponent(text)}`,
+      `https://translate.google.com/translate_a/single?client=webapp&sl=${encodeURIComponent(sl)}&tl=${encodeURIComponent(targetCode)}&dt=t&q=${encodeURIComponent(text)}`,
+      `https://clients5.google.com/translate_a/t?client=dict-chrome-ex&sl=${encodeURIComponent(sl)}&tl=${encodeURIComponent(targetCode)}&q=${encodeURIComponent(text)}`,
+    ];
 
-    if (!trans || !trans.trim()) {
-      const err: any = new Error('谷歌机器翻译未返回有效译文');
-      err.statusCode = 502;
-      throw err;
+    let lastError: any = null;
+    for (let i = 0; i < endpoints.length; i++) {
+      if (i > 0) {
+        const backoffMs = 200 * i + Math.floor(Math.random() * 120);
+        await new Promise((r) => setTimeout(r, backoffMs));
+      }
+      try {
+        const res = await fetch(endpoints[i], {
+          method: 'GET',
+          headers: {
+            'User-Agent':
+              'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+          },
+          signal: AbortSignal.timeout(10000),
+        });
+
+        if (!res.ok) {
+          const err: any = new Error(`谷歌机器翻译请求失败: HTTP ${res.status}`);
+          err.statusCode = res.status >= 400 && res.status < 500 ? res.status : 502;
+          lastError = err;
+          if (res.status === 429 || res.status >= 500) continue;
+          throw err;
+        }
+
+        const json = await res.json();
+        const trans = parseGoogleTranslateJson(json);
+
+        if (!trans || !trans.trim()) {
+          const err: any = new Error('谷歌机器翻译未返回有效译文');
+          err.statusCode = 502;
+          lastError = err;
+          continue;
+        }
+
+        const decoded = decodeHtmlEntities(trans);
+        setGoogleTranslateCache(cacheKey, decoded);
+        return decoded;
+      } catch (e: any) {
+        if (typeof e?.statusCode === 'number' && e.statusCode >= 400 && e.statusCode < 500 && e.statusCode !== 429) {
+          throw e;
+        }
+        lastError = e;
+      }
     }
 
-    return decodeHtmlEntities(trans);
+    throw lastError || new Error('谷歌机器翻译请求失败');
   }
 
   const url = `https://translation.googleapis.com/language/translate/v2?key=${encodeURIComponent(apiKey)}`;
@@ -10651,6 +10849,11 @@ export async function performStrictTranslation({
     throw err;
   }
 
+  const targetCode = mapLanguageCode(targetLang);
+  const isAutoSource = !sourceLang || sourceLang === 'Auto';
+  const effectiveSourceCode = isAutoSource ? detectSourceLangCode(text) : mapLanguageCode(sourceLang);
+  const detectedTextCode = detectSourceLangCode(text);
+
   // 1. Google Machine Translation (keyless gtx by default, or official Cloud Translation v2 if key configured)
   if (strictEngine === 'google') {
     const translatedText = await performGoogleTranslate(text, sourceLang, targetLang, googleApiKey);
@@ -10694,17 +10897,35 @@ export async function performStrictTranslation({
       (typeof customConfig.modelName === 'string' && customConfig.modelName.trim()) ||
       '';
     const inferredProtocol = inferGatewayProtocol(baseUrl, rawModel, customConfig.protocol);
-    if (inferredProtocol === 'gemini' && !baseUrl.includes(':generateContent') && !rawModel) {
+    const normalizedRawModel = normalizeCustomModelId(rawModel, inferredProtocol);
+    if (inferredProtocol === 'gemini' && !baseUrl.includes(':generateContent') && !normalizedRawModel) {
       const err: any = new Error('自有 Gemini 协议网关未填写模型型号 (Model Name)，已拦截空模型请求，请先填写具体 Gemini 模型 ID');
       err.statusCode = 400;
       throw err;
     }
+    if (normalizedRawModel && /\s/.test(normalizedRawModel)) {
+      const err: any = new Error(
+        `自定义模型型号「${normalizedRawModel}」包含空格，无法被网关识别；请填写标准模型 ID（例如 gemma-4-26b-a4b-it 或 gpt-4o-mini），或点击「探测当前密钥可用型号」`
+      );
+      err.statusCode = 400;
+      throw err;
+    }
     const resolvedModel =
-      rawModel ||
+      normalizedRawModel ||
       (inferredProtocol === 'anthropic' ? 'claude-3-5-sonnet-20241022' : 'gpt-4o-mini');
 
+    if (
+      isSameTranslationLanguage(effectiveSourceCode, targetCode) ||
+      isSameTranslationLanguage(detectedTextCode, targetCode)
+    ) {
+      return {
+        translatedText: text,
+        engine: `custom_llm:${resolvedModel}`,
+      };
+    }
+
     const targetLabel = resolvePromptLanguageName(targetLang);
-    const prompt = `Translate the following text into ${targetLabel}. Keep emojis, slang, linebreaks, and casual style. Return ONLY the translated text:\n\n${text}`;
+    const prompt = `Translate the following text into ${targetLabel}. Keep emojis, slang, linebreaks, and casual style. Return ONLY the final translated text without <thought>, <think>, reasoning, or explanations:\n\n${text}`;
     const translatedText = await callCustomLlm({
       customConfig: {
         ...customConfig,
@@ -10715,20 +10936,21 @@ export async function performStrictTranslation({
       },
       messages: [{ role: 'user', content: prompt }],
       temperature: 0.3,
-      maxTokens: 600,
+      maxTokens: 1200,
       timeoutMs: 12000,
       throwOnError: true,
       skipSync: true,
     });
 
-    if (!translatedText || !translatedText.trim()) {
+    const cleanedCustomText = stripModelThinkingText(translatedText || '');
+    if (!cleanedCustomText) {
       const err: any = new Error('自定义大模型未返回有效译文');
       err.statusCode = 502;
       throw err;
     }
 
     return {
-      translatedText: translatedText.trim(),
+      translatedText: cleanedCustomText,
       engine: `custom_llm:${resolvedModel}`,
     };
   }
@@ -10752,12 +10974,22 @@ export async function performStrictTranslation({
     throw err;
   }
 
+  if (
+    isSameTranslationLanguage(effectiveSourceCode, targetCode) ||
+    isSameTranslationLanguage(detectedTextCode, targetCode)
+  ) {
+    return {
+      translatedText: text,
+      engine: `cloud_kb:${selectedModel}`,
+    };
+  }
+
   const srcDesc = sourceLang === 'Auto' ? 'auto-detected language' : resolvePromptLanguageName(sourceLang);
   const targetLabel = resolvePromptLanguageName(targetLang);
   const translationSystemPrompt =
     `[STRICT TRANSLATION TASK - DO NOT CHAT OR ADD FILLER]\n` +
     `You are a high-precision real-time translator for Telegram. Translate the user's message accurately into ${targetLabel} (from ${srcDesc}).\n` +
-    `Preserve exact meaning, tone, emojis, and line breaks. Output ONLY the translated text without quotes, explanations, or conversational filler.`;
+    `Preserve exact meaning, tone, emojis, and line breaks. Output ONLY the final translated text. NEVER output <thought>, <think>, reasoning steps, notes, quotes, explanations, or conversational filler.`;
 
   const translatedText = await callCustomLlm({
     customConfig: {
@@ -10773,7 +11005,7 @@ export async function performStrictTranslation({
     systemInstruction: translationSystemPrompt,
     messages: [{ role: 'user', content: text }],
     temperature: 0.2,
-    maxTokens: 800,
+    maxTokens: 1600,
     timeoutMs: 15000,
     userJwt: effectiveUserJwt,
     throwOnError: true,
@@ -10781,14 +11013,15 @@ export async function performStrictTranslation({
     extraPayload: { purpose: 'translation' },
   });
 
-  if (!translatedText || !translatedText.trim()) {
+  const cleanedCloudText = stripModelThinkingText(translatedText || '');
+  if (!cleanedCloudText) {
     const err: any = new Error(`知识库大模型 (${selectedModel}) 未返回有效译文`);
     err.statusCode = 502;
     throw err;
   }
 
   return {
-    translatedText: translatedText.trim(),
+    translatedText: cleanedCloudText,
     engine: `cloud_kb:${selectedModel}`,
   };
 }
@@ -10903,10 +11136,10 @@ app.post('/api/translate', translationLimiter, requireTenantAuth, async (req: Re
         });
       }
     } else if (isPriorityCustomGateway) {
-      if (strictEngine !== 'custom_llm') {
+      if (strictEngine === 'gemini') {
         return res.status(400).json({
           error:
-            '已开启「优先自有密钥回复」，官方大模型已强制关闭，当前仅允许使用「自定义模型」翻译；如需使用谷歌机翻或谷歌大模型，请先关闭优先自有密钥回复。',
+            '已开启「优先自有密钥回复」，官方谷歌大模型已强制关闭，当前仅允许使用「谷歌机翻」或「自定义模型」翻译。',
         });
       }
     } else {
@@ -11283,6 +11516,138 @@ export function determineChatRouting(
   };
 }
 
+const VOICEPRINT_ALLOWED_EXTS = ['.wav', '.mp3', '.ogg', '.webm', '.m4a', '.aac', '.flac'];
+
+export function sanitizeVoiceprintSampleId(rawId: unknown): string {
+  const clean = typeof rawId === 'string' ? rawId.trim() : '';
+  return /^[a-zA-Z0-9_-]{4,64}$/.test(clean) ? clean : '';
+}
+
+function findVoiceprintSampleFile(sampleId: string): { filePath: string; mimeType: string; ext: string } | null {
+  const safeId = sanitizeVoiceprintSampleId(sampleId);
+  if (!safeId) return null;
+  for (const ext of VOICEPRINT_ALLOWED_EXTS) {
+    const candidate = path.join(VOICEPRINT_SAMPLES_DIR, `${safeId}${ext}`);
+    if (fs.existsSync(candidate)) {
+      return { filePath: candidate, mimeType: EXT_TO_MIME[ext] || 'audio/wav', ext };
+    }
+  }
+  return null;
+}
+
+function parseAudioDataUrlToBuffer(rawDataUrl: string, fallbackFileName?: string): { buffer: Buffer; mimeType: string; ext: string } | null {
+  const match = String(rawDataUrl || '').trim().match(/^data:([^;,]+)(?:;[^,]+)*;base64,([\s\S]+)$/i);
+  if (!match) return null;
+  const rawMime = match[1].toLowerCase().trim();
+  const base64Body = match[2].replace(/\s+/g, '');
+  if (!base64Body) return null;
+  const buf = Buffer.from(base64Body, 'base64');
+  if (buf.length === 0) return null;
+  const nameExt = typeof fallbackFileName === 'string' ? path.extname(fallbackFileName).toLowerCase() : '';
+  const mimeExt = MIME_TO_EXT[rawMime] || (VOICEPRINT_ALLOWED_EXTS.includes(nameExt) ? nameExt : '');
+  const isAudioMime = rawMime.startsWith('audio/') || rawMime === 'video/webm' || rawMime === 'application/ogg';
+  if (!isAudioMime && !VOICEPRINT_ALLOWED_EXTS.includes(nameExt)) return null;
+  const ext = VOICEPRINT_ALLOWED_EXTS.includes(mimeExt) ? mimeExt : '.wav';
+  const mimeType = EXT_TO_MIME[ext] || (isAudioMime ? rawMime : 'audio/wav');
+  return { buffer: buf, mimeType, ext };
+}
+
+async function convertAudioBufferToWavIfNeeded(inputBuf: Buffer, ext: string): Promise<{ buffer: Buffer; ext: string; mimeType: string }> {
+  const cleanExt = ext.toLowerCase();
+  if (cleanExt === '.wav' || cleanExt === '.mp3') {
+    return { buffer: inputBuf, ext: cleanExt, mimeType: EXT_TO_MIME[cleanExt] || 'audio/wav' };
+  }
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'hs-vp-conv-'));
+  const inPath = path.join(tmpDir, `in${cleanExt}`);
+  const outPath = path.join(tmpDir, 'out.wav');
+  try {
+    await fs.promises.writeFile(inPath, inputBuf);
+    await new Promise<void>((resolve, reject) => {
+      const ffmpegBin = resolveFfmpegBinaryPath();
+      const proc = spawn(ffmpegBin, ['-y', '-loglevel', 'error', '-i', inPath, '-ac', '1', '-ar', '24000', '-f', 'wav', outPath]);
+      proc.on('error', reject);
+      proc.on('close', (code) => (code === 0 && fs.existsSync(outPath) ? resolve() : reject(new Error(`ffmpeg exit ${code}`))));
+    });
+    const wavBuf = await fs.promises.readFile(outPath);
+    if (wavBuf.length > 0) {
+      return { buffer: wavBuf, ext: '.wav', mimeType: 'audio/wav' };
+    }
+  } catch {
+    // Fall back to original buffer if ffmpeg conversion is unavailable in current environment
+  } finally {
+    try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch {}
+  }
+  return { buffer: inputBuf, ext: cleanExt, mimeType: EXT_TO_MIME[cleanExt] || 'audio/webm' };
+}
+
+app.post('/api/audio/voiceprint-sample', requireTenantAuth, async (req: Request, res: Response) => {
+  try {
+    const { audioDataUrl, fileName, sampleId: requestedSampleId } = req.body || {};
+    if (!audioDataUrl || typeof audioDataUrl !== 'string') {
+      return res.status(400).json({ ok: false, error: '请提供有效的音频文件或录音数据' });
+    }
+    const parsed = parseAudioDataUrlToBuffer(audioDataUrl, typeof fileName === 'string' ? fileName : undefined);
+    if (!parsed) {
+      return res.status(400).json({ ok: false, error: '不支持的音频格式，请上传 wav / mp3 / m4a / ogg / webm 音频文件' });
+    }
+    const MAX_SAMPLE_BYTES = 15 * 1024 * 1024;
+    if (parsed.buffer.length > MAX_SAMPLE_BYTES) {
+      return res.status(400).json({ ok: false, error: '声纹样本音频体积不能超过 15MB（建议录制 5~30 秒清晰人声）' });
+    }
+
+    const safeId = sanitizeVoiceprintSampleId(requestedSampleId) || `vp_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
+    fs.mkdirSync(VOICEPRINT_SAMPLES_DIR, { recursive: true });
+    for (const oldExt of VOICEPRINT_ALLOWED_EXTS) {
+      const oldPath = path.join(VOICEPRINT_SAMPLES_DIR, `${safeId}${oldExt}`);
+      if (fs.existsSync(oldPath)) {
+        try { fs.unlinkSync(oldPath); } catch {}
+      }
+    }
+    const destPath = path.join(VOICEPRINT_SAMPLES_DIR, `${safeId}${parsed.ext}`);
+    await fs.promises.writeFile(destPath, parsed.buffer);
+    return res.json({
+      ok: true,
+      sampleId: safeId,
+      mimeType: parsed.mimeType,
+      sizeBytes: parsed.buffer.length,
+    });
+  } catch (error: any) {
+    return res.status(500).json({ ok: false, error: error?.message || '保存声纹样本失败' });
+  }
+});
+
+app.get('/api/audio/voiceprint-sample/:id', requireTenantAuth, async (req: Request, res: Response) => {
+  try {
+    const found = findVoiceprintSampleFile(req.params.id);
+    if (!found) {
+      return res.status(404).json({ ok: false, error: '声纹样本不存在或已被删除' });
+    }
+    res.setHeader('Content-Type', found.mimeType);
+    res.setHeader('Cache-Control', 'no-store');
+    return res.sendFile(path.resolve(found.filePath));
+  } catch (error: any) {
+    return res.status(500).json({ ok: false, error: error?.message || '读取声纹样本失败' });
+  }
+});
+
+app.delete('/api/audio/voiceprint-sample/:id', requireTenantAuth, async (req: Request, res: Response) => {
+  try {
+    const safeId = sanitizeVoiceprintSampleId(req.params.id);
+    if (!safeId) {
+      return res.status(400).json({ ok: false, error: '无效的声纹样本 ID' });
+    }
+    for (const ext of VOICEPRINT_ALLOWED_EXTS) {
+      const candidate = path.join(VOICEPRINT_SAMPLES_DIR, `${safeId}${ext}`);
+      if (fs.existsSync(candidate)) {
+        try { fs.unlinkSync(candidate); } catch {}
+      }
+    }
+    return res.json({ ok: true });
+  } catch (error: any) {
+    return res.status(500).json({ ok: false, error: error?.message || '删除声纹样本失败' });
+  }
+});
+
 // 9. Text to Speech (TTS) - Strictly routed through user's Tab 3 Custom Gateway (Base URL + Key) & Tab 2 TTS Model
 app.post('/api/audio/tts-clone', aiGenerationLimiter, requireTenantAuth, async (req: Request, res: Response) => {
   try {
@@ -11294,6 +11659,7 @@ app.post('/api/audio/tts-clone', aiGenerationLimiter, requireTenantAuth, async (
       speechRate: rawSpeechRate,
       pitch: rawPitch,
       customConfig,
+      voiceClone,
     } = req.body;
 
     if (!text || typeof text !== 'string' || !text.trim()) {
@@ -11374,6 +11740,432 @@ app.post('/api/audio/tts-clone', aiGenerationLimiter, requireTenantAuth, async (
         ok: false,
         error: '当前处于双关状态（官方大模型与自有密钥均已关闭），严禁调用语音合成；请前往「模型」开启官方大模型或优先自有密钥后再试。',
         message: '当前处于双关状态（官方大模型与自有密钥均已关闭），严禁调用语音合成；请前往「模型」开启官方大模型或优先自有密钥后再试。',
+      });
+    }
+
+    // 9A. Zero-shot Reference Audio Voice Cloning Mode (when user saved their own recorded/uploaded voiceprint)
+    if (voiceClone && typeof voiceClone === 'object' && voiceClone.cloneMode === 'voice_clone') {
+      const sampleId = sanitizeVoiceprintSampleId(voiceClone.sampleId);
+      const diskSample = sampleId ? findVoiceprintSampleFile(sampleId) : null;
+      const inlineSample =
+        !diskSample && typeof voiceClone.sampleAudioDataUrl === 'string'
+          ? parseAudioDataUrlToBuffer(voiceClone.sampleAudioDataUrl)
+          : null;
+      const presetVoiceId = typeof voiceClone.cloneVoiceId === 'string' ? voiceClone.cloneVoiceId.trim() : '';
+
+      let sampleBuffer: Buffer | null = null;
+      let sampleExt = '.wav';
+      let sampleMime = 'audio/wav';
+      let sampleFilePath = '';
+
+      if (diskSample) {
+        sampleBuffer = await fs.promises.readFile(diskSample.filePath);
+        sampleExt = diskSample.ext;
+        sampleMime = diskSample.mimeType;
+        sampleFilePath = path.resolve(diskSample.filePath);
+      } else if (inlineSample) {
+        sampleBuffer = inlineSample.buffer;
+        sampleExt = inlineSample.ext;
+        sampleMime = inlineSample.mimeType;
+      }
+
+      if (!sampleBuffer && !presetVoiceId) {
+        return res.status(400).json({
+          ok: false,
+          error: '未找到已上传的个人声纹样本',
+          message: '请先在「音色 → 真人声纹样本克隆」上传或录制一段自己的音频样本后再合成语音。',
+        });
+      }
+
+      const cloneProvider: string =
+        typeof voiceClone.cloneProvider === 'string' && voiceClone.cloneProvider.trim()
+          ? voiceClone.cloneProvider.trim()
+          : 'elevenlabs';
+      const cloneGatewayRaw =
+        (typeof voiceClone.cloneGatewayUrl === 'string' && voiceClone.cloneGatewayUrl.trim()) ||
+        (typeof customConfig?.baseUrl === 'string' && customConfig.baseUrl.trim()) ||
+        (typeof savedCustomConfig?.baseUrl === 'string' && savedCustomConfig.baseUrl.trim()) ||
+        (cloneProvider === 'elevenlabs'
+          ? 'https://api.elevenlabs.io'
+          : cloneProvider === 'fish_audio'
+          ? 'https://api.fish.audio'
+          : cloneProvider === 'siliconflow_cosyvoice'
+          ? 'https://api.siliconflow.cn/v1'
+          : '');
+      const cleanCloneUrl = cloneGatewayRaw.replace(/\/+$/, '');
+      const cloneApiKey = sanitizeHttpHeaderValue(
+        (typeof voiceClone.cloneApiKey === 'string' && voiceClone.cloneApiKey.trim()) ||
+          resolveSecretUpdate(customConfig?.apiKey, savedCustomConfig?.apiKey, true)
+      );
+      const sampleTranscript =
+        typeof voiceClone.sampleTranscript === 'string' ? voiceClone.sampleTranscript.trim() : '';
+      const sampleName =
+        (typeof voiceClone.sampleName === 'string' && voiceClone.sampleName.trim()) || 'MyClonedVoice';
+      const cloneModel =
+        (typeof requestedModel === 'string' && requestedModel.trim()) ||
+        (cloneProvider === 'elevenlabs'
+          ? 'eleven_multilingual_v2'
+          : cloneProvider === 'siliconflow_cosyvoice'
+          ? 'FunAudioLLM/CosyVoice2-0.5B'
+          : 'tts-1');
+
+      if (!cleanCloneUrl || isBuiltInCloudGatewayUrl(cleanCloneUrl)) {
+        return res.status(400).json({
+          ok: false,
+          error: '真人声纹克隆未配置克隆网关地址',
+          message: '请在「音色 → 真人声纹样本克隆」中填写支持参考音频克隆的服务地址（如 ElevenLabs / 硅基流动 CosyVoice / Fish Audio / 本地 GPT-SoVITS）。',
+        });
+      }
+
+      let isLocalCloneHost = false;
+      try {
+        const parsedCloneUrl = new URL(cleanCloneUrl);
+        isLocalCloneHost = isAllowedLocalhostEndpoint(parsedCloneUrl.hostname);
+      } catch {
+        return res.status(400).json({
+          ok: false,
+          error: '声纹克隆网关地址无效',
+          message: '请填写合法的 http:// 或 https:// 声纹克隆服务地址。',
+        });
+      }
+
+      const lowerCloneHost = cleanCloneUrl.toLowerCase();
+      if (lowerCloneHost.includes('googleapis.com') || lowerCloneHost.includes('api.openai.com')) {
+        return res.status(400).json({
+          ok: false,
+          error: '当前网关不支持参考音频声纹克隆',
+          message: 'Google Gemini 官方 TTS 与 OpenAI 官方接口仅支持固定预设音色，不支持用您上传的音频样本复刻声音；请在「音色」中切换支持克隆的引擎（如 ElevenLabs、硅基流动 CosyVoice、Fish Audio 或本地 GPT-SoVITS），或切回「系统预设音色」。',
+        });
+      }
+
+      if (!cloneApiKey && !isLocalCloneHost) {
+        return res.status(400).json({
+          ok: false,
+          error: '真人声纹克隆缺少 API 密钥',
+          message: '请在「音色 → 真人声纹样本克隆」填写克隆引擎 API 密钥（本地 localhost 部署可留空）。',
+        });
+      }
+
+      const parseCloneAudioResponse = async (
+        upstreamRes: globalThis.Response,
+        providerLabel: string
+      ): Promise<
+        | { ok: true; buffer: Buffer; format: 'mp3' | 'wav' | 'ogg' }
+        | { ok: false; status: number; message: string }
+      > => {
+        if (!upstreamRes.ok) {
+          const errTxt = await upstreamRes.text().catch(() => '');
+          return {
+            ok: false,
+            status: upstreamRes.status,
+            message: `${providerLabel} 返回 HTTP ${upstreamRes.status}${errTxt ? `: ${errTxt.slice(0, 220)}` : ''}`,
+          };
+        }
+        const ct = (upstreamRes.headers.get('content-type') || '').toLowerCase();
+        if (ct.includes('application/json')) {
+          const json = await upstreamRes.json().catch(() => null);
+          const rawB64 = json?.audio || json?.data?.[0]?.b64_json || json?.audioBase64;
+          if (typeof rawB64 === 'string' && rawB64.trim()) {
+            const cleaned = rawB64.replace(/^data:[^;]+;base64,/i, '');
+            const buf = Buffer.from(cleaned, 'base64');
+            if (buf.length > 0) return { ok: true, buffer: buf, format: 'mp3' };
+          }
+          return { ok: false, status: 502, message: json?.error?.message || json?.message || `${providerLabel} 返回 JSON 但未包含音频` };
+        }
+        const buf = Buffer.from(await upstreamRes.arrayBuffer());
+        if (buf.length === 0) {
+          return { ok: false, status: 502, message: `${providerLabel} 返回空音频数据` };
+        }
+        const format: 'mp3' | 'wav' | 'ogg' = ct.includes('wav') ? 'wav' : ct.includes('ogg') ? 'ogg' : 'mp3';
+        return { ok: true, buffer: buf, format };
+      };
+
+      if (cloneProvider === 'elevenlabs') {
+        const elBase = cleanCloneUrl.replace(/\/v1$/i, '');
+        let activeVoiceId = presetVoiceId;
+        if (!activeVoiceId) {
+          if (!sampleBuffer) {
+            return res.status(400).json({ ok: false, message: '缺少声纹样本音频，无法向 ElevenLabs 创建克隆音色' });
+          }
+          const addForm = new FormData();
+          addForm.append('name', sampleName);
+          addForm.append('files', new Blob([new Uint8Array(sampleBuffer)], { type: sampleMime }), `voice_sample${sampleExt}`);
+          const encodedAdd = new Response(addForm);
+          const addBuf = Buffer.from(await encodedAdd.arrayBuffer());
+          const addRes = await safeSsrfFetch(`${elBase}/v1/voices/add`, {
+            method: 'POST',
+            headers: {
+              'Content-Type': encodedAdd.headers.get('content-type') || 'multipart/form-data',
+              ...(cloneApiKey ? { 'xi-api-key': cloneApiKey } : {}),
+            },
+            body: addBuf,
+            signal: AbortSignal.timeout(35000),
+          });
+          if (!addRes.ok) {
+            const errTxt = await addRes.text().catch(() => '');
+            return res.status(addRes.status).json({
+              ok: false,
+              error: 'ElevenLabs 注册声纹样本失败',
+              message: `ElevenLabs 注册声纹样本失败 (HTTP ${addRes.status})${errTxt ? `: ${errTxt.slice(0, 220)}` : ''}`,
+            });
+          }
+          const addJson = await addRes.json().catch(() => null);
+          activeVoiceId = typeof addJson?.voice_id === 'string' ? addJson.voice_id.trim() : '';
+          if (!activeVoiceId) {
+            return res.status(502).json({ ok: false, message: 'ElevenLabs 未返回有效的 voice_id' });
+          }
+        }
+
+        const synthRes = await safeSsrfFetch(`${elBase}/v1/text-to-speech/${encodeURIComponent(activeVoiceId)}`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Accept: 'audio/mpeg',
+            ...(cloneApiKey ? { 'xi-api-key': cloneApiKey } : {}),
+          },
+          body: JSON.stringify({
+            text,
+            model_id: /^eleven_/i.test(cloneModel) ? cloneModel : 'eleven_multilingual_v2',
+          }),
+          signal: AbortSignal.timeout(35000),
+        });
+        const parsed = await parseCloneAudioResponse(synthRes, 'ElevenLabs');
+        if (!parsed.ok) {
+          return res.status(parsed.status).json({ ok: false, error: parsed.message, message: parsed.message });
+        }
+        const finalized = await finalizeSynthesizedAudio(parsed.buffer, parsed.format);
+        return res.json({
+          audioUrl: finalized.audioUrl,
+          format: finalized.format,
+          voiceName: sampleName,
+          toneStyle,
+          speechRate: effectiveRate,
+          pitch: effectivePitch,
+          audioProcessed: finalized.audioProcessed,
+          clonedVoiceId: activeVoiceId,
+          modelUsed: `elevenlabs:${activeVoiceId}`,
+          routingReason: '通过 ElevenLabs 个人声纹克隆模型合成语音',
+        });
+      }
+
+      if (cloneProvider === 'fish_audio') {
+        if (!sampleBuffer && !presetVoiceId) {
+          return res.status(400).json({ ok: false, message: '缺少声纹样本音频' });
+        }
+        const prepared = sampleBuffer ? await convertAudioBufferToWavIfNeeded(sampleBuffer, sampleExt) : null;
+        const fishUrl = cleanCloneUrl.endsWith('/v1/tts')
+          ? cleanCloneUrl
+          : cleanCloneUrl.endsWith('/v1')
+          ? `${cleanCloneUrl}/tts`
+          : `${cleanCloneUrl}/v1/tts`;
+        const synthRes = await safeSsrfFetch(fishUrl, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            ...(cloneApiKey ? { Authorization: `Bearer ${cloneApiKey}` } : {}),
+          },
+          body: JSON.stringify({
+            text,
+            format: 'mp3',
+            ...(presetVoiceId
+              ? { reference_id: presetVoiceId }
+              : prepared
+              ? {
+                  references: [
+                    {
+                      audio: prepared.buffer.toString('base64'),
+                      text: sampleTranscript || text,
+                    },
+                  ],
+                }
+              : {}),
+          }),
+          signal: AbortSignal.timeout(40000),
+        });
+        const parsed = await parseCloneAudioResponse(synthRes, 'Fish Audio');
+        if (!parsed.ok) {
+          return res.status(parsed.status).json({ ok: false, error: parsed.message, message: parsed.message });
+        }
+        const finalized = await finalizeSynthesizedAudio(parsed.buffer, parsed.format);
+        return res.json({
+          audioUrl: finalized.audioUrl,
+          format: finalized.format,
+          voiceName: sampleName,
+          toneStyle,
+          speechRate: effectiveRate,
+          pitch: effectivePitch,
+          audioProcessed: finalized.audioProcessed,
+          modelUsed: 'fish_audio:voice_clone',
+          routingReason: '通过 Fish Audio 个人声纹样本克隆合成语音',
+        });
+      }
+
+      if (cloneProvider === 'siliconflow_cosyvoice') {
+        const v1Base = cleanCloneUrl.endsWith('/v1') ? cleanCloneUrl : `${cleanCloneUrl}/v1`;
+        let activeVoiceUri = presetVoiceId;
+        if (!activeVoiceUri) {
+          if (!sampleBuffer) {
+            return res.status(400).json({ ok: false, message: '缺少声纹样本音频' });
+          }
+          const prepared = await convertAudioBufferToWavIfNeeded(sampleBuffer, sampleExt);
+          const sfModel = /^FunAudioLLM\//i.test(cloneModel) ? cloneModel : 'FunAudioLLM/CosyVoice2-0.5B';
+          const upForm = new FormData();
+          upForm.append('file', new Blob([new Uint8Array(prepared.buffer)], { type: prepared.mimeType }), `sample${prepared.ext}`);
+          upForm.append('model', sfModel);
+          upForm.append('customName', `${sampleName.replace(/[^a-zA-Z0-9_-]/g, '') || 'voice'}_${Date.now()}`);
+          upForm.append('text', sampleTranscript || '这是一段用于声纹克隆的参考语音样本。');
+          const encodedUp = new Response(upForm);
+          const upBuf = Buffer.from(await encodedUp.arrayBuffer());
+          const upRes = await safeSsrfFetch(`${v1Base}/uploads/audio/voice`, {
+            method: 'POST',
+            headers: {
+              'Content-Type': encodedUp.headers.get('content-type') || 'multipart/form-data',
+              ...(cloneApiKey ? { Authorization: `Bearer ${cloneApiKey}` } : {}),
+            },
+            body: upBuf,
+            signal: AbortSignal.timeout(35000),
+          });
+          if (!upRes.ok) {
+            const errTxt = await upRes.text().catch(() => '');
+            return res.status(upRes.status).json({
+              ok: false,
+              error: 'CosyVoice 上传声纹样本失败',
+              message: `硅基流动 CosyVoice 注册声纹失败 (HTTP ${upRes.status})${errTxt ? `: ${errTxt.slice(0, 220)}` : ''}`,
+            });
+          }
+          const upJson = await upRes.json().catch(() => null);
+          activeVoiceUri = typeof upJson?.uri === 'string' ? upJson.uri.trim() : '';
+          if (!activeVoiceUri) {
+            return res.status(502).json({ ok: false, message: 'CosyVoice 上传声纹后未返回有效的 uri' });
+          }
+        }
+
+        const sfSpeechModel = /^FunAudioLLM\//i.test(cloneModel) ? cloneModel : 'FunAudioLLM/CosyVoice2-0.5B';
+        const synthRes = await safeSsrfFetch(`${v1Base}/audio/speech`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            ...(cloneApiKey ? { Authorization: `Bearer ${cloneApiKey}` } : {}),
+          },
+          body: JSON.stringify({
+            model: sfSpeechModel,
+            input: text,
+            voice: activeVoiceUri,
+            response_format: 'mp3',
+          }),
+          signal: AbortSignal.timeout(35000),
+        });
+        const parsed = await parseCloneAudioResponse(synthRes, 'CosyVoice');
+        if (!parsed.ok) {
+          return res.status(parsed.status).json({ ok: false, error: parsed.message, message: parsed.message });
+        }
+        const finalized = await finalizeSynthesizedAudio(parsed.buffer, parsed.format);
+        return res.json({
+          audioUrl: finalized.audioUrl,
+          format: finalized.format,
+          voiceName: sampleName,
+          toneStyle,
+          speechRate: effectiveRate,
+          pitch: effectivePitch,
+          audioProcessed: finalized.audioProcessed,
+          clonedVoiceId: activeVoiceUri,
+          modelUsed: `${sfSpeechModel} (已绑定个人声纹)`,
+          routingReason: '通过 CosyVoice 个人声纹样本克隆合成语音',
+        });
+      }
+
+      if (cloneProvider === 'gpt_sovits') {
+        let localWavPath = sampleFilePath;
+        let tmpWavDir = '';
+        if (sampleBuffer && (!localWavPath || sampleExt !== '.wav')) {
+          const prepared = await convertAudioBufferToWavIfNeeded(sampleBuffer, sampleExt);
+          tmpWavDir = fs.mkdtempSync(path.join(os.tmpdir(), 'hs-gptsovits-'));
+          localWavPath = path.join(tmpWavDir, `ref${prepared.ext}`);
+          await fs.promises.writeFile(localWavPath, prepared.buffer);
+        }
+        try {
+          const sovitsUrl = cleanCloneUrl.endsWith('/tts') ? cleanCloneUrl : `${cleanCloneUrl}/tts`;
+          const synthRes = await safeSsrfFetch(sovitsUrl, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              ...(cloneApiKey ? { Authorization: `Bearer ${cloneApiKey}` } : {}),
+            },
+            body: JSON.stringify({
+              text,
+              text_lang: /[\u4e00-\u9fa5]/.test(text) ? 'zh' : 'en',
+              ref_audio_path: localWavPath,
+              prompt_text: sampleTranscript || '',
+              prompt_lang: /[\u4e00-\u9fa5]/.test(sampleTranscript) ? 'zh' : 'en',
+              media_type: 'wav',
+            }),
+            signal: AbortSignal.timeout(45000),
+          });
+          const parsed = await parseCloneAudioResponse(synthRes, 'GPT-SoVITS');
+          if (!parsed.ok) {
+            return res.status(parsed.status).json({ ok: false, error: parsed.message, message: parsed.message });
+          }
+          const finalized = await finalizeSynthesizedAudio(parsed.buffer, parsed.format);
+          return res.json({
+            audioUrl: finalized.audioUrl,
+            format: finalized.format,
+            voiceName: sampleName,
+            toneStyle,
+            speechRate: effectiveRate,
+            pitch: effectivePitch,
+            audioProcessed: finalized.audioProcessed,
+            modelUsed: 'gpt_sovits:voice_clone',
+            routingReason: '通过 GPT-SoVITS 个人声纹样本克隆合成语音',
+          });
+        } finally {
+          if (tmpWavDir) {
+            try { fs.rmSync(tmpWavDir, { recursive: true, force: true }); } catch {}
+          }
+        }
+      }
+
+      // openai_clone_compat: OpenAI-compatible custom cloning gateway accepting reference_audio + reference_text
+      const prepared = sampleBuffer ? await convertAudioBufferToWavIfNeeded(sampleBuffer, sampleExt) : null;
+      const compatUrl = cleanCloneUrl.endsWith('/audio/speech')
+        ? cleanCloneUrl
+        : cleanCloneUrl.endsWith('/v1')
+        ? `${cleanCloneUrl}/audio/speech`
+        : `${cleanCloneUrl}/v1/audio/speech`;
+      const synthRes = await safeSsrfFetch(compatUrl, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(cloneApiKey ? { Authorization: `Bearer ${cloneApiKey}` } : {}),
+        },
+        body: JSON.stringify({
+          model: cloneModel,
+          input: text,
+          voice: presetVoiceId || 'clone',
+          ...(prepared
+            ? {
+                reference_audio: `data:${prepared.mimeType};base64,${prepared.buffer.toString('base64')}`,
+                reference_text: sampleTranscript || undefined,
+              }
+            : {}),
+          response_format: 'mp3',
+        }),
+        signal: AbortSignal.timeout(40000),
+      });
+      const parsed = await parseCloneAudioResponse(synthRes, '声纹克隆网关');
+      if (!parsed.ok) {
+        return res.status(parsed.status).json({ ok: false, error: parsed.message, message: parsed.message });
+      }
+      const finalized = await finalizeSynthesizedAudio(parsed.buffer, parsed.format);
+      return res.json({
+        audioUrl: finalized.audioUrl,
+        format: finalized.format,
+        voiceName: sampleName,
+        toneStyle,
+        speechRate: effectiveRate,
+        pitch: effectivePitch,
+        audioProcessed: finalized.audioProcessed,
+        modelUsed: `${cloneModel} (声纹克隆)`,
+        routingReason: '通过兼容声纹克隆网关合成语音',
       });
     }
 
@@ -11738,7 +12530,7 @@ export async function getCnTranslationIfForeign(
     const detectedSourceCode = detectSourceLangCode(text);
     const normSrc = detectedSourceCode.toLowerCase();
     const normTarget = mapLanguageCode(targetLang).toLowerCase();
-    if (normSrc && normTarget && (normSrc === normTarget || (normSrc === 'zh-cn' && normTarget === 'zh'))) {
+    if (isSameTranslationLanguage(normSrc, normTarget)) {
       return '';
     }
 
@@ -11754,7 +12546,7 @@ export async function getCnTranslationIfForeign(
     if (isDualOff) {
       engine = 'google';
     } else if (isPriorityCustom) {
-      engine = 'custom_llm';
+      engine = configuredEngine === 'google' ? 'google' : 'custom_llm';
     } else {
       engine = configuredEngine === 'google' ? 'google' : 'gemini';
     }
@@ -11774,7 +12566,7 @@ export async function getCnTranslationIfForeign(
       userJwt: (typeof userJwt === 'string' && userJwt.trim()) || undefined,
       engineLicenseKey: customConfig?.engineLicenseKey,
     });
-    const translated = (result.translatedText || '').trim();
+    const translated = stripModelThinkingText(result.translatedText || '');
     if (!translated || translated.toLowerCase() === text.trim().toLowerCase()) {
       return '';
     }
@@ -13199,7 +13991,7 @@ function extractModelIdsFromListPayload(protocol: 'openai' | 'gemini' | 'anthrop
 
   const deduped = Array.from(new Set(rawList));
   deduped.sort((a, b) => computeModelRecencyScore(b, protocol) - computeModelRecencyScore(a, protocol));
-  return deduped.slice(0, 12);
+  return deduped.slice(0, 24);
 }
 
 async function fetchAvailableModelsForGateway({
@@ -13470,8 +14262,11 @@ app.post('/api/llm/ping', aiGenerationLimiter, requireTenantAuth, async (req: Re
     const effectiveProtocol = isCloudPing
       ? 'openai'
       : inferGatewayProtocol(cleanBaseUrl, typeof modelName === 'string' ? modelName : '', protocol);
+    const normalizedPingModel = hasExplicitModel
+      ? normalizeCustomModelId(modelName, effectiveProtocol)
+      : '';
     const effectiveModel = hasExplicitModel
-      ? modelName.trim()
+      ? normalizedPingModel
       : isCloudPing
       ? 'gemini-4-hydrogen'
       : effectiveProtocol === 'gemini'
@@ -13483,6 +14278,34 @@ app.post('/api/llm/ping', aiGenerationLimiter, requireTenantAuth, async (req: Re
     let extraHeaders: Record<string, string> = {};
     if (customHeaders) {
       try { extraHeaders = JSON.parse(customHeaders); } catch {}
+    }
+
+    if (!isCloudPing && hasExplicitModel && /\s/.test(effectiveModel)) {
+      const availableModels = await fetchAvailableModelsForGateway({
+        protocol: effectiveProtocol,
+        cleanBaseUrl,
+        cleanKey,
+        extraHeaders,
+      });
+      const modelDetails = await buildModelUsageDetails({
+        modelIds: availableModels,
+        apiKey: cleanKey,
+        baseUrl: cleanBaseUrl,
+      });
+      return res.status(400).json({
+        ok: false,
+        latencyMs: 0,
+        protocol: effectiveProtocol,
+        suggestedModels: availableModels,
+        modelDetails,
+        error: formatFriendlyPingError({
+          protocol: effectiveProtocol,
+          status: 400,
+          errText: 'unexpected model name format',
+          modelName: effectiveModel,
+          availableModels,
+        }),
+      });
     }
 
     const startTime = Date.now();
@@ -13667,8 +14490,8 @@ app.post('/api/llm/ping', aiGenerationLimiter, requireTenantAuth, async (req: Re
 
         let lastStatus = 404;
         let lastErrText = '';
-        const anthropicModel = (modelName && typeof modelName === 'string' && modelName.trim())
-          ? modelName.trim()
+        const anthropicModel = (effectiveModel && typeof effectiveModel === 'string' && effectiveModel.trim())
+          ? effectiveModel.trim()
           : 'claude-3-5-sonnet-20241022';
 
         for (const targetUrl of candidateUrls) {
@@ -15255,7 +16078,7 @@ async function processTelegramMessageAsync(
             if (isDualOff) {
               engine = 'google';
             } else if (isPriorityCustom) {
-              engine = 'custom_llm';
+              engine = configuredEngine === 'google' ? 'google' : 'custom_llm';
             } else {
               engine = configuredEngine === 'google' ? 'google' : 'gemini';
             }

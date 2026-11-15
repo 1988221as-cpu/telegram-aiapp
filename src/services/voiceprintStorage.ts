@@ -38,9 +38,15 @@ export async function hydrateMasterVoiceprint(): Promise<MasterVoiceprint | null
 export function saveMasterVoiceprint(voiceprint: MasterVoiceprint): { success: boolean; error?: string } {
   if (typeof window === 'undefined') return { success: false, error: '环境不支持本地存储' };
   try {
-    secureSetItemSync(STORAGE_KEY, voiceprint);
+    const compactVoiceprint: MasterVoiceprint =
+      voiceprint.sampleId &&
+      typeof voiceprint.sampleAudioUrl === 'string' &&
+      voiceprint.sampleAudioUrl.length > 64 * 1024
+        ? { ...voiceprint, sampleAudioUrl: undefined }
+        : voiceprint;
+    secureSetItemSync(STORAGE_KEY, compactVoiceprint);
     // Dispatch custom event for real-time reactive sync across components
-    window.dispatchEvent(new CustomEvent('tg_voiceprint_updated', { detail: voiceprint }));
+    window.dispatchEvent(new CustomEvent('tg_voiceprint_updated', { detail: compactVoiceprint }));
     return { success: true };
   } catch (e: any) {
     console.error('Failed to save master voiceprint to storage', e);

@@ -232,6 +232,13 @@ export interface CustomerProfile {
   updatedAt: number;
 }
 
+export type VoiceCloneProvider =
+  | 'elevenlabs'
+  | 'siliconflow_cosyvoice'
+  | 'fish_audio'
+  | 'gpt_sovits'
+  | 'openai_clone_compat';
+
 export interface MasterVoiceprint {
   id: string;
   name: string;
@@ -243,7 +250,15 @@ export interface MasterVoiceprint {
   gender?: 'female' | 'male';
   ttsModel?: string;
   updatedAt?: number;
-  // Legacy optional fields kept solely for reading pre-upgrade saved configs
+  cloneMode?: 'preset' | 'voice_clone';
+  sampleId?: string;
+  sampleFileName?: string;
+  sampleMimeType?: string;
+  cloneProvider?: VoiceCloneProvider;
+  cloneGatewayUrl?: string;
+  cloneApiKey?: string;
+  hasCloneApiKey?: boolean;
+  cloneVoiceId?: string;
   sampleAudioUrl?: string;
   duration?: number;
   recordedAt?: number;

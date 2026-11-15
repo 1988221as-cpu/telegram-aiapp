@@ -15,6 +15,7 @@ import {
   TelegramStickerItem,
   TranslationSettings,
   SystemProxyConfig,
+  VoiceCloneProvider,
 } from '../types';
 import { normalizeLanguageCode } from '../data/mockData';
 import { clearAccountPendingMediaBlobs, purgeAllPendingMediaBlobs } from './pendingMediaStorage';
@@ -800,11 +801,54 @@ export function inferGatewayProtocolFromUrlAndModel(
   return 'openai';
 }
 
+const CLIENT_CUSTOM_MODEL_DISPLAY_ALIASES: Record<string, string> = {
+  'gemma 4 26b': 'gemma-4-26b-a4b-it',
+  'gemma-4-26b': 'gemma-4-26b-a4b-it',
+  'gemma 4 26b a4b': 'gemma-4-26b-a4b-it',
+  'gemma 4 26b it': 'gemma-4-26b-a4b-it',
+  'gemma 4 26b a4b it': 'gemma-4-26b-a4b-it',
+  'gemma 4 31b': 'gemma-4-31b-it',
+  'gemma-4-31b': 'gemma-4-31b-it',
+  'gemma 4 31b it': 'gemma-4-31b-it',
+  'gemma 4 e4b': 'gemma-4-e4b-it',
+  'gemma-4-e4b': 'gemma-4-e4b-it',
+  'gemma 4 e2b': 'gemma-4-e2b-it',
+  'gemma-4-e2b': 'gemma-4-e2b-it',
+  'gemini 2.5 flash': 'gemini-2.5-flash',
+  'gemini 2.5 pro': 'gemini-2.5-pro',
+  'gemini 2.5 flash lite': 'gemini-2.5-flash-lite',
+  'gemini 3 flash': 'gemini-3-flash-preview',
+  'gemini 3 flash preview': 'gemini-3-flash-preview',
+  'gemini 3.1 flash lite': 'gemini-3.1-flash-lite',
+  'gemini flash latest': 'gemini-flash-latest',
+  'gemini pro latest': 'gemini-pro-latest',
+  'gpt 4o': 'gpt-4o',
+  'gpt 4o mini': 'gpt-4o-mini',
+  'deepseek v3': 'deepseek-chat',
+  'deepseek chat': 'deepseek-chat',
+  'deepseek r1': 'deepseek-reasoner',
+  'deepseek reasoner': 'deepseek-reasoner',
+  'claude 3.5 sonnet': 'claude-3-5-sonnet-20241022',
+};
+
+export function normalizeCustomModelIdInput(
+  rawModel?: string,
+  protocol?: 'openai' | 'gemini' | 'anthropic' | 'auto'
+): string {
+  let clean = typeof rawModel === 'string' ? rawModel.trim() : '';
+  if (!clean) return '';
+  if (protocol === 'gemini') {
+    clean = clean.replace(/^models\//i, '').trim();
+  }
+  const aliasKey = clean.toLowerCase().replace(/\s+/g, ' ');
+  return CLIENT_CUSTOM_MODEL_DISPLAY_ALIASES[aliasKey] || clean;
+}
+
 const MAX_TRANSLATE_CACHE = 300;
 const TRANSLATE_CACHE_TTL_MS = 10 * 60 * 1000;
 const MAX_TRANSLATE_CONCURRENCY = 3;
-const MAX_HISTORY_TRANSLATE_CONCURRENCY = 2;
-const HISTORY_TRANSLATE_MIN_INTERVAL_MS = 220;
+const MAX_HISTORY_TRANSLATE_CONCURRENCY = 1;
+const HISTORY_TRANSLATE_MIN_INTERVAL_MS = 450;
 
 const translateCache = new Map<string, { value: string; expiresAt: number }>();
 const inFlightTranslations = new Map<string, Promise<string>>();
@@ -839,6 +883,17 @@ function setTranslateCache(key: string, value: string): void {
 
 function normalizeClientLangCode(lang?: string): string {
   return normalizeLanguageCode(lang);
+}
+
+export function stripTranslationThinkingTags(raw: string): string {
+  if (!raw || typeof raw !== 'string') return '';
+  let cleaned = raw
+    .replace(/<(?:thought|think)\b[^>]*>[\s\S]*?<\/(?:thought|think)\s*>/gi, '')
+    .replace(/<(?:thought|think)\b[^>]*>[\s\S]*$/gi, '');
+  if (/<\/(?:thought|think)\s*>/i.test(cleaned)) {
+    cleaned = cleaned.replace(/^[\s\S]*?<\/(?:thought|think)\s*>/i, '');
+  }
+  return cleaned.trim();
 }
 
 async function runQueuedTranslation<T>(
@@ -962,8 +1017,8 @@ export async function translateText(
     if (isDualOff && strictEngine !== 'google') {
       throw new Error('当前处于双关状态（云端与自有大模型均已关闭），仅支持「谷歌机翻」；如需使用大模型翻译，请前往「模型」开启对应引擎');
     }
-    if (isPriorityCustom && strictEngine !== 'custom_llm') {
-      throw new Error('已开启「优先自有密钥回复」，当前仅允许使用「自定义模型」翻译；请切换为自定义模型或切回云端主引擎');
+    if (isPriorityCustom && strictEngine === 'gemini') {
+      throw new Error('已开启「优先自有密钥回复」，官方谷歌大模型已禁用，当前仅允许使用「谷歌机翻」或「自定义模型」翻译');
     }
     if (!isPriorityCustom && strictEngine === 'custom_llm') {
       throw new Error('当前未开启「优先自有密钥回复」，不可选择自定义模型翻译；请前往「模型」开启「启用优先自有密钥回复」');
@@ -978,8 +1033,9 @@ export async function translateText(
     rawProvidedModel,
     customConfig?.protocol
   );
+  const normalizedProvidedModel = normalizeCustomModelIdInput(rawProvidedModel, inferredProtocol);
   const effectiveCustomModel =
-    rawProvidedModel ||
+    normalizedProvidedModel ||
     (inferredProtocol === 'gemini'
       ? ''
       : inferredProtocol === 'anthropic'
@@ -1001,6 +1057,11 @@ export async function translateText(
     }
     if (inferredProtocol === 'gemini' && !effectiveCustomModel) {
       throw new Error('自有 Gemini 协议网关未填写模型型号 (Model Name)，已拦截空模型请求，请先在「模型」填写具体 Gemini 模型 ID');
+    }
+    if (effectiveCustomModel && /\s/.test(effectiveCustomModel)) {
+      throw new Error(
+        `自定义模型型号「${effectiveCustomModel}」包含空格，无法被网关识别；请填写无空格的标准模型 ID（如 gemma-4-26b-a4b-it、gemini-2.5-flash），或在翻译面板点击「探测当前密钥可用型号」`
+      );
     }
   }
 
@@ -1079,12 +1140,15 @@ export async function translateText(
       throw new Error(errData?.error || `当前翻译通道不可用 (${res.status})`);
     }
     const data = await res.json();
-    if (typeof data?.translatedText !== 'string' || !data.translatedText.trim()) {
+    const cleanedText =
+      typeof data?.translatedText === 'string'
+        ? stripTranslationThinkingTags(decodeHtmlEntities(data.translatedText))
+        : '';
+    if (!cleanedText) {
       throw new Error(data?.error || '翻译服务未返回有效译文');
     }
-    const decoded = decodeHtmlEntities(data.translatedText);
-    setTranslateCache(cacheKey, decoded);
-    return decoded;
+    setTranslateCache(cacheKey, cleanedText);
+    return cleanedText;
   };
 
   const queuePurpose: 'realtime' | 'history' = isHistoryTranslation ? 'history' : 'realtime';
@@ -1290,6 +1354,93 @@ export async function fetchTranslationSettingsApi(accountId?: string): Promise<T
   return null;
 }
 
+export interface VoiceCloneRequestOptions {
+  cloneMode: 'preset' | 'voice_clone';
+  sampleId?: string;
+  sampleAudioDataUrl?: string;
+  sampleName?: string;
+  sampleTranscript?: string;
+  cloneProvider?: VoiceCloneProvider;
+  cloneGatewayUrl?: string;
+  cloneApiKey?: string;
+  cloneVoiceId?: string;
+}
+
+export async function uploadVoiceprintSample(
+  audioDataUrl: string,
+  fileName?: string,
+  sampleId?: string
+): Promise<{
+  ok: boolean;
+  sampleId?: string;
+  mimeType?: string;
+  sizeBytes?: number;
+  error?: string;
+}> {
+  try {
+    const res = await fetchWithTimeout(
+      '/api/audio/voiceprint-sample',
+      {
+        method: 'POST',
+        headers: getAuthHeaders(),
+        body: JSON.stringify({
+          audioDataUrl,
+          ...(fileName ? { fileName } : {}),
+          ...(sampleId ? { sampleId } : {}),
+        }),
+      },
+      30000
+    );
+    const data = await res.json().catch(() => null);
+    if (!res.ok || !data?.ok) {
+      return {
+        ok: false,
+        error: data?.error || data?.message || `上传声纹样本失败 (HTTP ${res.status})`,
+      };
+    }
+    return data;
+  } catch (err: any) {
+    return { ok: false, error: err?.message || '上传声纹样本网络异常' };
+  }
+}
+
+export async function fetchVoiceprintSampleBlobUrl(sampleId: string): Promise<string | null> {
+  if (!sampleId || !sampleId.trim()) return null;
+  try {
+    const res = await fetchWithTimeout(
+      `/api/audio/voiceprint-sample/${encodeURIComponent(sampleId.trim())}`,
+      {
+        method: 'GET',
+        headers: getAuthHeaders(),
+      },
+      15000
+    );
+    if (!res.ok) return null;
+    const blob = await res.blob();
+    if (!blob || blob.size === 0) return null;
+    return URL.createObjectURL(blob);
+  } catch {
+    return null;
+  }
+}
+
+export async function deleteVoiceprintSample(sampleId: string): Promise<boolean> {
+  if (!sampleId || !sampleId.trim()) return false;
+  try {
+    const res = await fetchWithTimeout(
+      `/api/audio/voiceprint-sample/${encodeURIComponent(sampleId.trim())}`,
+      {
+        method: 'DELETE',
+        headers: getAuthHeaders(),
+      },
+      10000
+    );
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
 export async function generateTTSVoice(
   text: string,
   voiceName: string = 'Kore',
@@ -1298,7 +1449,7 @@ export async function generateTTSVoice(
   importance: 'normal' | 'high' = 'normal',
   emotion: string = '',
   model: string = 'gemini-3.8-flash-tts',
-  options?: { speechRate?: number; pitch?: number }
+  options?: { speechRate?: number; pitch?: number; voiceClone?: VoiceCloneRequestOptions }
 ): Promise<{
   audioUrl?: string;
   format?: string;
@@ -1307,6 +1458,7 @@ export async function generateTTSVoice(
   speechRate?: number;
   pitch?: number;
   audioProcessed?: boolean;
+  clonedVoiceId?: string;
   error?: string;
 }> {
   try {
@@ -1357,6 +1509,7 @@ export async function generateTTSVoice(
           speechRate,
           pitch,
           customConfig: ttsGatewayConfig,
+          ...(options?.voiceClone ? { voiceClone: options.voiceClone } : {}),
         }),
       },
       45000
@@ -2156,7 +2309,7 @@ export function buildSafeLlmConfigPayload(customConfig?: CustomLLMConfig): Custo
       customConfig.modelName,
       preservedProtocol
     );
-    const rawModel = (customConfig.modelName || '').trim();
+    const rawModel = normalizeCustomModelIdInput(customConfig.modelName, resolvedProto);
     const cleanModel = rawModel || (resolvedProto === 'gemini' ? '' : 'gpt-4o-mini');
     return {
       ...customConfig,

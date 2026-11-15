@@ -648,6 +648,25 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
   const [previewRetryNonce, setPreviewRetryNonce] = useState(0);
   const [isTranslatingPreview, setIsTranslatingPreview] = useState(false);
   const previewAbortRef = useRef<AbortController | null>(null);
+  const previewContextRef = useRef<string>('');
+
+  const isDualOffPreview = Boolean(
+    customLLMConfig && (customLLMConfig.enabled === false || customLLMConfig.explicitlyDisabled)
+  );
+  const isCustomPreview = Boolean(
+    !isDualOffPreview && customLLMConfig?.enabled && customLLMConfig?.engineMode === 'custom'
+  );
+  const effectiveOutboundEngine: 'gemini' | 'google' | 'custom_llm' = isDualOffPreview
+    ? 'google'
+    : isCustomPreview
+    ? translationSettings?.preferredEngine === 'google'
+      ? 'google'
+      : 'custom_llm'
+    : translationSettings?.preferredEngine === 'google'
+    ? 'google'
+    : 'gemini';
+  const isLlmOutboundEngine =
+    effectiveOutboundEngine === 'gemini' || effectiveOutboundEngine === 'custom_llm';
   const [showOriginalMsgIds, setShowOriginalMsgIds] = useState<Set<string>>(new Set());
   const [isTranslateBarVisible, setIsTranslateBarVisible] = useState(true);
   const [isLangMenuOpen, setIsLangMenuOpen] = useState(false);
@@ -1457,7 +1476,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
               refTargetLang,
               customLLMConfig,
               effectiveRefEngine,
-              undefined,
+              translationSettings?.googleApiKey,
               translationSettings?.geminiModel,
               translationSettings?.geminiApiKey,
               translationSettings?.customModelName
@@ -1698,7 +1717,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
     setSyncNotice(null);
   }, [chat?.id]);
 
-  // Real-time input translation preview (debounced, abortable, same-language skip)
+  // Real-time input translation preview (auto for free Google Translate; manual on-demand for LLM engines)
   useEffect(() => {
     if (previewAbortRef.current) {
       previewAbortRef.current.abort();
@@ -1724,6 +1743,17 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
       return;
     }
 
+    const currentPreviewContext = `${outboundTargetLang}|${effectiveOutboundEngine}`;
+    if (isLlmOutboundEngine) {
+      if (translatedPreviewSource !== queryText || previewContextRef.current !== currentPreviewContext) {
+        setTranslatedPreview('');
+        setTranslatedPreviewSource('');
+        setPreviewError('');
+      }
+      setIsTranslatingPreview(false);
+      return;
+    }
+
     let isCurrent = true;
     const controller = new AbortController();
     previewAbortRef.current = controller;
@@ -1739,13 +1769,14 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
           outboundTargetLang,
           customLLMConfig,
           translationSettings?.preferredEngine,
-          undefined,
+          translationSettings?.googleApiKey,
           translationSettings?.geminiModel,
           translationSettings?.geminiApiKey,
           translationSettings?.customModelName,
           { signal: controller.signal }
         );
         if (isCurrent && !controller.signal.aborted) {
+          previewContextRef.current = currentPreviewContext;
           setTranslatedPreview(trans);
           setTranslatedPreviewSource(queryText);
           setPreviewError('');
@@ -1781,7 +1812,69 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
     editingMessage,
     translateOnEdit,
     previewRetryNonce,
+    effectiveOutboundEngine,
+    isLlmOutboundEngine,
   ]);
+
+  const handleManualLlmPreview = async () => {
+    const queryText = inputText.trim();
+    if (
+      !queryText ||
+      !hasTranslatableLetters(queryText) ||
+      !isChatTransEnabled ||
+      translationSettings?.autoTranslateOutbound === false ||
+      (editingMessage && !translateOnEdit)
+    ) {
+      return;
+    }
+    const detectedCode = normalizeChatLangCode(detectClientLangCode(queryText));
+    const targetNormCode = normalizeChatLangCode(outboundTargetLang);
+    if (detectedCode !== 'auto' && targetNormCode !== 'auto' && detectedCode === targetNormCode) {
+      setTranslatedPreview('');
+      setTranslatedPreviewSource('');
+      setPreviewError('');
+      showSyncNotice('当前输入与发送目标语种一致，无需翻译');
+      return;
+    }
+
+    if (previewAbortRef.current) {
+      previewAbortRef.current.abort();
+    }
+    const controller = new AbortController();
+    previewAbortRef.current = controller;
+    setIsTranslatingPreview(true);
+    setPreviewError('');
+    try {
+      const trans = await translateText(
+        queryText,
+        'Auto',
+        outboundTargetLang,
+        customLLMConfig,
+        effectiveOutboundEngine,
+        translationSettings?.googleApiKey,
+        translationSettings?.geminiModel,
+        translationSettings?.geminiApiKey,
+        translationSettings?.customModelName,
+        { signal: controller.signal }
+      );
+      if (!controller.signal.aborted && (textareaRef.current?.value.trim() === queryText || inputText.trim() === queryText)) {
+        previewContextRef.current = `${outboundTargetLang}|${effectiveOutboundEngine}`;
+        setTranslatedPreview(trans);
+        setTranslatedPreviewSource(queryText);
+        setPreviewError('');
+      }
+    } catch (err: any) {
+      if (err?.name === 'AbortError' || controller.signal.aborted) return;
+      setTranslatedPreview('');
+      setTranslatedPreviewSource(queryText);
+      setPreviewError(err?.message || '请求失败');
+    } finally {
+      if (previewAbortRef.current === controller) {
+        previewAbortRef.current = null;
+      }
+      setIsTranslatingPreview(false);
+    }
+  };
 
   // Send message
   const handleSendText = async (bypassTranslation = false) => {
@@ -1828,7 +1921,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                 outboundTargetLang,
                 customLLMConfig,
                 translationSettings?.preferredEngine,
-                undefined,
+                translationSettings?.googleApiKey,
                 translationSettings?.geminiModel,
                 translationSettings?.geminiApiKey,
                 translationSettings?.customModelName
@@ -1853,7 +1946,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                 inboundTargetLang,
                 customLLMConfig,
                 translationSettings?.preferredEngine,
-                undefined,
+                translationSettings?.googleApiKey,
                 translationSettings?.geminiModel,
                 translationSettings?.geminiApiKey,
                 translationSettings?.customModelName
@@ -2469,6 +2562,24 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
       persistPatch({ sttText: transcribed });
 
       const currentInboundTarget = getInboundTargetLanguage(chat, translationSettings);
+      const transcribedNorm = normalizeChatLangCode(detectClientLangCode(transcribed));
+      const inboundNorm = normalizeChatLangCode(currentInboundTarget);
+      const isTranscribedAlreadyTarget =
+        transcribedNorm !== 'auto' &&
+        inboundNorm !== 'auto' &&
+        (transcribedNorm === inboundNorm ||
+          (transcribedNorm === 'zh-cn' && inboundNorm === 'zh') ||
+          (transcribedNorm === 'zh' && inboundNorm === 'zh-cn'));
+      if (isTranscribedAlreadyTarget) {
+        persistPatch({
+          sttText: transcribed,
+          translatedText: '',
+          translationError: undefined,
+          translationErrorChannel: undefined,
+        });
+        return;
+      }
+
       const isDualOffMode = Boolean(
         customLLMConfig && (customLLMConfig.enabled === false || customLLMConfig.explicitlyDisabled)
       );
@@ -2490,7 +2601,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
           currentInboundTarget,
           customLLMConfig,
           effectiveEngine,
-          undefined,
+          translationSettings?.googleApiKey,
           translationSettings?.geminiModel,
           translationSettings?.geminiApiKey,
           translationSettings?.customModelName
@@ -4361,7 +4472,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                           resolvedInbound,
                           customLLMConfig,
                           effectiveSendRefEngine,
-                          undefined,
+                          translationSettings?.googleApiKey,
                           translationSettings?.geminiModel,
                           translationSettings?.geminiApiKey,
                           translationSettings?.customModelName
@@ -4429,7 +4540,13 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
               <div className="flex items-center gap-1.5 shrink-0">
                 <button
                   type="button"
-                  onClick={() => setPreviewRetryNonce((n) => n + 1)}
+                  onClick={() => {
+                    if (isLlmOutboundEngine) {
+                      void handleManualLlmPreview();
+                    } else {
+                      setPreviewRetryNonce((n) => n + 1);
+                    }
+                  }}
                   className="px-2 py-1 rounded-md bg-white/80 dark:bg-[#0e1726] aurora:bg-[#101c23] border border-rose-500/30 hover:bg-white dark:hover:bg-[#152438] aurora:hover:bg-[#152934] text-rose-600 dark:text-rose-300 text-[11px] font-semibold cursor-pointer"
                 >
                   重试
@@ -4477,6 +4594,43 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
             </div>
           )
         )}
+
+        {(() => {
+          const trimmedQuery = inputText.trim();
+          const detectedNorm = trimmedQuery ? normalizeChatLangCode(detectClientLangCode(trimmedQuery)) : 'auto';
+          const targetNorm = normalizeChatLangCode(outboundTargetLang);
+          const sameLang = detectedNorm !== 'auto' && targetNorm !== 'auto' && detectedNorm === targetNorm;
+          const shouldShowLlmManualBar =
+            isLlmOutboundEngine &&
+            Boolean(trimmedQuery) &&
+            hasTranslatableLetters(trimmedQuery) &&
+            isChatTransEnabled &&
+            translationSettings?.autoTranslateOutbound !== false &&
+            (!editingMessage || translateOnEdit) &&
+            !sameLang &&
+            !(translatedPreview && translatedPreviewSource === trimmedQuery) &&
+            !previewError;
+          if (!shouldShowLlmManualBar) return null;
+          return (
+            <div className="mb-2 px-3 py-1.5 bg-[#f8fafc] dark:bg-[#0e1928] aurora:bg-[#102229] border border-[#e2e8f0] dark:border-[#1e3148] aurora:border-[#1f3b45] rounded-xl flex items-center justify-between gap-2 text-xs animate-in fade-in duration-150">
+              <div className="flex items-center gap-2 min-w-0">
+                <Sparkles className="w-3.5 h-3.5 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf] shrink-0" />
+                <span className="text-[11px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] truncate">
+                  大模型翻译已开启（打字不耗额度，发送或点击右侧按钮译为 {getLanguageDisplayName(outboundTargetLang)}）
+                </span>
+              </div>
+              <button
+                type="button"
+                disabled={isTranslatingPreview}
+                onClick={() => void handleManualLlmPreview()}
+                className="shrink-0 inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-[#2481cc]/10 hover:bg-[#2481cc]/20 dark:bg-[#2ba0ff]/15 dark:hover:bg-[#2ba0ff]/25 aurora:bg-[#14b8a6]/15 aurora:hover:bg-[#14b8a6]/25 border border-[#2481cc]/25 dark:border-[#2ba0ff]/30 aurora:border-[#2dd4bf]/30 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#5eead4] text-[11px] font-semibold cursor-pointer disabled:opacity-60 transition-colors"
+              >
+                <RotateCw className={`w-3 h-3 ${isTranslatingPreview ? 'animate-spin' : ''}`} />
+                <span>{isTranslatingPreview ? '生成中...' : '预览AI翻译'}</span>
+              </button>
+            </div>
+          );
+        })()}
 
         {/* Reply Quote Banner above Input */}
         {replyingTo && (

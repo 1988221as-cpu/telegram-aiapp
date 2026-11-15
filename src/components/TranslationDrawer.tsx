@@ -8,9 +8,15 @@ import {
   Sparkles,
   Search,
   Link,
+  RefreshCw,
 } from 'lucide-react';
 import { TranslationSettings, CustomLLMConfig } from '../types';
 import { SUPPORTED_LANGUAGES } from '../data/mockData';
+import {
+  pingCustomLLM,
+  normalizeCustomModelIdInput,
+  inferGatewayProtocolFromUrlAndModel,
+} from '../services/apiService';
 
 interface TranslationDrawerProps {
   isOpen: boolean;
@@ -34,6 +40,8 @@ const CUSTOM_TRANSLATION_MODEL_PRESETS: Array<{ value: string; label: string }> 
   { value: 'gemini-3.1-flash-lite', label: 'gemini-3.1-flash-lite (Google Gemini 最新轻量)' },
   { value: 'gemini-2.5-flash', label: 'gemini-2.5-flash (Google Gemini 高速)' },
   { value: 'gemini-2.5-pro', label: 'gemini-2.5-pro (Google Gemini 旗舰)' },
+  { value: 'gemma-4-26b-a4b-it', label: 'gemma-4-26b-a4b-it (Google Gemma 4 26B 极速直译)' },
+  { value: 'gemma-4-31b-it', label: 'gemma-4-31b-it (Google Gemma 4 31B 高精度)' },
 ];
 
 export const TranslationDrawer: React.FC<TranslationDrawerProps> = ({
@@ -47,6 +55,9 @@ export const TranslationDrawer: React.FC<TranslationDrawerProps> = ({
   embedded = false,
 }) => {
   const [langSearch, setLangSearch] = useState('');
+  const [isProbingModels, setIsProbingModels] = useState(false);
+  const [probedModels, setProbedModels] = useState<string[]>([]);
+  const [probeFeedback, setProbeFeedback] = useState<{ ok: boolean; message: string } | null>(null);
   const [modeGuardNotice, setModeGuardNotice] = useState<{
     type: 'need_custom' | 'locked_custom' | 'dual_off';
     message: string;
@@ -103,6 +114,58 @@ export const TranslationDrawer: React.FC<TranslationDrawerProps> = ({
   const isPresetModelValue = CUSTOM_TRANSLATION_MODEL_PRESETS.some(
     (m) => m.value === (settings.customModelName ?? currentCustomModel)
   );
+
+  const rawInputModel = (settings.customModelName ?? currentCustomModel).trim();
+  const detectedCustomProtocol = inferGatewayProtocolFromUrlAndModel(
+    gatewayUrl,
+    rawInputModel,
+    customLlmConfig?.protocol || 'auto'
+  );
+  const normalizedInputModel = normalizeCustomModelIdInput(rawInputModel, detectedCustomProtocol);
+  const hasAliasMapping = Boolean(
+    rawInputModel && normalizedInputModel && normalizedInputModel !== rawInputModel
+  );
+  const hasUnresolvedWhitespace = Boolean(normalizedInputModel && /\s/.test(normalizedInputModel));
+
+  const handleProbeGatewayModels = async () => {
+    if (!gatewayUrl) return;
+    setIsProbingModels(true);
+    setProbeFeedback(null);
+    const selectedProto =
+      customLlmConfig?.protocol === 'openai' ||
+      customLlmConfig?.protocol === 'gemini' ||
+      customLlmConfig?.protocol === 'anthropic' ||
+      customLlmConfig?.protocol === 'auto'
+        ? customLlmConfig.protocol
+        : 'auto';
+    const res = await pingCustomLLM(
+      gatewayUrl,
+      gatewayKey,
+      '',
+      customLlmConfig?.customHeaders || '',
+      selectedProto,
+      'custom'
+    );
+    setIsProbingModels(false);
+    const list = Array.isArray(res.suggestedModels) ? res.suggestedModels : [];
+    setProbedModels(list);
+    if (res.ok && list.length > 0) {
+      setProbeFeedback({
+        ok: true,
+        message: `探测到当前密钥支持 ${list.length} 个模型，点击下方型号一键填入：`,
+      });
+    } else if (res.ok) {
+      setProbeFeedback({
+        ok: true,
+        message: res.message || '网关连接正常，但未返回模型列表，请手动填写标准模型 ID。',
+      });
+    } else {
+      setProbeFeedback({
+        ok: false,
+        message: res.error || '未能探测到可用模型列表，请检查网关网址或密钥。',
+      });
+    }
+  };
 
   const handleSwap = () => {
     if (settings.defaultSourceLang !== 'Auto') {
@@ -338,35 +401,26 @@ export const TranslationDrawer: React.FC<TranslationDrawerProps> = ({
             }`}
           >
             {masterMode === 'custom'
-              ? `当前主引擎：优先自有密钥回复（仅允许使用「自定义模型」，型号：${currentCustomModel}）`
+              ? `当前主引擎：优先自有密钥回复（支持「谷歌机翻」或「自定义模型」，型号：${currentCustomModel}）`
               : masterMode === 'dual_off'
               ? '当前主引擎：双关状态（官方与自有大模型均已关闭，仅允许使用「谷歌机翻」）'
               : '当前主引擎：官方大模型优先（仅支持「谷歌机翻」或「谷歌大模型 Gemma 4」，不可选自定义模型）'}
           </div>
 
           <div className="grid grid-cols-3 gap-2">
-            {/* Option 1: Google Machine Translate (Allowed in 'cloud' and 'dual_off') */}
+            {/* Option 1: Google Machine Translate (Universal across all 3 master modes) */}
             {(() => {
-              const allowed = masterMode !== 'custom';
+              const allowed = true;
               const active = settings.preferredEngine === 'google' && allowed;
               return (
                 <button
                   type="button"
                   onClick={() => {
-                    if (!allowed) {
-                      setModeGuardNotice({
-                        type: 'locked_custom',
-                        message: '已开启「优先自有密钥回复」，当前仅可使用「自定义模型」翻译；如需使用谷歌机翻，请先切回云端主引擎或双关状态。',
-                      });
-                      return;
-                    }
                     setModeGuardNotice(null);
                     onUpdateSettings({ ...settings, preferredEngine: 'google' });
                   }}
                   className={`p-2.5 rounded-lg border text-xs text-left transition-colors ${
-                    !allowed
-                      ? 'opacity-45 cursor-not-allowed border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] bg-[#f1f5f9] dark:bg-[#08101a]/60 aurora:bg-[#081014]/60 text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5]'
-                      : active
+                    active
                       ? 'cursor-pointer border-[#2481cc] dark:border-[#2ba0ff] aurora:border-[#2dd4bf] bg-[#e8f3ff] dark:bg-[#2ba0ff]/12 aurora:bg-[#112d36] text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8]'
                       : 'cursor-pointer border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] bg-white dark:bg-[#08101a] aurora:bg-[#081014] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] hover:border-[#2481cc]/40 dark:hover:border-[#2ba0ff]/40 aurora:hover:border-[#2dd4bf]/40'
                   }`}
@@ -376,7 +430,7 @@ export const TranslationDrawer: React.FC<TranslationDrawerProps> = ({
                     <span className="truncate">谷歌机翻</span>
                   </div>
                   <p className="text-[10px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] mt-1 leading-tight">
-                    {allowed ? '免密钥直译' : '自有模式锁定'}
+                    全模式通用免密钥直译
                   </p>
                 </button>
               );
@@ -591,9 +645,73 @@ export const TranslationDrawer: React.FC<TranslationDrawerProps> = ({
                     }
                     onUpdateSettings({ ...settings, customModelName: e.target.value });
                   }}
-                  placeholder="请输入翻译模型型号，例如：gpt-4o / deepseek-chat / claude-3-5-sonnet"
+                  placeholder="请输入标准模型 ID，如 gpt-4o / deepseek-chat / gemma-4-26b-a4b-it"
                   className="w-full bg-white dark:bg-[#08101a] aurora:bg-[#081014] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] rounded-lg px-3 py-1.5 text-xs font-mono text-[#0284c7] dark:text-[#7cc4ff] aurora:text-[#5eead4] placeholder-[#94a3b8] dark:placeholder-[#4e657e] aurora:placeholder-[#5a7782] focus:outline-none focus:border-[#2481cc] dark:focus:border-[#2ba0ff] aurora:focus:border-[#2dd4bf]"
                 />
+                {hasAliasMapping && (
+                  <div className="flex items-center justify-between gap-2 text-[10.5px] text-sky-700 dark:text-sky-300 bg-sky-500/10 border border-sky-500/25 rounded-md px-2 py-1">
+                    <span className="truncate">
+                      已自动兼容识别为：<code className="font-mono font-semibold">{normalizedInputModel}</code>
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => onUpdateSettings({ ...settings, customModelName: normalizedInputModel })}
+                      className="px-1.5 py-0.5 rounded bg-sky-500/20 hover:bg-sky-500/30 font-semibold cursor-pointer shrink-0 transition-colors"
+                    >
+                      替换为标准 ID
+                    </button>
+                  </div>
+                )}
+                {hasUnresolvedWhitespace && (
+                  <p className="text-[10.5px] text-amber-700 dark:text-amber-400 leading-snug">
+                    提示：标准模型 ID 不能包含空格（如 gemma-4-26b-a4b-it、gpt-4o-mini），否则网关会报 HTTP 400。
+                  </p>
+                )}
+                {isGatewayReady && (
+                  <div className="space-y-1.5 pt-0.5">
+                    <button
+                      type="button"
+                      onClick={handleProbeGatewayModels}
+                      disabled={isProbingModels}
+                      className="w-full py-1.5 px-2.5 rounded-lg bg-[#f1f5f9] hover:bg-[#e2e8f0] dark:bg-[#132234] dark:hover:bg-[#1a2e45] aurora:bg-[#13252e] aurora:hover:bg-[#18303b] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] text-[11px] font-medium text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] flex items-center justify-center gap-1.5 cursor-pointer transition-colors disabled:opacity-50"
+                    >
+                      <RefreshCw className={`w-3 h-3 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf] ${isProbingModels ? 'animate-spin' : ''}`} />
+                      <span>{isProbingModels ? '正在探测当前密钥可用型号...' : '探测当前密钥可用型号（免测试扣费）'}</span>
+                    </button>
+                    {probeFeedback && (
+                      <div
+                        className={`text-[10.5px] leading-snug px-2 py-1 rounded-md border ${
+                          probeFeedback.ok
+                            ? 'bg-emerald-500/10 border-emerald-500/25 text-emerald-700 dark:text-emerald-300'
+                            : 'bg-rose-500/10 border-rose-500/25 text-rose-700 dark:text-rose-300'
+                        }`}
+                      >
+                        {probeFeedback.message}
+                      </div>
+                    )}
+                    {probedModels.length > 0 && (
+                      <div className="flex flex-wrap gap-1.5 max-h-28 overflow-y-auto pt-0.5">
+                        {probedModels.map((modelId) => {
+                          const isSelected = normalizedInputModel === modelId;
+                          return (
+                            <button
+                              key={modelId}
+                              type="button"
+                              onClick={() => onUpdateSettings({ ...settings, customModelName: modelId })}
+                              className={`px-2 py-0.5 rounded-md text-[10.5px] font-mono border cursor-pointer transition-colors ${
+                                isSelected
+                                  ? 'bg-[#2481cc] dark:bg-[#2ba0ff] aurora:bg-[#0d9488] border-[#2481cc] dark:border-[#2ba0ff] aurora:border-[#0d9488] text-white font-semibold'
+                                  : 'bg-white dark:bg-[#08101a] aurora:bg-[#081014] border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] text-[#334155] dark:text-[#b4c6d8] aurora:text-[#b7d0d8] hover:border-[#2481cc] dark:hover:border-[#2ba0ff] aurora:hover:border-[#2dd4bf]'
+                              }`}
+                            >
+                              {modelId}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </div>
+                )}
               </div>
 
               <div

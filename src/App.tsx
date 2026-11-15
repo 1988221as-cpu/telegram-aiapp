@@ -202,7 +202,7 @@ function enforceTranslationEngineForLlm(
   if (isDualOff && trans.preferredEngine !== 'google') {
     return { ...trans, preferredEngine: 'google' };
   }
-  if (isCustomPriority && trans.preferredEngine !== 'custom_llm') {
+  if (isCustomPriority && trans.preferredEngine !== 'custom_llm' && trans.preferredEngine !== 'google') {
     return { ...trans, preferredEngine: 'custom_llm' };
   }
   if (!isDualOff && !isCustomPriority && trans.preferredEngine === 'custom_llm') {
@@ -1811,6 +1811,7 @@ export default function App() {
   const backfillRetryCountRef = useRef<Map<string, number>>(new Map());
   const backfillCooldownUntilRef = useRef<Map<string, number>>(new Map());
   const backfillRetryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const backfillGlobalGoogleCooldownUntilRef = useRef<number>(0);
   const [backfillRetryNonce, setBackfillRetryNonce] = useState(0);
   const backfillAbortRef = useRef<AbortController | null>(null);
   const backfillScopeKeyRef = useRef<string>('');
@@ -1858,6 +1859,16 @@ export default function App() {
     if (!isMemberAuthenticated || !activeChatId || !activeAccountId) return;
     if (translationSettings.autoTranslateInbound === false) return;
     if (!isActiveChatTranslationEnabled) return;
+    const globalCooldownRemaining = backfillGlobalGoogleCooldownUntilRef.current - Date.now();
+    if (globalCooldownRemaining > 0) {
+      if (!backfillRetryTimerRef.current) {
+        backfillRetryTimerRef.current = setTimeout(() => {
+          backfillRetryTimerRef.current = null;
+          setBackfillRetryNonce((n) => n + 1);
+        }, globalCooldownRemaining + 150);
+      }
+      return;
+    }
 
     if (backfillScopeKeyRef.current !== backfillScopeKey || !backfillAbortRef.current) {
       if (backfillAbortRef.current) {
@@ -2038,6 +2049,23 @@ export default function App() {
           if (err?.name === 'AbortError' || controller.signal.aborted) {
             attemptedInboundBackfillRef.current.delete(dedupeKey);
             remaining = Math.max(0, remaining - 1);
+            return;
+          }
+          const rawErrMsg = String(err?.message || '');
+          const isRateLimited429 = /\b429\b|Too Many Requests|频率过高/i.test(rawErrMsg);
+          if (isRateLimited429) {
+            const cooldownMs = 30_000;
+            backfillGlobalGoogleCooldownUntilRef.current = Math.max(
+              backfillGlobalGoogleCooldownUntilRef.current,
+              Date.now() + cooldownMs
+            );
+            backfillCooldownUntilRef.current.set(dedupeKey, Date.now() + cooldownMs);
+            attemptedInboundBackfillRef.current.delete(dedupeKey);
+            if (backfillAbortRef.current === controller) {
+              backfillAbortRef.current = null;
+            }
+            controller.abort();
+            scheduleBackfillRetryWakeup(cooldownMs + 150);
             return;
           }
           const retries = backfillRetryCountRef.current.get(dedupeKey) || 0;
@@ -2519,12 +2547,22 @@ export default function App() {
                   ? currentTransSettings.autoTranslateGroups !== false
                   : currentTransSettings.autoTranslatePrivate !== false;
 
+            const incomingNormLang = normalizeLanguageCode(detectClientLangCode(trimmedIncomingText));
+            const inboundTargetNorm = normalizeLanguageCode(inboundTargetLang);
+            const isIncomingAlreadyTargetLang =
+              incomingNormLang !== 'auto' &&
+              inboundTargetNorm !== 'auto' &&
+              (incomingNormLang === inboundTargetNorm ||
+                (incomingNormLang === 'zh-cn' && inboundTargetNorm === 'zh') ||
+                (incomingNormLang === 'zh' && inboundTargetNorm === 'zh-cn'));
+
             if (
               currentTransSettings.autoTranslateInbound !== false &&
               isIncomingChatTransEnabled &&
               incomingMsg.sender === 'peer' &&
               !isMediaPlaceholder &&
-              !incomingMsg.translatedText
+              !incomingMsg.translatedText &&
+              !isIncomingAlreadyTargetLang
             ) {
               const effectiveInboundEngine = enforceTranslationEngineForLlm(
                 currentLLMConfig,
@@ -2541,7 +2579,7 @@ export default function App() {
                 inboundTargetLang,
                 currentLLMConfig,
                 effectiveInboundEngine,
-                undefined,
+                currentTransSettings.googleApiKey,
                 currentTransSettings.geminiModel,
                 currentTransSettings.geminiApiKey,
                 currentTransSettings.customModelName
@@ -3242,8 +3280,8 @@ export default function App() {
       showCloudError('当前处于双关状态（云端与自有大模型均已关闭），仅支持使用「谷歌机翻」');
       return;
     }
-    if (isCustomPriority && newSettings.preferredEngine !== 'custom_llm') {
-      showCloudError('已开启「优先自有密钥回复」，翻译引擎锁定为「自定义模型」');
+    if (isCustomPriority && newSettings.preferredEngine === 'gemini') {
+      showCloudError('已开启「优先自有密钥回复」，官方谷歌大模型已禁用，仅支持「谷歌机翻」或「自定义模型」');
       return;
     }
     if (!isDualOff && !isCustomPriority && newSettings.preferredEngine === 'custom_llm') {
@@ -3715,6 +3753,40 @@ export default function App() {
     const sourceLang =
       activeChat?.sourceLang && activeChat.sourceLang !== 'Auto' ? activeChat.sourceLang : 'Auto';
 
+    const detectedMsgNorm = normalizeLanguageCode(detectClientLangCode(rawText));
+    const targetMsgNorm = normalizeLanguageCode(targetLang);
+    const isAlreadyTargetLang =
+      detectedMsgNorm !== 'auto' &&
+      targetMsgNorm !== 'auto' &&
+      (detectedMsgNorm === targetMsgNorm ||
+        (detectedMsgNorm === 'zh-cn' && targetMsgNorm === 'zh') ||
+        (detectedMsgNorm === 'zh' && targetMsgNorm === 'zh-cn'));
+    if (isAlreadyTargetLang) {
+      setMessagesMap((prev) => {
+        const list = getBucketMessages(prev, targetAccountId, targetChatId);
+        return {
+          ...prev,
+          [bucketKey]: list.map((m) =>
+            m.id === messageId
+              ? {
+                  ...m,
+                  translatedText: '',
+                  isTranslating: false,
+                  translationError: undefined,
+                  translationErrorChannel: undefined,
+                }
+              : m
+          ),
+        };
+      });
+      await updateMessageTranslationInDb(messageId, '', {
+        chatId: targetChatId,
+        telegramMessageId: targetMsg.telegramMessageId,
+        accountId: targetAccountId,
+      }).catch(() => {});
+      return;
+    }
+
     setMessagesMap((prev) => {
       const list = getBucketMessages(prev, targetAccountId, targetChatId);
       return {
@@ -3734,7 +3806,7 @@ export default function App() {
         targetLang,
         currentLlm,
         effectiveEngine,
-        isHistoricalTarget ? currentTrans.googleApiKey : undefined,
+        currentTrans.googleApiKey,
         isHistoricalTarget ? undefined : currentTrans.geminiModel,
         isHistoricalTarget ? undefined : currentTrans.geminiApiKey,
         isHistoricalTarget ? undefined : currentTrans.customModelName,

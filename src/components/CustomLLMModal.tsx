@@ -20,6 +20,7 @@ import {
   syncCustomLLMConfigApi,
   isBuiltInCloudGatewayUrl,
   inferGatewayProtocolFromUrlAndModel,
+  normalizeCustomModelIdInput,
   fetchCustomLlmUsageStats,
   ModelUsageDetail,
 } from '../services/apiService';
@@ -43,6 +44,8 @@ const CHAT_MEMORY_MODEL_PRESETS: Array<{ value: string; label: string }> = [
   { value: 'gemini-flash-latest', label: 'gemini-flash-latest (Google Gemini 官方最新)' },
   { value: 'gemini-2.5-flash', label: 'gemini-2.5-flash (Google Gemini 2.5 高速)' },
   { value: 'gemini-2.5-pro', label: 'gemini-2.5-pro (Google Gemini 2.5 旗舰)' },
+  { value: 'gemma-4-26b-a4b-it', label: 'gemma-4-26b-a4b-it (Google Gemma 4 26B)' },
+  { value: 'gemma-4-31b-it', label: 'gemma-4-31b-it (Google Gemma 4 31B)' },
 ];
 
 function normalizeUiProtocol(
@@ -222,13 +225,14 @@ export const CustomLLMModal: React.FC<CustomLLMModalProps> = ({
       .replace(/^[^\x21-\x7E]+|[^\x21-\x7E]+$/g, '')
       .replace(/[^\x20-\x7E]/g, '')
       .trim();
-    const cleanModel = (formData.modelName || '').trim();
+    const cleanModel = normalizeCustomModelIdInput(formData.modelName, detectedEffectiveProtocol);
 
-    if (cleanApiKey !== formData.apiKey || cleanBaseUrl !== formData.baseUrl) {
+    if (cleanApiKey !== formData.apiKey || cleanBaseUrl !== formData.baseUrl || cleanModel !== formData.modelName) {
       setFormData((prev) => ({
         ...prev,
         baseUrl: cleanBaseUrl,
         apiKey: cleanApiKey,
+        modelName: cleanModel,
       }));
     }
 
@@ -305,7 +309,7 @@ export const CustomLLMModal: React.FC<CustomLLMModalProps> = ({
       .replace(/^[^\x21-\x7E]+|[^\x21-\x7E]+$/g, '')
       .replace(/[^\x20-\x7E]/g, '')
       .trim();
-    const cleanModelName = (formData.modelName || '').trim();
+    const cleanModelName = normalizeCustomModelIdInput(formData.modelName, detectedEffectiveProtocol);
     const savingCustomPriority = Boolean(formData.enabled && formData.engineMode === 'custom');
 
     if (savingCustomPriority) {
@@ -346,6 +350,15 @@ export const CustomLLMModal: React.FC<CustomLLMModalProps> = ({
           tested: true,
           ok: false,
           message: '保存失败：已开启「启用优先自有密钥回复」，请选择或输入对话与记忆模型型号。',
+        });
+        return;
+      }
+      if (/\s/.test(cleanModelName)) {
+        setActiveTab('custom');
+        setTestResult({
+          tested: true,
+          ok: false,
+          message: `保存失败：模型型号「${cleanModelName}」包含空格，请填写无空格的标准模型 ID 或留空后点击「一键连通性测试」探测可用型号。`,
         });
         return;
       }
@@ -823,11 +836,35 @@ export const CustomLLMModal: React.FC<CustomLLMModalProps> = ({
                   }
                   className="w-full bg-white dark:bg-[#08101a] aurora:bg-[#081014] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] rounded-lg px-3 py-2 text-xs font-mono text-[#0284c7] dark:text-[#7cc4ff] aurora:text-[#5eead4] placeholder-[#94a3b8] dark:placeholder-[#4e657e] aurora:placeholder-[#5a7782] focus:outline-none focus:border-[#2481cc] dark:focus:border-[#2ba0ff] aurora:focus:border-[#2dd4bf]"
                 />
-                {/\s/.test((formData.modelName || '').trim()) ? (
-                  <p className="text-[10.5px] text-amber-700 dark:text-amber-400 leading-snug">
-                    提示：模型型号不能包含空格，请填写无空格的官方模型 ID（例如 gemini-3.1-flash-lite、gpt-4o-mini）。
-                  </p>
-                ) : currentModelUsage ? (
+                {(() => {
+                  const rawTyped = (formData.modelName || '').trim();
+                  const normTyped = normalizeCustomModelIdInput(rawTyped, detectedEffectiveProtocol);
+                  if (rawTyped && normTyped !== rawTyped) {
+                    return (
+                      <div className="flex items-center justify-between gap-2 text-[10.5px] text-sky-700 dark:text-sky-300 bg-sky-500/10 border border-sky-500/25 rounded-md px-2 py-1">
+                        <span className="truncate">
+                          已自动兼容识别为：<code className="font-mono font-semibold">{normTyped}</code>
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => setFormData({ ...formData, modelName: normTyped })}
+                          className="px-1.5 py-0.5 rounded bg-sky-500/20 hover:bg-sky-500/30 font-semibold cursor-pointer shrink-0 transition-colors"
+                        >
+                          替换为标准 ID
+                        </button>
+                      </div>
+                    );
+                  }
+                  if (/\s/.test(normTyped)) {
+                    return (
+                      <p className="text-[10.5px] text-amber-700 dark:text-amber-400 leading-snug">
+                        提示：模型型号不能包含空格，请填写无空格的官方模型 ID（例如 gemma-4-26b-a4b-it、gemini-3.1-flash-lite、gpt-4o-mini）。
+                      </p>
+                    );
+                  }
+                  return null;
+                })()}
+                {!(/\s/.test(normalizeCustomModelIdInput(formData.modelName, detectedEffectiveProtocol))) && currentModelUsage ? (
                   <div className="flex flex-wrap items-center gap-1.5 text-[10.5px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] pt-0.5">
                     <span className="px-1.5 py-0.5 rounded bg-[#2481cc]/10 dark:bg-[#2ba0ff]/15 aurora:bg-[#14b8a6]/15 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf] font-medium">
                       {currentModelUsage.tierTag}
