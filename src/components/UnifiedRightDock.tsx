@@ -56,7 +56,7 @@ const PANEL_TABS: Array<{
   { id: 'memory', label: '记忆', title: '当前联系人 · 全息记忆', icon: Brain },
   { id: 'llm', label: '模型', title: '智能大模型与云端引擎', icon: Cpu },
   { id: 'translation', label: '翻译', title: '实时聊天双向翻译设置', icon: Languages },
-  { id: 'voice', label: '音色', title: '预设音色与语音合成配置', icon: AudioWaveform },
+  { id: 'voice', label: '音色', title: '真人声纹样本克隆配置', icon: AudioWaveform },
   { id: 'persona', label: '人设', title: '角色人设资料与试聊沙盒', icon: Sparkles },
 ];
 
@@ -142,7 +142,7 @@ export const UnifiedRightDock: React.FC<UnifiedRightDockProps> = ({
                       ? '自有密钥模式 · 锁定自定义模型'
                       : '官方引擎模式 · 支持谷歌机翻 / Gemma 4'
                     : activePanel === 'voice'
-                    ? '官方预设音色、模型与语速音高配置'
+                    ? '个人声纹样本、克隆引擎与语速音高配置'
                     : '人设档案、五阶提示词与试聊'}
                 </p>
               </div>

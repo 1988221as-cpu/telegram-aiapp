@@ -26,14 +26,6 @@ import {
   deleteVoiceprintSample,
 } from '../services/apiService';
 
-const TTS_MODEL_PRESETS: Array<{ value: string; label: string }> = [
-  { value: 'gemini-3.8-flash-tts', label: 'gemini-3.8-flash-tts (Gemini 3.8 Flash 拟真语音)' },
-  { value: 'gemini-3.8-flash-lite-tts', label: 'gemini-3.8-flash-lite-tts (Gemini 3.8 Lite 极速)' },
-  { value: 'gpt-4o-mini-tts', label: 'gpt-4o-mini-tts (OpenAI 情感语音)' },
-  { value: 'tts-1', label: 'tts-1 (OpenAI 标准语音)' },
-  { value: 'tts-1-hd', label: 'tts-1-hd (OpenAI 高清语音)' },
-];
-
 const VOICE_CLONE_PROVIDERS: Array<{
   id: VoiceCloneProvider;
   label: string;
@@ -78,19 +70,13 @@ const VOICE_CLONE_PROVIDERS: Array<{
   },
 ];
 
-const BASE_PRESET_VOICES: Array<{
-  id: 'Kore' | 'Zephyr' | 'Fenrir' | 'Puck' | 'Charon';
-  label: string;
-  tag: string;
-  openaiHint: string;
-  desc: string;
-}> = [
-  { id: 'Kore', label: '甜美女', tag: 'F1', openaiHint: 'nova', desc: '女声 · 甜美温润' },
-  { id: 'Zephyr', label: '知性女', tag: 'F2', openaiHint: 'shimmer', desc: '女声 · 知性从容' },
-  { id: 'Fenrir', label: '磁性男', tag: 'M1', openaiHint: 'onyx', desc: '男声 · 磁性沉稳' },
-  { id: 'Puck', label: '阳光男', tag: 'M2', openaiHint: 'echo', desc: '男声 · 阳光开朗' },
-  { id: 'Charon', label: '商务男', tag: 'M3', openaiHint: 'fable', desc: '男声 · 商务精英' },
-];
+function resolveCloneModelForProvider(model: string | undefined, defaultModel: string): string {
+  const trimmed = (model || '').trim();
+  if (!trimmed || /^gemini-/i.test(trimmed)) {
+    return defaultModel;
+  }
+  return trimmed;
+}
 
 function probeAudioDurationFromSrc(src: string): Promise<number | undefined> {
   return new Promise((resolve) => {
@@ -138,15 +124,13 @@ export const MasterVoiceprintModal: React.FC<MasterVoiceprintModalProps> = ({
   const [statusText, setStatusText] = useState<string | null>(null);
   const [statusTone, setStatusTone] = useState<'info' | 'error'>('info');
 
-  const [name, setName] = useState('个人预设音色档');
+  const [name, setName] = useState('克隆声纹');
   const [enabledAsDefault, setEnabledAsDefault] = useState(true);
   const [pitch, setPitch] = useState(1.0);
   const [rate, setRate] = useState(1.0);
-  const [baseVoice, setBaseVoice] = useState<'Kore' | 'Zephyr' | 'Fenrir' | 'Puck' | 'Charon'>('Kore');
-  const [ttsModel, setTtsModel] = useState<string>('gemini-3.8-flash-tts');
+  const [ttsModel, setTtsModel] = useState<string>(VOICE_CLONE_PROVIDERS[0].defaultModel);
 
   // Personal voiceprint cloning states
-  const [cloneMode, setCloneMode] = useState<'preset' | 'voice_clone'>('preset');
   const [sampleId, setSampleId] = useState<string>('');
   const [sampleFileName, setSampleFileName] = useState<string>('');
   const [sampleMimeType, setSampleMimeType] = useState<string>('');
@@ -214,13 +198,10 @@ export const MasterVoiceprintModal: React.FC<MasterVoiceprintModalProps> = ({
       const current = getMasterVoiceprint();
       if (current) {
         setVoiceprint(current);
-        setName(current.name || (current.cloneMode === 'voice_clone' ? '我的个人克隆声纹' : '个人预设音色档'));
+        setName(!current.name || current.name === '个人预设音色档' ? '克隆声纹' : current.name);
         setEnabledAsDefault(current.enabledAsDefault);
         setPitch(typeof current.pitch === 'number' && Number.isFinite(current.pitch) ? current.pitch : 1.0);
         setRate(typeof current.rate === 'number' && Number.isFinite(current.rate) ? current.rate : 1.0);
-        setBaseVoice(current.baseVoice || (current.pitch && current.pitch < 0.95 ? 'Fenrir' : 'Kore'));
-        setTtsModel(current.ttsModel || 'gemini-3.8-flash-tts');
-        setCloneMode(current.cloneMode === 'voice_clone' ? 'voice_clone' : 'preset');
         setSampleId(current.sampleId || '');
         setSampleFileName(current.sampleFileName || '');
         setSampleMimeType(current.sampleMimeType || '');
@@ -230,6 +211,7 @@ export const MasterVoiceprintModal: React.FC<MasterVoiceprintModalProps> = ({
         const savedProvider = current.cloneProvider || 'elevenlabs';
         setCloneProvider(savedProvider);
         const providerMeta = VOICE_CLONE_PROVIDERS.find((p) => p.id === savedProvider) || VOICE_CLONE_PROVIDERS[0];
+        setTtsModel(resolveCloneModelForProvider(current.ttsModel, providerMeta.defaultModel));
         setCloneGatewayUrl(current.cloneGatewayUrl || providerMeta.defaultUrl);
         setCloneApiKey(current.cloneApiKey || '');
         setCloneVoiceId(current.cloneVoiceId || '');
@@ -254,6 +236,11 @@ export const MasterVoiceprintModal: React.FC<MasterVoiceprintModalProps> = ({
           replacePreviewObjectUrl(null, false);
         }
       } else {
+        const defaultMeta = VOICE_CLONE_PROVIDERS[0];
+        setName('克隆声纹');
+        setCloneProvider(defaultMeta.id);
+        setCloneGatewayUrl(defaultMeta.defaultUrl);
+        setTtsModel(defaultMeta.defaultModel);
         replacePreviewObjectUrl(null, false);
       }
       setStatusText(null);
@@ -280,8 +267,6 @@ export const MasterVoiceprintModal: React.FC<MasterVoiceprintModalProps> = ({
 
   if (!isOpen && !embedded) return null;
 
-  const selectedPresetMeta =
-    BASE_PRESET_VOICES.find((v) => v.id === baseVoice) || BASE_PRESET_VOICES[0];
   const selectedCloneProviderMeta =
     VOICE_CLONE_PROVIDERS.find((p) => p.id === cloneProvider) || VOICE_CLONE_PROVIDERS[0];
 
@@ -292,12 +277,9 @@ export const MasterVoiceprintModal: React.FC<MasterVoiceprintModalProps> = ({
     if (!cloneGatewayUrl.trim() || cloneGatewayUrl.trim() === prevMeta?.defaultUrl) {
       setCloneGatewayUrl(nextMeta.defaultUrl);
     }
-    if (
-      nextProvider !== 'elevenlabs' &&
-      nextProvider !== 'siliconflow_cosyvoice' &&
-      nextProvider !== 'openai_clone_compat'
-    ) {
-      // keep existing cloneVoiceId only if relevant
+    const trimmedModel = ttsModel.trim();
+    if (!trimmedModel || /^gemini-/i.test(trimmedModel) || trimmedModel === prevMeta?.defaultModel) {
+      setTtsModel(nextMeta.defaultModel);
     }
     setCloneVoiceId('');
   };
@@ -328,8 +310,8 @@ export const MasterVoiceprintModal: React.FC<MasterVoiceprintModalProps> = ({
       setSampleDuration(probedDuration);
       setCloneVoiceId('');
       replacePreviewObjectUrl(dataUrl, false);
-      if (name === '个人预设音色档') {
-        setName('我的个人克隆声纹');
+      if (!name.trim() || name === '个人预设音色档') {
+        setName('克隆声纹');
       }
       setStatusTone('info');
       setStatusText(`已加载本地声纹样本「${file.name}」，点击底部保存即可应用到后续语音发送`);
@@ -410,8 +392,8 @@ export const MasterVoiceprintModal: React.FC<MasterVoiceprintModalProps> = ({
           setSampleDuration(probedDuration || elapsedSec);
           setCloneVoiceId('');
           replacePreviewObjectUrl(dataUrl, false);
-          if (name === '个人预设音色档') {
-            setName('我的个人克隆声纹');
+          if (!name.trim() || name === '个人预设音色档') {
+            setName('克隆声纹');
           }
           setStatusTone('info');
           setStatusText(`录音完成 (${probedDuration || elapsedSec}秒)，点击底部「保存声纹克隆配置」后将自动绑定`);
@@ -458,156 +440,112 @@ export const MasterVoiceprintModal: React.FC<MasterVoiceprintModalProps> = ({
       return;
     }
 
-    const resolvedTtsModel = ttsModel.trim() || (cloneMode === 'voice_clone' ? selectedCloneProviderMeta.defaultModel : 'gemini-3.8-flash-tts');
+    const resolvedTtsModel = resolveCloneModelForProvider(ttsModel, selectedCloneProviderMeta.defaultModel);
 
-    if (cloneMode === 'voice_clone') {
-      const hasSample = Boolean(pendingSampleDataUrl || sampleId || voiceprint?.sampleAudioUrl || cloneVoiceId.trim());
-      if (!hasSample) {
-        setStatusTone('error');
-        setStatusText('请先上传本地音频文件或录制一段个人声纹样本（或填写已有的 Voice ID）。');
-        return;
-      }
+    const hasSample = Boolean(pendingSampleDataUrl || sampleId || voiceprint?.sampleAudioUrl || cloneVoiceId.trim());
+    if (!hasSample) {
+      setStatusTone('error');
+      setStatusText('请先上传本地音频文件或录制一段个人声纹样本（或填写已有的 Voice ID）。');
+      return;
+    }
 
-      const trimmedUrl = cloneGatewayUrl.trim().replace(/\/+$/, '');
-      if (!trimmedUrl) {
-        setStatusTone('error');
-        setStatusText('请填写声纹克隆引擎服务地址（如 ElevenLabs / 硅基流动 CosyVoice / Fish Audio / 本地 GPT-SoVITS）。');
-        return;
-      }
+    const trimmedUrl = cloneGatewayUrl.trim().replace(/\/+$/, '');
+    if (!trimmedUrl) {
+      setStatusTone('error');
+      setStatusText('请填写声纹克隆引擎服务地址（如 ElevenLabs / 硅基流动 CosyVoice / Fish Audio / 本地 GPT-SoVITS）。');
+      return;
+    }
 
-      let isLocal = false;
-      try {
-        const u = new URL(trimmedUrl);
-        isLocal = u.hostname === 'localhost' || u.hostname === '127.0.0.1' || u.hostname === '::1';
-      } catch {
-        setStatusTone('error');
-        setStatusText('声纹克隆网关地址格式无效，请输入完整的 http:// 或 https:// 地址。');
-        return;
-      }
+    let isLocal = false;
+    try {
+      const u = new URL(trimmedUrl);
+      isLocal = u.hostname === 'localhost' || u.hostname === '127.0.0.1' || u.hostname === '::1';
+    } catch {
+      setStatusTone('error');
+      setStatusText('声纹克隆网关地址格式无效，请输入完整的 http:// 或 https:// 地址。');
+      return;
+    }
 
-      const lowerUrl = trimmedUrl.toLowerCase();
-      if (lowerUrl.includes('googleapis.com') || lowerUrl.includes('api.openai.com')) {
-        setStatusTone('error');
-        setStatusText('Google Gemini / OpenAI 官方接口不支持个人样本克隆，请切换为 ElevenLabs / CosyVoice / Fish Audio / 本地 GPT-SoVITS。');
-        return;
-      }
+    const lowerUrl = trimmedUrl.toLowerCase();
+    if (lowerUrl.includes('googleapis.com') || lowerUrl.includes('api.openai.com')) {
+      setStatusTone('error');
+      setStatusText('Google Gemini / OpenAI 官方接口不支持个人样本克隆，请切换为 ElevenLabs / CosyVoice / Fish Audio / 本地 GPT-SoVITS。');
+      return;
+    }
 
-      if (!isLocal && !cloneApiKey.trim()) {
-        setStatusTone('error');
-        setStatusText('请填写该声纹克隆引擎的 API 密钥（本地 localhost 部署可留空）。');
-        return;
-      }
+    if (!isLocal && !cloneApiKey.trim()) {
+      setStatusTone('error');
+      setStatusText('请填写该声纹克隆引擎的 API 密钥（本地 localhost 部署可留空）。');
+      return;
+    }
 
-      setIsSaving(true);
-      try {
-        let finalSampleId = sampleId;
-        let finalMime = sampleMimeType;
-        if (pendingSampleDataUrl) {
-          const uploadRes = await uploadVoiceprintSample(
-            pendingSampleDataUrl,
-            sampleFileName || undefined,
-            sampleId || undefined
-          );
-          if (!uploadRes.ok || !uploadRes.sampleId) {
-            setStatusTone('error');
-            setStatusText(uploadRes.error || '上传声纹样本至服务端失败，请重试');
-            return;
-          }
-          finalSampleId = uploadRes.sampleId;
-          finalMime = uploadRes.mimeType || sampleMimeType;
-          setSampleId(finalSampleId);
-          setPendingSampleDataUrl(null);
-        }
-
-        const updated: MasterVoiceprint = {
-          id: voiceprint?.id || 'master_' + Date.now(),
-          name: (name.trim() === '个人预设音色档' || !name.trim()) ? '我的个人克隆声纹' : name.trim(),
-          enabledAsDefault,
-          pitch,
-          rate,
-          timbreTag: `个人声纹样本克隆 · ${selectedCloneProviderMeta.label.split(' ')[0]}`,
-          baseVoice,
-          gender: baseVoice === 'Fenrir' || baseVoice === 'Puck' || baseVoice === 'Charon' ? 'male' : 'female',
-          ttsModel: resolvedTtsModel,
-          cloneMode: 'voice_clone',
-          sampleId: finalSampleId || undefined,
-          sampleFileName: sampleFileName || undefined,
-          sampleMimeType: finalMime || undefined,
-          duration: sampleDuration,
-          recordedAt: voiceprint?.recordedAt || Date.now(),
-          sampleTranscript: sampleTranscript.trim() || undefined,
-          cloneProvider,
-          cloneGatewayUrl: trimmedUrl,
-          cloneApiKey: cloneApiKey.trim() || undefined,
-          hasCloneApiKey: Boolean(cloneApiKey.trim()),
-          cloneVoiceId: cloneVoiceId.trim() || undefined,
-          updatedAt: Date.now(),
-        };
-
-        const saveRes = saveMasterVoiceprint(updated);
-        if (!saveRes.success) {
+    setIsSaving(true);
+    try {
+      let finalSampleId = sampleId;
+      let finalMime = sampleMimeType;
+      if (pendingSampleDataUrl) {
+        const uploadRes = await uploadVoiceprintSample(
+          pendingSampleDataUrl,
+          sampleFileName || undefined,
+          sampleId || undefined
+        );
+        if (!uploadRes.ok || !uploadRes.sampleId) {
           setStatusTone('error');
-          setStatusText(saveRes.error || '保存失败，存储不可用');
+          setStatusText(uploadRes.error || '上传声纹样本至服务端失败，请重试');
           return;
         }
-        setVoiceprint(updated);
-        onVoiceprintSaved?.(updated);
-        if (embedded) {
-          setStatusTone('info');
-          setStatusText('个人声纹克隆模型已保存，后续发送语音将默认使用此克隆声纹');
-          setTimeout(() => setStatusText(null), 3500);
-        } else {
-          onClose();
-        }
-      } finally {
-        setIsSaving(false);
+        finalSampleId = uploadRes.sampleId;
+        finalMime = uploadRes.mimeType || sampleMimeType;
+        setSampleId(finalSampleId);
+        setPendingSampleDataUrl(null);
       }
-      return;
-    }
 
-    // Preset voice mode (original behavior preserved)
-    const updated: MasterVoiceprint = {
-      id: voiceprint?.id || 'master_' + Date.now(),
-      name: name.trim() || '个人预设音色档',
-      enabledAsDefault,
-      pitch,
-      rate,
-      timbreTag: '预设音色 · 服务端 ffmpeg 真实调速调音高',
-      baseVoice,
-      gender: baseVoice === 'Fenrir' || baseVoice === 'Puck' || baseVoice === 'Charon' ? 'male' : 'female',
-      ttsModel: resolvedTtsModel,
-      cloneMode: 'preset',
-      sampleId: sampleId || undefined,
-      sampleFileName: sampleFileName || undefined,
-      sampleMimeType: sampleMimeType || undefined,
-      duration: sampleDuration,
-      sampleTranscript: sampleTranscript.trim() || undefined,
-      cloneProvider,
-      cloneGatewayUrl: cloneGatewayUrl.trim() || undefined,
-      cloneApiKey: cloneApiKey.trim() || undefined,
-      hasCloneApiKey: Boolean(cloneApiKey.trim()),
-      cloneVoiceId: cloneVoiceId.trim() || undefined,
-      updatedAt: Date.now(),
-    };
+      const updated: MasterVoiceprint = {
+        id: voiceprint?.id || 'master_' + Date.now(),
+        name: (name.trim() === '个人预设音色档' || !name.trim()) ? '克隆声纹' : name.trim(),
+        enabledAsDefault,
+        pitch,
+        rate,
+        timbreTag: `个人声纹样本克隆 · ${selectedCloneProviderMeta.label.split(' ')[0]}`,
+        baseVoice: voiceprint?.baseVoice || 'Kore',
+        gender: voiceprint?.gender || 'female',
+        ttsModel: resolvedTtsModel,
+        cloneMode: 'voice_clone',
+        sampleId: finalSampleId || undefined,
+        sampleFileName: sampleFileName || undefined,
+        sampleMimeType: finalMime || undefined,
+        duration: sampleDuration,
+        recordedAt: voiceprint?.recordedAt || Date.now(),
+        sampleTranscript: sampleTranscript.trim() || undefined,
+        cloneProvider,
+        cloneGatewayUrl: trimmedUrl,
+        cloneApiKey: cloneApiKey.trim() || undefined,
+        hasCloneApiKey: Boolean(cloneApiKey.trim()),
+        cloneVoiceId: cloneVoiceId.trim() || undefined,
+        updatedAt: Date.now(),
+      };
 
-    const saveRes = saveMasterVoiceprint(updated);
-    if (!saveRes.success) {
-      setStatusTone('error');
-      setStatusText(saveRes.error || '保存失败，存储不可用');
-      return;
-    }
-    setVoiceprint(updated);
-    onVoiceprintSaved?.(updated);
-    if (embedded) {
-      setStatusTone('info');
-      setStatusText(`预设音色配置与模型 (${resolvedTtsModel}) 已保存`);
-      setTimeout(() => setStatusText(null), 3000);
-    } else {
-      onClose();
+      const saveRes = saveMasterVoiceprint(updated);
+      if (!saveRes.success) {
+        setStatusTone('error');
+        setStatusText(saveRes.error || '保存失败，存储不可用');
+        return;
+      }
+      setVoiceprint(updated);
+      setTtsModel(resolvedTtsModel);
+      onVoiceprintSaved?.(updated);
+      if (embedded) {
+        setStatusTone('info');
+        setStatusText('个人声纹克隆模型已保存，后续发送语音将默认使用此克隆声纹');
+        setTimeout(() => setStatusText(null), 3500);
+      } else {
+        onClose();
+      }
+    } finally {
+      setIsSaving(false);
     }
   };
 
-  const isPresetTtsModel = TTS_MODEL_PRESETS.some((m) => m.value === ttsModel);
   const hasAnySampleAudio = Boolean(previewAudioUrl || sampleId || pendingSampleDataUrl);
 
   const innerContent = (
@@ -621,7 +559,7 @@ export const MasterVoiceprintModal: React.FC<MasterVoiceprintModalProps> = ({
             </div>
             <div>
               <h2 className="text-sm font-semibold text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] tracking-wide">
-                预设音色与语音合成配置
+                真人声纹样本克隆配置
               </h2>
             </div>
           </div>
@@ -650,46 +588,12 @@ export const MasterVoiceprintModal: React.FC<MasterVoiceprintModalProps> = ({
           </div>
         )}
 
-        {/* Mode Switcher: Preset vs Personal Voiceprint Cloning */}
-        <div className="p-1 rounded-xl bg-[#f1f5f9] dark:bg-[#08101a] aurora:bg-[#081014] border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] grid grid-cols-2 gap-1">
-          <button
-            type="button"
-            onClick={() => setCloneMode('voice_clone')}
-            className={`py-2 px-2.5 rounded-lg text-xs font-semibold transition-all cursor-pointer flex items-center justify-center gap-1.5 ${
-              cloneMode === 'voice_clone'
-                ? 'bg-[#2481cc] dark:bg-[#2ba0ff] aurora:bg-[#0d9488] text-white shadow-xs'
-                : 'text-[#475569] dark:text-[#7b93ad] aurora:text-[#7e9aa5] hover:text-[#0f172a] dark:hover:text-[#eef4fb] aurora:hover:text-[#ecf6f8]'
-            }`}
-          >
-            <Mic className="w-3.5 h-3.5" />
-            <span>真人声纹样本克隆</span>
-          </button>
-          <button
-            type="button"
-            onClick={() => setCloneMode('preset')}
-            className={`py-2 px-2.5 rounded-lg text-xs font-semibold transition-all cursor-pointer flex items-center justify-center gap-1.5 ${
-              cloneMode === 'preset'
-                ? 'bg-[#2481cc] dark:bg-[#2ba0ff] aurora:bg-[#0d9488] text-white shadow-xs'
-                : 'text-[#475569] dark:text-[#7b93ad] aurora:text-[#7e9aa5] hover:text-[#0f172a] dark:hover:text-[#eef4fb] aurora:hover:text-[#ecf6f8]'
-            }`}
-          >
-            <Sliders className="w-3.5 h-3.5" />
-            <span>系统预设音色库</span>
-          </button>
-        </div>
-
         {/* Capability Notice */}
         <div className="p-3 rounded-xl bg-[#e8f3ff]/75 dark:bg-[#2ba0ff]/10 aurora:bg-[#112d36]/80 border border-[#bfdbfe] dark:border-[#2ba0ff]/25 aurora:border-[#2dd4bf]/30 text-[11px] text-[#334155] dark:text-[#b4c6d8] aurora:text-[#b7d0d8] flex items-start gap-2 leading-relaxed">
           <Info className="w-4 h-4 text-[#0284c7] dark:text-[#2ba0ff] aurora:text-[#2dd4bf] shrink-0 mt-0.5" />
-          {cloneMode === 'voice_clone' ? (
-            <span>
-              上传或录制一段 <strong>5~30 秒清晰人声样本</strong>并绑定支持零样本复刻的语音引擎（ElevenLabs / 硅基流动 CosyVoice / Fish Audio / 本地 GPT-SoVITS）。保存后，后续每次发送语音消息都会自动以该克隆声纹作为默认声音模型。
-            </span>
-          ) : (
-            <span>
-              当前使用官方/自有网关的<strong>预设音色库</strong>进行语音合成。下方设置的<strong>音高基线</strong>与<strong>语速倍率</strong>会在服务端通过本地 ffmpeg 真实处理导出音频，试听与发往 Telegram 的语音条保持完全一致。
-            </span>
-          )}
+          <span>
+            上传或录制一段 <strong>5~30 秒清晰人声样本</strong>并绑定支持零样本复刻的语音引擎（ElevenLabs / 硅基流动 CosyVoice / Fish Audio / 本地 GPT-SoVITS）。保存后，后续每次发送语音消息都会自动以该克隆声纹作为默认声音模型。
+          </span>
         </div>
 
         {/* Profile Summary Card */}
@@ -700,40 +604,28 @@ export const MasterVoiceprintModal: React.FC<MasterVoiceprintModalProps> = ({
               value={name}
               onChange={(e) => setName(e.target.value)}
               className="bg-transparent text-xs font-semibold text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] placeholder-[#94a3b8] dark:placeholder-[#4e657e] aurora:placeholder-[#5a7782] focus:outline-none border-b border-transparent focus:border-[#2481cc] dark:focus:border-[#2ba0ff] aurora:focus:border-[#2dd4bf] w-full"
-              placeholder={cloneMode === 'voice_clone' ? '输入个人克隆声纹名称' : '输入预设音色档名称'}
+              placeholder="输入克隆声纹名称"
             />
             <div className="text-[11px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] flex items-center gap-1.5 mt-0.5 truncate">
-              {cloneMode === 'voice_clone' ? (
-                <>
-                  <span>{selectedCloneProviderMeta.label.split(' ')[0]} 声纹克隆</span>
-                  <span>·</span>
-                  <span className="font-mono text-[#0284c7] dark:text-[#7cc4ff] aurora:text-[#5eead4] truncate">
-                    {sampleFileName || (cloneVoiceId ? `ID: ${cloneVoiceId}` : '待上传/录制样本')}
-                  </span>
-                </>
-              ) : (
-                <>
-                  <span>预设音色 {baseVoice} (OpenAI 映射 {selectedPresetMeta.openaiHint})</span>
-                  <span>·</span>
-                  <span className="font-mono text-[#0284c7] dark:text-[#7cc4ff] aurora:text-[#5eead4]">{ttsModel.trim() || 'gemini-3.8-flash-tts'}</span>
-                </>
-              )}
+              <span>{selectedCloneProviderMeta.label.split(' ')[0]} 声纹克隆</span>
+              <span>·</span>
+              <span className="font-mono text-[#0284c7] dark:text-[#7cc4ff] aurora:text-[#5eead4] truncate">
+                {sampleFileName || (cloneVoiceId ? `ID: ${cloneVoiceId}` : '待上传/录制样本')}
+              </span>
             </div>
           </div>
 
           <div className="grid grid-cols-3 gap-2 pt-2.5 border-t border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] text-[11px]">
             <div className="text-center">
               <div className="text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] text-[10px]">
-                {cloneMode === 'voice_clone' ? '声纹来源' : '基础预设音色'}
+                声纹来源
               </div>
               <div className="font-medium text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] mt-0.5 truncate">
-                {cloneMode === 'voice_clone'
-                  ? hasAnySampleAudio
-                    ? `${sampleDuration ? `${sampleDuration}s ` : ''}个人样本`
-                    : cloneVoiceId
-                    ? '已填 Voice ID'
-                    : '未上传'
-                  : baseVoice}
+                {hasAnySampleAudio
+                  ? `${sampleDuration ? `${sampleDuration}s ` : ''}个人样本`
+                  : cloneVoiceId
+                  ? '已填 Voice ID'
+                  : '未上传'}
               </div>
             </div>
             <div className="text-center">
@@ -752,8 +644,7 @@ export const MasterVoiceprintModal: React.FC<MasterVoiceprintModalProps> = ({
         </div>
 
         {/* Voice Clone Sample Upload / Mic Recording Section */}
-        {cloneMode === 'voice_clone' && (
-          <div className="p-3.5 rounded-xl bg-[#f8fafc] dark:bg-[#0e1726]/85 aurora:bg-[#101c23]/90 border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] space-y-3 text-xs">
+        <div className="p-3.5 rounded-xl bg-[#f8fafc] dark:bg-[#0e1726]/85 aurora:bg-[#101c23]/90 border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] space-y-3 text-xs">
             <div className="flex items-center justify-between gap-2">
               <span className="font-semibold text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] flex items-center gap-1.5">
                 <AudioWaveform className="w-3.5 h-3.5 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf]" />
@@ -923,7 +814,6 @@ export const MasterVoiceprintModal: React.FC<MasterVoiceprintModalProps> = ({
               </div>
             </div>
           </div>
-        )}
 
         {/* TTS Model Selector */}
         <div className="p-3.5 rounded-xl bg-[#f8fafc] dark:bg-[#0e1726]/85 aurora:bg-[#101c23]/90 border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] space-y-2.5">
@@ -935,86 +825,28 @@ export const MasterVoiceprintModal: React.FC<MasterVoiceprintModalProps> = ({
             <span className="text-[10px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5]">支持自由输入</span>
           </div>
 
-          {cloneMode === 'preset' && (
-            <select
-              value={isPresetTtsModel ? ttsModel : '__custom__'}
-              onChange={(e) => {
-                if (e.target.value !== '__custom__') {
-                  setTtsModel(e.target.value);
-                } else {
-                  setTtsModel('');
-                }
-              }}
-              className="w-full bg-white dark:bg-[#08101a] aurora:bg-[#081014] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] rounded-lg px-3 py-1.5 text-xs text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] focus:outline-none focus:border-[#2481cc] dark:focus:border-[#2ba0ff] aurora:focus:border-[#2dd4bf]"
-            >
-              {TTS_MODEL_PRESETS.map((m) => (
-                <option key={m.value} value={m.value}>
-                  {m.label}
-                </option>
-              ))}
-              <option value="__custom__">自定义输入其他语音模型型号...</option>
-            </select>
-          )}
-
           <input
             type="text"
             value={ttsModel}
             onChange={(e) => setTtsModel(e.target.value)}
-            placeholder={
-              cloneMode === 'voice_clone'
-                ? `输入克隆模型型号，默认：${selectedCloneProviderMeta.defaultModel}`
-                : '输入模型型号，例如：gemini-3.8-flash-tts / gpt-4o-mini-tts / tts-1'
-            }
+            placeholder={`输入克隆模型型号，默认：${selectedCloneProviderMeta.defaultModel}`}
             className="w-full bg-white dark:bg-[#08101a] aurora:bg-[#081014] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] rounded-lg px-3 py-1.5 text-xs font-mono text-[#0284c7] dark:text-[#7cc4ff] aurora:text-[#5eead4] placeholder-[#94a3b8] dark:placeholder-[#4e657e] aurora:placeholder-[#5a7782] focus:outline-none focus:border-[#2481cc] dark:focus:border-[#2ba0ff] aurora:focus:border-[#2dd4bf]"
           />
 
           <p className="text-[10.5px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] flex items-center gap-1.5 leading-snug">
             <Link className="w-3 h-3 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf] shrink-0" />
             <span>
-              {cloneMode === 'voice_clone'
-                ? '真人声纹克隆模式将直接使用上方配置的支持参考音频复刻的引擎网址与密钥；系统预设模式仍走统一模型网关。'
-                : '接入口与密钥统一走「模型 → 接入自有模型网关」配置的大模型接入网址与密钥，或使用官方云端引擎。'}
+              真人声纹克隆模式将直接使用上方配置的支持参考音频复刻的引擎网址与密钥。
             </span>
           </p>
         </div>
 
-        {/* Preset Voice & ffmpeg Audio Parameters */}
+        {/* ffmpeg Audio Parameters */}
         <div className="p-3.5 rounded-xl bg-[#f8fafc] dark:bg-[#0e1726]/85 aurora:bg-[#101c23]/90 border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] space-y-3 text-xs">
           <span className="font-medium text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] flex items-center gap-1.5">
             <Sliders className="w-3.5 h-3.5 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf]" />
-            <span>{cloneMode === 'voice_clone' ? '音频参数（ffmpeg 实效微调）' : '预设音色与音频参数（ffmpeg 实效处理）'}</span>
+            <span>音频参数（ffmpeg 实效微调）</span>
           </span>
-
-          {/* Base Voice Anchor (shown in preset mode) */}
-          {cloneMode === 'preset' && (
-            <div className="space-y-1.5 pt-0.5">
-              <div className="flex justify-between text-[11px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5]">
-                <span>系统预设音色库 (Gemini / OpenAI 自动映射)</span>
-                <span className="text-[#0284c7] dark:text-[#2ba0ff] aurora:text-[#2dd4bf] font-medium">
-                  {selectedPresetMeta.desc}
-                </span>
-              </div>
-              <div className="grid grid-cols-5 gap-1.5">
-                {BASE_PRESET_VOICES.map((v) => (
-                  <button
-                    key={v.id}
-                    type="button"
-                    onClick={() => setBaseVoice(v.id)}
-                    className={`py-1.5 px-1 rounded-lg text-center border transition-all cursor-pointer ${
-                      baseVoice === v.id
-                        ? 'bg-[#2481cc] dark:bg-[#2ba0ff] aurora:bg-[#0d9488] border-[#2481cc] dark:border-[#2ba0ff] aurora:border-[#0d9488] text-white shadow-xs'
-                        : 'bg-white dark:bg-[#08101a] aurora:bg-[#081014] border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] text-[#475569] dark:text-[#7b93ad] aurora:text-[#7e9aa5] hover:text-[#0f172a] dark:hover:text-[#eef4fb] aurora:hover:text-[#ecf6f8] hover:bg-[#f1f5f9] dark:hover:bg-[#152438] aurora:hover:bg-[#152934]'
-                    }`}
-                  >
-                    <div className={`text-[10px] font-mono font-semibold ${baseVoice === v.id ? 'text-white/90' : 'text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf]'}`}>
-                      {v.tag}
-                    </div>
-                    <div className="text-[10px] mt-0.5 truncate">{v.label}</div>
-                  </button>
-                ))}
-              </div>
-            </div>
-          )}
 
           {/* Pitch */}
           <div className="space-y-1">
@@ -1054,7 +886,7 @@ export const MasterVoiceprintModal: React.FC<MasterVoiceprintModalProps> = ({
         {/* Global Default Toggle */}
         <div className="p-3 rounded-xl bg-[#f8fafc] dark:bg-[#0e1726]/85 aurora:bg-[#101c23]/90 border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] flex items-center justify-between gap-3">
           <div className="text-xs font-semibold text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8]">
-            {cloneMode === 'voice_clone' ? '发语音时默认使用此克隆声纹' : '设为默认语音合成预设'}
+            发语音时默认使用此克隆声纹
           </div>
           <button
             type="button"
@@ -1084,11 +916,7 @@ export const MasterVoiceprintModal: React.FC<MasterVoiceprintModalProps> = ({
           </button>
         ) : (
           <span className="text-[11px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5]">
-            {voiceprint
-              ? cloneMode === 'voice_clone'
-                ? '已配置个人声纹克隆模型'
-                : '已关联语音合成预设'
-              : '上传/录制样本或选择预设后保存'}
+            {voiceprint ? '已配置个人声纹克隆模型' : '上传或录制声纹样本后保存'}
           </span>
         )}
 
@@ -1099,7 +927,7 @@ export const MasterVoiceprintModal: React.FC<MasterVoiceprintModalProps> = ({
           className="px-4 py-2 rounded-lg bg-[#2481cc] hover:bg-[#1d6fb3] dark:bg-[#2ba0ff] dark:hover:bg-[#1e8ee8] aurora:bg-[#0d9488] aurora:hover:bg-[#0f766e] text-white font-medium text-xs flex items-center gap-1.5 shadow-xs transition-colors cursor-pointer disabled:opacity-50"
         >
           {isSaving ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Check className="w-3.5 h-3.5" />}
-          <span>{cloneMode === 'voice_clone' ? '保存声纹克隆配置' : '保存预设音色配置'}</span>
+          <span>保存声纹克隆配置</span>
         </button>
       </div>
     </>

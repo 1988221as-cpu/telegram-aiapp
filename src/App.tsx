@@ -4610,6 +4610,7 @@ export default function App() {
           customLLMConfig={customLLMConfig}
           currentAccountId={activeAccountId}
           onOpenKnowledgeEvolution={() => toggleRightPanel('persona')}
+          onOpenVoiceprintConfig={() => openRightPanel('voice')}
           onOpenCustomerMemory={toggleChatMemoryPanel}
           isCustomerMemoryOpen={isChatMemoryOpen}
           activeRightPanel={activeRightPanel}

@@ -50,6 +50,7 @@ import {
 } from 'lucide-react';
 import { Chat, Message, TranslationSettings, MasterVoiceprint, TelegramStickerItem, TelegramContact, TelegramChatFullInfo } from '../types';
 import { VoiceCloneStudioModal } from './VoiceCloneStudioModal';
+import { MasterVoiceprintModal } from './MasterVoiceprintModal';
 import { TelegramEmojiPicker } from './TelegramEmojiPicker';
 import { TelegramChatInfoDrawer } from './TelegramChatInfoDrawer';
 import type { RightPanelTab } from './UnifiedRightDock';
@@ -479,6 +480,7 @@ interface ChatAreaProps {
   onLoadOlderMessages?: (chatId: string, offsetId: number) => Promise<{ ok: boolean; count: number; hasMore: boolean; error?: string }>;
   onMessagesSynced?: (synced: Message[], meta?: { hasMore?: boolean; readOutboxMaxId?: number; fromLocalFallback?: boolean; chatId?: string; accountId?: string }) => void;
   onOpenKnowledgeEvolution?: () => void;
+  onOpenVoiceprintConfig?: () => void;
   onOpenCustomerMemory?: () => void;
   isCustomerMemoryOpen?: boolean;
   onDeleteMessage?: (messageId: string, options?: { revoke?: boolean }) => void | Promise<{ ok: boolean; error?: string } | void>;
@@ -639,6 +641,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
   onLoadOlderMessages,
   onMessagesSynced,
   onOpenKnowledgeEvolution,
+  onOpenVoiceprintConfig,
   onOpenCustomerMemory,
   isCustomerMemoryOpen = false,
   onDeleteMessage,
@@ -730,6 +733,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
   const recordDurationRef = useRef<number>(0);
   const [retryingMsgIds, setRetryingMsgIds] = useState<Set<string>>(new Set());
   const [isVoiceStudioOpen, setIsVoiceStudioOpen] = useState(false);
+  const [isVoiceprintModalOpen, setIsVoiceprintModalOpen] = useState(false);
   const [isSynthesizingVoice, setIsSynthesizingVoice] = useState(false);
   const [masterVoiceprint, setMasterVoiceprint] = useState<MasterVoiceprint | null>(null);
   const [activePersonaName, setActivePersonaName] = useState<string>('默认人设');
@@ -3201,13 +3205,17 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
     const originChatId = chat.id;
     const originAccountId = currentAccountId;
     const originReplyPayload = replyingTo ? buildReplyPayload(replyingTo, chat.title) : undefined;
-    const mv = masterVoiceprint || getMasterVoiceprint();
-    const isMasterVoiceClone = Boolean(
-      mv?.cloneMode === 'voice_clone' && (mv.sampleId || mv.sampleAudioUrl || mv.cloneVoiceId)
+    const mv = getMasterVoiceprint() || masterVoiceprint;
+    const hasVoiceCloneSample = Boolean(
+      mv && (mv.sampleId || mv.sampleAudioUrl || mv.cloneVoiceId?.trim())
     );
-    const hasSavedVoice = Boolean(mv && (isMasterVoiceClone || mv.baseVoice));
-    if (!hasSavedVoice || !mv) {
-      showSyncNotice('尚未保存声纹样本或预设音色，请先在右侧「音色」面板配置并保存', 4000);
+    if (!hasVoiceCloneSample || !mv) {
+      showSyncNotice('尚未配置个人声纹样本或 Voice ID，请先在「真人声纹样本克隆」中上传或录制并保存', 4500);
+      if (onOpenVoiceprintConfig) {
+        onOpenVoiceprintConfig();
+      } else {
+        setIsVoiceprintModalOpen(true);
+      }
       return;
     }
 
@@ -3269,51 +3277,32 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
         }
       }
 
-      // 2. 读取已保存声纹模型与网关参数，直接调用合成接口
-      const isCustomPriority = Boolean(
-        customLLMConfig &&
-          customLLMConfig.enabled !== false &&
-          !customLLMConfig.explicitlyDisabled &&
-          customLLMConfig.engineMode === 'custom'
-      );
-      const isCustomGeminiGateway = Boolean(
-        isCustomPriority &&
-          (customLLMConfig?.protocol === 'gemini' ||
-            (customLLMConfig?.baseUrl || '').toLowerCase().includes('googleapis.com'))
-      );
-      const isCustomOpenAiGateway = Boolean(isCustomPriority && !isCustomGeminiGateway);
-
+      // 2. 读取已保存个人声纹样本与克隆引擎参数，直接调用 /api/audio/tts-clone
+      const cloneProvider = mv.cloneProvider || 'elevenlabs';
+      const cloneFallback =
+        cloneProvider === 'elevenlabs'
+          ? 'eleven_multilingual_v2'
+          : cloneProvider === 'siliconflow_cosyvoice'
+          ? 'FunAudioLLM/CosyVoice2-0.5B'
+          : cloneProvider === 'gpt_sovits'
+          ? 'gpt-sovits'
+          : 'tts-1';
       const savedTts = mv.ttsModel?.trim() || '';
-      let ttsEngine = 'gemini-3.8-flash-tts';
-      if (isMasterVoiceClone) {
-        const cloneFallback =
-          mv.cloneProvider === 'elevenlabs'
-            ? 'eleven_multilingual_v2'
-            : mv.cloneProvider === 'siliconflow_cosyvoice'
-            ? 'FunAudioLLM/CosyVoice2-0.5B'
-            : 'tts-1';
-        ttsEngine = savedTts && !/^gemini-/i.test(savedTts) ? savedTts : cloneFallback;
-      } else if (isCustomOpenAiGateway) {
-        ttsEngine = savedTts && !/^gemini-/i.test(savedTts) ? savedTts : 'tts-1';
-      } else if (savedTts) {
-        ttsEngine = savedTts;
-      }
+      const ttsEngine = savedTts && !/^gemini-/i.test(savedTts) ? savedTts : cloneFallback;
 
       const speedRate = typeof mv.rate === 'number' && Number.isFinite(mv.rate) ? mv.rate : 1.0;
       const pitchRate = typeof mv.pitch === 'number' && Number.isFinite(mv.pitch) ? mv.pitch : 1.0;
-      const voiceClonePayload: VoiceCloneRequestOptions | undefined = isMasterVoiceClone
-        ? {
-            cloneMode: 'voice_clone',
-            sampleId: mv.sampleId,
-            sampleAudioDataUrl: !mv.sampleId ? mv.sampleAudioUrl : undefined,
-            sampleName: mv.name,
-            sampleTranscript: mv.sampleTranscript,
-            cloneProvider: mv.cloneProvider || 'elevenlabs',
-            cloneGatewayUrl: mv.cloneGatewayUrl,
-            cloneApiKey: mv.cloneApiKey,
-            cloneVoiceId: mv.cloneVoiceId,
-          }
-        : undefined;
+      const voiceClonePayload: VoiceCloneRequestOptions = {
+        cloneMode: 'voice_clone',
+        sampleId: mv.sampleId,
+        sampleAudioDataUrl: !mv.sampleId ? mv.sampleAudioUrl : undefined,
+        sampleName: mv.name || '克隆声纹',
+        sampleTranscript: mv.sampleTranscript,
+        cloneProvider,
+        cloneGatewayUrl: mv.cloneGatewayUrl,
+        cloneApiKey: mv.cloneApiKey,
+        cloneVoiceId: mv.cloneVoiceId,
+      };
 
       const res = await generateTTSVoice(
         speechText,
@@ -3326,16 +3315,16 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
         {
           speechRate: speedRate,
           pitch: pitchRate,
-          ...(voiceClonePayload ? { voiceClone: voiceClonePayload } : {}),
+          voiceClone: voiceClonePayload,
         }
       );
 
       if (!res?.audioUrl || res.error) {
-        showSyncNotice('请检查合成通道', 4000);
+        showSyncNotice(res?.error || '语音合成失败，请检查声纹克隆通道配置', 4500);
         return;
       }
 
-      if (res.clonedVoiceId && isMasterVoiceClone && res.clonedVoiceId !== mv.cloneVoiceId) {
+      if (res.clonedVoiceId && res.clonedVoiceId !== mv.cloneVoiceId) {
         const updatedVp: MasterVoiceprint = {
           ...mv,
           cloneVoiceId: res.clonedVoiceId,
@@ -3350,18 +3339,16 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
         text: speechText,
         audioUrl: res.audioUrl,
         audioDuration,
-        voiceName: isMasterVoiceClone
-          ? `${mv.name || '个人克隆声纹'} (声纹克隆)`
-          : `${mv.name || '个人预设'} (${mv.baseVoice || 'Kore'})`,
+        voiceName: `${mv.name || '克隆声纹'} (声纹克隆)`,
         voiceTone: '💫 自然日常',
         isMasterVoice: true,
         chatId: originChatId,
         accountId: originAccountId,
         replyTo: originReplyPayload,
       });
-    } catch {
+    } catch (err: any) {
       if (isSameOriginScope(originChatId, originAccountId)) {
-        showSyncNotice('请检查合成通道', 4000);
+        showSyncNotice(err?.message || '语音合成请求异常，请检查声纹克隆通道', 4500);
       }
     } finally {
       setIsSynthesizingVoice(false);
@@ -5519,8 +5506,14 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
 
               <button
                 type="button"
-                onClick={() => setIsVoiceStudioOpen(true)}
-                title="语音合成"
+                onClick={() => {
+                  if (onOpenVoiceprintConfig) {
+                    onOpenVoiceprintConfig();
+                  } else {
+                    setIsVoiceprintModalOpen(true);
+                  }
+                }}
+                title="真人声纹样本克隆"
                 className="w-8 h-8 rounded-lg flex items-center justify-center text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] hover:text-[#2481cc] dark:hover:text-[#2ba0ff] aurora:hover:text-[#5eead4] hover:bg-[#e2e8f0]/60 dark:hover:bg-[#152438] aurora:hover:bg-[#152934] transition-colors cursor-pointer"
               >
                 <AudioWaveform className="w-4 h-4" />
@@ -5642,6 +5635,13 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
         targetLangName={getLanguageDisplayName(outboundTargetLang)}
         customConfig={customLLMConfig}
         onSendVoice={handleTriggerVoiceCloneSend}
+      />
+
+      {/* Fallback Standalone MasterVoiceprintModal when onOpenVoiceprintConfig is not provided */}
+      <MasterVoiceprintModal
+        isOpen={isVoiceprintModalOpen}
+        onClose={() => setIsVoiceprintModalOpen(false)}
+        onVoiceprintSaved={(vp) => setMasterVoiceprint(vp)}
       />
 
       {/* Telegram Message Context Menu Popup (Right-Click) */}
