@@ -35,7 +35,7 @@ jobs:
         run: npm install electron@31.0.0 electron-builder@24.13.3 --save-dev --legacy-peer-deps
 
       - name: Package Windows App (.exe)
-        run: npx electron-builder --win nsis portable
+        run: npx electron-builder --win nsis portable --publish never
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 

@@ -383,7 +383,15 @@ export const SystemSettingsModal: React.FC<SystemSettingsModalProps> = ({
             >
               {isCheckingUpdate ? '检查中...' : '检查更新'}
             </button>
-            {updaterState?.status === 'downloading' ? (
+            {updaterState?.status === 'checking' ? (
+              <button
+                type="button"
+                onClick={onOpenUpdateModal}
+                className="text-[11px] text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf] hover:underline truncate cursor-pointer"
+              >
+                正在校验更新清单...
+              </button>
+            ) : updaterState?.status === 'downloading' ? (
               <button
                 type="button"
                 onClick={onOpenUpdateModal}
@@ -398,6 +406,23 @@ export const SystemSettingsModal: React.FC<SystemSettingsModalProps> = ({
                 className="text-[11px] font-medium text-[#16a34a] dark:text-[#4ade80] hover:underline truncate cursor-pointer"
               >
                 新版已就绪，点击重启更新
+              </button>
+            ) : updaterState?.status === 'installing' ? (
+              <button
+                type="button"
+                onClick={onOpenUpdateModal}
+                className="text-[11px] font-medium text-[#16a34a] dark:text-[#4ade80] hover:underline truncate cursor-pointer"
+              >
+                正在重启安装更新...
+              </button>
+            ) : updaterState?.status === 'error' ? (
+              <button
+                type="button"
+                onClick={onOpenUpdateModal}
+                title={updaterState.error || '更新失败，点击查看详情并重试'}
+                className="text-[11px] font-medium text-rose-600 dark:text-rose-400 hover:underline truncate cursor-pointer"
+              >
+                {updaterState.error ? `更新失败：${updaterState.error}` : '更新失败，点击查看详情'}
               </button>
             ) : updateCheckMessage ? (
               <span className="text-[11px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] truncate">

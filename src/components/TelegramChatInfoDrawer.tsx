@@ -27,6 +27,7 @@ import {
 import { Chat, Message, TelegramChatFullInfo, TelegramContact } from '../types';
 import {
   fetchTelegramChatFullInfoApi,
+  removeTelegramGroupMemberApi,
   addTelegramUserContactApi,
   blockTelegramUserContactApi,
   unblockTelegramUserContactApi,
@@ -99,6 +100,9 @@ export const TelegramChatInfoDrawer: React.FC<TelegramChatInfoDrawerProps> = ({
   const [confirmAddContact, setConfirmAddContact] = useState(false);
   const [addContactName, setAddContactName] = useState('');
   const [isAddingContact, setIsAddingContact] = useState(false);
+  const [confirmRemoveMemberId, setConfirmRemoveMemberId] = useState<string | null>(null);
+  const [removingMemberId, setRemovingMemberId] = useState<string | null>(null);
+  const [memberActionError, setMemberActionError] = useState<string | null>(null);
   const [copiedField, setCopiedField] = useState<'username' | 'phone' | 'id' | 'inviteLink' | null>(null);
   const copyTimerRef = useRef<number | null>(null);
   const [refreshedUrlsMap, setRefreshedUrlsMap] = useState<Record<string, string>>({});
@@ -199,6 +203,9 @@ export const TelegramChatInfoDrawer: React.FC<TelegramChatInfoDrawerProps> = ({
     setConfirmBlockToggle(false);
     setConfirmDeleteContact(false);
     setConfirmAddContact(false);
+    setConfirmRemoveMemberId(null);
+    setRemovingMemberId(null);
+    setMemberActionError(null);
     setCopiedField(null);
     setAddContactName(chat.title || '');
     if (chat.id.startsWith('tg_')) {
@@ -1118,16 +1125,29 @@ export const TelegramChatInfoDrawer: React.FC<TelegramChatInfoDrawerProps> = ({
                   <span className="tabular-nums">
                     成员列表 ({fullInfo?.memberCount ?? chat.memberCount ?? fullInfo?.participants?.length ?? 0})
                   </span>
-                  <button
-                    type="button"
-                    onClick={() => void loadFullInfo()}
-                    disabled={isLoadingFullInfo}
-                    className="text-[#2481cc] dark:text-[#7cc4ff] aurora:text-[#5eead4] hover:underline flex items-center gap-1 font-normal normal-case cursor-pointer"
-                  >
-                    <RefreshCw className={`w-3 h-3 ${isLoadingFullInfo ? 'animate-spin' : ''}`} />
-                    刷新
-                  </button>
+                  <div className="flex items-center gap-2">
+                    {fullInfo?.canRemoveMembers && (
+                      <span className="px-1.5 py-0.5 rounded bg-[#2481cc]/10 dark:bg-[#2ba0ff]/15 aurora:bg-[#2dd4bf]/15 text-[#2481cc] dark:text-[#7cc4ff] aurora:text-[#5eead4] text-[10px] font-medium normal-case">
+                        {fullInfo.currentUserRole === 'creator' ? '群主权限' : '管理权限'}
+                      </span>
+                    )}
+                    <button
+                      type="button"
+                      onClick={() => void loadFullInfo()}
+                      disabled={isLoadingFullInfo}
+                      className="text-[#2481cc] dark:text-[#7cc4ff] aurora:text-[#5eead4] hover:underline flex items-center gap-1 font-normal normal-case cursor-pointer"
+                    >
+                      <RefreshCw className={`w-3 h-3 ${isLoadingFullInfo ? 'animate-spin' : ''}`} />
+                      刷新
+                    </button>
+                  </div>
                 </div>
+                {memberActionError && (
+                  <div className="px-2.5 py-2 rounded-xl bg-rose-500/10 border border-rose-500/25 text-[11px] text-rose-700 dark:text-rose-400 aurora:text-rose-400 flex items-center gap-1.5">
+                    <AlertCircle className="w-3.5 h-3.5 shrink-0" />
+                    <span>{memberActionError}</span>
+                  </div>
+                )}
 
                 {isLoadingFullInfo ? (
                   <div className="py-10 flex flex-col items-center justify-center text-xs text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5]">
@@ -1147,7 +1167,20 @@ export const TelegramChatInfoDrawer: React.FC<TelegramChatInfoDrawerProps> = ({
                     {chat.id.startsWith('tg_') ? '暂无可展示的成员列表数据' : '非 Telegram 云端群组，无云端成员列表'}
                   </div>
                 ) : (
-                  fullInfo.participants.map((member) => (
+                  fullInfo.participants.map((member) => {
+                    const selfTgId = accountId?.startsWith('acc_tg_') ? `tg_${accountId.replace(/^acc_tg_/, '')}` : '';
+                    const isSelfMember = Boolean(selfTgId && member.id === selfTgId);
+                    const canRemoveTarget = Boolean(
+                      fullInfo?.canRemoveMembers &&
+                      chat.id.startsWith('tg_') &&
+                      accountId !== 'acc_telegram_bot' &&
+                      !isSelfMember &&
+                      member.role !== 'creator' &&
+                      (member.role !== 'admin' || fullInfo.currentUserRole === 'creator')
+                    );
+                    const isConfirmingRemove = confirmRemoveMemberId === member.id;
+                    const isRemovingThis = removingMemberId === member.id;
+                    return (
                     <div
                       key={member.id}
                       onClick={() => onSelectMember?.(member)}
@@ -1186,21 +1219,102 @@ export const TelegramChatInfoDrawer: React.FC<TelegramChatInfoDrawerProps> = ({
                           </div>
                         </div>
                       </div>
-                      {member.role === 'creator' ? (
-                        <span className="text-[11px] text-[#2481cc] dark:text-[#7cc4ff] aurora:text-[#5eead4] font-medium shrink-0">
-                          群主
-                        </span>
-                      ) : member.role === 'admin' ? (
-                        <span className="text-[11px] text-amber-700 dark:text-amber-400 aurora:text-amber-400 font-medium shrink-0">
-                          管理员
-                        </span>
-                      ) : member.isBot ? (
-                        <span className="text-[11px] text-emerald-700 dark:text-emerald-400 aurora:text-emerald-400 font-medium shrink-0">
-                          Bot
-                        </span>
-                      ) : null}
+                      <div className="flex items-center gap-1.5 shrink-0 ml-2" onClick={(e) => isConfirmingRemove && e.stopPropagation()}>
+                        {member.role === 'creator' ? (
+                          <span className="text-[11px] text-[#2481cc] dark:text-[#7cc4ff] aurora:text-[#5eead4] font-medium shrink-0">
+                            群主
+                          </span>
+                        ) : member.role === 'admin' ? (
+                          <span className="text-[11px] text-amber-700 dark:text-amber-400 aurora:text-amber-400 font-medium shrink-0">
+                            管理员
+                          </span>
+                        ) : member.isBot ? (
+                          <span className="text-[11px] text-emerald-700 dark:text-emerald-400 aurora:text-emerald-400 font-medium shrink-0">
+                            Bot
+                          </span>
+                        ) : null}
+                        {canRemoveTarget && (
+                          isConfirmingRemove ? (
+                            <div className="flex items-center gap-1">
+                              <button
+                                type="button"
+                                disabled={isRemovingThis}
+                                onClick={async (e) => {
+                                  e.stopPropagation();
+                                  setMemberActionError(null);
+                                  setRemovingMemberId(member.id);
+                                  try {
+                                    const res = await removeTelegramGroupMemberApi({
+                                      accountId,
+                                      chatId: chat.id,
+                                      memberId: member.id,
+                                    });
+                                    if (!res.ok) {
+                                      setMemberActionError(res.error || '移除成员失败');
+                                      return;
+                                    }
+                                    setConfirmRemoveMemberId(null);
+                                    const currentParticipants = fullInfo?.participants || [];
+                                    const nextParticipants = currentParticipants.filter((p) => p.id !== member.id);
+                                    const nextMemberCount =
+                                      typeof fullInfo?.memberCount === 'number'
+                                        ? Math.max(0, fullInfo.memberCount - 1)
+                                        : nextParticipants.length;
+                                    setFullInfo((prev) => {
+                                      if (!prev) return prev;
+                                      const filtered = (prev.participants || []).filter((p) => p.id !== member.id);
+                                      return {
+                                        ...prev,
+                                        participants: filtered,
+                                        memberCount:
+                                          typeof prev.memberCount === 'number'
+                                            ? Math.max(0, prev.memberCount - 1)
+                                            : filtered.length,
+                                      };
+                                    });
+                                    if (fullInfo) {
+                                      onChatInfoUpdated?.(chat.id, { memberCount: nextMemberCount });
+                                    }
+                                  } finally {
+                                    setRemovingMemberId(null);
+                                  }
+                                }}
+                                className="px-2 py-0.5 rounded-md bg-rose-600 hover:bg-rose-700 text-white text-[10px] font-medium cursor-pointer disabled:opacity-50"
+                              >
+                                {isRemovingThis ? '移除中' : '确认移除'}
+                              </button>
+                              <button
+                                type="button"
+                                disabled={isRemovingThis}
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setConfirmRemoveMemberId(null);
+                                }}
+                                className="px-1.5 py-0.5 rounded-md bg-[#e2e8f0] dark:bg-[#132234] aurora:bg-[#13252e] text-[#475569] dark:text-[#b4c6d8] text-[10px] cursor-pointer"
+                              >
+                                取消
+                              </button>
+                            </div>
+                          ) : (
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setMemberActionError(null);
+                                setConfirmRemoveMemberId(member.id);
+                              }}
+                              title={`将 ${member.name} 移出群组`}
+                              className="px-2 py-0.5 rounded-md border border-rose-500/30 bg-rose-500/10 hover:bg-rose-500/20 text-rose-700 dark:text-rose-400 aurora:text-rose-400 text-[10px] font-medium inline-flex items-center gap-0.5 cursor-pointer transition-colors"
+                            >
+                              <UserMinus className="w-3 h-3" />
+                              <span>移除</span>
+                            </button>
+                          )
+                        )}
+                      </div>
                     </div>
-                  ))
+                    );
+                  })
                 )}
               </div>
             )}

@@ -508,6 +508,30 @@ async function loadScopedCallRecordsAsync(accountId?: string): Promise<TelegramC
   return [];
 }
 
+const ALLOWED_CLOUD_TRANSLATE_MODELS = new Set([
+  'gemma-4-26b-a4b-it',
+  'gemma-4-31b-it',
+  'qwen/qwen3.8-27b',
+  'openai/gpt-oss-120b',
+  'openai/gpt-oss-20b',
+]);
+
+function normalizeCloudTranslateModel(rawModel?: unknown): string {
+  const trimmed = typeof rawModel === 'string' ? rawModel.trim() : '';
+  const lowered = trimmed.toLowerCase();
+  if (
+    !trimmed ||
+    lowered === 'auto' ||
+    lowered === 'fastest' ||
+    lowered === 'cloud_auto' ||
+    ALLOWED_CLOUD_TRANSLATE_MODELS.has(lowered) ||
+    (lowered.includes('31b') && lowered.includes('gemma'))
+  ) {
+    return 'auto';
+  }
+  return 'auto';
+}
+
 function normalizeLoadedTranslationSettings(raw: any): TranslationSettings {
   if (!raw || typeof raw !== 'object') return INITIAL_TRANSLATION_SETTINGS;
   const rawEngine = raw.preferredEngine;
@@ -515,7 +539,7 @@ function normalizeLoadedTranslationSettings(raw: any): TranslationSettings {
     rawEngine === 'google' || rawEngine === 'custom_llm' || rawEngine === 'gemini'
       ? rawEngine
       : 'gemini';
-  const normalizedGemmaModel = 'gemma-4-26b-a4b-it';
+  const normalizedGemmaModel = normalizeCloudTranslateModel(raw.geminiModel);
   const merged: TranslationSettings = {
     ...INITIAL_TRANSLATION_SETTINGS,
     ...raw,
@@ -1078,7 +1102,7 @@ export default function App() {
         const rawEngine = (rawSavedTrans as any).preferredEngine;
         const normalizedEngine: 'gemini' | 'google' | 'custom_llm' =
           rawEngine === 'google' || rawEngine === 'custom_llm' || rawEngine === 'gemini' ? rawEngine : 'gemini';
-        const normalizedGemmaModel = 'gemma-4-26b-a4b-it';
+        const normalizedGemmaModel = normalizeCloudTranslateModel((rawSavedTrans as any).geminiModel);
         const mergedTrans: TranslationSettings = {
           ...INITIAL_TRANSLATION_SETTINGS,
           ...rawSavedTrans,
@@ -1310,7 +1334,7 @@ export default function App() {
                 rawEngine === 'google' || rawEngine === 'custom_llm' || rawEngine === 'gemini'
                   ? rawEngine
                   : 'gemini';
-              const normalizedGemmaModel = 'gemma-4-26b-a4b-it';
+              const normalizedGemmaModel = normalizeCloudTranslateModel(unwrappedTrans?.geminiModel);
               const mergedServerTrans: TranslationSettings = {
                 ...INITIAL_TRANSLATION_SETTINGS,
                 ...unwrappedTrans,

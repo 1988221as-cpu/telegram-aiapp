@@ -87,6 +87,8 @@ export interface TelegramChatFullInfo {
   isSelf?: boolean;
   memberCount?: number;
   onlineCount?: number;
+  currentUserRole?: 'creator' | 'admin' | 'member';
+  canRemoveMembers?: boolean;
   inviteLink?: string;
   participants?: TelegramChatParticipant[];
   participantsError?: string;

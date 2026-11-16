@@ -31,7 +31,7 @@ export const INITIAL_TRANSLATION_SETTINGS: TranslationSettings = {
   autoTranslatePrivate: true,
   showOriginalAndTranslation: true,
   preferredEngine: 'gemini',
-  geminiModel: 'gemma-4-26b-a4b-it',
+  geminiModel: 'auto',
   customModelName: 'gpt-4o-mini',
 };
 

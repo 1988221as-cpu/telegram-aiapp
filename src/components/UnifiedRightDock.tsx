@@ -157,7 +157,7 @@ export const UnifiedRightDock: React.FC<UnifiedRightDockProps> = ({
                       ? '双关模式 · 仅支持谷歌机翻'
                       : customLLMConfig.enabled && customLLMConfig.engineMode === 'custom'
                       ? '自有密钥模式 · 锁定自定义模型'
-                      : '官方引擎模式 · 支持谷歌机翻 / Gemma 4'
+                      : '官方引擎模式 · 支持谷歌机翻 / 云端大模型'
                     : activePanel === 'voice'
                     ? '个人声纹样本、克隆引擎与语速音高配置'
                     : '人设档案、五阶提示词与试聊'}

@@ -2082,9 +2082,15 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
       return;
     }
 
-    const currentPreviewContext = `${outboundTargetLang}|${effectiveOutboundEngine}`;
+    const currentPreviewContext = `${outboundTargetLang}|${effectiveOutboundEngine}|${translationSettings?.geminiModel || ''}|${translationSettings?.customModelName || ''}`;
+    if (previewContextRef.current !== currentPreviewContext) {
+      setTranslatedPreview('');
+      setTranslatedPreviewSource('');
+      setPreviewError('');
+      previewContextRef.current = currentPreviewContext;
+    }
     if (isLlmOutboundEngine) {
-      if (translatedPreviewSource !== queryText || previewContextRef.current !== currentPreviewContext) {
+      if (translatedPreviewSource !== queryText) {
         setTranslatedPreview('');
         setTranslatedPreviewSource('');
         setPreviewError('');
@@ -2203,7 +2209,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
         }
       );
       if (!controller.signal.aborted && (textareaRef.current?.value.trim() === queryText || inputText.trim() === queryText)) {
-        previewContextRef.current = `${outboundTargetLang}|${effectiveOutboundEngine}`;
+        previewContextRef.current = `${outboundTargetLang}|${effectiveOutboundEngine}|${translationSettings?.geminiModel || ''}|${translationSettings?.customModelName || ''}`;
         setTranslatedPreview(trans);
         setTranslatedPreviewSource(queryText);
         setPreviewError('');

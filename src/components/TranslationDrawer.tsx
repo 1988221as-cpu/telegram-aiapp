@@ -404,7 +404,7 @@ export const TranslationDrawer: React.FC<TranslationDrawerProps> = ({
               ? `当前主引擎：优先自有密钥回复（支持「谷歌机翻」或「自定义模型」，型号：${currentCustomModel}）`
               : masterMode === 'dual_off'
               ? '当前主引擎：双关状态（官方与自有大模型均已关闭，仅允许使用「谷歌机翻」）'
-              : '当前主引擎：官方大模型优先（仅支持「谷歌机翻」或「谷歌大模型 Gemma 4」，不可选自定义模型）'}
+              : '当前主引擎：官方大模型优先（支持「谷歌机翻」或「云端大模型」，多通道智能测速排队、最快优先）'}
           </div>
           <p className="text-[10.5px] leading-snug text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5]">
             说明：对方发来的消息（私聊与群聊）及历史消息统一使用「谷歌机翻」不占密钥；选中大模型通道时，仅用于我方输入与发出的聊天消息。
@@ -439,7 +439,7 @@ export const TranslationDrawer: React.FC<TranslationDrawerProps> = ({
               );
             })()}
 
-            {/* Option 2: Google Gemma LLM (Allowed ONLY in 'cloud') */}
+            {/* Option 2: Cloud Knowledge Base LLM (Gemma 4 / Qwen3.8 / GPT-OSS, Allowed ONLY in 'cloud') */}
             {(() => {
               const allowed = masterMode === 'cloud';
               const active = settings.preferredEngine === 'gemini' && allowed;
@@ -452,8 +452,8 @@ export const TranslationDrawer: React.FC<TranslationDrawerProps> = ({
                         type: masterMode === 'dual_off' ? 'dual_off' : 'locked_custom',
                         message:
                           masterMode === 'dual_off'
-                            ? '当前处于双关状态，谷歌大模型已禁用，仅支持「谷歌机翻」；请前往「模型」开启官方大模型或优先自有密钥。'
-                            : '已开启「优先自有密钥回复」，官方谷歌大模型已关闭，当前仅支持「自定义模型」翻译。',
+                            ? '当前处于双关状态，云端大模型已禁用，仅支持「谷歌机翻」；请前往「模型」开启官方大模型或优先自有密钥。'
+                            : '已开启「优先自有密钥回复」，官方云端大模型已关闭，当前仅支持「自定义模型」翻译。',
                       });
                       return;
                     }
@@ -461,7 +461,7 @@ export const TranslationDrawer: React.FC<TranslationDrawerProps> = ({
                     onUpdateSettings({
                       ...settings,
                       preferredEngine: 'gemini',
-                      geminiModel: 'gemma-4-26b-a4b-it',
+                      geminiModel: 'auto',
                     });
                   }}
                   className={`p-2.5 rounded-lg border text-xs text-left transition-colors ${
@@ -474,10 +474,10 @@ export const TranslationDrawer: React.FC<TranslationDrawerProps> = ({
                 >
                   <div className="font-semibold text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] flex items-center gap-1.5 text-[11px]">
                     <Sparkles className="w-3.5 h-3.5 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf] shrink-0" />
-                    <span className="truncate">谷歌大模型</span>
+                    <span className="truncate">云端大模型</span>
                   </div>
-                  <p className="text-[10px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] mt-1 leading-tight">
-                    {allowed ? 'Gemma 4 直译' : masterMode === 'dual_off' ? '双关已禁用' : '自有模式已关闭'}
+                  <p className="text-[10px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] mt-1 leading-tight truncate">
+                    {allowed ? '多通道智能排队 · 最快优先' : masterMode === 'dual_off' ? '双关已禁用' : '自有模式已关闭'}
                   </p>
                 </button>
               );

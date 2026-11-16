@@ -5311,6 +5311,42 @@ export async function fetchTelegramChatFullInfoApi(
   }
 }
 
+export async function removeTelegramGroupMemberApi(params: {
+  accountId?: string;
+  chatId: string;
+  memberId: string;
+}): Promise<{ ok: boolean; error?: string; code?: string }> {
+  try {
+    const res = await fetchWithTimeout('/api/telegram/user/group/remove-member', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...getAuthHeaders(params.accountId),
+      },
+      credentials: 'include',
+      body: JSON.stringify({
+        accountId: params.accountId,
+        chatId: params.chatId,
+        memberId: params.memberId,
+      }),
+    }, 15000);
+    const data = await res.json().catch(() => null);
+    if (res.ok && data?.ok) {
+      return { ok: true };
+    }
+    return {
+      ok: false,
+      code: data?.code,
+      error: data?.error || `移除群成员失败 (HTTP ${res.status})`,
+    };
+  } catch (err: any) {
+    return {
+      ok: false,
+      error: err?.message || '网络异常，移除群成员失败',
+    };
+  }
+}
+
 export async function fetchTelegramStickersApi(
   accountId?: string
 ): Promise<{ ok: boolean; packs: TelegramStickerPack[]; error?: string }> {

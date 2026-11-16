@@ -875,12 +875,122 @@ function resolveTranslationSettingsScope(accountId?: string): { storageKey: stri
   return { storageKey: `translation_settings::${clean}`, scopedAccId: clean };
 }
 
-export function normalizeCloudGemmaTranslateModel(rawModel?: string): 'gemma-4-26b-a4b-it' | 'gemma-4-31b-it' {
-  const lowered = typeof rawModel === 'string' ? rawModel.trim().toLowerCase() : '';
+export const CLOUD_TRANSLATE_MODELS = [
+  'gemma-4-26b-a4b-it',
+  'openai/gpt-oss-20b',
+  'qwen/qwen3.8-27b',
+  'gemma-4-31b-it',
+  'openai/gpt-oss-120b',
+] as const;
+
+export type CloudTranslateModel = (typeof CLOUD_TRANSLATE_MODELS)[number];
+
+interface CloudTranslateChannelMetric {
+  avgLatencyMs: number | null;
+  sampleCount: number;
+  consecutiveFailures: number;
+  cooldownUntil: number;
+  lastUpdatedAt: number;
+  lastProbedAt: number;
+}
+
+const cloudTranslateChannelMetrics = new Map<CloudTranslateModel, CloudTranslateChannelMetric>();
+const CLOUD_TRANSLATE_REPROBE_INTERVAL_MS = 10 * 60 * 1000;
+const CLOUD_TRANSLATE_COOLDOWN_BASE_MS = 30 * 1000;
+const CLOUD_TRANSLATE_PROBE_LEASE_MS = 15 * 1000;
+
+function getCloudTranslateChannelMetric(model: CloudTranslateModel): CloudTranslateChannelMetric {
+  let entry = cloudTranslateChannelMetrics.get(model);
+  if (!entry) {
+    entry = {
+      avgLatencyMs: null,
+      sampleCount: 0,
+      consecutiveFailures: 0,
+      cooldownUntil: 0,
+      lastUpdatedAt: 0,
+      lastProbedAt: 0,
+    };
+    cloudTranslateChannelMetrics.set(model, entry);
+  }
+  return entry;
+}
+
+export function isAllowedCloudEngineModel(rawModel?: string): boolean {
+  const trimmed = typeof rawModel === 'string' ? rawModel.trim() : '';
+  if (!trimmed) return false;
+  if (/^(gemini|gemma)/i.test(trimmed)) return true;
+  return (CLOUD_TRANSLATE_MODELS as readonly string[]).includes(trimmed.toLowerCase());
+}
+
+export function normalizeCloudGemmaTranslateModel(rawModel?: string): CloudTranslateModel {
+  const trimmed = typeof rawModel === 'string' ? rawModel.trim() : '';
+  const lowered = trimmed.toLowerCase();
+  if (lowered === 'qwen/qwen3.8-27b') return 'qwen/qwen3.8-27b';
+  if (lowered === 'openai/gpt-oss-120b') return 'openai/gpt-oss-120b';
+  if (lowered === 'openai/gpt-oss-20b') return 'openai/gpt-oss-20b';
   if (lowered.includes('31b')) {
     return 'gemma-4-31b-it';
   }
   return 'gemma-4-26b-a4b-it';
+}
+
+export function buildOrderedCloudTranslateQueue(preferredModel?: string): CloudTranslateModel[] {
+  const now = Date.now();
+  const raw = typeof preferredModel === 'string' ? preferredModel.trim().toLowerCase() : '';
+  const hasExplicitModel = Boolean(raw && raw !== 'auto' && raw !== 'fastest' && raw !== 'cloud_auto');
+  const explicitTarget = hasExplicitModel ? normalizeCloudGemmaTranslateModel(preferredModel) : null;
+
+  const active: Array<{ model: CloudTranslateModel; metric: CloudTranslateChannelMetric; baseIdx: number }> = [];
+  const cooling: Array<{ model: CloudTranslateModel; metric: CloudTranslateChannelMetric; baseIdx: number }> = [];
+
+  CLOUD_TRANSLATE_MODELS.forEach((model, baseIdx) => {
+    const metric = getCloudTranslateChannelMetric(model);
+    if (metric.cooldownUntil > now) {
+      cooling.push({ model, metric, baseIdx });
+    } else {
+      active.push({ model, metric, baseIdx });
+    }
+  });
+
+  active.sort((a, b) => {
+    const aHealthy = a.metric.consecutiveFailures === 0;
+    const bHealthy = b.metric.consecutiveFailures === 0;
+    if (aHealthy !== bHealthy) return aHealthy ? -1 : 1;
+    const aHas = a.metric.avgLatencyMs !== null;
+    const bHas = b.metric.avgLatencyMs !== null;
+    if (aHas && bHas) {
+      return (a.metric.avgLatencyMs as number) - (b.metric.avgLatencyMs as number);
+    }
+    if (aHas !== bHas) return aHas ? -1 : 1;
+    return a.baseIdx - b.baseIdx;
+  });
+
+  cooling.sort((a, b) => a.metric.cooldownUntil - b.metric.cooldownUntil || a.baseIdx - b.baseIdx);
+
+  let ordered: CloudTranslateModel[] = [...active, ...cooling].map((x) => x.model);
+
+  if (!explicitTarget && active.length > 0) {
+    const probeCandidate =
+      active.find(
+        (x) =>
+          x.metric.sampleCount === 0 &&
+          x.metric.consecutiveFailures === 0 &&
+          now - x.metric.lastProbedAt > CLOUD_TRANSLATE_PROBE_LEASE_MS
+      ) ||
+      active.find(
+        (x) =>
+          x.metric.lastUpdatedAt > 0 &&
+          now - x.metric.lastUpdatedAt > CLOUD_TRANSLATE_REPROBE_INTERVAL_MS &&
+          now - x.metric.lastProbedAt > CLOUD_TRANSLATE_PROBE_LEASE_MS
+      );
+    if (probeCandidate) {
+      ordered = [probeCandidate.model, ...ordered.filter((m) => m !== probeCandidate.model)];
+    }
+  } else if (explicitTarget) {
+    ordered = [explicitTarget, ...ordered.filter((m) => m !== explicitTarget)];
+  }
+
+  return ordered;
 }
 
 export function normalizeStrictTranslationEngine(engine?: string): 'google' | 'gemini' | 'custom_llm' | null {
@@ -1212,6 +1322,7 @@ export async function callCustomLlm({
   throwOnError = false,
   skipSync = false,
   extraPayload,
+  maxRetries = 1,
 }: {
   customConfig: any;
   messages: Array<{ role: string; content?: string; text?: string; sender?: string }>;
@@ -1223,6 +1334,7 @@ export async function callCustomLlm({
   throwOnError?: boolean;
   skipSync?: boolean;
   extraPayload?: Record<string, any>;
+  maxRetries?: number;
 }): Promise<string | null> {
   const isCloudEngineMode =
     customConfig?.engineMode === 'cloud' ||
@@ -1490,7 +1602,9 @@ export async function callCustomLlm({
         }
       } else {
         // OpenAI Protocol (or Private Cloud Brain Gateway)
-        const candidateUrls = buildCustomOpenAiUrls(cleanBaseUrl);
+        const candidateUrls = isCloudEngineMode
+          ? [`${cleanBaseUrl}/chat/completions`]
+          : buildCustomOpenAiUrls(cleanBaseUrl);
         const cleanKey = sanitizeHttpHeaderValue(customConfig.apiKey);
         const headers: Record<string, string> = isCloudEngineMode
           ? {
@@ -1521,7 +1635,7 @@ export async function callCustomLlm({
         }
 
         const resolvedRequestModel = isCloudEngineMode
-          ? (customConfig.modelName && /^(gemini|gemma)/i.test(String(customConfig.modelName).trim())
+          ? (customConfig.modelName && isAllowedCloudEngineModel(String(customConfig.modelName).trim())
               ? String(customConfig.modelName).trim()
               : 'gemini-4-hydrogen')
           : (normalizeCustomModelId(customConfig.modelName, 'openai') || 'gpt-4o-mini');
@@ -1552,7 +1666,7 @@ export async function callCustomLlm({
                 }),
                 signal: controller.signal,
               },
-              { timeoutMs, maxRetries: 1, baseDelayMs: 250 }
+              { timeoutMs, maxRetries, baseDelayMs: 250 }
             );
 
             if (response.ok) {
@@ -1597,6 +1711,7 @@ export async function callCustomLlm({
           } catch (e: any) {
             lastStatusCode = 503;
             lastErrorMsg = e?.message || String(e);
+            if (controller.signal.aborted) break;
             // try next candidate url
           }
         }
@@ -11272,8 +11387,12 @@ export async function performStrictTranslation({
     };
   }
 
-  // 3. Google Large Model Translation (Gemma 4 26B / 31B) routed via Cloud Knowledge Base LLM
-  const selectedModel = normalizeCloudGemmaTranslateModel(geminiModel);
+  // 3. Cloud Knowledge Base LLM Multi-Channel Translation (Fastest-first adaptive queue)
+  const rawGeminiModel = typeof geminiModel === 'string' ? geminiModel.trim().toLowerCase() : '';
+  const isAutoCloudQueue =
+    !rawGeminiModel || rawGeminiModel === 'auto' || rawGeminiModel === 'fastest' || rawGeminiModel === 'cloud_auto';
+  const channelQueue = buildOrderedCloudTranslateQueue(geminiModel);
+  const primaryModel = channelQueue[0] || 'gemma-4-26b-a4b-it';
   const serverCustomCfg = await getServerCustomLlmConfig().catch(() => null);
   const effectiveLicenseKey =
     (typeof engineLicenseKey === 'string' && engineLicenseKey.trim()) ||
@@ -11286,7 +11405,7 @@ export async function performStrictTranslation({
     undefined;
 
   if (!effectiveUserJwt && !effectiveLicenseKey) {
-    const err: any = new Error('谷歌大模型翻译通道（知识库大模型）未获取到会员授权令牌，请先登录会员账号或在「大模型配置」中填写引擎密钥');
+    const err: any = new Error('云端大模型翻译通道（知识库大模型）未获取到会员授权令牌，请先登录会员账号或在「大模型配置」中填写引擎密钥');
     err.statusCode = 401;
     throw err;
   }
@@ -11297,7 +11416,7 @@ export async function performStrictTranslation({
   ) {
     return {
       translatedText: text,
-      engine: `cloud_kb:${selectedModel}`,
+      engine: `cloud_kb:${isAutoCloudQueue ? 'auto' : primaryModel}`,
     };
   }
 
@@ -11308,39 +11427,81 @@ export async function performStrictTranslation({
     `You are a high-precision real-time translator for Telegram. Translate the user's message accurately into ${targetLabel} (from ${srcDesc}).\n` +
     `Preserve exact meaning, tone, emojis, and line breaks. Output ONLY the final translated text. NEVER output <thought>, <think>, reasoning steps, notes, quotes, explanations, or conversational filler.`;
 
-  const translatedText = await callCustomLlm({
-    customConfig: {
-      enabled: true,
-      engineMode: 'cloud',
-      protocol: 'openai',
-      baseUrl: '',
-      apiKey: '',
-      modelName: selectedModel,
-      temperature: 0.2,
-      engineLicenseKey: effectiveLicenseKey,
-    },
-    systemInstruction: translationSystemPrompt,
-    messages: [{ role: 'user', content: text }],
-    temperature: 0.2,
-    maxTokens: 1600,
-    timeoutMs: 15000,
-    userJwt: effectiveUserJwt,
-    throwOnError: true,
-    skipSync: true,
-    extraPayload: { purpose: 'translation' },
-  });
+  const queueDeadlineAt = Date.now() + 26000;
+  let lastChannelErr: any = null;
+  for (const channelModel of channelQueue) {
+    const remainingBudgetMs = queueDeadlineAt - Date.now();
+    if (remainingBudgetMs < 1500) {
+      break;
+    }
+    const perChannelTimeoutMs = Math.min(7500, remainingBudgetMs);
+    const startedAt = Date.now();
+    const preMetric = getCloudTranslateChannelMetric(channelModel);
+    preMetric.lastProbedAt = startedAt;
+    try {
+      const translatedText = await callCustomLlm({
+        customConfig: {
+          enabled: true,
+          engineMode: 'cloud',
+          protocol: 'openai',
+          baseUrl: '',
+          apiKey: '',
+          modelName: channelModel,
+          temperature: 0.2,
+          engineLicenseKey: effectiveLicenseKey,
+        },
+        systemInstruction: translationSystemPrompt,
+        messages: [{ role: 'user', content: text }],
+        temperature: 0.2,
+        maxTokens: 1600,
+        timeoutMs: perChannelTimeoutMs,
+        maxRetries: 0,
+        userJwt: effectiveUserJwt,
+        throwOnError: true,
+        skipSync: true,
+        extraPayload: { purpose: 'translation' },
+      });
 
-  const cleanedCloudText = stripModelThinkingText(translatedText || '');
-  if (!cleanedCloudText) {
-    const err: any = new Error(`知识库大模型 (${selectedModel}) 未返回有效译文`);
-    err.statusCode = 502;
-    throw err;
+      const cleanedCloudText = stripModelThinkingText(translatedText || '');
+      if (!cleanedCloudText) {
+        const err: any = new Error(`知识库大模型 (${channelModel}) 未返回有效译文`);
+        err.statusCode = 502;
+        throw err;
+      }
+
+      const elapsedMs = Math.max(1, Date.now() - startedAt);
+      const metric = getCloudTranslateChannelMetric(channelModel);
+      metric.avgLatencyMs =
+        metric.avgLatencyMs === null ? elapsedMs : Math.round(metric.avgLatencyMs * 0.6 + elapsedMs * 0.4);
+      metric.sampleCount += 1;
+      metric.consecutiveFailures = 0;
+      metric.cooldownUntil = 0;
+      metric.lastUpdatedAt = Date.now();
+
+      return {
+        translatedText: cleanedCloudText,
+        engine: `cloud_kb:${channelModel}`,
+      };
+    } catch (channelErr: any) {
+      const status = Number(channelErr?.statusCode || 0);
+      if (status === 401 || status === 403) {
+        throw channelErr;
+      }
+      const metric = getCloudTranslateChannelMetric(channelModel);
+      metric.consecutiveFailures += 1;
+      metric.cooldownUntil =
+        Date.now() + Math.min(180000, CLOUD_TRANSLATE_COOLDOWN_BASE_MS * Math.pow(2, metric.consecutiveFailures - 1));
+      metric.lastUpdatedAt = Date.now();
+      lastChannelErr = channelErr;
+    }
   }
 
-  return {
-    translatedText: cleanedCloudText,
-    engine: `cloud_kb:${selectedModel}`,
-  };
+  const fallbackErr: any =
+    lastChannelErr || new Error('云端大模型翻译所有通道均暂不可用，请稍后重试');
+  if (typeof fallbackErr.statusCode !== 'number') {
+    fallbackErr.statusCode = 503;
+  }
+  throw fallbackErr;
 }
 
 // 7. Translation Endpoint (Strictly single selected engine + 3-state mutual exclusion, zero silent hijack)
@@ -23283,6 +23444,36 @@ app.get('/api/telegram/user/chat-info/:chatId', requireTenantAuth, async (req: R
 
       const participants: any[] = [];
       let participantsError: string | undefined;
+      let currentUserRole: 'creator' | 'admin' | 'member' = 'member';
+      let canRemoveMembers = false;
+
+      if (entity.creator || channelObj?.creator) {
+        currentUserRole = 'creator';
+        canRemoveMembers = true;
+      } else if (entity.adminRights || channelObj?.adminRights) {
+        currentUserRole = 'admin';
+        const rights = entity.adminRights || channelObj?.adminRights;
+        canRemoveMembers = Boolean(rights?.banUsers);
+      } else {
+        try {
+          const selfPartRes: any = await client.invoke(
+            new Api.channels.GetParticipant({
+              channel: inputPeer,
+              participant: new Api.InputPeerSelf(),
+            })
+          );
+          const sp = selfPartRes?.participant;
+          if (sp?.className === 'ChannelParticipantCreator') {
+            currentUserRole = 'creator';
+            canRemoveMembers = true;
+          } else if (sp?.className === 'ChannelParticipantAdmin') {
+            currentUserRole = 'admin';
+            canRemoveMembers = Boolean(sp?.adminRights?.banUsers);
+          }
+        } catch {
+          // Non-admin or restricted channel defaults to member / false
+        }
+      }
 
       try {
         const partRes: any = await client.invoke(
@@ -23348,6 +23539,8 @@ app.get('/api/telegram/user/chat-info/:chatId', requireTenantAuth, async (req: R
         inviteLink: fullChat?.exportedInvite?.link ? String(fullChat.exportedInvite.link) : undefined,
         participants,
         participantsError,
+        currentUserRole,
+        canRemoveMembers,
       });
     }
 
@@ -23396,6 +23589,18 @@ app.get('/api/telegram/user/chat-info/:chatId', requireTenantAuth, async (req: R
         participants.length > 0
           ? participants.length
           : (chatObj?.participantsCount ? Number(chatObj.participantsCount) : undefined);
+      const selfParticipant = rawParticipants.find(
+        (p: any) => String(p?.userId ?? '') === String(connected.userId)
+      );
+      let currentUserRole: 'creator' | 'admin' | 'member' = 'member';
+      let canRemoveMembers = false;
+      if (entity.creator || chatObj?.creator || selfParticipant?.className === 'ChatParticipantCreator') {
+        currentUserRole = 'creator';
+        canRemoveMembers = true;
+      } else if (selfParticipant?.className === 'ChatParticipantAdmin') {
+        currentUserRole = 'admin';
+        canRemoveMembers = true;
+      }
 
       return res.json({
         ok: true,
@@ -23410,6 +23615,8 @@ app.get('/api/telegram/user/chat-info/:chatId', requireTenantAuth, async (req: R
         onlineCount,
         inviteLink: fullChat?.exportedInvite?.link ? String(fullChat.exportedInvite.link) : undefined,
         participants,
+        currentUserRole,
+        canRemoveMembers,
       });
     }
 
@@ -23456,6 +23663,223 @@ app.get('/api/telegram/user/chat-info/:chatId', requireTenantAuth, async (req: R
       return res.status(401).json({ ok: false, code: 'TELEGRAM_SESSION_EXPIRED', error: formatTelegramError(err) });
     }
     return res.status(400).json({ ok: false, error: formatTelegramError(err) });
+  }
+});
+
+// 20.3.1u2 Remove Group / Supergroup Member with Strict Creator/Admin Permission Enforcement
+app.post('/api/telegram/user/group/remove-member', requireTenantAuth, async (req: Request, res: Response) => {
+  try {
+    const accountId = (req.body?.accountId as string) || (req.headers['x-account-id'] as string) || '';
+    const chatId = String(req.body?.chatId || '').trim();
+    const memberId = String(req.body?.memberId || '').trim();
+
+    if (!chatId || !memberId) {
+      return res.status(400).json({ ok: false, error: '群组 ID 与目标成员 ID 不能为空' });
+    }
+    if (accountId === 'acc_telegram_bot') {
+      return res.status(400).json({ ok: false, error: 'Bot 模式不支持此群成员管理操作' });
+    }
+
+    const connected = resolveConnectedTelegramUser(accountId);
+    if (!connected || !connected.client) {
+      return res.status(400).json({ ok: false, error: '当前账号未在线连接 Telegram MTProto，无法移除群成员' });
+    }
+
+    const activeFlood = getTelegramFloodCooldown({
+      accountId: accountId || `acc_tg_${connected.userId}`,
+      userId: connected.userId,
+      phone: connected.phone,
+    });
+    if (activeFlood) {
+      return res.status(429).json({
+        ok: false,
+        code: 'TELEGRAM_FLOOD_WAIT',
+        retryAfterSeconds: activeFlood.retryAfterSeconds,
+        floodWaitUntil: activeFlood.floodWaitUntil,
+        error: formatTelegramError({ errorMessage: `FLOOD_WAIT_${activeFlood.retryAfterSeconds}` }),
+      });
+    }
+
+    const cleanMemberId = memberId.replace(/^tg_/, '').trim();
+    if (!cleanMemberId || cleanMemberId === 'me' || cleanMemberId === String(connected.userId)) {
+      return res.status(400).json({ ok: false, error: '不能将当前登录账号自身作为目标成员移除' });
+    }
+    if (!/^\d+$/.test(cleanMemberId)) {
+      return res.status(400).json({ ok: false, error: '无效的群成员用户 ID' });
+    }
+
+    const client = connected.client;
+    const { inputPeer, rawPeer } = await resolveTelegramInputPeer(client, chatId, connected.userId);
+    let entity: any = null;
+    try {
+      entity = await client.getEntity(rawPeer === 'me' ? 'me' : inputPeer);
+    } catch {
+      entity = await client.getEntity(rawPeer);
+    }
+
+    if (entity instanceof Api.Channel) {
+      let isCreator = Boolean(entity.creator);
+      let canBan = isCreator || Boolean(entity.adminRights?.banUsers);
+      if (!isCreator) {
+        try {
+          const selfPartRes: any = await client.invoke(
+            new Api.channels.GetParticipant({
+              channel: inputPeer,
+              participant: new Api.InputPeerSelf(),
+            })
+          );
+          const sp = selfPartRes?.participant;
+          if (sp?.className === 'ChannelParticipantCreator') {
+            isCreator = true;
+            canBan = true;
+          } else if (sp?.className === 'ChannelParticipantAdmin') {
+            canBan = Boolean(sp?.adminRights?.banUsers);
+          } else {
+            canBan = false;
+          }
+        } catch {
+          canBan = false;
+        }
+      }
+
+      if (!canBan) {
+        return res.status(403).json({
+          ok: false,
+          code: 'CHAT_ADMIN_REQUIRED',
+          error: '无权操作：仅群主或拥有“封禁/移除成员”权限的管理员可移除群成员',
+        });
+      }
+
+      let targetPeer: Api.TypeInputPeer | null = null;
+      const resolvedInputUser = await resolveTelegramInputUser(client, cleanMemberId);
+      if (resolvedInputUser) {
+        targetPeer = new Api.InputPeerUser({
+          userId: resolvedInputUser.userId,
+          accessHash: resolvedInputUser.accessHash,
+        });
+      } else {
+        try {
+          const partList: any = await client.invoke(
+            new Api.channels.GetParticipants({
+              channel: inputPeer,
+              filter: new Api.ChannelParticipantsRecent(),
+              offset: 0,
+              limit: 200,
+              hash: returnBigInt(0),
+            })
+          );
+          const matchedUser = (Array.isArray(partList?.users) ? partList.users : []).find(
+            (u: any) => String(u?.id) === cleanMemberId
+          );
+          if (matchedUser?.id !== undefined && matchedUser?.accessHash !== undefined) {
+            targetPeer = new Api.InputPeerUser({
+              userId: matchedUser.id,
+              accessHash: matchedUser.accessHash,
+            });
+          }
+        } catch {}
+      }
+
+      if (!targetPeer) {
+        return res.status(404).json({ ok: false, error: '未找到该群成员信息，请刷新成员列表后重试' });
+      }
+
+      try {
+        const targetPartRes: any = await client.invoke(
+          new Api.channels.GetParticipant({
+            channel: inputPeer,
+            participant: targetPeer,
+          })
+        );
+        const tp = targetPartRes?.participant;
+        if (tp?.className === 'ChannelParticipantCreator') {
+          return res.status(403).json({ ok: false, error: '无法移除群主' });
+        }
+        if (tp?.className === 'ChannelParticipantAdmin' && !isCreator) {
+          return res.status(403).json({ ok: false, error: '权限不足：仅群主可移除其他管理员' });
+        }
+      } catch {}
+
+      await client.invoke(
+        new Api.channels.EditBanned({
+          channel: inputPeer,
+          participant: targetPeer,
+          bannedRights: new Api.ChatBannedRights({
+            untilDate: 0,
+            viewMessages: true,
+          }),
+        })
+      );
+
+      return res.json({ ok: true, chatId, memberId });
+    }
+
+    if (entity instanceof Api.Chat) {
+      const fullRes: any = await client.invoke(new Api.messages.GetFullChat({ chatId: entity.id }));
+      const rawParticipants: any[] = Array.isArray(fullRes?.fullChat?.participants?.participants)
+        ? fullRes.fullChat.participants.participants
+        : [];
+      const selfPart = rawParticipants.find((p: any) => String(p.userId ?? '') === String(connected.userId));
+      const isCreator = Boolean(entity.creator || selfPart?.className === 'ChatParticipantCreator');
+      const isAdmin = isCreator || selfPart?.className === 'ChatParticipantAdmin';
+
+      if (!isAdmin) {
+        return res.status(403).json({
+          ok: false,
+          code: 'CHAT_ADMIN_REQUIRED',
+          error: '无权操作：仅群主或群管理员可移除群成员',
+        });
+      }
+
+      const targetPart = rawParticipants.find((p: any) => String(p.userId ?? '') === cleanMemberId);
+      if (targetPart?.className === 'ChatParticipantCreator') {
+        return res.status(403).json({ ok: false, error: '无法移除群主' });
+      }
+      if (targetPart?.className === 'ChatParticipantAdmin' && !isCreator) {
+        return res.status(403).json({ ok: false, error: '权限不足：仅群主可移除其他管理员' });
+      }
+
+      const matchedUser = (Array.isArray(fullRes?.users) ? fullRes.users : []).find(
+        (u: any) => String(u?.id) === cleanMemberId
+      );
+      const targetInputUser =
+        matchedUser?.id !== undefined && matchedUser?.accessHash !== undefined
+          ? new Api.InputUser({ userId: matchedUser.id, accessHash: matchedUser.accessHash })
+          : await resolveTelegramInputUser(client, cleanMemberId);
+
+      if (!targetInputUser) {
+        return res.status(404).json({ ok: false, error: '未找到该群成员信息，请刷新成员列表后重试' });
+      }
+
+      await client.invoke(
+        new Api.messages.DeleteChatUser({
+          chatId: entity.id,
+          userId: targetInputUser,
+          revokeHistory: false,
+        })
+      );
+
+      return res.json({ ok: true, chatId, memberId });
+    }
+
+    return res.status(400).json({ ok: false, error: '仅支持在群组或频道会话中移除成员' });
+  } catch (err: any) {
+    const rawErr = String(err?.errorMessage || err?.message || '');
+    if (rawErr.includes('CHAT_ADMIN_REQUIRED') || rawErr.includes('USER_ADMIN_INVALID')) {
+      return res.status(403).json({
+        ok: false,
+        code: rawErr.includes('USER_ADMIN_INVALID') ? 'USER_ADMIN_INVALID' : 'CHAT_ADMIN_REQUIRED',
+        error: rawErr.includes('USER_ADMIN_INVALID')
+          ? '权限不足：无法移除群主或同级/上级管理员'
+          : '无权操作：需要群主或具备移除成员权限的管理员身份',
+      });
+    }
+    if (rawErr.includes('USER_NOT_PARTICIPANT')) {
+      return res.status(404).json({ ok: false, error: '该用户已不在当前群组中' });
+    }
+    return await handleMtprotoRouteError(res, err, {
+      accountId: (req.body?.accountId as string) || (req.headers['x-account-id'] as string) || '',
+    }, 400);
   }
 });
 

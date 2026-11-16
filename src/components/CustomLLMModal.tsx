@@ -530,7 +530,7 @@ export const CustomLLMModal: React.FC<CustomLLMModalProps> = ({
               )}
 
               <div className="p-2.5 rounded-lg bg-white dark:bg-[#08101a] aurora:bg-[#081014] border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] text-[11px] text-[#475569] dark:text-[#b4c6d8] aurora:text-[#b7d0d8] leading-relaxed">
-                <div>云端引擎模式负责：<span className="font-medium text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8]">官方大模型智能回复（使用云端自建知识库 Cloud RAG）、谷歌大模型 (Gemma 4 26B / 31B) 翻译、客户全息记忆提炼</span>。</div>
+                <div>云端引擎模式负责：<span className="font-medium text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8]">官方大模型智能回复（使用云端自建知识库 Cloud RAG）、云端大模型多通道智能翻译、客户全息记忆提炼</span>。</div>
                 <div className="mt-1 text-[10.5px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5]">
                   提示：官方大模型只结合个人资料、客户全息记忆与云端自建知识库，不读取软件本地知识库与整文范本库；如需使用软件本地知识库或自定义翻译模型，请前往「接入自有模型网关」开启「启用优先自有密钥回复」。
                 </div>
