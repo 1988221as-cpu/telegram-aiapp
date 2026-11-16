@@ -19088,6 +19088,10 @@ async function finishQrLogin(sessionObj: QrSessionContext, user: any) {
     lastName: user.lastName,
     username: user.username ? `@${user.username}` : '',
     phone: user.phone ? (user.phone.startsWith('+') ? user.phone : `+${user.phone}`) : cleanPhone,
+    avatarUrl: signTelegramResourceUrl(
+      `/api/telegram/user/avatar/${user.id}`,
+      `acc_tg_${user.id}`
+    ),
   };
 
   // Register in-memory connected user client session
@@ -19637,6 +19641,10 @@ app.post('/api/telegram/user/verify-code', requireTenantAuth, authAttemptLimiter
         lastName: me.lastName,
         username: me.username ? `@${me.username}` : '',
         phone: cleanPhone,
+        avatarUrl: signTelegramResourceUrl(
+          `/api/telegram/user/avatar/${me.id}`,
+          `acc_tg_${me.id}`
+        ),
       },
     });
   } catch (err: any) {
@@ -20855,6 +20863,10 @@ app.get('/api/telegram/user/active-accounts', requireTenantAuth, async (_req: Re
         phone: u.phone,
         avatarBg: u.avatarBg,
         avatarInitial: u.avatarInitial,
+        avatarUrl: signTelegramResourceUrl(
+          `/api/telegram/user/avatar/${u.userId}`,
+          `acc_tg_${u.userId}`
+        ),
         connectedAt: u.connectedAt,
         dialogsCount: u.dialogs.length,
         isConnected: realConnected,

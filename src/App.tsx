@@ -1343,13 +1343,24 @@ export default function App() {
       });
     }
 
+    const activeById = new Map<string, any>();
     if (activeAccs && activeAccs.length > 0) {
       activeAccs.forEach((acc: any) => {
+        if (acc?.id) {
+          activeById.set(acc.id, acc);
+        }
         if (!statusById.has(acc.id)) {
           statusById.set(acc.id, acc.isConnected ? 'online' : 'away');
         }
       });
     }
+
+    const shouldRefreshAvatarUrl = (url?: string): boolean => {
+      if (!url) return true;
+      const query = url.includes('?') ? url.split('?')[1] : '';
+      const exp = Number(new URLSearchParams(query).get('exp') || 0);
+      return !exp || exp <= Date.now() + 5 * 60 * 1000;
+    };
 
     setOfflineReasonByAccount(reasonsMap);
 
@@ -1368,7 +1379,12 @@ export default function App() {
                 : realStatus === 'away'
                   ? 'Telegram 账号 (重连中)'
                   : 'Telegram 账号 (未连接)';
-          map.set(a.id, { ...a, status: realStatus, bio: nextBio });
+          const activeMeta = activeById.get(a.id);
+          const nextAvatarUrl =
+            activeMeta?.avatarUrl && shouldRefreshAvatarUrl(a.avatarUrl)
+              ? activeMeta.avatarUrl
+              : a.avatarUrl;
+          map.set(a.id, { ...a, status: realStatus, bio: nextBio, avatarUrl: nextAvatarUrl });
         } else {
           map.set(a.id, a);
         }
@@ -1382,6 +1398,7 @@ export default function App() {
               name: acc.name,
               username: acc.username,
               phone: acc.phone,
+              avatarUrl: acc.avatarUrl,
               avatarBg: acc.avatarBg || '#2481cc',
               avatarInitial: acc.avatarInitial || 'TG',
               unreadTotal: 0,
@@ -3215,6 +3232,7 @@ export default function App() {
       name: newAccountData.name || 'Telegram 账号',
       username: newAccountData.username || `@user_${id.slice(-4)}`,
       phone: newAccountData.phone || '',
+      avatarUrl: newAccountData.avatarUrl,
       avatarBg: newAccountData.avatarBg || '#2481cc',
       avatarInitial: newAccountData.avatarInitial || 'TG',
       unreadTotal: 0,

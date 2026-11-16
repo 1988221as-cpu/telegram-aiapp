@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useState } from 'react';
 import {
   MessageSquare,
   Languages,
@@ -43,6 +43,7 @@ export const LeftSidebar: React.FC<LeftSidebarProps> = ({
   activeTab,
   setActiveTab,
 }) => {
+  const [failedAvatarKeys, setFailedAvatarKeys] = useState<Record<string, string>>({});
   const totalUnread = accounts.reduce((acc, curr) => acc + (curr.unreadTotal || 0), 0);
 
   const railItemClass = (isActive: boolean) =>
@@ -168,6 +169,8 @@ export const LeftSidebar: React.FC<LeftSidebarProps> = ({
         <div className="flex flex-col items-center gap-2.5 w-full max-h-[210px] overflow-y-auto no-scrollbar py-1">
           {accounts.map((acc) => {
             const isSelected = acc.id === activeAccountId;
+            const avatarRenderKey = `${acc.avatarUrl || ''}|${acc.status}`;
+            const canRenderAvatarImg = Boolean(acc.avatarUrl) && failedAvatarKeys[acc.id] !== avatarRenderKey;
             return (
               <button
                 key={acc.id}
@@ -189,12 +192,17 @@ export const LeftSidebar: React.FC<LeftSidebarProps> = ({
                   }`}
                   style={{ backgroundColor: acc.avatarBg }}
                 >
-                  {acc.avatarUrl ? (
+                  {canRenderAvatarImg ? (
                     <img
                       src={acc.avatarUrl}
                       alt={acc.name}
                       referrerPolicy="no-referrer"
                       className="w-full h-full object-cover"
+                      onError={() => {
+                        setFailedAvatarKeys((prev) =>
+                          prev[acc.id] === avatarRenderKey ? prev : { ...prev, [acc.id]: avatarRenderKey }
+                        );
+                      }}
                     />
                   ) : (
                     <span className="text-white text-xs font-bold">{acc.avatarInitial}</span>

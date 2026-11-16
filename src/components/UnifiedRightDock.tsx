@@ -1,4 +1,4 @@
-import React, { useEffect } from 'react';
+import React, { useEffect, useRef } from 'react';
 import {
   Brain,
   Cpu,
@@ -76,6 +76,8 @@ export const UnifiedRightDock: React.FC<UnifiedRightDockProps> = ({
   onUpdateTranslationSettings,
   isMasterVoiceActive,
 }) => {
+  const pointerDownOnBackdropRef = useRef(false);
+
   useEffect(() => {
     if (!activePanel) return;
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -94,7 +96,22 @@ export const UnifiedRightDock: React.FC<UnifiedRightDockProps> = ({
 
   return (
     <div
-      onClick={onClose}
+      onMouseDown={(e) => {
+        pointerDownOnBackdropRef.current = e.target === e.currentTarget;
+      }}
+      onMouseUp={(e) => {
+        if (e.target !== e.currentTarget) {
+          pointerDownOnBackdropRef.current = false;
+        }
+      }}
+      onClick={(e) => {
+        const shouldClose =
+          pointerDownOnBackdropRef.current && e.target === e.currentTarget;
+        pointerDownOnBackdropRef.current = false;
+        if (shouldClose) {
+          onClose();
+        }
+      }}
       className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-6 bg-black/60 backdrop-blur-sm animate-in fade-in duration-150"
     >
       {/* Standalone Modal Page Overlay (Detached from Chat Workspace) */}

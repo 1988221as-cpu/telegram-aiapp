@@ -85,7 +85,7 @@ import {
 } from '../services/apiService';
 import { sanitizeSafeResourceUrl } from '../services/urlSafety';
 
-const AI_SUGGESTION_COOLDOWN_MS = 60_000;
+const AI_SUGGESTION_COOLDOWN_MS = 120_000;
 const AI_SUGGESTION_COOLDOWN_STORAGE_KEY = 'tg_ai_suggestion_cooldown_until';
 
 function readAiSuggestionCooldownUntil(): number {
