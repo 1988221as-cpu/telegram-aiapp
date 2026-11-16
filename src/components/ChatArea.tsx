@@ -377,11 +377,13 @@ export function isSystemMediaPlaceholder(text?: string | null, msg?: Partial<Mes
     ) ||
     /^🎵\s*音频(?:\s*[:：].*)?$/.test(trimmed) ||
     /^📁\s*\[文件\](?:\s+.*)?$/.test(trimmed) ||
+    /^(?:📞|📹|📵)\s*(?:语音通话|视频通话|未接语音来电|未接视频来电)/.test(trimmed) ||
     /^[^\p{L}\d]*\[贴纸\]$/u.test(trimmed)
   ) {
     return true;
   }
 
+  if (msg?.isCall) return true;
   if (msg?.isFile && /^(📎|📁)\s+/.test(trimmed)) return true;
   if (msg?.isAudio && /^(🎤|🎵)\s+/.test(trimmed)) return true;
   if (msg?.isVideo && /^(🎬|🎥)\s+/.test(trimmed)) return true;
@@ -1327,6 +1329,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
   const emojiButtonRef = useRef<HTMLButtonElement>(null);
   const scrollViewportRef = useRef<HTMLDivElement>(null);
   const suppressAutoScrollRef = useRef(false);
+  const isNearBottomRef = useRef(true);
   const prevChatIdForScrollRef = useRef<string | null>(null);
   const prevMsgCountRef = useRef<number>(0);
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -1607,22 +1610,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
           inboundTargetLang && inboundTargetLang !== 'Auto' ? inboundTargetLang : 'Chinese';
         const refTargetNorm = normalizeChatLangCode(refTargetLang);
         const replyLangNorm = normalizeChatLangCode(detectClientLangCode(res.replyText));
-        const isDualOffMode = Boolean(
-          customLLMConfig && (customLLMConfig.enabled === false || customLLMConfig.explicitlyDisabled)
-        );
-        const isCustomMode = Boolean(
-          !isDualOffMode && customLLMConfig?.enabled && customLLMConfig?.engineMode === 'custom'
-        );
-        const effectiveRefEngine: 'gemini' | 'google' | 'custom_llm' =
-          isGroupOrChannelChat || isDualOffMode
-            ? 'google'
-            : isCustomMode
-            ? 'custom_llm'
-            : translationSettings?.preferredEngine === 'google'
-            ? 'google'
-            : 'gemini';
-
-        if (res.cnTranslation) {
+        if (res.cnTranslation && res.cnTranslation.trim().toLowerCase() !== res.replyText.trim().toLowerCase()) {
           setAiSuggestionTranslation(res.cnTranslation);
         } else if (refTargetNorm !== 'auto' && replyLangNorm !== refTargetNorm) {
           setIsTranslatingSuggestion(true);
@@ -1632,17 +1620,21 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
               'Auto',
               refTargetLang,
               customLLMConfig,
-              effectiveRefEngine,
+              'google',
               translationSettings?.googleApiKey,
-              isGroupOrChannelChat ? undefined : translationSettings?.geminiModel,
-              isGroupOrChannelChat ? undefined : translationSettings?.geminiApiKey,
-              isGroupOrChannelChat ? undefined : translationSettings?.customModelName,
-              isGroupOrChannelChat ? { purpose: 'group', isGroup: true } : undefined
+              undefined,
+              undefined,
+              undefined,
+              { purpose: 'inbound' }
             );
-            setAiSuggestionTranslation(refTrans || null);
+            setAiSuggestionTranslation(
+              refTrans && refTrans.trim().toLowerCase() !== res.replyText.trim().toLowerCase()
+                ? refTrans
+                : null
+            );
           } catch {
             setAiSuggestionTranslation(null);
-            showSyncNotice('翻译失败，请检查翻译通道', 5000);
+            showSyncNotice('我方语言对照获取失败，可在建议卡片点击重试', 4000);
           } finally {
             setIsTranslatingSuggestion(false);
           }
@@ -1842,6 +1834,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
   ]);
 
   const scrollToBottom = () => {
+    isNearBottomRef.current = true;
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   };
 
@@ -1891,6 +1884,18 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
       scrollToBottom();
     }
   }, [chat?.id, messages]);
+
+  // Keep viewport anchored at bottom when window shrinks/resizes if user was already near bottom
+  useEffect(() => {
+    const viewport = scrollViewportRef.current;
+    if (!viewport || typeof ResizeObserver === 'undefined') return;
+    const observer = new ResizeObserver(() => {
+      if (suppressAutoScrollRef.current || !isNearBottomRef.current) return;
+      viewport.scrollTop = viewport.scrollHeight;
+    });
+    observer.observe(viewport);
+    return () => observer.disconnect();
+  }, [chat?.id]);
 
   // Reset translation preview & historical AI suggestion state when switching chats
   useEffect(() => {
@@ -2163,12 +2168,12 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                 'Auto',
                 inboundTargetLang,
                 customLLMConfig,
-                effectiveOutboundEngine,
+                'google',
                 translationSettings?.googleApiKey,
-                isGroupOrChannelChat ? undefined : translationSettings?.geminiModel,
-                isGroupOrChannelChat ? undefined : translationSettings?.geminiApiKey,
-                isGroupOrChannelChat ? undefined : translationSettings?.customModelName,
-                isGroupOrChannelChat ? { purpose: 'group', isGroup: true } : undefined
+                undefined,
+                undefined,
+                undefined,
+                { purpose: 'inbound' }
               );
             } catch {
               translationOfTarget = '';
@@ -2850,14 +2855,16 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
       const isCustomMode = Boolean(
         !isDualOffMode && customLLMConfig?.enabled && customLLMConfig?.engineMode === 'custom'
       );
+      const isInboundPeerAudio = msg.sender === 'peer';
       const effectiveEngine =
-        isGroupOrChannelChat || isDualOffMode
+        isInboundPeerAudio || isGroupOrChannelChat || isDualOffMode
           ? 'google'
           : isCustomMode
           ? 'custom_llm'
           : translationSettings?.preferredEngine === 'google'
           ? 'google'
           : 'gemini';
+      const forceGoogleAudio = isInboundPeerAudio || isGroupOrChannelChat;
 
       try {
         const translated = await translateText(
@@ -2867,10 +2874,10 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
           customLLMConfig,
           effectiveEngine,
           translationSettings?.googleApiKey,
-          isGroupOrChannelChat ? undefined : translationSettings?.geminiModel,
-          isGroupOrChannelChat ? undefined : translationSettings?.geminiApiKey,
-          isGroupOrChannelChat ? undefined : translationSettings?.customModelName,
-          isGroupOrChannelChat ? { purpose: 'group', isGroup: true } : undefined
+          forceGoogleAudio ? undefined : translationSettings?.geminiModel,
+          forceGoogleAudio ? undefined : translationSettings?.geminiApiKey,
+          forceGoogleAudio ? undefined : translationSettings?.customModelName,
+          isGroupOrChannelChat ? { purpose: 'group', isGroup: true } : isInboundPeerAudio ? { purpose: 'inbound' } : undefined
         );
         persistPatch({
           sttText: transcribed,
@@ -3760,15 +3767,15 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
 
       {/* 2. Official Telegram Native Translate Bar (Telegram 8.4+ Style) */}
       {isTranslateBarVisible && (
-        <div className="bg-[#f8fafc]/90 dark:bg-[#0c1624]/90 aurora:bg-[#0c171d]/92 backdrop-blur-xs border-b border-[#e2e8f0] dark:border-[#162436] aurora:border-[#182b34] px-4 py-1.5 flex items-center justify-between text-xs text-[#0f172a] dark:text-[#d3e2ef] aurora:text-[#d5ebee] transition-colors shrink-0">
-          <div className="flex items-center gap-2 min-w-0">
+        <div className="bg-[#f8fafc]/90 dark:bg-[#0c1624]/90 aurora:bg-[#0c171d]/92 backdrop-blur-xs border-b border-[#e2e8f0] dark:border-[#162436] aurora:border-[#182b34] px-4 py-1.5 flex flex-wrap items-center justify-between gap-x-2 gap-y-1 text-xs text-[#0f172a] dark:text-[#d3e2ef] aurora:text-[#d5ebee] transition-colors shrink-0 min-w-0">
+          <div className="flex items-center gap-2 min-w-0 flex-1">
             <Languages className={`w-3.5 h-3.5 shrink-0 ${isChatTransEnabled ? 'text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf]' : 'text-[#94a3b8] dark:text-[#64748b]'}`} />
             {isChatTransEnabled ? (
-              <span className="font-medium whitespace-nowrap text-[#334155] dark:text-[#d3e2ef] aurora:text-[#d5ebee]">
+              <span className="font-medium truncate text-[#334155] dark:text-[#d3e2ef] aurora:text-[#d5ebee]">
                 自动翻译为{getLanguageDisplayName(inboundTargetLang)}
               </span>
             ) : (
-              <span className="font-medium whitespace-nowrap text-[#64748b] dark:text-[#8aa0b8] aurora:text-[#7e9aa5]">
+              <span className="font-medium truncate text-[#64748b] dark:text-[#8aa0b8] aurora:text-[#7e9aa5]">
                 {chatTransScopeLabel}已关闭（消息仅展示原文）
               </span>
             )}
@@ -3893,7 +3900,11 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
       {/* 3. Messages Stream Viewport with Official Telegram Wallpaper Pattern */}
       <div
         ref={scrollViewportRef}
-        className="flex-1 overflow-y-auto px-3.5 py-2.5 space-y-1.5 tg-chat-pattern select-text"
+        onScroll={(e) => {
+          const el = e.currentTarget;
+          isNearBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight <= 72;
+        }}
+        className="flex-1 min-h-0 min-w-0 overflow-y-auto overflow-x-hidden px-3.5 py-2.5 space-y-1.5 tg-chat-pattern select-text"
       >
         {/* Load Older Cloud History Button */}
         {chat.id.startsWith('tg_') && currentAccountId !== 'acc_telegram_bot' && hasMoreHistory && cloudSearchResults === null && onLoadOlderMessages && (
@@ -3971,7 +3982,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
               <div
                 data-msg-id={msg.id}
                 onClick={isMultiSelectMode ? () => toggleSelectMessage(msg.id) : undefined}
-                className={`flex ${isMultiSelectMode ? 'items-center gap-2.5 cursor-pointer rounded-xl px-1.5 py-0.5 transition-colors ' + (isSelectedMulti ? 'bg-[#2481cc]/10 dark:bg-[#2ba0ff]/15 aurora:bg-[#14b8a6]/15' : 'hover:bg-black/5 dark:hover:bg-white/5 aurora:hover:bg-white/5') : 'flex-col'} ${
+                className={`w-full min-w-0 flex ${isMultiSelectMode ? 'items-center gap-2.5 cursor-pointer rounded-xl px-1.5 py-0.5 transition-colors ' + (isSelectedMulti ? 'bg-[#2481cc]/10 dark:bg-[#2ba0ff]/15 aurora:bg-[#14b8a6]/15' : 'hover:bg-black/5 dark:hover:bg-white/5 aurora:hover:bg-white/5') : 'flex-col'} ${
                   isMe ? (isMultiSelectMode ? 'justify-end' : 'items-end') : (isMultiSelectMode ? 'justify-start' : 'items-start')
                 } group relative ${hoveredMessageId === msg.id ? 'z-30' : ''} ${isSameSenderAsPrev ? 'mt-0.5' : 'mt-1'} ${isSameSenderAsNext ? 'mb-0.5' : 'mb-1'}`}
                 onContextMenu={(e) => {
@@ -3998,7 +4009,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                 {/* Telegram Floating Quick Action Menu on Hover */}
                 {!isMultiSelectMode && hoveredMessageId === msg.id && (
                   <div
-                    className={`absolute ${idx === 0 ? 'top-1' : '-top-4'} z-40 flex items-center gap-0.5 bg-white dark:bg-[#0e1726] aurora:bg-[#101c23] border border-[#e2e8f0] dark:border-[#1e3148] aurora:border-[#203742] rounded-full px-1.5 py-0.5 shadow-lg animate-in fade-in zoom-in-95 duration-100 ${
+                    className={`absolute ${idx === 0 ? 'top-1' : '-top-4'} z-40 max-w-full overflow-x-auto no-scrollbar flex items-center gap-0.5 bg-white dark:bg-[#0e1726] aurora:bg-[#101c23] border border-[#e2e8f0] dark:border-[#1e3148] aurora:border-[#203742] rounded-full px-1.5 py-0.5 shadow-lg animate-in fade-in zoom-in-95 duration-100 ${
                       isMe ? 'right-2' : isGroupPeer ? 'left-10' : 'left-2'
                     }`}
                   >
@@ -4126,7 +4137,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                   </div>
                 )}
 
-                <div className={isGroupPeer ? 'flex items-end gap-2 max-w-[86%] sm:max-w-[78%]' : 'contents'}>
+                <div className={isGroupPeer ? 'flex items-end gap-2 max-w-[86%] sm:max-w-[78%] min-w-0' : 'contents'}>
                   {isGroupPeer && (
                     showGroupSenderAvatar ? (
                       <div
@@ -4174,7 +4185,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                   )}
 
                   <div
-                    className={`${isGroupPeer ? 'min-w-0' : 'max-w-[84%] sm:max-w-[78%]'} rounded-xl ${
+                    className={`${isGroupPeer ? 'min-w-0 max-w-full' : 'min-w-0 max-w-[84%] sm:max-w-[78%]'} rounded-xl ${
                       hasMediaBubble ? 'p-1' : 'py-1.5 px-2.5'
                     } relative transition-all select-text ${
                       highlightedMsgId === msg.id ? 'ring-2 ring-amber-400 shadow-lg' : ''
@@ -4246,7 +4257,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                       !/\.(jpg|jpeg|png|gif|webp|bmp|svg|heic)$/i.test(msg.text.trim())
                   );
                   return (
-                    <div className={`${hasVisibleImageCaption ? 'mb-1.5' : ''} rounded-xl overflow-hidden max-w-[280px] shadow-xs relative group/img select-none`}>
+                    <div className={`${hasVisibleImageCaption ? 'mb-1.5' : ''} rounded-xl overflow-hidden w-full max-w-[280px] shadow-xs relative group/img select-none`}>
                       <img
                         src={safeImageHref}
                         alt={msg.imageCaption || 'image'}
@@ -4372,7 +4383,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                   );
                   return (
                     <div
-                      className={`${hasVisibleVideoCaption ? 'mb-1.5' : ''} rounded-xl overflow-hidden max-w-[320px] shadow-sm relative group/vid bg-black/10 dark:bg-black/40 select-none`}
+                      className={`${hasVisibleVideoCaption ? 'mb-1.5' : ''} rounded-xl overflow-hidden w-full max-w-[320px] shadow-sm relative group/vid bg-black/10 dark:bg-black/40 select-none`}
                       onDoubleClick={(e) => {
                         if (isMultiSelectMode) return;
                         e.preventDefault();
@@ -4506,7 +4517,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
 
                 {/* Audio voice note message */}
                 {msg.isAudio ? (
-                  <div className="flex flex-col gap-2 min-w-[220px]">
+                  <div className="flex flex-col gap-2 w-full min-w-0 sm:min-w-[220px]">
                     <div className="flex items-center gap-3">
                       <button
                         onClick={() => void handlePlayAudio(msg.id, msg.audioUrl)}
@@ -4593,7 +4604,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                   </div>
                 ) : (
                   /* Standard Text Message or Photo Caption */
-                  <div>
+                  <div className="min-w-0">
                     {(() => {
                       const showOriginalAndTranslation =
                         translationSettings?.showOriginalAndTranslation !== false;
@@ -4609,8 +4620,8 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
 
                       if (isTranslationOnlyPeer) {
                         return (
-                          <div>
-                            <p className="text-[13.5px] leading-relaxed whitespace-pre-wrap break-words select-text cursor-text">
+                          <div className="min-w-0">
+                            <p className="text-[13.5px] leading-relaxed whitespace-pre-wrap break-words [overflow-wrap:anywhere] select-text cursor-text">
                               {msg.translatedText}
                             </p>
                             <div className="mt-1.5 flex items-center gap-2 select-none">
@@ -4637,7 +4648,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                             {isShowingOriginalOverlay && msg.text && (
                               <div className="mt-1.5 p-2 rounded-lg bg-[#f8fafc] dark:bg-[#0b131f]/80 aurora:bg-[#0c161c]/85 border border-[#e2e8f0] dark:border-[#1e3148] aurora:border-[#1e343e] text-xs text-[#475569] dark:text-[#cbd5e1] aurora:text-[#b7d0d8] select-text">
                                 <div className="text-[10px] opacity-70 mb-0.5 select-none">原文：</div>
-                                <p className="whitespace-pre-wrap break-words">{renderMessageTextWithLinks(msg.text, false)}</p>
+                                <p className="whitespace-pre-wrap break-words [overflow-wrap:anywhere]">{renderMessageTextWithLinks(msg.text, false)}</p>
                               </div>
                             )}
                           </div>
@@ -4646,8 +4657,42 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
 
                       return (
                         <>
-                          {!msg.isImage && !msg.isFile && !msg.isVideo && (
-                            <p className="text-[13px] leading-snug whitespace-pre-wrap break-words select-text cursor-text">
+                          {msg.isCall ? (
+                            <div className="flex items-center gap-2.5 py-0.5 select-text">
+                              <span
+                                className={`w-8 h-8 rounded-full flex items-center justify-center shrink-0 ${
+                                  msg.callType === 'missed'
+                                    ? 'bg-rose-500/15 text-rose-500 dark:text-rose-400'
+                                    : isMe
+                                      ? 'bg-white/20 text-white'
+                                      : 'bg-[#2481cc]/12 text-[#2481cc] dark:bg-[#2ba0ff]/15 dark:text-[#7cc4ff] aurora:bg-[#2dd4bf]/15 aurora:text-[#5eead4]'
+                                }`}
+                              >
+                                {msg.isVideoCall ? <Video className="w-4 h-4" /> : <Phone className="w-4 h-4" />}
+                              </span>
+                              <div className="min-w-0">
+                                <div
+                                  className={`text-[13px] font-medium leading-snug ${
+                                    msg.callType === 'missed' && !isMe
+                                      ? 'text-rose-600 dark:text-rose-400 aurora:text-rose-300'
+                                      : ''
+                                  }`}
+                                >
+                                  {msg.callType === 'missed'
+                                    ? (msg.isVideoCall ? '未接视频来电' : '未接语音来电')
+                                    : (msg.isVideoCall ? '视频通话' : '语音通话')}
+                                </div>
+                                <div className={`text-[11px] leading-tight tabular-nums ${isMe ? 'text-white/80' : 'opacity-75'}`}>
+                                  {msg.callType === 'missed'
+                                    ? '对方来电未接听'
+                                    : msg.callDuration && msg.callDuration > 0
+                                      ? `时长 ${Math.floor(msg.callDuration / 3600) > 0 ? `${Math.floor(msg.callDuration / 3600)}:` : ''}${String(Math.floor((msg.callDuration % 3600) / 60)).padStart(2, '0')}:${String(Math.floor(msg.callDuration % 60)).padStart(2, '0')}`
+                                      : (isMe ? '未接听' : '已结束')}
+                                </div>
+                              </div>
+                            </div>
+                          ) : !msg.isImage && !msg.isFile && !msg.isVideo && (
+                            <p className="text-[13px] leading-snug whitespace-pre-wrap break-words [overflow-wrap:anywhere] select-text cursor-text">
                               {renderMessageTextWithLinks(msg.text, isMe)}
                             </p>
                           )}
@@ -4657,7 +4702,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                             (!msg.imageUrl ||
                               (!isSystemMediaPlaceholder(msg.text, msg) &&
                                 !/\.(jpg|jpeg|png|gif|webp|bmp|svg|heic)$/i.test(msg.text.trim()))) && (
-                            <p className="text-[13px] leading-snug whitespace-pre-wrap break-words select-text cursor-text mt-1 px-1.5">
+                            <p className="text-[13px] leading-snug whitespace-pre-wrap break-words [overflow-wrap:anywhere] select-text cursor-text mt-1 px-1.5">
                               {renderMessageTextWithLinks(msg.text, isMe)}
                             </p>
                           )}
@@ -4667,13 +4712,14 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                             (!msg.videoUrl ||
                               (!isSystemMediaPlaceholder(msg.text, msg) &&
                                 !/\.(mp4|mov|webm|mkv|avi|m4v)$/i.test(msg.text.trim()))) && (
-                            <p className="text-[13px] leading-snug whitespace-pre-wrap break-words select-text cursor-text mt-1 px-1.5">
+                            <p className="text-[13px] leading-snug whitespace-pre-wrap break-words [overflow-wrap:anywhere] select-text cursor-text mt-1 px-1.5">
                               {renderMessageTextWithLinks(msg.text, isMe)}
                             </p>
                           )}
 
                           {/* Official Telegram Inline Translation Card */}
                           {(!isChatTransEnabled ||
+                            msg.isCall ||
                             (msg.isImage && msg.imageUrl && (!msg.text?.trim() || isSystemMediaPlaceholder(msg.text, msg))) ||
                             (msg.isVideo && msg.videoUrl && (!msg.text?.trim() || isSystemMediaPlaceholder(msg.text, msg)))) ? null : msg.isTranslating ? (
                             <div
@@ -4701,7 +4747,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                                   }`}
                                 >
                                   <Languages className="w-3 h-3" />
-                                  <span>{isMe ? '已发送对照译文' : 'AI 实时译文'}</span>
+                                  <span>{isMe ? '已发送对照译文' : '实时译文'}</span>
                                 </span>
                                 <div className="flex items-center gap-1">
                                   {onRetranslateMessage && (
@@ -4742,7 +4788,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                                   </button>
                                 </div>
                               </div>
-                              <p className="leading-snug font-normal select-text cursor-text">{msg.translatedText}</p>
+                              <p className="leading-snug font-normal whitespace-pre-wrap break-words [overflow-wrap:anywhere] select-text cursor-text">{msg.translatedText}</p>
                             </div>
                           ) : msg.translationError ? (
                             <div
@@ -5010,7 +5056,49 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                   <Languages className="w-3 h-3 animate-spin shrink-0" />
                   <span>正在获取{getLanguageDisplayName(inboundTargetLang)}含义翻译...</span>
                 </div>
-              ) : null}
+              ) : (() => {
+                const refTargetLang = inboundTargetLang && inboundTargetLang !== 'Auto' ? inboundTargetLang : 'Chinese';
+                const refTargetNorm = normalizeChatLangCode(refTargetLang);
+                const replyLangNorm = normalizeChatLangCode(detectClientLangCode(aiSuggestion));
+                if (refTargetNorm === 'auto' || replyLangNorm === refTargetNorm) return null;
+                return (
+                  <div className="pt-2 border-t border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] text-[11px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] flex items-center justify-between gap-2">
+                    <span className="inline-flex items-center gap-1.5">
+                      <Languages className="w-3 h-3 shrink-0 opacity-80" />
+                      <span>暂未获取{getLanguageDisplayName(refTargetLang)}对照</span>
+                    </span>
+                    <button
+                      type="button"
+                      onClick={async () => {
+                        if (!aiSuggestion || isTranslatingSuggestion) return;
+                        setIsTranslatingSuggestion(true);
+                        try {
+                          const refTrans = await translateText(
+                            aiSuggestion,
+                            'Auto',
+                            refTargetLang,
+                            customLLMConfig,
+                            'google',
+                            translationSettings?.googleApiKey,
+                            undefined,
+                            undefined,
+                            undefined,
+                            { purpose: 'inbound' }
+                          );
+                          setAiSuggestionTranslation(refTrans || null);
+                        } catch {
+                          showSyncNotice('我方语言对照翻译失败，请检查网络连接', 4000);
+                        } finally {
+                          setIsTranslatingSuggestion(false);
+                        }
+                      }}
+                      className="px-2 py-0.5 rounded bg-[#2481cc]/10 hover:bg-[#2481cc]/20 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#5eead4] font-semibold cursor-pointer transition-colors"
+                    >
+                      重试谷歌对照
+                    </button>
+                  </div>
+                );
+              })()}
             </div>
 
             <div className="flex items-center justify-end gap-2 text-xs pt-0.5">
@@ -5040,20 +5128,6 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                   setAiSuggestionTranslation(null);
                   try {
                     let cnTranslation = targetTranslation || '';
-                    const isDualOffSend = Boolean(
-                      customLLMConfig && (customLLMConfig.enabled === false || customLLMConfig.explicitlyDisabled)
-                    );
-                    const isCustomSend = Boolean(
-                      !isDualOffSend && customLLMConfig?.enabled && customLLMConfig?.engineMode === 'custom'
-                    );
-                    const effectiveSendRefEngine: 'gemini' | 'google' | 'custom_llm' =
-                      isGroupOrChannelChat || isDualOffSend
-                        ? 'google'
-                        : isCustomSend
-                        ? 'custom_llm'
-                        : translationSettings?.preferredEngine === 'google'
-                        ? 'google'
-                        : 'gemini';
                     const resolvedInbound =
                       inboundTargetLang && inboundTargetLang !== 'Auto' ? inboundTargetLang : 'Chinese';
                     if (
@@ -5067,12 +5141,12 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                           outboundTargetLang,
                           resolvedInbound,
                           customLLMConfig,
-                          effectiveSendRefEngine,
+                          'google',
                           translationSettings?.googleApiKey,
-                          isGroupOrChannelChat ? undefined : translationSettings?.geminiModel,
-                          isGroupOrChannelChat ? undefined : translationSettings?.geminiApiKey,
-                          isGroupOrChannelChat ? undefined : translationSettings?.customModelName,
-                          isGroupOrChannelChat ? { purpose: 'group', isGroup: true } : undefined
+                          undefined,
+                          undefined,
+                          undefined,
+                          { purpose: 'inbound' }
                         );
                       } catch {
                         if (isSameOriginScope(originChatId, originAccountId)) {

@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { X, Phone, PhoneIncoming, PhoneOutgoing, PhoneMissed } from 'lucide-react';
+import { X, Phone, Video, PhoneIncoming, PhoneOutgoing, PhoneMissed } from 'lucide-react';
 import { TelegramCallRecord } from '../types';
 
 interface TelegramCallsModalProps {
@@ -102,6 +102,15 @@ export const TelegramCallsModal: React.FC<TelegramCallsModalProps> = ({
                         <PhoneMissed className="w-3.5 h-3.5 text-rose-600 dark:text-rose-400 aurora:text-rose-400" />
                       )}
                       <span>{record.type === 'missed' ? '未接通' : record.duration}</span>
+                      {record.isVideo && (
+                        <>
+                          <span>·</span>
+                          <span className="inline-flex items-center gap-0.5">
+                            <Video className="w-3 h-3" />
+                            <span>视频</span>
+                          </span>
+                        </>
+                      )}
                       <span>·</span>
                       <span>{record.timestamp}</span>
                     </div>

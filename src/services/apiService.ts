@@ -989,7 +989,7 @@ export async function translateText(
   geminiModel?: string,
   geminiApiKey?: string,
   customModelName?: string,
-  options?: { signal?: AbortSignal; bypassCache?: boolean; purpose?: 'realtime' | 'history' | 'group'; isGroup?: boolean }
+  options?: { signal?: AbortSignal; bypassCache?: boolean; purpose?: 'realtime' | 'history' | 'group' | 'inbound'; isGroup?: boolean }
 ): Promise<string> {
   const trimmedText = typeof text === 'string' ? text.trim() : '';
   if (!trimmedText) return '';
@@ -1001,7 +1001,11 @@ export async function translateText(
   }
 
   const isHistoryTranslation = options?.purpose === 'history';
-  const isForceGoogleOnly = isHistoryTranslation || options?.purpose === 'group' || Boolean(options?.isGroup);
+  const isForceGoogleOnly =
+    isHistoryTranslation ||
+    options?.purpose === 'group' ||
+    options?.purpose === 'inbound' ||
+    Boolean(options?.isGroup);
   const isDualOff = Boolean(
     customConfig && (customConfig.enabled === false || customConfig.explicitlyDisabled)
   );

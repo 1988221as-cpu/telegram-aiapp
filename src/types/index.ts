@@ -12,6 +12,7 @@ export interface Account {
   isActive: boolean;
   status: 'online' | 'offline' | 'away' | 'expired';
   bio?: string;
+  remark?: string;
 }
 
 export interface Chat {
@@ -152,6 +153,11 @@ export interface Message {
   fileName?: string;
   fileSize?: string;
   fileUrl?: string;
+  isCall?: boolean;
+  callType?: 'incoming' | 'outgoing' | 'missed';
+  callDuration?: number;
+  isVideoCall?: boolean;
+  telegramCallId?: string;
 }
 
 export interface MemberUser {
@@ -284,6 +290,8 @@ export interface TelegramContact {
 export interface TelegramCallRecord {
   id: string;
   accountId?: string;
+  chatId?: string;
+  telegramCallId?: string;
   contactName: string;
   avatarBg: string;
   avatarInitial: string;

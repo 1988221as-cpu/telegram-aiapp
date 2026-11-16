@@ -365,7 +365,7 @@ export const ChatList: React.FC<ChatListProps> = ({
 
   return (
     <div
-      style={{ width: `${width}px` }}
+      style={{ width: `clamp(168px, 36vw, ${width}px)` }}
       className="bg-white/95 dark:bg-[#09111d]/95 aurora:bg-[#0f171c]/95 backdrop-blur-md border-r border-[#e2e8f0] dark:border-[#162436] aurora:border-[#182b34] flex flex-col h-full shrink-0 select-none transition-colors relative"
     >
       {/* 1. Top Header: Search Bar + Compact New Chat Button */}

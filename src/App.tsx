@@ -225,6 +225,7 @@ function engineToLiveErrorChannel(engine?: string): Message['translationErrorCha
 }
 
 function formatChatMessageSummary(msg: Partial<Message>, emptyFallback = '暂无消息'): string {
+  if (msg.isCall) return msg.text || (msg.isVideoCall ? '📹 视频通话' : '📞 语音通话');
   if (msg.isAudio) return '🎤 语音消息';
   if (msg.isVideo) return '🎬 [视频]';
   if (msg.isImage) return '🖼️ [图片]';
@@ -353,6 +354,101 @@ const LEGACY_MOCK_CALL_IDS = new Set(['call_rec_1', 'call_rec_2', 'call_rec_3'])
 function sanitizeCallRecords(list: any): TelegramCallRecord[] {
   if (!Array.isArray(list)) return [];
   return list.filter((rec) => rec && rec.id && !LEGACY_MOCK_CALL_IDS.has(String(rec.id)));
+}
+
+function formatCallRecordDurationStr(seconds?: number): string {
+  const total = Math.max(0, Math.floor(Number(seconds || 0)));
+  if (total <= 0) return '00:00';
+  const hrs = Math.floor(total / 3600);
+  const mins = Math.floor((total % 3600) / 60);
+  const secs = total % 60;
+  return hrs > 0
+    ? `${hrs}:${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`
+    : `${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
+}
+
+function mergeCallMessagesIntoCallRecords(
+  prevRecords: TelegramCallRecord[],
+  msgs: Partial<Message>[],
+  chatsSnapshot: Chat[],
+  fallbackAccountId: string
+): TelegramCallRecord[] {
+  const callMsgs = (Array.isArray(msgs) ? msgs : []).filter((m) => m && m.isCall);
+  if (callMsgs.length === 0) return prevRecords;
+
+  const next = [...prevRecords];
+  let changed = false;
+
+  for (const m of callMsgs) {
+    const accId = m.accountId || fallbackAccountId;
+    const chatId = m.chatId || '';
+    const tgCallId = m.telegramCallId ? String(m.telegramCallId) : '';
+    const recId = tgCallId
+      ? `call_${accId}_${tgCallId}`
+      : m.telegramMessageId && chatId
+        ? `call_${accId}_${chatId}_${m.telegramMessageId}`
+        : `call_${accId}_${m.id || Date.now()}`;
+
+    const matchedChat = chatsSnapshot.find((c) => c.id === chatId && (!accId || c.accountId === accId));
+    const contactName =
+      matchedChat?.title ||
+      (m.sender === 'peer' && m.senderName ? m.senderName : '') ||
+      (chatId ? `Telegram (${chatId.replace(/^tg_/, '')})` : '未知联系人');
+    const avatarInitial = matchedChat?.avatarInitial || contactName.slice(0, 2).toUpperCase() || 'TG';
+    const avatarBg = matchedChat?.avatarBg || '#2481cc';
+    const avatarUrl = matchedChat?.avatarUrl || m.senderAvatarUrl;
+    const recType: 'incoming' | 'outgoing' | 'missed' =
+      m.callType === 'incoming' || m.callType === 'outgoing' || m.callType === 'missed'
+        ? m.callType
+        : m.sender === 'me'
+          ? 'outgoing'
+          : 'incoming';
+    const duration =
+      recType === 'missed'
+        ? '未接通'
+        : m.callDuration && m.callDuration > 0
+          ? formatCallRecordDurationStr(m.callDuration)
+          : m.sender === 'me'
+            ? '未接听'
+            : '00:00';
+    const timestamp =
+      m.timestamp ||
+      new Date(m.createdAt || Date.now()).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false });
+
+    const existingIdx = next.findIndex(
+      (r) =>
+        r.id === recId ||
+        (tgCallId && r.telegramCallId === tgCallId && r.accountId === accId) ||
+        (r.accountId === accId && r.chatId === chatId && r.timestamp === timestamp && r.type === recType)
+    );
+    const entry: TelegramCallRecord = {
+      id: recId,
+      accountId: accId,
+      ...(chatId ? { chatId } : {}),
+      ...(tgCallId ? { telegramCallId: tgCallId } : {}),
+      contactName,
+      avatarBg,
+      avatarInitial,
+      ...(avatarUrl ? { avatarUrl } : {}),
+      type: recType,
+      duration,
+      timestamp,
+      isVideo: Boolean(m.isVideoCall),
+    };
+
+    if (existingIdx >= 0) {
+      const ex = next[existingIdx];
+      if (ex.duration !== entry.duration || ex.type !== entry.type || ex.contactName !== entry.contactName) {
+        next[existingIdx] = { ...ex, ...entry };
+        changed = true;
+      }
+    } else {
+      next.unshift(entry);
+      changed = true;
+    }
+  }
+
+  return changed ? next.slice(0, 300) : prevRecords;
 }
 
 function getScopedTranslationSettingsKey(accountId?: string): string {
@@ -1812,6 +1908,12 @@ export default function App() {
         }
         const cloudMsgs = Array.isArray(cloudRes.messages) ? cloudRes.messages : [];
         if (cloudMsgs.length === 0 && cloudRes.fromLocalFallback) return;
+        const callMsgsInCloud = cloudMsgs.filter((m: any) => Boolean(m?.isCall));
+        if (callMsgsInCloud.length > 0 && targetAccId === activeAccountIdRef.current) {
+          setCallRecords((prev) =>
+            mergeCallMessagesIntoCallRecords(prev, callMsgsInCloud, chatsRef.current, targetAccId)
+          );
+        }
         setMessagesMap((prev) => {
           const base = getBucketMessages(prev, targetAccId, targetChatId);
           const merged = mergeCloudMessagesWithLocal(
@@ -2013,12 +2115,16 @@ export default function App() {
       if ((m.translatedText || '').trim() || m.isTranslating || isFreshLiveTranslationError) continue;
       const rawText = (m.sttText || m.text || m.imageCaption || '').trim();
       if (
+        m.isCall ||
         !rawText ||
         /^\[(语音|视频|图片|多媒体|文件)消息\]$/.test(rawText) ||
         rawText.startsWith('🎤') ||
         rawText.startsWith('🖼️') ||
         rawText.startsWith('🎬') ||
         rawText.startsWith('📁') ||
+        rawText.startsWith('📞') ||
+        rawText.startsWith('📹') ||
+        rawText.startsWith('📵') ||
         !/\p{L}/u.test(rawText)
       ) {
         continue;
@@ -2469,6 +2575,15 @@ export default function App() {
               return;
             }
 
+            if (updType === 'phone_call_ringing') {
+              const matchedCallerChat = currentChats.find(
+                (c) => c.id === targetChatId && c.accountId === targetAccountId
+              );
+              const callerTitle = matchedCallerChat?.title || upd.senderName || `Telegram (${targetChatId.replace(/^tg_/, '')})`;
+              showCloudError(`${upd.isVideoCall ? '📹' : '📞'} ${callerTitle} 正在向您发起${upd.isVideoCall ? '视频' : '语音'}通话`);
+              return;
+            }
+
             if (updType === 'peer_blocked') {
               const nextBlocked = Boolean(upd.isBlocked);
               setChats((prev) =>
@@ -2523,6 +2638,11 @@ export default function App() {
               fileName: upd.fileName,
               fileSize: upd.fileSize,
               fileUrl: upd.fileUrl,
+              isCall: Boolean(upd.isCall),
+              callType: upd.callType,
+              callDuration: typeof upd.callDuration === 'number' ? upd.callDuration : undefined,
+              isVideoCall: Boolean(upd.isVideoCall),
+              telegramCallId: upd.telegramCallId,
               replyTo: upd.replyTo,
               forwardFrom: upd.forwardFrom,
               isPinned: Boolean(upd.isPinned),
@@ -2635,12 +2755,16 @@ export default function App() {
 
             const trimmedIncomingText = (incomingMsg.text || '').trim();
             const isMediaPlaceholder =
+              Boolean(incomingMsg.isCall) ||
               !trimmedIncomingText ||
               /^\[(语音|视频|图片|多媒体|文件)消息\]$/.test(trimmedIncomingText) ||
               trimmedIncomingText.startsWith('🎤') ||
               trimmedIncomingText.startsWith('🖼️') ||
               trimmedIncomingText.startsWith('🎬') ||
-              trimmedIncomingText.startsWith('📁');
+              trimmedIncomingText.startsWith('📁') ||
+              trimmedIncomingText.startsWith('📞') ||
+              trimmedIncomingText.startsWith('📹') ||
+              trimmedIncomingText.startsWith('📵');
 
             const incomingIsGroup = Boolean(
               matchedChatForLang?.isGroup ||
@@ -2673,12 +2797,7 @@ export default function App() {
               !incomingMsg.translatedText &&
               !isIncomingAlreadyTargetLang
             ) {
-              const effectiveInboundEngine = incomingIsGroup
-                ? ('google' as const)
-                : enforceTranslationEngineForLlm(
-                    currentLLMConfig,
-                    currentTransSettings
-                  ).preferredEngine;
+              const effectiveInboundEngine = 'google' as const;
               const inboundSourceLang =
                 matchedChatForLang?.sourceLang && matchedChatForLang.sourceLang !== 'Auto'
                   ? matchedChatForLang.sourceLang
@@ -2691,10 +2810,10 @@ export default function App() {
                 currentLLMConfig,
                 effectiveInboundEngine,
                 currentTransSettings.googleApiKey,
-                incomingIsGroup ? undefined : currentTransSettings.geminiModel,
-                incomingIsGroup ? undefined : currentTransSettings.geminiApiKey,
-                incomingIsGroup ? undefined : currentTransSettings.customModelName,
-                incomingIsGroup ? { purpose: 'group', isGroup: true } : undefined
+                undefined,
+                undefined,
+                undefined,
+                incomingIsGroup ? { purpose: 'group', isGroup: true } : { purpose: 'inbound' }
               )
                 .then((trans) => {
                   if (trans && trans.trim() && trans.trim().toLowerCase() !== trimmedIncomingText.toLowerCase()) {
@@ -2734,6 +2853,12 @@ export default function App() {
                     };
                   });
                 });
+            }
+
+            if (incomingMsg.isCall && targetAccountId === currentAccId) {
+              setCallRecords((prev) =>
+                mergeCallMessagesIntoCallRecords(prev, [incomingMsg], currentChats, targetAccountId)
+              );
             }
 
             const summaryText = formatChatMessageSummary(incomingMsg);
@@ -3227,21 +3352,22 @@ export default function App() {
     const id = newAccountData.id || `acc_${Date.now()}`;
     deletedAccountIdsRef.current.delete(id);
     notifiedExpiredRef.current.delete(id);
-    const newAcc: Account = {
-      id,
-      name: newAccountData.name || 'Telegram 账号',
-      username: newAccountData.username || `@user_${id.slice(-4)}`,
-      phone: newAccountData.phone || '',
-      avatarUrl: newAccountData.avatarUrl,
-      avatarBg: newAccountData.avatarBg || '#2481cc',
-      avatarInitial: newAccountData.avatarInitial || 'TG',
-      unreadTotal: 0,
-      isActive: false,
-      status: 'online',
-      bio: newAccountData.bio || 'Telegram 账号',
-    };
-
     setAccounts((prev) => {
+      const existing = prev.find((a) => a.id === id);
+      const newAcc: Account = {
+        id,
+        name: newAccountData.name || 'Telegram 账号',
+        username: newAccountData.username || `@user_${id.slice(-4)}`,
+        phone: newAccountData.phone || '',
+        avatarUrl: newAccountData.avatarUrl,
+        avatarBg: newAccountData.avatarBg || '#2481cc',
+        avatarInitial: newAccountData.avatarInitial || 'TG',
+        unreadTotal: 0,
+        isActive: false,
+        status: 'online',
+        bio: newAccountData.bio || 'Telegram 账号',
+        remark: newAccountData.remark ?? existing?.remark,
+      };
       const filtered = prev.filter((a) => a.id !== id);
       return [...filtered, newAcc];
     });
@@ -3838,12 +3964,16 @@ export default function App() {
 
     const rawText = (targetMsg.sttText || targetMsg.text || targetMsg.imageCaption || '').trim();
     if (
+      targetMsg.isCall ||
       !rawText ||
       /^\[(语音|视频|图片|多媒体|文件)消息\]$/.test(rawText) ||
       rawText.startsWith('🎤') ||
       rawText.startsWith('🖼️') ||
       rawText.startsWith('🎬') ||
-      rawText.startsWith('📁')
+      rawText.startsWith('📁') ||
+      rawText.startsWith('📞') ||
+      rawText.startsWith('📹') ||
+      rawText.startsWith('📵')
     ) {
       showCloudError('该消息暂无可翻译的文本内容');
       return;
@@ -3865,12 +3995,13 @@ export default function App() {
     const isGroupTarget = Boolean(
       activeChat?.isGroup || activeChat?.isChannel || /^tg_-/.test(targetChatId)
     );
-    const forceGoogleOnly = isHistoricalTarget || isGroupTarget;
+    const isInboundPeerTarget = targetMsg.sender === 'peer';
+    const forceGoogleOnly = isHistoricalTarget || isGroupTarget || isInboundPeerTarget;
     const currentLlm = customLLMConfigRef.current;
     const currentTrans = translationSettingsRef.current;
     const effectiveEngine = isHistoricalTarget
       ? 'google'
-      : isGroupTarget
+      : isGroupTarget || isInboundPeerTarget
       ? 'google'
       : enforceTranslationEngineForLlm(currentLlm, currentTrans).preferredEngine;
     const resolvedGlobalTargetLang =
@@ -3947,6 +4078,8 @@ export default function App() {
             ? { purpose: 'history' as const }
             : isGroupTarget
             ? { purpose: 'group' as const, isGroup: true }
+            : isInboundPeerTarget
+            ? { purpose: 'inbound' as const }
             : {}),
         }
       );
@@ -4505,6 +4638,10 @@ export default function App() {
         onSelectAccount={(accountId) => {
           handleSelectAccount(accountId);
           setIsMultiAccountOpen(false);
+        }}
+        onUpdateAccountRemark={(accountId, remark) => {
+          const normalized = remark.trim();
+          handleUpdateCurrentAccount({ remark: normalized || undefined }, accountId);
         }}
         onOpenMenuDrawer={() => setIsTelegramMenuOpen(true)}
         onOpenTranslation={() => toggleRightPanel('translation')}

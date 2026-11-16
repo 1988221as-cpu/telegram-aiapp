@@ -406,6 +406,9 @@ export const TranslationDrawer: React.FC<TranslationDrawerProps> = ({
               ? '当前主引擎：双关状态（官方与自有大模型均已关闭，仅允许使用「谷歌机翻」）'
               : '当前主引擎：官方大模型优先（仅支持「谷歌机翻」或「谷歌大模型 Gemma 4」，不可选自定义模型）'}
           </div>
+          <p className="text-[10.5px] leading-snug text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5]">
+            说明：对方发来的消息（私聊与群聊）及历史消息统一使用「谷歌机翻」不占密钥；选中大模型通道时，仅用于我方输入与发出的聊天消息。
+          </p>
 
           <div className="grid grid-cols-3 gap-2">
             {/* Option 1: Google Machine Translate (Universal across all 3 master modes) */}

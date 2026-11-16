@@ -2259,8 +2259,114 @@ function formatTelegramFileSize(bytes?: number): string {
   return `${(n / (1024 * 1024 * 1024)).toFixed(2)} GB`;
 }
 
+function formatTelegramCallDuration(seconds?: number): string {
+  const total = Math.max(0, Math.floor(Number(seconds || 0)));
+  if (total <= 0) return '';
+  const hrs = Math.floor(total / 3600);
+  const mins = Math.floor((total % 3600) / 60);
+  const secs = total % 60;
+  return hrs > 0
+    ? `${hrs}:${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`
+    : `${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
+}
+
+function extractTelegramPhoneCallFields(m: any): {
+  text: string;
+  isCall: true;
+  callType: 'incoming' | 'outgoing' | 'missed';
+  callDuration: number;
+  isVideoCall: boolean;
+  telegramCallId?: string;
+} | null {
+  const action = m?.action;
+  if (!action || (action.className !== 'MessageActionPhoneCall' && !(action instanceof Api.MessageActionPhoneCall))) {
+    return null;
+  }
+  const isVideoCall = Boolean(action.video);
+  const callDuration = Math.max(0, Math.floor(Number(action.duration || 0)));
+  const reasonClass = String(action.reason?.className || '');
+  const isOut = Boolean(m?.out);
+  const telegramCallId = action.callId !== undefined ? String(action.callId) : undefined;
+  const durationLabel = formatTelegramCallDuration(callDuration);
+  const baseLabel = isVideoCall ? '📹 视频通话' : '📞 语音通话';
+
+  let callType: 'incoming' | 'outgoing' | 'missed';
+  let text: string;
+  if (!isOut && (callDuration <= 0 || reasonClass === 'PhoneCallDiscardReasonMissed' || reasonClass === 'PhoneCallDiscardReasonBusy')) {
+    callType = 'missed';
+    text = isVideoCall ? '📵 未接视频来电' : '📵 未接语音来电';
+  } else if (isOut && (callDuration <= 0 || reasonClass === 'PhoneCallDiscardReasonMissed' || reasonClass === 'PhoneCallDiscardReasonBusy')) {
+    callType = 'outgoing';
+    text = `${baseLabel} (未接听)`;
+  } else {
+    callType = isOut ? 'outgoing' : 'incoming';
+    text = durationLabel ? `${baseLabel} (${durationLabel})` : baseLabel;
+  }
+
+  return {
+    text,
+    isCall: true,
+    callType,
+    callDuration,
+    isVideoCall,
+    telegramCallId,
+  };
+}
+
+function inferCallMetadataFromStoredRecord(
+  raw: any,
+  sender: 'me' | 'peer' | 'system'
+): {
+  isCall?: boolean;
+  callType?: 'incoming' | 'outgoing' | 'missed';
+  callDuration?: number;
+  isVideoCall?: boolean;
+  telegramCallId?: string;
+} {
+  const explicitIsCall = Boolean(raw?.isCall ?? raw?.is_call);
+  const text = String(raw?.text ?? '').trim();
+  const textLooksLikeCall = /^(?:📞|📹|📵)\s*(?:语音通话|视频通话|未接语音来电|未接视频来电)/.test(text);
+  if (!explicitIsCall && !textLooksLikeCall) return {};
+
+  const isVideoCall =
+    raw?.isVideoCall !== undefined || raw?.is_video_call !== undefined
+      ? Boolean(raw?.isVideoCall ?? raw?.is_video_call)
+      : text.includes('视频');
+
+  let callType: 'incoming' | 'outgoing' | 'missed' =
+    raw?.callType === 'incoming' || raw?.callType === 'outgoing' || raw?.callType === 'missed'
+      ? raw.callType
+      : text.startsWith('📵') || text.includes('未接来电')
+        ? 'missed'
+        : sender === 'me'
+          ? 'outgoing'
+          : 'incoming';
+
+  let callDuration = Number(raw?.callDuration ?? raw?.call_duration ?? 0) || 0;
+  if (!callDuration && text) {
+    const durMatch = text.match(/\((\d+):(\d{2})(?::(\d{2}))?\)/);
+    if (durMatch) {
+      if (durMatch[3] !== undefined) {
+        callDuration = Number(durMatch[1]) * 3600 + Number(durMatch[2]) * 60 + Number(durMatch[3]);
+      } else {
+        callDuration = Number(durMatch[1]) * 60 + Number(durMatch[2]);
+      }
+    }
+  }
+  const telegramCallId = raw?.telegramCallId ? String(raw.telegramCallId) : undefined;
+  return {
+    isCall: true,
+    callType,
+    callDuration,
+    isVideoCall,
+    ...(telegramCallId ? { telegramCallId } : {}),
+  };
+}
+
 function summarizeTelegramDialogMedia(message: any): string {
   if (!message) return '暂无消息';
+  const callInfo = extractTelegramPhoneCallFields(message);
+  if (callInfo) return callInfo.text;
   const text = String(message.message || '').trim();
   const media = message.media;
   if (!media) return text || '暂无消息';
@@ -4676,6 +4782,11 @@ export interface UnifiedChatMessage {
   isEdited?: boolean;
   isPinned?: boolean;
   forwardFrom?: string;
+  isCall?: boolean;
+  callType?: 'incoming' | 'outgoing' | 'missed';
+  callDuration?: number;
+  isVideoCall?: boolean;
+  telegramCallId?: string;
 }
 
 export function parseStoredReactionsJson(raw: any): {
@@ -4825,6 +4936,7 @@ export function normalizeStoredMessageRecord(
     isEdited: Boolean(raw.isEdited ?? raw.is_edited),
     isPinned: Boolean(raw.isPinned ?? raw.is_pinned),
     ...(raw.forwardFrom || raw.forward_from ? { forwardFrom: String(raw.forwardFrom ?? raw.forward_from) } : {}),
+    ...inferCallMetadataFromStoredRecord(raw, sender),
   };
 }
 
@@ -6001,6 +6113,8 @@ app.get('/api/messages/:chatId', requireTenantAuth, async (req: Request, res: Re
         r.sender !== 'me' && cleanSenderId && r.accountId && r.accountId !== 'acc_telegram_bot'
           ? signTelegramResourceUrl(`/api/telegram/user/avatar/${encodeURIComponent(cleanSenderId)}`, r.accountId)
           : undefined;
+      const senderRole: 'me' | 'peer' | 'system' =
+        r.sender === 'me' ? 'me' : r.sender === 'system' ? 'system' : 'peer';
       return {
         ...rest,
         ...(cleanSenderId ? { senderId: cleanSenderId } : {}),
@@ -6020,6 +6134,7 @@ app.get('/api/messages/:chatId', requireTenantAuth, async (req: Request, res: Re
         ...(parsedReactions.myReactions ? { myReactions: parsedReactions.myReactions } : {}),
         ...(r.forwardFrom ? { forwardFrom: r.forwardFrom } : {}),
         deliveryStatus: r.deliveryStatus || 'delivered',
+        ...inferCallMetadataFromStoredRecord(r, senderRole),
       };
     });
 
@@ -11221,7 +11336,8 @@ app.post('/api/translate', translationLimiter, requireTenantAuth, async (req: Re
       });
     }
 
-    const isGoogleOnlyTranslation = purpose === 'history' || purpose === 'group' || isGroup === true;
+    const isGoogleOnlyTranslation =
+      purpose === 'history' || purpose === 'group' || purpose === 'inbound' || isGroup === true;
     const userJwt = extractBearerToken(req);
 
     // Resolve saved local user keys/gateways as fallback ONLY if not passed in body (scoped by accountId when provided)
@@ -11290,7 +11406,7 @@ app.post('/api/translate', translationLimiter, requireTenantAuth, async (req: Re
     if (isGoogleOnlyTranslation) {
       if (strictEngine !== 'google') {
         return res.status(400).json({
-          error: '历史记录与群消息仅允许使用「谷歌机翻」，禁止使用 AI 翻译。',
+          error: '接收消息、历史记录与群消息仅允许使用「谷歌机翻」，禁止使用 AI 翻译。',
         });
       }
     } else if (isDualOff) {
@@ -12697,37 +12813,14 @@ export async function getCnTranslationIfForeign(
       return '';
     }
 
-    const customConfig = overrideCustomConfig || (await getServerCustomLlmConfig());
-    const isDualOff = Boolean(
-      customConfig && (customConfig.enabled === false || customConfig.explicitlyDisabled)
-    );
-    const isPriorityCustom = Boolean(
-      !isDualOff && customConfig?.enabled && customConfig?.engineMode === 'custom'
-    );
-    const configuredEngine = normalizeStrictTranslationEngine(transSettings?.preferredEngine) || 'gemini';
-    let engine: 'google' | 'gemini' | 'custom_llm';
-    if (isDualOff) {
-      engine = 'google';
-    } else if (isPriorityCustom) {
-      engine = configuredEngine === 'google' ? 'google' : 'custom_llm';
-    } else {
-      engine = configuredEngine === 'google' ? 'google' : 'gemini';
-    }
-    const resolvedCustomModel = isPriorityCustom
-      ? (customConfig?.modelName || transSettings?.customModelName || '')
-      : (transSettings?.customModelName || customConfig?.modelName);
+    void overrideCustomConfig;
+    void userJwt;
     const result = await performStrictTranslation({
       text,
       sourceLang: 'Auto',
       targetLang,
-      engine,
+      engine: 'google',
       googleApiKey: transSettings?.googleApiKey,
-      geminiModel: transSettings?.geminiModel,
-      geminiApiKey: transSettings?.geminiApiKey,
-      customModelName: resolvedCustomModel,
-      customConfig,
-      userJwt: (typeof userJwt === 'string' && userJwt.trim()) || undefined,
-      engineLicenseKey: customConfig?.engineLicenseKey,
     });
     const translated = stripModelThinkingText(result.translatedText || '');
     if (!translated || translated.toLowerCase() === text.trim().toLowerCase()) {
@@ -12829,12 +12922,14 @@ function isSystemMediaPlaceholderText(text?: string | null, raw?: any): boolean 
     ) ||
     /^🎵\s*音频(?:\s*[:：].*)?$/.test(trimmed) ||
     /^📁\s*\[文件\](?:\s+.*)?$/.test(trimmed) ||
+    /^(?:📞|📹|📵)\s*(?:语音通话|视频通话|未接语音来电|未接视频来电)/.test(trimmed) ||
     /^[^\p{L}\d]*\[贴纸\]$/u.test(trimmed)
   ) {
     return true;
   }
 
   if (raw && typeof raw === 'object') {
+    if (raw.isCall || raw.is_call) return true;
     if ((raw.isFile || raw.is_file) && /^(📎|📁)\s+/.test(trimmed)) return true;
     if ((raw.isAudio || raw.is_audio) && /^(🎤|🎵)\s+/.test(trimmed)) return true;
     if ((raw.isVideo || raw.is_video) && /^(🎬|🎥)\s+/.test(trimmed)) return true;
@@ -16229,43 +16324,18 @@ async function processTelegramMessageAsync(
                 : transSettings?.autoTranslatePrivate !== false;
 
           if (shouldTranslateThisChat) {
-            const customConfig = await getServerCustomLlmConfig();
-            const isDualOff = Boolean(
-              customConfig && (customConfig.enabled === false || customConfig.explicitlyDisabled)
-            );
-            const isPriorityCustom = Boolean(
-              !isDualOff && customConfig?.enabled && customConfig?.engineMode === 'custom'
-            );
-            const configuredEngine = normalizeStrictTranslationEngine(transSettings?.preferredEngine) || 'gemini';
-            let engine: 'google' | 'gemini' | 'custom_llm';
-            if (isGroupChat || isDualOff) {
-              engine = 'google';
-            } else if (isPriorityCustom) {
-              engine = configuredEngine === 'google' ? 'google' : 'custom_llm';
-            } else {
-              engine = configuredEngine === 'google' ? 'google' : 'gemini';
-            }
-            const resolvedCustomModel = isPriorityCustom && configuredEngine !== 'custom_llm'
-              ? (customConfig?.modelName || transSettings?.customModelName || '')
-              : (transSettings?.customModelName || customConfig?.modelName);
-
             const targetLang =
               chatPrefTargetLang ||
               (transSettings?.defaultTargetLang && transSettings.defaultTargetLang !== 'Auto'
                 ? transSettings.defaultTargetLang
                 : 'Chinese');
+            const engine = 'google';
             const transRes = await performStrictTranslation({
               text: effectiveIncomingText,
               sourceLang: chatPrefSourceLang,
               targetLang,
               engine,
               googleApiKey: transSettings?.googleApiKey,
-              geminiModel: transSettings?.geminiModel,
-              geminiApiKey: transSettings?.geminiApiKey,
-              customModelName: resolvedCustomModel,
-              customConfig,
-              userJwt: lastActiveUserJwt || undefined,
-              engineLicenseKey: customConfig?.engineLicenseKey,
             });
             const translatedInbound = transRes.translatedText;
             if (translatedInbound && translatedInbound.toLowerCase() !== effectiveIncomingText.toLowerCase()) {
@@ -25120,6 +25190,33 @@ async function resolveTelegramMessageSenderInfo(
 }
 
 function extractTelegramMediaFields(m: any, canonicalId: string, accountId: string) {
+  const callInfo = extractTelegramPhoneCallFields(m);
+  if (callInfo) {
+    return {
+      text: callInfo.text,
+      isAudio: false,
+      audioDuration: 0,
+      audioUrl: '',
+      isImage: false,
+      imageUrl: '',
+      imageCaption: '',
+      isVideo: false,
+      videoDuration: 0,
+      videoWidth: undefined,
+      videoHeight: undefined,
+      videoUrl: '',
+      isFile: false,
+      fileName: undefined,
+      fileSize: undefined,
+      fileUrl: '',
+      isCall: true,
+      callType: callInfo.callType,
+      callDuration: callInfo.callDuration,
+      isVideoCall: callInfo.isVideoCall,
+      telegramCallId: callInfo.telegramCallId,
+    };
+  }
+
   const media = m?.media;
   const doc = media?.document;
   const attrs: any[] = Array.isArray(doc?.attributes) ? doc.attributes : [];
@@ -25300,7 +25397,7 @@ export async function syncTelegramUserChatMessages(
     for (const m of allFetched) {
       if (!m) continue;
       const mediaParsed = extractTelegramMediaFields(m, canonicalId, accountId);
-      if (!mediaParsed.text && !m.media) continue;
+      if (!mediaParsed.text && !m.media && !mediaParsed.isCall) continue;
 
       const isOut = Boolean(m.out);
       const createdAt = m.date ? m.date * 1000 : Date.now();
@@ -25366,6 +25463,15 @@ export async function syncTelegramUserChatMessages(
         fileName: mediaParsed.fileName,
         fileSize: mediaParsed.fileSize,
         fileUrl: mediaParsed.fileUrl,
+        ...(mediaParsed.isCall
+          ? {
+              isCall: true,
+              callType: mediaParsed.callType,
+              callDuration: mediaParsed.callDuration,
+              isVideoCall: mediaParsed.isVideoCall,
+              ...(mediaParsed.telegramCallId ? { telegramCallId: mediaParsed.telegramCallId } : {}),
+            }
+          : {}),
         replyTo,
         reactions,
         myReactions,
@@ -25470,11 +25576,13 @@ export async function querySqlitePaginatedMessagesFallback(
       r.sender !== 'me' && cleanSenderId && r.accountId && r.accountId !== 'acc_telegram_bot'
         ? signTelegramResourceUrl(`/api/telegram/user/avatar/${encodeURIComponent(cleanSenderId)}`, r.accountId)
         : undefined;
+    const senderRole: 'me' | 'peer' | 'system' =
+      r.sender === 'me' ? 'me' : r.sender === 'system' ? 'system' : 'peer';
     return {
       id: r.id,
       chatId: r.chatId,
       accountId: r.accountId,
-      sender: r.sender === 'me' ? 'me' : r.sender === 'system' ? 'system' : 'peer',
+      sender: senderRole,
       senderName: r.senderName || '',
       ...(cleanSenderId ? { senderId: cleanSenderId } : {}),
       ...(senderAvatarUrl ? { senderAvatarUrl } : {}),
@@ -25505,6 +25613,7 @@ export async function querySqlitePaginatedMessagesFallback(
       ...(r.forwardFrom ? { forwardFrom: r.forwardFrom } : {}),
       ...(parsedReactions.reactions ? { reactions: parsedReactions.reactions } : {}),
       ...(parsedReactions.myReactions ? { myReactions: parsedReactions.myReactions } : {}),
+      ...inferCallMetadataFromStoredRecord(r, senderRole),
     };
   });
 
@@ -25764,7 +25873,7 @@ app.post('/api/telegram/autopilot/toggle', requireTenantAuth, (req: Request, res
 // Real-time MTProto NewMessage event listener for personal Telegram account
 export interface LocalIncomingUpdate {
   id: string;
-  type?: 'message' | 'edit' | 'delete' | 'read_outbox' | 'read_inbox' | 'dialog_pinned' | 'pin' | 'user_status' | 'peer_blocked' | 'reactions';
+  type?: 'message' | 'edit' | 'delete' | 'read_outbox' | 'read_inbox' | 'dialog_pinned' | 'pin' | 'user_status' | 'peer_blocked' | 'reactions' | 'phone_call_ringing';
   telegramMessageId?: number;
   deletedMessageIds?: number[];
   readOutboxMaxId?: number;
@@ -25804,6 +25913,11 @@ export interface LocalIncomingUpdate {
   fileName?: string;
   fileSize?: string;
   fileUrl?: string;
+  isCall?: boolean;
+  callType?: 'incoming' | 'outgoing' | 'missed';
+  callDuration?: number;
+  isVideoCall?: boolean;
+  telegramCallId?: string;
   replyTo?: { id: string; telegramMessageId?: number; senderName?: string; text: string };
   isEdited?: boolean;
   isPinned?: boolean;
@@ -26865,9 +26979,120 @@ ${memories.slice(-3).map((m: any) => `  * [${m.date}] ${m.topic}: ${m.summary}`)
             timestamp: '',
             createdAt: Date.now(),
           });
+          return;
+        }
+
+        if (update instanceof Api.UpdateNewMessage || update instanceof Api.UpdateNewChannelMessage) {
+          const msgObj: any = update.message;
+          const callInfo = msgObj ? extractTelegramPhoneCallFields(msgObj) : null;
+          if (!callInfo || !msgObj?.id) return;
+
+          const canonicalChatId =
+            resolveRawPeerChatId(msgObj.peerId) ||
+            (msgObj.fromId ? resolveRawPeerChatId(msgObj.fromId) : '');
+          if (!canonicalChatId) return;
+          const rawChatId = canonicalChatId.replace(/^tg_/, '');
+
+          const mtprotoMsgKey = `${userId}_${rawChatId}_${msgObj.id}`;
+          if (processedMtprotoMsgIds.has(mtprotoMsgKey)) return;
+          processedMtprotoMsgIds.set(mtprotoMsgKey, Date.now());
+
+          const isOut = Boolean(msgObj.out);
+          const createdAt = msgObj.date ? Number(msgObj.date) * 1000 : Date.now();
+          const messageId = buildTelegramRealtimeMessageId(userId, canonicalChatId, msgObj.id);
+          const timestamp = new Date(createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false });
+
+          let senderInfo = await resolveTelegramMessageSenderInfo(msgObj, isOut, accountId).catch(() => ({
+            senderId: rawChatId,
+            senderName: '',
+            senderAvatarUrl: undefined as string | undefined,
+          }));
+          if (!isOut && !senderInfo.senderName) {
+            try {
+              const entity: any = await client.getEntity(/^-?\d+$/.test(rawChatId) ? Number(rawChatId) : rawChatId);
+              const entName =
+                [entity?.firstName, entity?.lastName].filter(Boolean).join(' ').trim() ||
+                entity?.title ||
+                entity?.username ||
+                '';
+              if (entName) {
+                senderInfo = {
+                  senderId: senderInfo.senderId || rawChatId,
+                  senderName: entName,
+                  senderAvatarUrl:
+                    senderInfo.senderAvatarUrl ||
+                    signTelegramResourceUrl(`/api/telegram/user/avatar/${encodeURIComponent(rawChatId)}`, accountId),
+                };
+              }
+            } catch {}
+          }
+
+          const callUpdate: LocalIncomingUpdate = {
+            id: messageId,
+            type: 'message',
+            telegramMessageId: Number(msgObj.id),
+            chatId: canonicalChatId,
+            rawChatId,
+            accountId,
+            sender: isOut ? 'me' : 'peer',
+            senderName: senderInfo.senderName,
+            ...(senderInfo.senderId ? { senderId: senderInfo.senderId } : {}),
+            ...(senderInfo.senderAvatarUrl ? { senderAvatarUrl: senderInfo.senderAvatarUrl } : {}),
+            text: callInfo.text,
+            timestamp,
+            createdAt,
+            isCall: true,
+            callType: callInfo.callType,
+            callDuration: callInfo.callDuration,
+            isVideoCall: callInfo.isVideoCall,
+            ...(callInfo.telegramCallId ? { telegramCallId: callInfo.telegramCallId } : {}),
+          };
+          pushPendingLocalUpdate(callUpdate);
+          void upsertSyncedMessageToDb(callUpdate, canonicalChatId, accountId);
+          return;
+        }
+
+        if (update instanceof Api.UpdatePhoneCall || update?.className === 'UpdatePhoneCall') {
+          const phoneCall: any = update.phoneCall;
+          if (phoneCall?.className === 'PhoneCallRequested' && phoneCall.adminId !== undefined) {
+            const callerId = String(phoneCall.adminId);
+            if (callerId && callerId !== String(userId)) {
+              const callerChatId = `tg_${callerId}`;
+              const isVideoCall = Boolean(phoneCall.video);
+              let callerName = '';
+              try {
+                const entity: any = await client.getEntity(/^-?\d+$/.test(callerId) ? Number(callerId) : callerId);
+                callerName =
+                  [entity?.firstName, entity?.lastName].filter(Boolean).join(' ').trim() ||
+                  entity?.title ||
+                  entity?.username ||
+                  '';
+              } catch {}
+              pushPendingLocalUpdate({
+                id: `ring_${userId}_${String(phoneCall.id || Date.now())}`,
+                type: 'phone_call_ringing',
+                chatId: callerChatId,
+                rawChatId: callerId,
+                accountId,
+                sender: 'peer',
+                senderName: callerName || `Telegram (${callerId})`,
+                senderId: callerId,
+                senderAvatarUrl: signTelegramResourceUrl(`/api/telegram/user/avatar/${encodeURIComponent(callerId)}`, accountId),
+                text: isVideoCall ? '📹 对方正在向您发起视频通话' : '📞 对方正在向您发起语音通话',
+                timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false }),
+                createdAt: Date.now(),
+                isCall: true,
+                callType: 'incoming',
+                isVideoCall,
+                ...(phoneCall.id !== undefined ? { telegramCallId: String(phoneCall.id) } : {}),
+              });
+            }
+          }
+          return;
         }
       } catch {}
     }, new Raw({}));
+    ensurePhoneCallListener(client);
   } catch (err: any) {
     console.warn('[Attach Telegram Listener Error]:', err.message);
   }
