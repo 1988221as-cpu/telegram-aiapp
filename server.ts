@@ -26995,7 +26995,18 @@ ${memories.slice(-3).map((m: any) => `  * [${m.date}] ${m.topic}: ${m.summary}`)
 
           const mtprotoMsgKey = `${userId}_${rawChatId}_${msgObj.id}`;
           if (processedMtprotoMsgIds.has(mtprotoMsgKey)) return;
-          processedMtprotoMsgIds.set(mtprotoMsgKey, Date.now());
+          const nowDedup = Date.now();
+          processedMtprotoMsgIds.set(mtprotoMsgKey, nowDedup);
+          if (processedMtprotoMsgIds.size > 500) {
+            for (const [k, ts] of processedMtprotoMsgIds.entries()) {
+              if (nowDedup - ts >= MTPROTO_DEDUP_TTL_MS) processedMtprotoMsgIds.delete(k);
+            }
+            while (processedMtprotoMsgIds.size > MAX_PROCESSED_MTPROTO_MSG_IDS) {
+              const oldest = processedMtprotoMsgIds.keys().next().value;
+              if (oldest === undefined) break;
+              processedMtprotoMsgIds.delete(oldest);
+            }
+          }
 
           const isOut = Boolean(msgObj.out);
           const createdAt = msgObj.date ? Number(msgObj.date) * 1000 : Date.now();

@@ -4053,6 +4053,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
 
                     {/* Manual Translate / Retranslate Button */}
                     {onRetranslateMessage &&
+                      !msg.isCall &&
                       (!msg.isAudio || msg.sttText) &&
                       Boolean((msg.sttText || msg.text || msg.imageCaption || '').trim()) && (
                       <button
@@ -4083,6 +4084,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                     {/* Edit Button (For delivered non-audio sent messages) */}
                     {isMe &&
                       !msg.isAudio &&
+                      !msg.isCall &&
                       msg.deliveryStatus !== 'failed' &&
                       msg.deliveryStatus !== 'pending' &&
                       (!chat.id.startsWith('tg_') || typeof msg.telegramMessageId === 'number') && (
@@ -4613,6 +4615,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                         !isMe &&
                         !showOriginalAndTranslation &&
                         Boolean(msg.translatedText) &&
+                        !msg.isCall &&
                         !msg.isImage &&
                         !msg.isFile &&
                         !msg.isVideo;

@@ -415,12 +415,21 @@ function mergeCallMessagesIntoCallRecords(
       m.timestamp ||
       new Date(m.createdAt || Date.now()).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false });
 
-    const existingIdx = next.findIndex(
+    let existingIdx = next.findIndex(
       (r) =>
         r.id === recId ||
-        (tgCallId && r.telegramCallId === tgCallId && r.accountId === accId) ||
-        (r.accountId === accId && r.chatId === chatId && r.timestamp === timestamp && r.type === recType)
+        (Boolean(tgCallId) && r.telegramCallId === tgCallId && r.accountId === accId)
     );
+    if (existingIdx < 0 && !tgCallId && !m.telegramMessageId) {
+      existingIdx = next.findIndex(
+        (r) =>
+          !r.telegramCallId &&
+          r.accountId === accId &&
+          r.chatId === chatId &&
+          r.timestamp === timestamp &&
+          r.type === recType
+      );
+    }
     const entry: TelegramCallRecord = {
       id: recId,
       accountId: accId,
@@ -1869,6 +1878,12 @@ export default function App() {
     if (!localMsgs || localMsgs.length === 0 || targetAccId === 'acc_telegram_bot') {
       fetchMessagesFromDb(targetChatId, targetAccId, { limit: 60 }).then((cloudMsgs) => {
         if (isMounted && cloudMsgs && cloudMsgs.length > 0) {
+          const callMsgsInDb = cloudMsgs.filter((m: any) => Boolean(m?.isCall));
+          if (callMsgsInDb.length > 0 && targetAccId === activeAccountIdRef.current) {
+            setCallRecords((prev) =>
+              mergeCallMessagesIntoCallRecords(prev, callMsgsInDb, chatsRef.current, targetAccId)
+            );
+          }
           setChatHasMoreMap((prev) => ({
             ...prev,
             [bucketKey]: prev[bucketKey] ?? cloudMsgs.length >= 60,
