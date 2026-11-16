@@ -9,6 +9,9 @@ on:
     tags:
       - 'v*'
 
+permissions:
+  contents: write
+
 jobs:
   build-windows:
     runs-on: windows-latest
@@ -85,16 +88,17 @@ jobs:
           Write-Host "::error::Smoke test failed with exit code $($proc.ExitCode)"
           exit 1
 
-      - name: Upload Artifacts (Downloadable Exe)
+      - name: Upload Artifacts (Downloadable Exe & Update Metadata)
         uses: actions/upload-artifact@v4
         with:
           name: HumanSense-Windows-Installer
           path: |
             dist-electron/*.exe
+            dist-electron/latest.yml
+            dist-electron/*.blockmap
 
       - name: Release Exe to GitHub Releases
         if: startsWith(github.ref, 'refs/tags/')
-        continue-on-error: true
         uses: softprops/action-gh-release@v2
         with:
           files: |
