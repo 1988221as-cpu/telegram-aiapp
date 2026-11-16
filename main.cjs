@@ -12,6 +12,11 @@ if (process.platform === 'win32' && typeof app.setAppUserModelId === 'function')
   app.setAppUserModelId('com.lingxicontext.app');
 }
 
+function getAppWindowTitle() {
+  const rawVer = typeof app.getVersion === 'function' ? String(app.getVersion() || '').trim() : '';
+  return rawVer ? `HumanSense v${rawVer}` : 'HumanSense';
+}
+
 function resolveAppIcon() {
   const candidates = [
     path.join(__dirname, 'dist', 'app-icon.png'),
@@ -369,7 +374,7 @@ const SPLASH_HTML = `data:text/html;charset=utf-8,` + encodeURIComponent(`
 <head>
   <meta charset="utf-8">
   <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline';">
-  <title>HumanSense</title>
+  <title>${escapeHtml(getAppWindowTitle())}</title>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body {
@@ -552,12 +557,13 @@ async function startBackendServer(port) {
 }
 
 async function createWindow() {
+  const windowTitle = getAppWindowTitle();
   mainWindow = new BrowserWindow({
     width: 1280,
     height: 820,
     minWidth: 900,
     minHeight: 650,
-    title: 'HumanSense',
+    title: windowTitle,
     icon: resolveAppIcon(),
     backgroundColor: '#0a111a',
     autoHideMenuBar: true,
@@ -571,6 +577,13 @@ async function createWindow() {
   });
 
   Menu.setApplicationMenu(null);
+  mainWindow.on('page-title-updated', (event, nextTitle) => {
+    const expected = getAppWindowTitle();
+    if (nextTitle !== expected) {
+      event.preventDefault();
+      if (!mainWindow.isDestroyed()) mainWindow.setTitle(expected);
+    }
+  });
 
   // Show splash immediately
   mainWindow.loadURL(SPLASH_HTML);
@@ -632,7 +645,7 @@ async function createWindow() {
 
     if (isHealthy && mainWindow && !mainWindow.isDestroyed()) {
       writeLog('info', `Navigating window to http://127.0.0.1:${currentPort}`);
-      mainWindow.setTitle('HumanSense');
+      mainWindow.setTitle(windowTitle);
       mainWindow.loadURL(`http://127.0.0.1:${currentPort}`);
     } else if (mainWindow && !mainWindow.isDestroyed()) {
       const msg = healthRes?.fatalError

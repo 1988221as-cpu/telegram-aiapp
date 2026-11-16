@@ -108,6 +108,7 @@ import {
   refreshSignedResourceUrlsApi,
   checkAppUpdateApi,
   getDesktopUpdaterBridge,
+  APP_VERSION,
   type AppUpdateCheckResult,
   type DesktopUpdaterInfo,
   type DesktopUpdaterState,
