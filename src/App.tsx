@@ -4534,13 +4534,12 @@ export default function App() {
                 />
                 <span className="truncate font-medium">
                   {currentAccount.status === 'expired'
-                    ? `Telegram 账号「${currentAccount.name}」会话已失效或被限制，当前为只读离线浏览`
-                    : currentAccount.status === 'away'
-                      ? `Telegram 账号「${currentAccount.name}」正在恢复连接（当前可离线浏览本地历史）`
-                      : `Telegram 账号「${currentAccount.name}」当前处于离线状态`}
-                  {offlineReasonByAccount[currentAccount.id]
-                    ? `：${offlineReasonByAccount[currentAccount.id]}`
-                    : ''}
+                    ? `Telegram 账号「${currentAccount.name}」会话已失效或被限制，当前为只读离线浏览${
+                        offlineReasonByAccount[currentAccount.id]
+                          ? `：${offlineReasonByAccount[currentAccount.id]}`
+                          : ''
+                      }`
+                    : '连接中'}
                 </span>
               </div>
               <div className="flex items-center gap-2 shrink-0">
