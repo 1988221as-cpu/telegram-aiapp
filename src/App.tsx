@@ -30,6 +30,7 @@ import {
 } from './data/mockData';
 import {
   Account,
+  AccountGroup,
   Chat,
   Message,
   TranslationSettings,
@@ -106,7 +107,10 @@ import {
   isSignedResourceUrl,
   refreshSignedResourceUrlsApi,
   checkAppUpdateApi,
+  getDesktopUpdaterBridge,
   type AppUpdateCheckResult,
+  type DesktopUpdaterInfo,
+  type DesktopUpdaterState,
 } from './services/apiService';
 
 
@@ -541,6 +545,14 @@ export default function App() {
     return INITIAL_ACCOUNTS;
   });
 
+  const [accountGroups, setAccountGroups] = useState<AccountGroup[]>(() => {
+    const saved = secureGetItemSync<AccountGroup[]>('tg_pro_account_groups');
+    if (saved && Array.isArray(saved)) {
+      return saved.filter((g) => g && typeof g.id === 'string' && typeof g.name === 'string');
+    }
+    return [];
+  });
+
   const [activeAccountId, setActiveAccountId] = useState<string>(() => {
     let resolved = accounts[0]?.id || '';
     try {
@@ -667,6 +679,8 @@ export default function App() {
   const [isTelegramSettingsOpen, setIsTelegramSettingsOpen] = useState(false);
   const [appUpdateInfo, setAppUpdateInfo] = useState<AppUpdateCheckResult | null>(null);
   const [isUpdateModalOpen, setIsUpdateModalOpen] = useState(false);
+  const [desktopUpdaterInfo, setDesktopUpdaterInfo] = useState<DesktopUpdaterInfo | null>(null);
+  const [updaterState, setUpdaterState] = useState<DesktopUpdaterState>({ status: 'idle' });
   const hasCheckedUpdateOnBootRef = useRef(false);
 
   // Member authentication gate state (credentials & member count on server, chat data strictly local)
@@ -856,13 +870,18 @@ export default function App() {
 
   const rehydrateFromLocalStorage = async (isRestore = false) => {
     try {
-      const [savedAccs, savedChats, savedMsgs, savedLegacyTrans, savedLLM] = await Promise.all([
+      const [savedAccs, savedGroups, savedChats, savedMsgs, savedLegacyTrans, savedLLM] = await Promise.all([
         secureGetItemAsync<Account[]>('tg_pro_accounts'),
+        secureGetItemAsync<AccountGroup[]>('tg_pro_account_groups'),
         secureGetItemAsync<Chat[]>('tg_pro_chats'),
         secureGetItemAsync<Record<string, Message[]>>('tg_pro_messages'),
         secureGetItemAsync<TranslationSettings>('tg_pro_trans_settings'),
         secureGetItemAsync<CustomLLMConfig>('tg_pro_llm_config'),
       ]);
+
+      if (savedGroups && Array.isArray(savedGroups)) {
+        setAccountGroups(savedGroups.filter((g) => g && typeof g.id === 'string' && typeof g.name === 'string'));
+      }
 
       let nextAccounts: Account[] | null = null;
       let resolvedActiveAccId = activeAccountId;
@@ -1146,6 +1165,11 @@ export default function App() {
 
   useEffect(() => {
     if (!isHydrated) return;
+    secureSetItemSync('tg_pro_account_groups', accountGroups);
+  }, [accountGroups, isHydrated]);
+
+  useEffect(() => {
+    if (!isHydrated) return;
     secureSetItemSync('tg_pro_chats', chats);
   }, [chats, isHydrated]);
 
@@ -1361,8 +1385,10 @@ export default function App() {
     scheduleRevokeBlobUrls(Array.from(restoredBlobUrlsRef.current.values()));
     restoredBlobUrlsRef.current.clear();
     purgeAllLocalChatData();
+    secureRemoveItem('tg_pro_account_groups');
     notifiedExpiredRef.current.clear();
     setAccounts([]);
+    setAccountGroups([]);
     setChats([]);
     setMessagesMap({});
     setContacts([]);
@@ -1520,6 +1546,134 @@ export default function App() {
 
   const lastDialogsSyncAtRef = useRef<Record<string, number>>({});
   const lastFloodToastAtRef = useRef<Record<string, number>>({});
+  const dialogsMutationVersionRef = useRef<Record<string, number>>({});
+  const recentDialogOverridesRef = useRef<
+    Record<
+      string,
+      {
+        isArchived?: boolean;
+        isPinned?: boolean;
+        isMuted?: boolean;
+        unreadCount?: number;
+        title?: string;
+        lastMessage?: string;
+        deleted?: boolean;
+        updatedAt: number;
+      }
+    >
+  >({});
+
+  const recordDialogMutationOverride = (
+    accountId: string,
+    chatId: string,
+    patch: {
+      isArchived?: boolean;
+      isPinned?: boolean;
+      isMuted?: boolean;
+      unreadCount?: number;
+      title?: string;
+      lastMessage?: string;
+      deleted?: boolean;
+    }
+  ) => {
+    if (!accountId || !chatId) return;
+    dialogsMutationVersionRef.current[accountId] =
+      (dialogsMutationVersionRef.current[accountId] || 0) + 1;
+    lastDialogsSyncAtRef.current[accountId] = 0;
+    const key = msgBucketKey(accountId, chatId);
+    const prev = recentDialogOverridesRef.current[key] || { updatedAt: 0 };
+    recentDialogOverridesRef.current[key] = {
+      ...prev,
+      ...patch,
+      updatedAt: Date.now(),
+    };
+  };
+
+  const mergeCloudDialogsForAccount = (
+    targetAccId: string,
+    realDialogs: any[],
+    meta?: { isCached?: boolean; reqMutationVersion?: number }
+  ) => {
+    const latestMutationVersion = dialogsMutationVersionRef.current[targetAccId] || 0;
+    const isStaleComparedToMutation =
+      typeof meta?.reqMutationVersion === 'number' && meta.reqMutationVersion !== latestMutationVersion;
+    const nowTs = Date.now();
+    setChats((prev) => {
+      const otherChats = prev.filter((c) => c.accountId !== targetAccId);
+      const prevAccountChats = prev.filter((c) => c.accountId === targetAccId);
+      const prevMap = new Map<string, Chat>();
+      prevAccountChats.forEach((c) => prevMap.set(c.id, c));
+
+      const nextAccountChats: Chat[] = [];
+      for (const d of realDialogs) {
+        if (!d?.id) continue;
+        const existing = prevMap.get(d.id);
+        const overrideKey = msgBucketKey(targetAccId, d.id);
+        const override = recentDialogOverridesRef.current[overrideKey];
+        if (override?.deleted) {
+          const hasNewerCloudActivity =
+            !meta?.isCached &&
+            !isStaleComparedToMutation &&
+            typeof d.lastDate === 'number' &&
+            d.lastDate > Math.floor(override.updatedAt / 1000);
+          const withinGrace = nowTs - override.updatedAt < 60_000;
+          if (!hasNewerCloudActivity && (meta?.isCached || isStaleComparedToMutation || withinGrace)) {
+            continue;
+          }
+          delete recentDialogOverridesRef.current[overrideKey];
+        }
+
+        const mapped = mapCloudDialogToChat(d, targetAccId, existing);
+        if (override && !override.deleted) {
+          const withinGrace = nowTs - override.updatedAt < 60_000;
+          const allMatched =
+            (override.isArchived === undefined || mapped.isArchived === override.isArchived) &&
+            (override.isPinned === undefined || mapped.isPinned === override.isPinned) &&
+            (override.isMuted === undefined || mapped.isMuted === override.isMuted) &&
+            (override.unreadCount === undefined || mapped.unreadCount === override.unreadCount) &&
+            (override.title === undefined || mapped.title === override.title) &&
+            (override.lastMessage === undefined || mapped.lastMessage === override.lastMessage);
+          if (!meta?.isCached && !isStaleComparedToMutation && allMatched) {
+            delete recentDialogOverridesRef.current[overrideKey];
+            nextAccountChats.push(mapped);
+            continue;
+          }
+          if (meta?.isCached || isStaleComparedToMutation || withinGrace) {
+            nextAccountChats.push({
+              ...mapped,
+              ...(override.isArchived !== undefined ? { isArchived: override.isArchived } : {}),
+              ...(override.isPinned !== undefined ? { isPinned: override.isPinned } : {}),
+              ...(override.isMuted !== undefined ? { isMuted: override.isMuted } : {}),
+              ...(override.unreadCount !== undefined ? { unreadCount: override.unreadCount } : {}),
+              ...(override.title !== undefined ? { title: override.title } : {}),
+              ...(override.lastMessage !== undefined ? { lastMessage: override.lastMessage } : {}),
+            });
+            continue;
+          }
+          delete recentDialogOverridesRef.current[overrideKey];
+        } else if ((meta?.isCached || isStaleComparedToMutation) && existing) {
+          nextAccountChats.push({
+            ...mapped,
+            isArchived: Boolean(existing.isArchived),
+            isPinned: Boolean(existing.isPinned),
+            isMuted: Boolean(existing.isMuted),
+            unreadCount: existing.unreadCount,
+            title: existing.title,
+            lastMessage: existing.lastMessage,
+          });
+          continue;
+        }
+        nextAccountChats.push(mapped);
+      }
+      const cloudIds = new Set(nextAccountChats.map((c) => c.id));
+      prevAccountChats.forEach((c) => {
+        if (!c.id.startsWith('tg_') && !cloudIds.has(c.id)) {
+          nextAccountChats.push(c);
+        }
+      });
+      return [...nextAccountChats, ...otherChats];
+    });
+  };
 
   const notifyTelegramFloodCooldown = (accId: string, errorMsg?: string, retryAfterSeconds?: number) => {
     const now = Date.now();
@@ -1545,6 +1699,7 @@ export default function App() {
       } else {
         const curAcc = activeAccountIdRef.current;
         if (curAcc && curAcc.startsWith('acc_tg_')) {
+          const reqMutationVersion = dialogsMutationVersionRef.current[curAcc] || 0;
           const dlgRes = await fetchTelegramUserDialogsDetailedApi(curAcc, undefined, { force: true });
           if (dlgRes.code === 'TELEGRAM_FLOOD_WAIT') {
             notifyTelegramFloodCooldown(curAcc, dlgRes.error, dlgRes.retryAfterSeconds);
@@ -1553,12 +1708,9 @@ export default function App() {
             if (dlgRes.ok) {
               lastDialogsSyncAtRef.current[curAcc] = Date.now();
             }
-            setChats((prev) => {
-              const otherChats = prev.filter((c) => c.accountId !== curAcc);
-              const prevMap = new Map<string, Chat>();
-              prev.filter((c) => c.accountId === curAcc).forEach((c) => prevMap.set(c.id, c));
-              const nextChats = dlgRes.dialogs.map((d: any) => mapCloudDialogToChat(d, curAcc, prevMap.get(d.id)));
-              return [...nextChats, ...otherChats];
+            mergeCloudDialogsForAccount(curAcc, dlgRes.dialogs, {
+              isCached: Boolean(dlgRes.cached),
+              reqMutationVersion,
             });
           }
         }
@@ -1593,6 +1745,32 @@ export default function App() {
       clearInterval(statusPollTimer);
     };
   }, [isMemberAuthenticated]);
+
+  // Subscribe to Electron desktop auto-updater runtime state & capability
+  useEffect(() => {
+    const bridge = getDesktopUpdaterBridge();
+    if (!bridge) return;
+    let active = true;
+    bridge
+      .getInfo()
+      .then((info) => {
+        if (active && info) setDesktopUpdaterInfo(info);
+      })
+      .catch(() => {});
+    bridge
+      .getState()
+      .then((st) => {
+        if (active && st) setUpdaterState(st);
+      })
+      .catch(() => {});
+    const unsubscribe = bridge.onStateChange((nextState) => {
+      if (active && nextState) setUpdaterState(nextState);
+    });
+    return () => {
+      active = false;
+      unsubscribe();
+    };
+  }, []);
 
   // Check GitHub Releases once after login (non-blocking, respects dismissed version)
   useEffect(() => {
@@ -1659,34 +1837,15 @@ export default function App() {
           handleSyncContacts(res.contacts, targetAccId);
         }
       }).catch(() => {});
-    } else if (pendingAutoSelectAccountRef.current === targetAccId && !activeChatIdRef.current) {
-      pendingAutoSelectAccountRef.current = null;
-      const existingChat = chatsRef.current.find((c) => c.accountId === targetAccId);
-      if (existingChat) setActiveChatId(existingChat.id);
     }
 
     const LOW_FREQUENCY_DIALOG_FALLBACK_INTERVAL_MS = 180_000;
     const DIALOG_MIN_REFRESH_GAP_MS = 20_000;
 
-    const applyCloudDialogs = (realDialogs: any[]) => {
-      setChats((prev) => {
-        const otherChats = prev.filter((c) => c.accountId !== targetAccId);
-        const prevAccountChats = prev.filter((c) => c.accountId === targetAccId);
-        const prevMap = new Map<string, Chat>();
-        prevAccountChats.forEach((c) => prevMap.set(c.id, c));
-
-        const nextAccountChats: Chat[] = realDialogs.map((d: any) =>
-          mapCloudDialogToChat(d, targetAccId, prevMap.get(d.id))
-        );
-        const cloudIds = new Set(nextAccountChats.map((c) => c.id));
-        prevAccountChats.forEach((c) => {
-          if (!c.id.startsWith('tg_') && !cloudIds.has(c.id)) {
-            nextAccountChats.push(c);
-          }
-        });
-        return [...nextAccountChats, ...otherChats];
-      });
-    };
+    const applyCloudDialogs = (
+      realDialogs: any[],
+      meta?: { isCached?: boolean; reqMutationVersion?: number }
+    ) => mergeCloudDialogsForAccount(targetAccId, realDialogs, meta);
 
     const syncDialogsFromCloud = async (opts?: { force?: boolean }) => {
       if (!targetAccId.startsWith('acc_tg_')) return;
@@ -1698,6 +1857,7 @@ export default function App() {
         return;
       }
       const seq = selectAccountSeqRef.current;
+      const reqMutationVersion = dialogsMutationVersionRef.current[targetAccId] || 0;
       try {
         const res = await fetchTelegramUserDialogsDetailedApi(targetAccId, undefined, opts);
         if (selectAccountSeqRef.current !== seq) return;
@@ -1708,29 +1868,15 @@ export default function App() {
           } else if (res.code === 'TELEGRAM_FLOOD_WAIT') {
             notifyTelegramFloodCooldown(targetAccId, res.error, res.retryAfterSeconds);
             if (Array.isArray(res.dialogs) && res.dialogs.length > 0) {
-              applyCloudDialogs(res.dialogs);
+              applyCloudDialogs(res.dialogs, { isCached: true, reqMutationVersion });
             }
-          } else if (pendingAutoSelectAccountRef.current === targetAccId && !activeChatIdRef.current) {
-            pendingAutoSelectAccountRef.current = null;
-            const existingChat = chatsRef.current.find((c) => c.accountId === targetAccId);
-            if (existingChat) setActiveChatId(existingChat.id);
           }
           return;
         }
 
         lastDialogsSyncAtRef.current[targetAccId] = Date.now();
         const realDialogs = res.dialogs;
-        applyCloudDialogs(realDialogs);
-
-        if (pendingAutoSelectAccountRef.current === targetAccId && !activeChatIdRef.current) {
-          pendingAutoSelectAccountRef.current = null;
-          if (realDialogs.length > 0) {
-            setActiveChatId(realDialogs[0].id);
-          } else {
-            const existingChat = chatsRef.current.find((c) => c.accountId === targetAccId);
-            if (existingChat) setActiveChatId(existingChat.id);
-          }
-        }
+        applyCloudDialogs(realDialogs, { isCached: Boolean(res.cached), reqMutationVersion });
 
         if (realDialogs.length > 0 && activeAccountIdRef.current === targetAccId) {
           const dialogById = new Map<string, any>();
@@ -2461,6 +2607,15 @@ export default function App() {
             if (updType === 'read_inbox') {
               const nextUnread = typeof upd.unreadCount === 'number' ? Math.max(0, upd.unreadCount) : 0;
               const nextReadInboxMaxId = typeof upd.readInboxMaxId === 'number' ? upd.readInboxMaxId : undefined;
+              const override = recentDialogOverridesRef.current[msgBucketKey(targetAccountId, targetChatId)];
+              if (
+                override &&
+                Date.now() - override.updatedAt < 15_000 &&
+                override.unreadCount !== undefined &&
+                override.unreadCount !== nextUnread
+              ) {
+                return;
+              }
               setChats((prev) =>
                 prev.map((c) =>
                   c.id === targetChatId && c.accountId === targetAccountId
@@ -2479,10 +2634,41 @@ export default function App() {
 
             if (updType === 'dialog_pinned') {
               const nextPinned = Boolean(upd.isPinned);
+              const override = recentDialogOverridesRef.current[msgBucketKey(targetAccountId, targetChatId)];
+              if (
+                override &&
+                Date.now() - override.updatedAt < 15_000 &&
+                override.isPinned !== undefined &&
+                override.isPinned !== nextPinned
+              ) {
+                return;
+              }
               setChats((prev) =>
                 prev.map((c) =>
                   c.id === targetChatId && c.accountId === targetAccountId
                     ? { ...c, isPinned: nextPinned }
+                    : c
+                )
+              );
+              return;
+            }
+
+            if (updType === 'dialog_archived') {
+              const nextArchived = Boolean(upd.isArchived);
+              const overrideKey = msgBucketKey(targetAccountId, targetChatId);
+              const override = recentDialogOverridesRef.current[overrideKey];
+              if (
+                override &&
+                Date.now() - override.updatedAt < 15_000 &&
+                override.isArchived !== undefined &&
+                override.isArchived !== nextArchived
+              ) {
+                return;
+              }
+              setChats((prev) =>
+                prev.map((c) =>
+                  c.id === targetChatId && c.accountId === targetAccountId
+                    ? { ...c, isArchived: nextArchived }
                     : c
                 )
               );
@@ -3023,6 +3209,9 @@ export default function App() {
         .filter((id): id is number => typeof id === 'number' && id > 0);
       const maxTgId = tgIds.length > 0 ? Math.max(...tgIds) : undefined;
       if ((targetChatObj?.unreadCount || 0) > 0 || maxTgId !== undefined) {
+        if ((targetChatObj?.unreadCount || 0) > 0 && targetAccId) {
+          recordDialogMutationOverride(targetAccId, chatId, { unreadCount: 0 });
+        }
         markTelegramDialogReadApi({
           accountId: targetAccId,
           chatId,
@@ -3284,11 +3473,12 @@ export default function App() {
     chatId: string,
     newTitle: string
   ): Promise<{ ok: boolean; error?: string }> => {
+    const targetAccountId = activeAccountIdRef.current || activeAccountId;
     const trimmed = newTitle.trim();
     if (!trimmed) return { ok: false, error: '备注名称不能为空' };
     if (isTelegramCloudChat(chatId)) {
       const cloudRes = await renameTelegramContactApi({
-        accountId: activeAccountId,
+        accountId: targetAccountId,
         chatId,
         newTitle: trimmed,
       });
@@ -3298,9 +3488,12 @@ export default function App() {
         return { ok: false, error: errMsg };
       }
     }
+    if (targetAccountId) {
+      recordDialogMutationOverride(targetAccountId, chatId, { title: trimmed });
+    }
     setChats((prev) => {
       const updated = prev.map((c) =>
-        c.id === chatId && (!activeAccountId || c.accountId === activeAccountId)
+        c.id === chatId && (!targetAccountId || c.accountId === targetAccountId)
           ? { ...c, title: trimmed }
           : c
       );
@@ -3319,15 +3512,15 @@ export default function App() {
         return ct;
       });
       if (changed) {
-        saveScopedContacts(next, activeAccountId);
+        saveScopedContacts(next, targetAccountId);
       }
       return changed ? next : prev;
     });
-    if (!updatedExistingContact && isTelegramCloudChat(chatId) && activeAccountId.startsWith('acc_tg_')) {
-      fetchTelegramUserContactsApi(activeAccountId)
+    if (!updatedExistingContact && isTelegramCloudChat(chatId) && targetAccountId.startsWith('acc_tg_')) {
+      fetchTelegramUserContactsApi(targetAccountId)
         .then((res) => {
           if (res.ok && Array.isArray(res.contacts)) {
-            handleSyncContacts(res.contacts, activeAccountId);
+            handleSyncContacts(res.contacts, targetAccountId);
           }
         })
         .catch(() => {});
@@ -3339,7 +3532,7 @@ export default function App() {
   const handleSelectAccount = (accountId: string) => {
     selectAccountSeqRef.current += 1;
     selectChatSeqRef.current += 1;
-    pendingAutoSelectAccountRef.current = accountId;
+    pendingAutoSelectAccountRef.current = null;
     activeAccountIdRef.current = accountId;
     activeChatIdRef.current = null;
     clientPrefsScopeRef.current = accountId;
@@ -3382,6 +3575,7 @@ export default function App() {
         status: 'online',
         bio: newAccountData.bio || 'Telegram 账号',
         remark: newAccountData.remark ?? existing?.remark,
+        groupId: newAccountData.groupId ?? existing?.groupId,
       };
       const filtered = prev.filter((a) => a.id !== id);
       return [...filtered, newAcc];
@@ -4314,6 +4508,9 @@ export default function App() {
       ...prev,
       [bucketKey]: [],
     }));
+    if (targetAccountId) {
+      recordDialogMutationOverride(targetAccountId, chatId, { lastMessage: '暂无消息', unreadCount: 0 });
+    }
     setChats((prev) =>
       prev.map((c) =>
         c.id === chatId && (!targetAccountId || c.accountId === targetAccountId)
@@ -4325,11 +4522,12 @@ export default function App() {
   };
 
   const handleToggleMuteChat = async (chatId: string) => {
-    const targetChat = chats.find((c) => c.id === chatId && (!activeAccountId || c.accountId === activeAccountId));
+    const targetAccountId = activeAccountIdRef.current || activeAccountId;
+    const targetChat = chats.find((c) => c.id === chatId && (!targetAccountId || c.accountId === targetAccountId));
     const nextMuted = !targetChat?.isMuted;
     if (isTelegramCloudChat(chatId)) {
       const res = await toggleTelegramDialogMuteApi({
-        accountId: activeAccountId,
+        accountId: targetAccountId,
         chatId,
         muted: nextMuted,
       });
@@ -4338,9 +4536,12 @@ export default function App() {
         return;
       }
     }
+    if (targetAccountId) {
+      recordDialogMutationOverride(targetAccountId, chatId, { isMuted: nextMuted });
+    }
     setChats((prev) =>
       prev.map((c) =>
-        c.id === chatId && (!activeAccountId || c.accountId === activeAccountId)
+        c.id === chatId && (!targetAccountId || c.accountId === targetAccountId)
           ? { ...c, isMuted: nextMuted }
           : c
       )
@@ -4348,11 +4549,12 @@ export default function App() {
   };
 
   const handleTogglePinChat = async (chatId: string) => {
-    const targetChat = chats.find((c) => c.id === chatId && (!activeAccountId || c.accountId === activeAccountId));
+    const targetAccountId = activeAccountIdRef.current || activeAccountId;
+    const targetChat = chats.find((c) => c.id === chatId && (!targetAccountId || c.accountId === targetAccountId));
     const nextPinned = !targetChat?.isPinned;
     if (isTelegramCloudChat(chatId)) {
       const res = await toggleTelegramDialogPinApi({
-        accountId: activeAccountId,
+        accountId: targetAccountId,
         chatId,
         pinned: nextPinned,
       });
@@ -4361,9 +4563,12 @@ export default function App() {
         return;
       }
     }
+    if (targetAccountId) {
+      recordDialogMutationOverride(targetAccountId, chatId, { isPinned: nextPinned });
+    }
     setChats((prev) =>
       prev.map((c) =>
-        c.id === chatId && (!activeAccountId || c.accountId === activeAccountId)
+        c.id === chatId && (!targetAccountId || c.accountId === targetAccountId)
           ? { ...c, isPinned: nextPinned }
           : c
       )
@@ -4371,11 +4576,12 @@ export default function App() {
   };
 
   const handleToggleArchiveChat = async (chatId: string) => {
-    const targetChat = chats.find((c) => c.id === chatId && (!activeAccountId || c.accountId === activeAccountId));
+    const targetAccountId = activeAccountIdRef.current || activeAccountId;
+    const targetChat = chats.find((c) => c.id === chatId && (!targetAccountId || c.accountId === targetAccountId));
     const nextArchived = !targetChat?.isArchived;
     if (isTelegramCloudChat(chatId)) {
       const res = await toggleTelegramDialogArchiveApi({
-        accountId: activeAccountId,
+        accountId: targetAccountId,
         chatId,
         archived: nextArchived,
       });
@@ -4384,9 +4590,12 @@ export default function App() {
         return;
       }
     }
+    if (targetAccountId) {
+      recordDialogMutationOverride(targetAccountId, chatId, { isArchived: nextArchived });
+    }
     setChats((prev) =>
       prev.map((c) =>
-        c.id === chatId && (!activeAccountId || c.accountId === activeAccountId)
+        c.id === chatId && (!targetAccountId || c.accountId === targetAccountId)
           ? { ...c, isArchived: nextArchived }
           : c
       )
@@ -4394,11 +4603,12 @@ export default function App() {
   };
 
   const handleToggleMarkUnread = async (chatId: string) => {
-    const targetChat = chats.find((c) => c.id === chatId && (!activeAccountId || c.accountId === activeAccountId));
+    const targetAccountId = activeAccountIdRef.current || activeAccountId;
+    const targetChat = chats.find((c) => c.id === chatId && (!targetAccountId || c.accountId === targetAccountId));
     const nextUnread = (targetChat?.unreadCount || 0) === 0;
     if (isTelegramCloudChat(chatId)) {
       const res = await toggleTelegramDialogUnreadApi({
-        accountId: activeAccountId,
+        accountId: targetAccountId,
         chatId,
         unread: nextUnread,
       });
@@ -4407,9 +4617,12 @@ export default function App() {
         return;
       }
     }
+    if (targetAccountId) {
+      recordDialogMutationOverride(targetAccountId, chatId, { unreadCount: nextUnread ? 1 : 0 });
+    }
     setChats((prev) =>
       prev.map((c) => {
-        if (c.id !== chatId || (activeAccountId && c.accountId !== activeAccountId)) return c;
+        if (c.id !== chatId || (targetAccountId && c.accountId !== targetAccountId)) return c;
         return { ...c, unreadCount: nextUnread ? 1 : 0 };
       })
     );
@@ -4448,6 +4661,9 @@ export default function App() {
       delete next[bucketKey];
       return next;
     });
+    if (targetAccountId) {
+      recordDialogMutationOverride(targetAccountId, chatId, { deleted: true });
+    }
     setChats((prev) =>
       prev.filter((c) => !(c.id === chatId && (!targetAccountId || c.accountId === targetAccountId)))
     );
@@ -4637,6 +4853,51 @@ export default function App() {
     );
   };
 
+  const handleCreateAccountGroup = (name: string, color?: string): AccountGroup | null => {
+    const cleanName = name.trim().slice(0, 24);
+    if (!cleanName) return null;
+    const newGroup: AccountGroup = {
+      id: `grp_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+      name: cleanName,
+      color: color || '#2ba0ff',
+      collapsed: false,
+    };
+    setAccountGroups((prev) => [...prev, newGroup]);
+    return newGroup;
+  };
+
+  const handleRenameAccountGroup = (groupId: string, name: string, color?: string) => {
+    const cleanName = name.trim().slice(0, 24);
+    if (!cleanName) return;
+    setAccountGroups((prev) =>
+      prev.map((g) => (g.id === groupId ? { ...g, name: cleanName, ...(color ? { color } : {}) } : g))
+    );
+  };
+
+  const handleDeleteAccountGroup = (groupId: string) => {
+    setAccountGroups((prev) => prev.filter((g) => g.id !== groupId));
+    setAccounts((prev) =>
+      prev.map((a) => (a.groupId === groupId ? { ...a, groupId: undefined } : a))
+    );
+  };
+
+  const handleToggleAccountGroupCollapse = (groupId: string) => {
+    setAccountGroups((prev) =>
+      prev.map((g) => (g.id === groupId ? { ...g, collapsed: !g.collapsed } : g))
+    );
+  };
+
+  const handleUpdateAccountMeta = (accountId: string, meta: { remark?: string; groupId?: string }) => {
+    const cleanRemark = typeof meta.remark === 'string' ? meta.remark.trim() : undefined;
+    handleUpdateCurrentAccount(
+      {
+        ...(meta.remark !== undefined ? { remark: cleanRemark || undefined } : {}),
+        ...(meta.groupId !== undefined ? { groupId: meta.groupId || undefined } : {}),
+      },
+      accountId
+    );
+  };
+
   const currentAccount = accounts.find((a) => a.id === activeAccountId) || accounts[0];
 
   return (
@@ -4649,6 +4910,7 @@ export default function App() {
             .filter((c) => c.accountId === a.id && !c.isArchived)
             .reduce((sum, c) => sum + (c.unreadCount || 0), 0),
         }))}
+        accountGroups={accountGroups}
         activeAccountId={activeAccountId}
         onSelectAccount={(accountId) => {
           handleSelectAccount(accountId);
@@ -4658,6 +4920,11 @@ export default function App() {
           const normalized = remark.trim();
           handleUpdateCurrentAccount({ remark: normalized || undefined }, accountId);
         }}
+        onUpdateAccountMeta={handleUpdateAccountMeta}
+        onCreateAccountGroup={handleCreateAccountGroup}
+        onRenameAccountGroup={handleRenameAccountGroup}
+        onDeleteAccountGroup={handleDeleteAccountGroup}
+        onToggleAccountGroupCollapse={handleToggleAccountGroupCollapse}
         onOpenMenuDrawer={() => setIsTelegramMenuOpen(true)}
         onOpenTranslation={() => toggleRightPanel('translation')}
         onOpenAddAccount={() => {
@@ -4991,10 +5258,15 @@ export default function App() {
           setReloginAccount(null);
         }}
         accounts={accounts}
+        accountGroups={accountGroups}
         activeAccountId={activeAccountId}
         onSelectAccount={handleSelectAccount}
         onAddAccount={handleAddAccount}
         onDeleteAccount={handleDeleteAccount}
+        onUpdateAccountMeta={handleUpdateAccountMeta}
+        onCreateAccountGroup={handleCreateAccountGroup}
+        onRenameAccountGroup={handleRenameAccountGroup}
+        onDeleteAccountGroup={handleDeleteAccountGroup}
         reloginAccount={reloginAccount}
       />
 
@@ -5023,6 +5295,8 @@ export default function App() {
         onClose={() => setIsSystemSettingsOpen(false)}
         onOpenDatabase={() => setIsDatabaseOpen(true)}
         onOpenTranslation={() => openRightPanel('translation')}
+        updaterState={updaterState}
+        onOpenUpdateModal={() => setIsUpdateModalOpen(true)}
         onUpdateAvailable={(info) => {
           setAppUpdateInfo(info);
           setIsUpdateModalOpen(true);
@@ -5141,8 +5415,56 @@ export default function App() {
             return 'https://github.com/1988221as-cpu/telegram-aiapp/releases';
           }
         };
-        const downloadHref = safeHref(appUpdateInfo.downloadUrl);
+        const formatUpdateBytes = (bytes?: number) => {
+          const val = Number(bytes || 0);
+          if (!val || val <= 0) return '0 B';
+          if (val < 1024) return `${val} B`;
+          if (val < 1024 * 1024) return `${(val / 1024).toFixed(1)} KB`;
+          return `${(val / (1024 * 1024)).toFixed(1)} MB`;
+        };
+        const bridge = getDesktopUpdaterBridge();
+        const canInAppUpdate = Boolean(bridge && desktopUpdaterInfo?.supported);
+        const isCheckingMeta = updaterState.status === 'checking';
+        const isDownloading = updaterState.status === 'downloading';
+        const isDownloaded = updaterState.status === 'downloaded';
+        const isInstalling = updaterState.status === 'installing';
+        const isError = updaterState.status === 'error';
+        const percent = Math.max(0, Math.min(100, Number(updaterState.percent || 0)));
+
+        const downloadHref = safeHref(
+          desktopUpdaterInfo?.mode === 'nsis'
+            ? appUpdateInfo.installerDownloadUrl || appUpdateInfo.downloadUrl
+            : appUpdateInfo.portableDownloadUrl || appUpdateInfo.downloadUrl
+        );
         const releaseHref = safeHref(appUpdateInfo.releaseUrl);
+        const displayAssetName =
+          desktopUpdaterInfo?.mode === 'nsis'
+            ? appUpdateInfo.installerAssetName || appUpdateInfo.assetName
+            : appUpdateInfo.portableAssetName || appUpdateInfo.assetName;
+
+        const handleStartInAppDownload = () => {
+          if (!bridge) return;
+          void bridge.startDownload({
+            version: appUpdateInfo.latestVersion,
+            downloadUrl: appUpdateInfo.downloadUrl,
+            assetName: appUpdateInfo.assetName,
+            portableDownloadUrl: appUpdateInfo.portableDownloadUrl,
+            portableAssetName: appUpdateInfo.portableAssetName,
+            installerDownloadUrl: appUpdateInfo.installerDownloadUrl,
+            installerAssetName: appUpdateInfo.installerAssetName,
+          });
+        };
+
+        const handleCancelInAppDownload = () => {
+          if (!bridge) return;
+          void bridge.cancelDownload();
+        };
+
+        const handleInstallAndRestart = () => {
+          if (!bridge) return;
+          void bridge.installNow();
+        };
+
         return (
           <div className="fixed inset-0 z-[70] bg-black/55 backdrop-blur-xs flex items-center justify-center p-4 select-none">
             <div className="w-full max-w-md bg-white dark:bg-[#0b131f] aurora:bg-[#0c151b] border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] rounded-2xl shadow-2xl overflow-hidden text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8]">
@@ -5153,57 +5475,175 @@ export default function App() {
                     (当前 v{appUpdateInfo.currentVersion})
                   </span>
                 </div>
-                <button
-                  type="button"
-                  onClick={() => setIsUpdateModalOpen(false)}
-                  className="text-xs text-[#64748b] hover:text-[#0f172a] dark:text-[#7b93ad] dark:hover:text-white cursor-pointer"
-                >
-                  ✕
-                </button>
+                {!isInstalling && (
+                  <button
+                    type="button"
+                    onClick={() => setIsUpdateModalOpen(false)}
+                    className="text-xs text-[#64748b] hover:text-[#0f172a] dark:text-[#7b93ad] dark:hover:text-white cursor-pointer"
+                  >
+                    ✕
+                  </button>
+                )}
               </div>
               <div className="p-5 space-y-3 text-xs">
-                {appUpdateInfo.assetName && (
-                  <div className="text-[#475569] dark:text-[#b4c6d8]">
-                    安装包/便携版：<span className="font-mono font-medium">{appUpdateInfo.assetName}</span>
+                {displayAssetName && (
+                  <div className="text-[#475569] dark:text-[#b4c6d8] flex items-center justify-between gap-2">
+                    <span className="truncate">
+                      更新包：<span className="font-mono font-medium">{displayAssetName}</span>
+                    </span>
+                    {canInAppUpdate && (
+                      <span className="shrink-0 text-[11px] text-[#64748b] dark:text-[#7b93ad]">
+                        {desktopUpdaterInfo?.mode === 'portable' ? '便携直更模式' : '自动安装模式'}
+                      </span>
+                    )}
                   </div>
                 )}
-                <div className="max-h-48 overflow-y-auto whitespace-pre-wrap rounded-xl bg-[#f8fafc] dark:bg-[#08101a] aurora:bg-[#081014] border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] p-3 text-[#334155] dark:text-[#b4c6d8] leading-relaxed select-text">
-                  {appUpdateInfo.releaseNotes?.trim() || '本次发布包含功能优化与问题修复，建议下载最新便携版覆盖使用。'}
+                <div className="max-h-44 overflow-y-auto whitespace-pre-wrap rounded-xl bg-[#f8fafc] dark:bg-[#08101a] aurora:bg-[#081014] border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] p-3 text-[#334155] dark:text-[#b4c6d8] leading-relaxed select-text">
+                  {appUpdateInfo.releaseNotes?.trim() || '本次发布包含功能优化与问题修复，建议更新至最新版本。'}
                 </div>
+
+                {canInAppUpdate && (isCheckingMeta || isDownloading || isDownloaded || isInstalling) && (
+                  <div className="rounded-xl bg-[#f1f5f9] dark:bg-[#0d1726] aurora:bg-[#0e1920] border border-[#e2e8f0] dark:border-[#1e3148] aurora:border-[#1f343d] p-3 space-y-2">
+                    <div className="flex items-center justify-between text-[11px]">
+                      <span className="font-medium text-[#0f172a] dark:text-[#eef4fb]">
+                        {isCheckingMeta
+                          ? '正在校验更新清单...'
+                          : isDownloading
+                            ? `正在下载更新包 (${percent.toFixed(1)}%)`
+                            : isDownloaded
+                              ? '更新包下载并校验完成，已就绪'
+                              : '正在关闭本地服务并重启安装...'}
+                      </span>
+                      {isDownloading && (
+                        <span className="text-[#64748b] dark:text-[#7b93ad] tabular-nums">
+                          {updaterState.bytesPerSecond ? `${formatUpdateBytes(updaterState.bytesPerSecond)}/s` : ''}
+                        </span>
+                      )}
+                    </div>
+                    <div className="w-full h-2 rounded-full bg-[#cbd5e1] dark:bg-[#1e293b] overflow-hidden">
+                      <div
+                        className={`h-full rounded-full transition-all duration-200 ${
+                          isDownloaded || isInstalling
+                            ? 'bg-[#16a34a] dark:bg-[#22c55e]'
+                            : 'bg-[#2481cc] dark:bg-[#2ba0ff] aurora:bg-[#0d9488]'
+                        } ${isCheckingMeta ? 'animate-pulse w-1/3' : ''}`}
+                        style={isCheckingMeta ? undefined : { width: `${isDownloaded || isInstalling ? 100 : percent}%` }}
+                      />
+                    </div>
+                    {(isDownloading || isDownloaded) && (updaterState.total || updaterState.transferred) ? (
+                      <div className="flex items-center justify-between text-[11px] text-[#64748b] dark:text-[#7b93ad] tabular-nums">
+                        <span>
+                          {formatUpdateBytes(updaterState.transferred)}
+                          {updaterState.total ? ` / ${formatUpdateBytes(updaterState.total)}` : ''}
+                        </span>
+                        <span>{isDownloaded ? '100%' : `${percent.toFixed(1)}%`}</span>
+                      </div>
+                    ) : null}
+                  </div>
+                )}
+
+                {canInAppUpdate && isError && updaterState.error && (
+                  <div className="rounded-xl bg-[#fef2f2] dark:bg-[#2a1215] border border-[#fecaca] dark:border-[#7f1d1d] p-3 text-[11px] text-[#b91c1c] dark:text-[#fca5a5] leading-relaxed">
+                    自动更新失败：{updaterState.error}。你可以重试或点击下方“浏览器下载”。
+                  </div>
+                )}
               </div>
               <div className="px-5 py-3.5 border-t border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] bg-[#f8fafc] dark:bg-[#0d1726] aurora:bg-[#0e1920] flex items-center justify-between gap-2 text-xs">
-                <button
-                  type="button"
-                  onClick={() => {
-                    try {
-                      if (appUpdateInfo.latestVersion) {
-                        localStorage.setItem('tg_dismissed_update_version', appUpdateInfo.latestVersion);
-                      }
-                    } catch {}
-                    setIsUpdateModalOpen(false);
-                  }}
-                  className="text-[#64748b] hover:text-[#0f172a] dark:text-[#7b93ad] dark:hover:text-white cursor-pointer"
-                >
-                  忽略此版本
-                </button>
+                {canInAppUpdate && (isDownloading || isCheckingMeta) ? (
+                  <button
+                    type="button"
+                    onClick={handleCancelInAppDownload}
+                    className="text-[#64748b] hover:text-[#dc2626] dark:text-[#7b93ad] dark:hover:text-[#f87171] cursor-pointer"
+                  >
+                    取消下载
+                  </button>
+                ) : !isInstalling ? (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      try {
+                        if (appUpdateInfo.latestVersion) {
+                          localStorage.setItem('tg_dismissed_update_version', appUpdateInfo.latestVersion);
+                        }
+                      } catch {}
+                      setIsUpdateModalOpen(false);
+                    }}
+                    className="text-[#64748b] hover:text-[#0f172a] dark:text-[#7b93ad] dark:hover:text-white cursor-pointer"
+                  >
+                    忽略此版本
+                  </button>
+                ) : (
+                  <span className="text-[11px] text-[#64748b] dark:text-[#7b93ad]">请勿手动关闭...</span>
+                )}
+
                 <div className="flex items-center gap-2">
-                  <a
-                    href={releaseHref}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="px-3 py-1.5 rounded-lg border border-[#cbd5e1] dark:border-[#1e3148] hover:border-[#2481cc] text-[#334155] dark:text-[#b4c6d8] font-medium"
-                  >
-                    查看 Release
-                  </a>
-                  <a
-                    href={downloadHref}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    onClick={() => setIsUpdateModalOpen(false)}
-                    className="px-3.5 py-1.5 rounded-lg bg-[#2481cc] hover:bg-[#1d6fb3] dark:bg-[#2ba0ff] dark:hover:bg-[#1e8ee8] aurora:bg-[#0d9488] aurora:hover:bg-[#0f766e] text-white font-semibold"
-                  >
-                    立即下载新版
-                  </a>
+                  {canInAppUpdate ? (
+                    <>
+                      {isDownloading || isCheckingMeta ? (
+                        <button
+                          type="button"
+                          onClick={() => setIsUpdateModalOpen(false)}
+                          className="px-3 py-1.5 rounded-lg border border-[#cbd5e1] dark:border-[#1e3148] hover:border-[#2481cc] text-[#334155] dark:text-[#b4c6d8] font-medium cursor-pointer"
+                        >
+                          后台下载
+                        </button>
+                      ) : isDownloaded ? (
+                        <button
+                          type="button"
+                          onClick={handleInstallAndRestart}
+                          className="px-3.5 py-1.5 rounded-lg bg-[#16a34a] hover:bg-[#15803d] dark:bg-[#22c55e] dark:hover:bg-[#16a34a] text-white font-semibold cursor-pointer"
+                        >
+                          立即关闭并重启更新
+                        </button>
+                      ) : isInstalling ? (
+                        <button
+                          type="button"
+                          disabled
+                          className="px-3.5 py-1.5 rounded-lg bg-[#64748b] text-white font-semibold opacity-75 cursor-not-allowed"
+                        >
+                          正在重启安装...
+                        </button>
+                      ) : (
+                        <>
+                          <a
+                            href={downloadHref}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="px-3 py-1.5 rounded-lg border border-[#cbd5e1] dark:border-[#1e3148] hover:border-[#2481cc] text-[#334155] dark:text-[#b4c6d8] font-medium"
+                          >
+                            浏览器下载
+                          </a>
+                          <button
+                            type="button"
+                            onClick={handleStartInAppDownload}
+                            className="px-3.5 py-1.5 rounded-lg bg-[#2481cc] hover:bg-[#1d6fb3] dark:bg-[#2ba0ff] dark:hover:bg-[#1e8ee8] aurora:bg-[#0d9488] aurora:hover:bg-[#0f766e] text-white font-semibold cursor-pointer"
+                          >
+                            {isError ? '重新下载更新' : '立即下载更新'}
+                          </button>
+                        </>
+                      )}
+                    </>
+                  ) : (
+                    <>
+                      <a
+                        href={releaseHref}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="px-3 py-1.5 rounded-lg border border-[#cbd5e1] dark:border-[#1e3148] hover:border-[#2481cc] text-[#334155] dark:text-[#b4c6d8] font-medium"
+                      >
+                        查看 Release
+                      </a>
+                      <a
+                        href={downloadHref}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        onClick={() => setIsUpdateModalOpen(false)}
+                        className="px-3.5 py-1.5 rounded-lg bg-[#2481cc] hover:bg-[#1d6fb3] dark:bg-[#2ba0ff] dark:hover:bg-[#1e8ee8] aurora:bg-[#0d9488] aurora:hover:bg-[#0f766e] text-white font-semibold"
+                      >
+                        立即下载新版
+                      </a>
+                    </>
+                  )}
                 </div>
               </div>
             </div>

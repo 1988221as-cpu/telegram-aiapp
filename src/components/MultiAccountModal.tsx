@@ -12,9 +12,13 @@ import {
   Mail,
   ChevronDown,
   Users,
+  Pencil,
+  FolderPlus,
+  Check,
+  X,
 } from 'lucide-react';
 import QRCode from 'qrcode';
-import { Account } from '../types';
+import { Account, AccountGroup } from '../types';
 import {
   getAuthHeaders,
   disconnectTelegramAccount,
@@ -26,6 +30,8 @@ import { COMMON_COUNTRY_CODES, CountryPreset } from '../data/countryCodes';
 
 export type { CountryPreset };
 export { COMMON_COUNTRY_CODES };
+
+const ACCOUNT_GROUP_COLORS = ['#2ba0ff', '#14b8a6', '#f59e0b', '#ec4899', '#8b5cf6', '#10b981'];
 
 export function sanitizePhoneInput(raw: string): string {
   let val = raw;
@@ -53,10 +59,15 @@ interface MultiAccountModalProps {
   isOpen: boolean;
   onClose: () => void;
   accounts: Account[];
+  accountGroups?: AccountGroup[];
   activeAccountId: string;
   onSelectAccount: (accountId: string) => void;
   onAddAccount: (account: Partial<Account>) => void;
   onDeleteAccount: (id: string) => void;
+  onUpdateAccountMeta?: (accountId: string, meta: { remark?: string; groupId?: string }) => void;
+  onCreateAccountGroup?: (name: string, color?: string) => AccountGroup | null;
+  onRenameAccountGroup?: (groupId: string, name: string, color?: string) => void;
+  onDeleteAccountGroup?: (groupId: string) => void;
   reloginAccount?: Account | null;
 }
 
@@ -64,14 +75,27 @@ export const MultiAccountModal: React.FC<MultiAccountModalProps> = ({
   isOpen,
   onClose,
   accounts,
+  accountGroups = [],
   activeAccountId,
   onSelectAccount,
   onAddAccount,
   onDeleteAccount,
+  onUpdateAccountMeta,
+  onCreateAccountGroup,
+  onRenameAccountGroup,
+  onDeleteAccountGroup,
   reloginAccount,
 }) => {
   const [loginMethod, setLoginMethod] = useState<'phone' | 'qr'>('qr');
   const [showAccountsPanel, setShowAccountsPanel] = useState(false);
+  const [activeGroupFilter, setActiveGroupFilter] = useState<string>('all');
+  const [isAddingGroupInPanel, setIsAddingGroupInPanel] = useState(false);
+  const [newGroupNameInPanel, setNewGroupNameInPanel] = useState('');
+  const [renamingGroupIdInPanel, setRenamingGroupIdInPanel] = useState<string | null>(null);
+  const [renamingGroupNameDraft, setRenamingGroupNameDraft] = useState('');
+  const [editingAccountMetaId, setEditingAccountMetaId] = useState<string | null>(null);
+  const [editingRemarkDraft, setEditingRemarkDraft] = useState('');
+  const [editingGroupIdDraft, setEditingGroupIdDraft] = useState('');
 
   // Phone Login State (Country dropdown + Dial code + Local number)
   const [selectedCountryIso, setSelectedCountryIso] = useState<string>('US');
@@ -689,6 +713,14 @@ export const MultiAccountModal: React.FC<MultiAccountModalProps> = ({
     setQrExpiresIn(30);
     setIsSilentRefreshing(false);
     setShowAccountsPanel(false);
+    setActiveGroupFilter('all');
+    setIsAddingGroupInPanel(false);
+    setNewGroupNameInPanel('');
+    setRenamingGroupIdInPanel(null);
+    setRenamingGroupNameDraft('');
+    setEditingAccountMetaId(null);
+    setEditingRemarkDraft('');
+    setEditingGroupIdDraft('');
     setConfirmingDeleteId(null);
     setDisconnectingId(null);
     setDisconnectError(null);
@@ -781,167 +813,477 @@ export const MultiAccountModal: React.FC<MultiAccountModalProps> = ({
       </div>
 
       {/* Optional Slide-Down Connected Accounts Manager */}
-      {showAccountsPanel && accounts && accounts.length > 0 && (
-        <div className="mx-auto w-full max-w-md px-5 pb-3 animate-in fade-in duration-150">
-          <div className="p-3 rounded-xl bg-white dark:bg-[#0e1726] aurora:bg-[#101c23] border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] shadow-sm space-y-1.5 max-h-56 overflow-y-auto">
-            {accounts.map((acc) => {
-              const isCurrent = acc.id === activeAccountId;
-              const isConfirming = confirmingDeleteId === acc.id;
-              const isDisconnecting = disconnectingId === acc.id;
-              const accError = disconnectError?.accountId === acc.id ? disconnectError : null;
-              return (
-                <div
-                  key={acc.id}
-                  className={`flex flex-col p-2 rounded-lg transition-colors ${
-                    isCurrent
-                      ? 'bg-[#e8f3ff] dark:bg-[#2ba0ff]/15 aurora:bg-[#112d36] text-[#0f172a] dark:text-white aurora:text-[#ecf6f8]'
-                      : 'hover:bg-[#f1f5f9] dark:hover:bg-[#152438] aurora:hover:bg-[#152934] text-[#334155] dark:text-[#b4c6d8] aurora:text-[#b7d0d8]'
-                  }`}
-                >
-                  <div className="flex items-center justify-between gap-2">
-                    <div
-                      className="flex items-center gap-2.5 min-w-0 cursor-pointer flex-1"
-                      onClick={() => {
-                        onSelectAccount(acc.id);
-                        onClose();
-                        resetState();
-                      }}
-                    >
-                      <div className="relative shrink-0">
-                        <div
-                          className="w-7 h-7 rounded-full flex items-center justify-center text-xs font-bold text-white"
-                          style={{ backgroundColor: acc.avatarBg || '#2481cc' }}
-                        >
-                          {acc.avatarInitial || 'TG'}
-                        </div>
-                        <span
-                          className={`absolute -bottom-0.5 -right-0.5 w-2.5 h-2.5 rounded-full border-2 border-white dark:border-[#0e1726] aurora:border-[#101c23] ${
-                            acc.status === 'online'
-                              ? 'bg-emerald-400'
-                              : acc.status === 'away'
-                              ? 'bg-amber-400'
-                              : acc.status === 'expired'
-                              ? 'bg-rose-500'
-                              : 'bg-slate-400'
-                          }`}
-                        />
-                      </div>
-                      <div className="min-w-0">
-                        <div className="text-xs font-medium truncate flex items-center gap-1.5">
-                          <span className="truncate">{acc.name}</span>
-                          {isCurrent && (
-                            <span className="text-[11px] text-emerald-700 dark:text-emerald-400 font-normal shrink-0">· 当前</span>
-                          )}
-                          {acc.status === 'expired' && (
-                            <span className="text-[10px] text-rose-600 dark:text-rose-400 font-normal shrink-0">· 已失效</span>
-                          )}
-                        </div>
-                        <div className="text-[11px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] truncate">{acc.phone || acc.username}</div>
-                      </div>
-                    </div>
+      {showAccountsPanel && accounts && accounts.length > 0 && (() => {
+        const validGroupIds = new Set(accountGroups.map((g) => g.id));
+        const ungroupedCount = accounts.filter((a) => !a.groupId || !validGroupIds.has(a.groupId)).length;
+        const effectiveFilter =
+          activeGroupFilter === 'all' ||
+          activeGroupFilter === 'ungrouped' ||
+          validGroupIds.has(activeGroupFilter)
+            ? activeGroupFilter
+            : 'all';
+        const filteredAccounts = accounts.filter((acc) => {
+          if (effectiveFilter === 'all') return true;
+          if (effectiveFilter === 'ungrouped') return !acc.groupId || !validGroupIds.has(acc.groupId);
+          return acc.groupId === effectiveFilter;
+        });
 
-                    {isConfirming ? (
-                      <div className="flex items-center gap-1.5 shrink-0 ml-2">
-                        <button
-                          type="button"
-                          disabled={isDisconnecting}
-                          onClick={async () => {
-                            setDisconnectingId(acc.id);
-                            setDisconnectError(null);
-                            const res = await disconnectTelegramAccount(acc.id, acc.phone);
-                            setDisconnectingId(null);
-                            if (res.ok) {
-                              setConfirmingDeleteId(null);
-                              onDeleteAccount(acc.id);
-                            } else {
-                              setDisconnectError({
-                                accountId: acc.id,
-                                message: res.error || '云端注销失败',
-                                canForceLocal: res.canForceLocal,
-                              });
+        return (
+          <div className="mx-auto w-full max-w-md px-5 pb-3 animate-in fade-in duration-150">
+            <div className="p-3 rounded-xl bg-white dark:bg-[#0e1726] aurora:bg-[#101c23] border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] shadow-sm space-y-2 max-h-80 overflow-y-auto">
+              {/* Group Filter Chips & Quick Create Group */}
+              {(accountGroups.length > 0 || onCreateAccountGroup) && (
+                <div className="pb-2 border-b border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] space-y-1.5">
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    <button
+                      type="button"
+                      onClick={() => setActiveGroupFilter('all')}
+                      className={`px-2 py-0.5 rounded-md text-[11px] cursor-pointer transition-colors ${
+                        effectiveFilter === 'all'
+                          ? 'bg-[#2481cc] dark:bg-[#2ba0ff] aurora:bg-[#14b8a6] text-white font-medium'
+                          : 'bg-[#f1f5f9] dark:bg-[#132234] aurora:bg-[#13252e] text-[#475569] dark:text-[#9cb2c9] aurora:text-[#8eb2bd] hover:opacity-90'
+                      }`}
+                    >
+                      全部 ({accounts.length})
+                    </button>
+                    {accountGroups.map((grp) => {
+                      const count = accounts.filter((a) => a.groupId === grp.id).length;
+                      const isActiveFilter = effectiveFilter === grp.id;
+                      return (
+                        <div key={grp.id} className="inline-flex items-center">
+                          <button
+                            type="button"
+                            onClick={() => setActiveGroupFilter(grp.id)}
+                            className={`px-2 py-0.5 rounded-md text-[11px] flex items-center gap-1 cursor-pointer transition-colors ${
+                              isActiveFilter
+                                ? 'bg-[#2481cc] dark:bg-[#2ba0ff] aurora:bg-[#14b8a6] text-white font-medium'
+                                : 'bg-[#f1f5f9] dark:bg-[#132234] aurora:bg-[#13252e] text-[#475569] dark:text-[#9cb2c9] aurora:text-[#8eb2bd] hover:opacity-90'
+                            }`}
+                          >
+                            <span
+                              className="w-1.5 h-1.5 rounded-full shrink-0"
+                              style={{ backgroundColor: isActiveFilter ? '#ffffff' : grp.color || '#2ba0ff' }}
+                            />
+                            <span className="max-w-[84px] truncate">{grp.name}</span>
+                            <span className="opacity-75 tabular-nums">({count})</span>
+                          </button>
+                        </div>
+                      );
+                    })}
+                    {accountGroups.length > 0 && ungroupedCount > 0 && (
+                      <button
+                        type="button"
+                        onClick={() => setActiveGroupFilter('ungrouped')}
+                        className={`px-2 py-0.5 rounded-md text-[11px] cursor-pointer transition-colors ${
+                          effectiveFilter === 'ungrouped'
+                            ? 'bg-[#2481cc] dark:bg-[#2ba0ff] aurora:bg-[#14b8a6] text-white font-medium'
+                            : 'bg-[#f1f5f9] dark:bg-[#132234] aurora:bg-[#13252e] text-[#475569] dark:text-[#9cb2c9] aurora:text-[#8eb2bd] hover:opacity-90'
+                        }`}
+                      >
+                        未分组 ({ungroupedCount})
+                      </button>
+                    )}
+                    {onCreateAccountGroup && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setRenamingGroupIdInPanel(null);
+                          setIsAddingGroupInPanel((v) => !v);
+                        }}
+                        className="px-2 py-0.5 rounded-md text-[11px] border border-dashed border-[#cbd5e1] dark:border-[#243952] aurora:border-[#203944] text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf] hover:bg-[#e8f3ff]/60 dark:hover:bg-[#2ba0ff]/10 flex items-center gap-1 cursor-pointer"
+                      >
+                        <FolderPlus className="w-3 h-3" />
+                        <span>新建分组</span>
+                      </button>
+                    )}
+                    {effectiveFilter !== 'all' && effectiveFilter !== 'ungrouped' && (() => {
+                      const selectedGrp = accountGroups.find((g) => g.id === effectiveFilter);
+                      if (!selectedGrp) return null;
+                      return (
+                        <>
+                          {onRenameAccountGroup && (
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setIsAddingGroupInPanel(false);
+                                if (renamingGroupIdInPanel === selectedGrp.id) {
+                                  setRenamingGroupIdInPanel(null);
+                                } else {
+                                  setRenamingGroupIdInPanel(selectedGrp.id);
+                                  setRenamingGroupNameDraft(selectedGrp.name);
+                                }
+                              }}
+                              className="px-2 py-0.5 rounded-md text-[11px] bg-[#f1f5f9] dark:bg-[#132234] aurora:bg-[#13252e] text-[#475569] dark:text-[#9cb2c9] hover:text-[#2481cc] dark:hover:text-[#2ba0ff] aurora:hover:text-[#2dd4bf] cursor-pointer"
+                            >
+                              重命名组
+                            </button>
+                          )}
+                          {onDeleteAccountGroup && (
+                            <button
+                              type="button"
+                              onClick={() => {
+                                onDeleteAccountGroup(selectedGrp.id);
+                                setRenamingGroupIdInPanel(null);
+                                setActiveGroupFilter('all');
+                              }}
+                              className="px-2 py-0.5 rounded-md text-[11px] text-rose-500 hover:bg-rose-500/10 cursor-pointer"
+                            >
+                              删当前组
+                            </button>
+                          )}
+                        </>
+                      );
+                    })()}
+                  </div>
+
+                  {isAddingGroupInPanel && onCreateAccountGroup && (
+                    <div className="flex items-center gap-1.5 pt-1">
+                      <input
+                        type="text"
+                        maxLength={24}
+                        value={newGroupNameInPanel}
+                        onChange={(e) => setNewGroupNameInPanel(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter' && newGroupNameInPanel.trim()) {
+                            const created = onCreateAccountGroup(
+                              newGroupNameInPanel,
+                              ACCOUNT_GROUP_COLORS[accountGroups.length % ACCOUNT_GROUP_COLORS.length]
+                            );
+                            if (created) {
+                              setNewGroupNameInPanel('');
+                              setIsAddingGroupInPanel(false);
+                              setActiveGroupFilter(created.id);
+                            }
+                          }
+                        }}
+                        placeholder="输入分组名（如：主力客服）"
+                        className="flex-1 min-w-0 px-2.5 py-1 rounded-md bg-[#f8fafc] dark:bg-[#08101a] aurora:bg-[#081217] border border-[#cbd5e1] dark:border-[#243952] aurora:border-[#203944] text-xs outline-none focus:border-[#2ba0ff] aurora:focus:border-[#2dd4bf]"
+                      />
+                      <button
+                        type="button"
+                        disabled={!newGroupNameInPanel.trim()}
+                        onClick={() => {
+                          const created = onCreateAccountGroup(
+                            newGroupNameInPanel,
+                            ACCOUNT_GROUP_COLORS[accountGroups.length % ACCOUNT_GROUP_COLORS.length]
+                          );
+                          if (created) {
+                            setNewGroupNameInPanel('');
+                            setIsAddingGroupInPanel(false);
+                            setActiveGroupFilter(created.id);
+                          }
+                        }}
+                        className="px-2.5 py-1 rounded-md bg-[#2ba0ff] aurora:bg-[#14b8a6] text-white text-[11px] font-medium disabled:opacity-40 cursor-pointer"
+                      >
+                        创建
+                      </button>
+                    </div>
+                  )}
+
+                  {renamingGroupIdInPanel &&
+                    renamingGroupIdInPanel === effectiveFilter &&
+                    onRenameAccountGroup && (
+                      <div className="flex items-center gap-1.5 pt-1">
+                        <input
+                          type="text"
+                          maxLength={24}
+                          value={renamingGroupNameDraft}
+                          onChange={(e) => setRenamingGroupNameDraft(e.target.value)}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter' && renamingGroupNameDraft.trim()) {
+                              onRenameAccountGroup(renamingGroupIdInPanel, renamingGroupNameDraft);
+                              setRenamingGroupIdInPanel(null);
                             }
                           }}
-                          className="px-2 py-1 rounded bg-rose-500 hover:bg-rose-600 disabled:opacity-50 text-white text-[11px] font-medium cursor-pointer transition-colors"
+                          placeholder="输入新分组名称"
+                          className="flex-1 min-w-0 px-2.5 py-1 rounded-md bg-[#f8fafc] dark:bg-[#08101a] aurora:bg-[#081217] border border-[#cbd5e1] dark:border-[#243952] aurora:border-[#203944] text-xs outline-none focus:border-[#2ba0ff] aurora:focus:border-[#2dd4bf]"
+                        />
+                        <button
+                          type="button"
+                          disabled={!renamingGroupNameDraft.trim()}
+                          onClick={() => {
+                            onRenameAccountGroup(renamingGroupIdInPanel, renamingGroupNameDraft);
+                            setRenamingGroupIdInPanel(null);
+                          }}
+                          className="px-2.5 py-1 rounded-md bg-[#2ba0ff] aurora:bg-[#14b8a6] text-white text-[11px] font-medium disabled:opacity-40 cursor-pointer"
                         >
-                          {isDisconnecting ? '注销中...' : '确认退出'}
+                          保存
                         </button>
                         <button
                           type="button"
-                          disabled={isDisconnecting}
-                          onClick={() => {
-                            setConfirmingDeleteId(null);
-                            setDisconnectError(null);
-                          }}
-                          className="px-2 py-1 rounded bg-[#f1f5f9] hover:bg-[#e2e8f0] dark:bg-[#132234] dark:hover:bg-[#1b2f47] aurora:bg-[#13252e] aurora:hover:bg-[#1a3340] text-[#334155] dark:text-[#b4c6d8] aurora:text-[#b7d0d8] text-[11px] cursor-pointer transition-colors"
+                          onClick={() => setRenamingGroupIdInPanel(null)}
+                          className="px-2 py-1 rounded-md text-[11px] text-[#64748b] dark:text-[#9cb2c9] hover:bg-black/5 dark:hover:bg-white/5 cursor-pointer"
                         >
                           取消
                         </button>
                       </div>
-                    ) : (
-                      <div className="flex items-center gap-1.5 shrink-0 ml-2">
-                        {acc.status === 'expired' && (
+                    )}
+                </div>
+              )}
+
+              {filteredAccounts.length === 0 ? (
+                <div className="py-4 text-center text-xs text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5]">
+                  该分组下暂无账号，可点击账号右侧铅笔图标归类到此分组
+                </div>
+              ) : (
+                filteredAccounts.map((acc) => {
+                  const isCurrent = acc.id === activeAccountId;
+                  const isConfirming = confirmingDeleteId === acc.id;
+                  const isDisconnecting = disconnectingId === acc.id;
+                  const isEditingMeta = editingAccountMetaId === acc.id;
+                  const accError = disconnectError?.accountId === acc.id ? disconnectError : null;
+                  const groupObj = acc.groupId ? accountGroups.find((g) => g.id === acc.groupId) : undefined;
+                  const displayName = acc.remark?.trim() || acc.name;
+                  return (
+                    <div
+                      key={acc.id}
+                      className={`flex flex-col p-2 rounded-lg transition-colors ${
+                        isCurrent
+                          ? 'bg-[#e8f3ff] dark:bg-[#2ba0ff]/15 aurora:bg-[#112d36] text-[#0f172a] dark:text-white aurora:text-[#ecf6f8]'
+                          : 'hover:bg-[#f1f5f9] dark:hover:bg-[#152438] aurora:hover:bg-[#152934] text-[#334155] dark:text-[#b4c6d8] aurora:text-[#b7d0d8]'
+                      }`}
+                    >
+                      <div className="flex items-center justify-between gap-2">
+                        <div
+                          className="flex items-center gap-2.5 min-w-0 cursor-pointer flex-1"
+                          onClick={() => {
+                            onSelectAccount(acc.id);
+                            onClose();
+                            resetState();
+                          }}
+                        >
+                          <div className="relative shrink-0">
+                            <div
+                              className="w-7 h-7 rounded-full flex items-center justify-center text-xs font-bold text-white overflow-hidden"
+                              style={{ backgroundColor: acc.avatarBg || '#2481cc' }}
+                            >
+                              {acc.avatarUrl ? (
+                                <img src={acc.avatarUrl} alt={displayName} className="w-full h-full object-cover" />
+                              ) : (
+                                acc.avatarInitial || 'TG'
+                              )}
+                            </div>
+                            <span
+                              className={`absolute -bottom-0.5 -right-0.5 w-2.5 h-2.5 rounded-full border-2 border-white dark:border-[#0e1726] aurora:border-[#101c23] ${
+                                acc.status === 'online'
+                                  ? 'bg-emerald-400'
+                                  : acc.status === 'away'
+                                  ? 'bg-amber-400'
+                                  : acc.status === 'expired'
+                                  ? 'bg-rose-500'
+                                  : 'bg-slate-400'
+                              }`}
+                            />
+                          </div>
+                          <div className="min-w-0">
+                            <div className="text-xs font-medium truncate flex items-center gap-1.5">
+                              <span className="truncate">{displayName}</span>
+                              {acc.remark?.trim() && acc.remark.trim() !== acc.name && (
+                                <span className="text-[10px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] font-normal truncate max-w-[70px]">
+                                  ({acc.name})
+                                </span>
+                              )}
+                              {groupObj && (
+                                <span
+                                  className="px-1.5 py-0.5 rounded text-[10px] font-normal shrink-0 border"
+                                  style={{
+                                    borderColor: `${groupObj.color || '#2ba0ff'}44`,
+                                    backgroundColor: `${groupObj.color || '#2ba0ff'}18`,
+                                    color: groupObj.color || '#2ba0ff',
+                                  }}
+                                >
+                                  {groupObj.name}
+                                </span>
+                              )}
+                              {isCurrent && (
+                                <span className="text-[11px] text-emerald-700 dark:text-emerald-400 font-normal shrink-0">· 当前</span>
+                              )}
+                              {acc.status === 'expired' && (
+                                <span className="text-[10px] text-rose-600 dark:text-rose-400 font-normal shrink-0">· 已失效</span>
+                              )}
+                            </div>
+                            <div className="text-[11px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] truncate">{acc.phone || acc.username}</div>
+                          </div>
+                        </div>
+
+                        {isConfirming ? (
+                          <div className="flex items-center gap-1.5 shrink-0 ml-2">
+                            <button
+                              type="button"
+                              disabled={isDisconnecting}
+                              onClick={async () => {
+                                setDisconnectingId(acc.id);
+                                setDisconnectError(null);
+                                const res = await disconnectTelegramAccount(acc.id, acc.phone);
+                                setDisconnectingId(null);
+                                if (res.ok) {
+                                  setConfirmingDeleteId(null);
+                                  onDeleteAccount(acc.id);
+                                } else {
+                                  setDisconnectError({
+                                    accountId: acc.id,
+                                    message: res.error || '云端注销失败',
+                                    canForceLocal: res.canForceLocal,
+                                  });
+                                }
+                              }}
+                              className="px-2 py-1 rounded bg-rose-500 hover:bg-rose-600 disabled:opacity-50 text-white text-[11px] font-medium cursor-pointer transition-colors"
+                            >
+                              {isDisconnecting ? '注销中...' : '确认退出'}
+                            </button>
+                            <button
+                              type="button"
+                              disabled={isDisconnecting}
+                              onClick={() => {
+                                setConfirmingDeleteId(null);
+                                setDisconnectError(null);
+                              }}
+                              className="px-2 py-1 rounded bg-[#f1f5f9] hover:bg-[#e2e8f0] dark:bg-[#132234] dark:hover:bg-[#1b2f47] aurora:bg-[#13252e] aurora:hover:bg-[#1a3340] text-[#334155] dark:text-[#b4c6d8] aurora:text-[#b7d0d8] text-[11px] cursor-pointer transition-colors"
+                            >
+                              取消
+                            </button>
+                          </div>
+                        ) : (
+                          <div className="flex items-center gap-1 shrink-0 ml-2">
+                            {onUpdateAccountMeta && (
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  if (isEditingMeta) {
+                                    setEditingAccountMetaId(null);
+                                  } else {
+                                    setEditingAccountMetaId(acc.id);
+                                    setEditingRemarkDraft(acc.remark || '');
+                                    setEditingGroupIdDraft(acc.groupId || '');
+                                  }
+                                }}
+                                className="p-1.5 rounded-lg text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] hover:text-[#2481cc] dark:hover:text-[#2ba0ff] aurora:hover:text-[#2dd4bf] hover:bg-black/5 dark:hover:bg-white/5 transition-colors cursor-pointer"
+                                title="设置自定义名与分组"
+                              >
+                                <Pencil className="w-3.5 h-3.5" />
+                              </button>
+                            )}
+                            {acc.status === 'expired' && (
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setShowAccountsPanel(false);
+                                  if (acc.phone && /\d/.test(acc.phone)) {
+                                    prefillPhoneNumber(acc.phone);
+                                    handleSwitchLoginMethod('phone');
+                                  } else {
+                                    handleSwitchLoginMethod('qr');
+                                    void fetchQrToken();
+                                  }
+                                }}
+                                className="px-2 py-1 rounded bg-rose-500/15 hover:bg-rose-500/25 text-rose-700 dark:text-rose-300 text-[11px] font-medium cursor-pointer transition-colors"
+                              >
+                                重新登录
+                              </button>
+                            )}
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setConfirmingDeleteId(acc.id);
+                                setDisconnectError(null);
+                              }}
+                              className="p-1.5 rounded-lg text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] hover:text-rose-600 dark:hover:text-rose-400 hover:bg-rose-500/10 transition-colors cursor-pointer"
+                              title="断开并退出该账号"
+                            >
+                              <LogOut className="w-3.5 h-3.5" />
+                            </button>
+                          </div>
+                        )}
+                      </div>
+
+                      {isEditingMeta && onUpdateAccountMeta && (
+                        <div className="mt-2 pt-2 border-t border-[#e2e8f0] dark:border-[#1e3148] aurora:border-[#1f3944] flex flex-wrap items-center gap-1.5">
+                          <input
+                            type="text"
+                            maxLength={24}
+                            value={editingRemarkDraft}
+                            onChange={(e) => setEditingRemarkDraft(e.target.value)}
+                            onKeyDown={(e) => {
+                              if (e.key === 'Enter') {
+                                onUpdateAccountMeta(acc.id, {
+                                  remark: editingRemarkDraft,
+                                  groupId: editingGroupIdDraft,
+                                });
+                                setEditingAccountMetaId(null);
+                              }
+                            }}
+                            placeholder="自定义名称"
+                            className="flex-1 min-w-[110px] px-2 py-1 rounded-md bg-[#f8fafc] dark:bg-[#08101a] aurora:bg-[#081217] border border-[#cbd5e1] dark:border-[#243952] aurora:border-[#203944] text-xs outline-none focus:border-[#2ba0ff] aurora:focus:border-[#2dd4bf]"
+                          />
+                          <select
+                            value={editingGroupIdDraft}
+                            onChange={(e) => setEditingGroupIdDraft(e.target.value)}
+                            className="px-2 py-1 rounded-md bg-[#f8fafc] dark:bg-[#08101a] aurora:bg-[#081217] border border-[#cbd5e1] dark:border-[#243952] aurora:border-[#203944] text-xs outline-none focus:border-[#2ba0ff] aurora:focus:border-[#2dd4bf] cursor-pointer"
+                          >
+                            <option value="">未分组</option>
+                            {accountGroups.map((g) => (
+                              <option key={g.id} value={g.id}>
+                                {g.name}
+                              </option>
+                            ))}
+                          </select>
                           <button
                             type="button"
                             onClick={() => {
-                              setShowAccountsPanel(false);
-                              if (acc.phone && /\d/.test(acc.phone)) {
-                                prefillPhoneNumber(acc.phone);
-                                handleSwitchLoginMethod('phone');
-                              } else {
-                                handleSwitchLoginMethod('qr');
-                                void fetchQrToken();
-                              }
+                              onUpdateAccountMeta(acc.id, {
+                                remark: editingRemarkDraft,
+                                groupId: editingGroupIdDraft,
+                              });
+                              setEditingAccountMetaId(null);
                             }}
-                            className="px-2 py-1 rounded bg-rose-500/15 hover:bg-rose-500/25 text-rose-700 dark:text-rose-300 text-[11px] font-medium cursor-pointer transition-colors"
+                            className="p-1.5 rounded-md bg-[#2ba0ff] aurora:bg-[#14b8a6] text-white hover:opacity-90 cursor-pointer"
+                            title="保存"
                           >
-                            重新登录
+                            <Check className="w-3.5 h-3.5" />
                           </button>
-                        )}
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setConfirmingDeleteId(acc.id);
-                            setDisconnectError(null);
-                          }}
-                          className="p-1.5 rounded-lg text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] hover:text-rose-600 dark:hover:text-rose-400 hover:bg-rose-500/10 transition-colors cursor-pointer"
-                          title="断开并退出该账号"
-                        >
-                          <LogOut className="w-3.5 h-3.5" />
-                        </button>
-                      </div>
-                    )}
-                  </div>
+                          <button
+                            type="button"
+                            onClick={() => setEditingAccountMetaId(null)}
+                            className="p-1.5 rounded-md bg-black/5 dark:bg-white/10 text-[#64748b] dark:text-[#9cb2c9] hover:opacity-90 cursor-pointer"
+                            title="取消"
+                          >
+                            <X className="w-3.5 h-3.5" />
+                          </button>
+                        </div>
+                      )}
 
-                  {accError && (
-                    <div className="mt-1.5 flex items-center justify-between gap-2 text-[11px] text-rose-700 dark:text-rose-300 bg-rose-500/10 border border-rose-500/25 rounded-md px-2 py-1">
-                      <span className="truncate">{accError.message}</span>
-                      {accError.canForceLocal && (
-                        <button
-                          type="button"
-                          disabled={isDisconnecting}
-                          onClick={async () => {
-                            setDisconnectingId(acc.id);
-                            const forced = await disconnectTelegramAccount(acc.id, acc.phone, true);
-                            setDisconnectingId(null);
-                            if (forced.ok) {
-                              setConfirmingDeleteId(null);
-                              setDisconnectError(null);
-                              onDeleteAccount(acc.id);
-                            }
-                          }}
-                          className="text-amber-700 dark:text-amber-300 hover:underline shrink-0 cursor-pointer"
-                        >
-                          仅移除本地
-                        </button>
+                      {accError && (
+                        <div className="mt-1.5 flex items-center justify-between gap-2 text-[11px] text-rose-700 dark:text-rose-300 bg-rose-500/10 border border-rose-500/25 rounded-md px-2 py-1">
+                          <span className="truncate">{accError.message}</span>
+                          {accError.canForceLocal && (
+                            <button
+                              type="button"
+                              disabled={isDisconnecting}
+                              onClick={async () => {
+                                setDisconnectingId(acc.id);
+                                const forced = await disconnectTelegramAccount(acc.id, acc.phone, true);
+                                setDisconnectingId(null);
+                                if (forced.ok) {
+                                  setConfirmingDeleteId(null);
+                                  setDisconnectError(null);
+                                  onDeleteAccount(acc.id);
+                                }
+                              }}
+                              className="text-amber-700 dark:text-amber-300 hover:underline shrink-0 cursor-pointer"
+                            >
+                              仅移除本地
+                            </button>
+                          )}
+                        </div>
                       )}
                     </div>
-                  )}
-                </div>
-              );
-            })}
+                  );
+                })
+              )}
+            </div>
           </div>
-        </div>
-      )}
+        );
+      })()}
 
       {/* Main Centered Login Stage */}
       <div className="flex-1 overflow-y-auto flex flex-col items-center justify-center px-6 pb-10">

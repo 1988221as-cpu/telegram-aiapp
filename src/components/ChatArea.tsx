@@ -87,6 +87,88 @@ import { sanitizeSafeResourceUrl } from '../services/urlSafety';
 
 const AI_SUGGESTION_COOLDOWN_MS = 120_000;
 const AI_SUGGESTION_COOLDOWN_STORAGE_KEY = 'tg_ai_suggestion_cooldown_until';
+const CHAT_FONT_SCALE_STORAGE_KEY = 'tg_pro_chat_font_scale';
+const CHAT_FONT_SCALE_STEPS = [0.85, 0.9, 1, 1.1, 1.2, 1.35, 1.5] as const;
+type ChatFontScale = (typeof CHAT_FONT_SCALE_STEPS)[number];
+
+const CHAT_FONT_SIZE_CLASSES: Record<
+  ChatFontScale,
+  {
+    composer: string;
+    body: string;
+    secondary: string;
+    translation: string;
+    replySender: string;
+    replyBody: string;
+  }
+> = {
+  0.85: {
+    composer: 'text-[11.5px]',
+    body: 'text-[11px]',
+    secondary: 'text-[10px]',
+    translation: 'text-[10px]',
+    replySender: 'text-[9.5px]',
+    replyBody: 'text-[9px]',
+  },
+  0.9: {
+    composer: 'text-[12px]',
+    body: 'text-[11.5px]',
+    secondary: 'text-[11px]',
+    translation: 'text-[10.5px]',
+    replySender: 'text-[10px]',
+    replyBody: 'text-[9.5px]',
+  },
+  1: {
+    composer: 'text-[13.5px]',
+    body: 'text-[13px]',
+    secondary: 'text-xs',
+    translation: 'text-[11.5px]',
+    replySender: 'text-[11px]',
+    replyBody: 'text-[10.5px]',
+  },
+  1.1: {
+    composer: 'text-[15px]',
+    body: 'text-[14.5px]',
+    secondary: 'text-[13px]',
+    translation: 'text-[12.5px]',
+    replySender: 'text-xs',
+    replyBody: 'text-[11.5px]',
+  },
+  1.2: {
+    composer: 'text-[16px]',
+    body: 'text-[15.5px]',
+    secondary: 'text-[14.5px]',
+    translation: 'text-[14px]',
+    replySender: 'text-[13px]',
+    replyBody: 'text-[12.5px]',
+  },
+  1.35: {
+    composer: 'text-[18px]',
+    body: 'text-[17.5px]',
+    secondary: 'text-[16px]',
+    translation: 'text-[15.5px]',
+    replySender: 'text-[15px]',
+    replyBody: 'text-[14px]',
+  },
+  1.5: {
+    composer: 'text-[20px]',
+    body: 'text-[19.5px]',
+    secondary: 'text-[18px]',
+    translation: 'text-[17px]',
+    replySender: 'text-[16.5px]',
+    replyBody: 'text-[16px]',
+  },
+};
+
+function readStoredChatFontScale(): ChatFontScale {
+  try {
+    const raw = Number(localStorage.getItem(CHAT_FONT_SCALE_STORAGE_KEY));
+    if (CHAT_FONT_SCALE_STEPS.includes(raw as ChatFontScale)) {
+      return raw as ChatFontScale;
+    }
+  } catch {}
+  return 1;
+}
 
 function readAiSuggestionCooldownUntil(): number {
   try {
@@ -680,6 +762,27 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
   const isSameOriginScope = (originChatId: string, originAccountId?: string) =>
     activeChatIdRef.current === originChatId && activeAccountIdRef.current === originAccountId;
 
+  const [chatFontScale, setChatFontScale] = useState<ChatFontScale>(() => readStoredChatFontScale());
+  const chatFontClasses = CHAT_FONT_SIZE_CLASSES[chatFontScale];
+  const chatFontScaleIndex = CHAT_FONT_SCALE_STEPS.indexOf(chatFontScale);
+  const stepChatFontScale = useCallback((delta: -1 | 1) => {
+    setChatFontScale((prev) => {
+      const idx = CHAT_FONT_SCALE_STEPS.indexOf(prev);
+      const nextIdx = Math.max(0, Math.min(CHAT_FONT_SCALE_STEPS.length - 1, idx + delta));
+      const next = CHAT_FONT_SCALE_STEPS[nextIdx];
+      try {
+        localStorage.setItem(CHAT_FONT_SCALE_STORAGE_KEY, String(next));
+      } catch {}
+      return next;
+    });
+  }, []);
+  const resetChatFontScale = useCallback(() => {
+    setChatFontScale(1);
+    try {
+      localStorage.setItem(CHAT_FONT_SCALE_STORAGE_KEY, '1');
+    } catch {}
+  }, []);
+
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   useEffect(() => {
@@ -690,7 +793,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
     const nextHeight = Math.min(el.scrollHeight, maxHeight);
     el.style.height = `${nextHeight}px`;
     el.style.overflowY = el.scrollHeight > maxHeight ? 'auto' : 'hidden';
-  }, [inputText, chat?.id]);
+  }, [inputText, chat?.id, chatFontScale]);
   const [translatedPreview, setTranslatedPreview] = useState('');
   const [translatedPreviewSource, setTranslatedPreviewSource] = useState('');
   const [previewError, setPreviewError] = useState('');
@@ -1719,6 +1822,29 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
     if (!chat) return;
 
     const handleGlobalKeyDown = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && !e.altKey) {
+        const hasBlockingModal =
+          Boolean(lightboxMedia || memberProfileModal || inviteModalState) ||
+          Boolean(document.querySelector('.z-50'));
+        if (!hasBlockingModal) {
+          if (e.key === '=' || e.key === '+' || e.code === 'Equal' || e.code === 'NumpadAdd') {
+            e.preventDefault();
+            stepChatFontScale(1);
+            return;
+          }
+          if (e.key === '-' || e.key === '_' || e.code === 'Minus' || e.code === 'NumpadSubtract') {
+            e.preventDefault();
+            stepChatFontScale(-1);
+            return;
+          }
+          if (e.key === '0' || (!e.shiftKey && (e.code === 'Digit0' || e.code === 'Numpad0'))) {
+            e.preventDefault();
+            resetChatFontScale();
+            return;
+          }
+        }
+      }
+
       if (e.key === 'Escape') {
         if (lightboxMedia) {
           e.preventDefault();
@@ -1831,6 +1957,8 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
     memberProfileModal,
     inviteModalState,
     onCloseChat,
+    stepChatFontScale,
+    resetChatFontScale,
   ]);
 
   const scrollToBottom = () => {
@@ -3448,7 +3576,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
         {/* Left: Contact Info (Click to view Profile & Shared Media) */}
         <div
           onClick={() => setChatInfoOpen(true)}
-          className="flex items-center gap-3 min-w-0 cursor-pointer hover:opacity-90 transition-opacity"
+          className="flex items-center gap-3 flex-1 min-w-0 pr-2 cursor-pointer hover:opacity-90 transition-opacity"
           title="点击查看联系人资料与共享媒体库"
         >
           <div
@@ -3585,6 +3713,44 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
           >
             <Search className="w-4 h-4" />
           </button>
+
+          {/* Chat Text Zoom Controls */}
+          <div
+            className="flex items-center rounded-lg border border-[#e2e8f0] dark:border-[#1a2b40] aurora:border-[#1e343e] bg-[#f8fafc] dark:bg-[#0e1726] aurora:bg-[#101c23] p-0.5 shrink-0 select-none"
+            title={`调节聊天文字大小（当前 ${Math.round(chatFontScale * 100)}%，快捷键 Ctrl/Cmd + / - / 0）`}
+          >
+            <button
+              type="button"
+              onClick={() => stepChatFontScale(-1)}
+              disabled={chatFontScaleIndex <= 0}
+              title={`缩小聊天文字 · 当前 ${Math.round(chatFontScale * 100)}% (Ctrl/Cmd + -)`}
+              className="px-1 h-6 rounded-md text-[11px] font-semibold transition-colors cursor-pointer disabled:opacity-35 disabled:cursor-not-allowed hover:bg-[#e2e8f0]/70 dark:hover:bg-[#152438] aurora:hover:bg-[#152934] hover:text-[#2481cc] dark:hover:text-[#2ba0ff] aurora:hover:text-[#5eead4]"
+            >
+              A-
+            </button>
+            <button
+              type="button"
+              onClick={resetChatFontScale}
+              disabled={chatFontScale === 1}
+              title={chatFontScale === 1 ? '当前默认字号 100%' : '点击恢复默认字号 100% (Ctrl/Cmd + 0)'}
+              className={`hidden md:inline-flex items-center justify-center px-1 h-6 rounded-md text-[11px] font-medium tabular-nums transition-colors ${
+                chatFontScale === 1
+                  ? 'text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] cursor-default'
+                  : 'text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#5eead4] hover:bg-[#e8f3ff] dark:hover:bg-[#132234] aurora:hover:bg-[#112e37] cursor-pointer'
+              }`}
+            >
+              {Math.round(chatFontScale * 100)}%
+            </button>
+            <button
+              type="button"
+              onClick={() => stepChatFontScale(1)}
+              disabled={chatFontScaleIndex >= CHAT_FONT_SCALE_STEPS.length - 1}
+              title={`放大聊天文字 · 当前 ${Math.round(chatFontScale * 100)}% (Ctrl/Cmd + +)`}
+              className="px-1 h-6 rounded-md text-[11px] font-semibold transition-colors cursor-pointer disabled:opacity-35 disabled:cursor-not-allowed hover:bg-[#e2e8f0]/70 dark:hover:bg-[#152438] aurora:hover:bg-[#152934] hover:text-[#2481cc] dark:hover:text-[#2ba0ff] aurora:hover:text-[#5eead4]"
+            >
+              A+
+            </button>
+          </div>
 
           {/* 当前联系人全息记忆按钮 */}
           <button
@@ -4232,7 +4398,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                   {/* Telegram Reply Quote Header */}
                   {msg.replyTo && (
                     <div
-                      className={`mb-2 pl-2.5 py-1 border-l-2 rounded-r text-[11px] select-none ${
+                      className={`mb-2 pl-2.5 py-1 border-l-2 rounded-r ${chatFontClasses.replySender} select-none ${
                         isMe
                           ? 'border-white/70 bg-white/12 text-white'
                           : 'border-[#2481cc] dark:border-[#2ba0ff] aurora:border-[#2dd4bf] bg-[#f8fafc] dark:bg-white/5 aurora:bg-[#081014]/60 text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8]'
@@ -4245,7 +4411,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                       >
                         {msg.replyTo.senderName || '回复消息'}
                       </div>
-                      <div className="opacity-85 truncate text-[10.5px]">{msg.replyTo.text}</div>
+                      <div className={`opacity-85 truncate ${chatFontClasses.replyBody}`}>{msg.replyTo.text}</div>
                     </div>
                   )}
 
@@ -4471,7 +4637,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                 {msg.isFile && (() => {
                   const safeFileHref = resolveDisplayUrl(msg.fileUrl);
                   return (
-                    <div className={`p-2.5 rounded-xl flex items-center justify-between gap-3 text-xs mb-1.5 ${isMe ? 'bg-white/12' : 'bg-black/5 dark:bg-white/10 aurora:bg-[#15252e]'}`}>
+                    <div className={`p-2.5 rounded-xl flex items-center justify-between gap-3 ${chatFontClasses.secondary} mb-1.5 ${isMe ? 'bg-white/12' : 'bg-black/5 dark:bg-white/10 aurora:bg-[#15252e]'}`}>
                       <div className="flex items-center gap-2 min-w-0">
                         <FileText className={`w-6 h-6 shrink-0 ${isMe ? 'text-white/90' : 'text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#5eead4]'}`} />
                         <div className="min-w-0">
@@ -4563,7 +4729,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
 
                     {/* Speech to Text Transcribe toggle */}
                     {msg.sttText ? (
-                      <div className={`mt-1 pt-1.5 border-t text-xs ${isMe ? 'border-white/20' : 'border-black/10 dark:border-white/10 aurora:border-white/10'}`}>
+                      <div className={`mt-1 pt-1.5 border-t ${chatFontClasses.secondary} ${isMe ? 'border-white/20' : 'border-black/10 dark:border-white/10 aurora:border-white/10'}`}>
                         <div className="text-[11px] opacity-70 mb-0.5 select-none">转文字:</div>
                         <p className="select-text cursor-text">{msg.sttText}</p>
                         {msg.translatedText ? (
@@ -4624,7 +4790,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                       if (isTranslationOnlyPeer) {
                         return (
                           <div className="min-w-0">
-                            <p className="text-[13.5px] leading-relaxed whitespace-pre-wrap break-words [overflow-wrap:anywhere] select-text cursor-text">
+                            <p className={`${chatFontClasses.composer} leading-relaxed whitespace-pre-wrap break-words [overflow-wrap:anywhere] select-text cursor-text`}>
                               {msg.translatedText}
                             </p>
                             <div className="mt-1.5 flex items-center gap-2 select-none">
@@ -4649,7 +4815,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                               </button>
                             </div>
                             {isShowingOriginalOverlay && msg.text && (
-                              <div className="mt-1.5 p-2 rounded-lg bg-[#f8fafc] dark:bg-[#0b131f]/80 aurora:bg-[#0c161c]/85 border border-[#e2e8f0] dark:border-[#1e3148] aurora:border-[#1e343e] text-xs text-[#475569] dark:text-[#cbd5e1] aurora:text-[#b7d0d8] select-text">
+                              <div className={`mt-1.5 p-2 rounded-lg bg-[#f8fafc] dark:bg-[#0b131f]/80 aurora:bg-[#0c161c]/85 border border-[#e2e8f0] dark:border-[#1e3148] aurora:border-[#1e343e] ${chatFontClasses.secondary} text-[#475569] dark:text-[#cbd5e1] aurora:text-[#b7d0d8] select-text`}>
                                 <div className="text-[10px] opacity-70 mb-0.5 select-none">原文：</div>
                                 <p className="whitespace-pre-wrap break-words [overflow-wrap:anywhere]">{renderMessageTextWithLinks(msg.text, false)}</p>
                               </div>
@@ -4675,7 +4841,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                               </span>
                               <div className="min-w-0">
                                 <div
-                                  className={`text-[13px] font-medium leading-snug ${
+                                  className={`${chatFontClasses.body} font-medium leading-snug ${
                                     msg.callType === 'missed' && !isMe
                                       ? 'text-rose-600 dark:text-rose-400 aurora:text-rose-300'
                                       : ''
@@ -4695,7 +4861,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                               </div>
                             </div>
                           ) : !msg.isImage && !msg.isFile && !msg.isVideo && (
-                            <p className="text-[13px] leading-snug whitespace-pre-wrap break-words [overflow-wrap:anywhere] select-text cursor-text">
+                            <p className={`${chatFontClasses.body} leading-snug whitespace-pre-wrap break-words [overflow-wrap:anywhere] select-text cursor-text`}>
                               {renderMessageTextWithLinks(msg.text, isMe)}
                             </p>
                           )}
@@ -4705,7 +4871,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                             (!msg.imageUrl ||
                               (!isSystemMediaPlaceholder(msg.text, msg) &&
                                 !/\.(jpg|jpeg|png|gif|webp|bmp|svg|heic)$/i.test(msg.text.trim()))) && (
-                            <p className="text-[13px] leading-snug whitespace-pre-wrap break-words [overflow-wrap:anywhere] select-text cursor-text mt-1 px-1.5">
+                            <p className={`${chatFontClasses.body} leading-snug whitespace-pre-wrap break-words [overflow-wrap:anywhere] select-text cursor-text mt-1 px-1.5`}>
                               {renderMessageTextWithLinks(msg.text, isMe)}
                             </p>
                           )}
@@ -4715,7 +4881,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                             (!msg.videoUrl ||
                               (!isSystemMediaPlaceholder(msg.text, msg) &&
                                 !/\.(mp4|mov|webm|mkv|avi|m4v)$/i.test(msg.text.trim()))) && (
-                            <p className="text-[13px] leading-snug whitespace-pre-wrap break-words [overflow-wrap:anywhere] select-text cursor-text mt-1 px-1.5">
+                            <p className={`${chatFontClasses.body} leading-snug whitespace-pre-wrap break-words [overflow-wrap:anywhere] select-text cursor-text mt-1 px-1.5`}>
                               {renderMessageTextWithLinks(msg.text, isMe)}
                             </p>
                           )}
@@ -4737,7 +4903,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                             </div>
                           ) : msg.translatedText ? (
                             <div
-                              className={`mt-1.5 px-2 py-1.5 rounded-lg border text-[11.5px] select-text cursor-text ${
+                              className={`mt-1.5 px-2 py-1.5 rounded-lg border ${chatFontClasses.translation} select-text cursor-text ${
                                 isMe
                                   ? 'bg-white/12 border-white/20 text-white/95'
                                   : 'bg-[#f8fafc] dark:bg-[#0b131f]/80 aurora:bg-[#0c161c]/85 border-[#e2e8f0] dark:border-[#1e3148] aurora:border-[#1e343e] text-[#1e293b] dark:text-[#eef4fb] aurora:text-[#ecf6f8]'
@@ -5242,7 +5408,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                   <span className="text-[10px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] block">
                     译文预览：
                   </span>
-                  <span className="text-xs font-medium text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] truncate block">
+                  <span className={`${chatFontClasses.secondary} font-medium text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] truncate block`}>
                     {translatedPreview}
                   </span>
                 </div>
@@ -5547,7 +5713,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                 ? '添加图片说明（可选）...'
                 : '输入消息（支持自动翻译、Shift+Enter 换行与 Ctrl+V 粘贴图片）...'
             }
-            className="w-full max-h-36 resize-none bg-transparent text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] text-[13.5px] leading-relaxed px-3.5 pt-2.5 pb-1.5 focus:outline-none placeholder-[#94a3b8] dark:placeholder-[#566d85] aurora:placeholder-[#5a7782] overflow-y-hidden"
+            className={`w-full max-h-36 resize-none bg-transparent text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] ${chatFontClasses.composer} leading-relaxed px-3.5 pt-2.5 pb-1.5 focus:outline-none placeholder-[#94a3b8] dark:placeholder-[#566d85] aurora:placeholder-[#5a7782] overflow-y-hidden`}
           />
 
           <div className="px-2.5 pb-2 pt-1 flex items-center justify-between border-t border-[#e2e8f0]/60 dark:border-white/5 aurora:border-[#182b34]">

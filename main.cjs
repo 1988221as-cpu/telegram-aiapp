@@ -664,8 +664,520 @@ async function createWindow() {
   });
 }
 
+// 8. In-App Desktop Auto-Updater (NSIS electron-updater + Windows Portable self-updater)
+const updaterRuntime = {
+  state: { status: 'idle', mode: 'unsupported', percent: 0, transferred: 0, total: 0, bytesPerSecond: 0 },
+  engine: 'none',
+  autoUpdater: null,
+  cancellationToken: null,
+  activeRequest: null,
+  downloadedFilePath: null,
+  initialized: false,
+};
+
+function getDesktopUpdaterInfo() {
+  const portableExePath = process.env.PORTABLE_EXECUTABLE_FILE ? String(process.env.PORTABLE_EXECUTABLE_FILE).trim() : '';
+  const isPortable = Boolean(portableExePath);
+  const hasNsisConfig = Boolean(
+    app.isPackaged &&
+    !isPortable &&
+    process.resourcesPath &&
+    fs.existsSync(path.join(process.resourcesPath, 'app-update.yml'))
+  );
+  if (!app.isPackaged) {
+    return { isElectron: true, supported: false, mode: 'unsupported', engine: 'none', portableExePath: '' };
+  }
+  if (hasNsisConfig) {
+    return { isElectron: true, supported: true, mode: 'nsis', engine: 'electron-updater', portableExePath: '' };
+  }
+  if (isPortable) {
+    return { isElectron: true, supported: true, mode: 'portable', engine: 'direct-download', portableExePath };
+  }
+  return { isElectron: true, supported: true, mode: 'nsis', engine: 'direct-download', portableExePath: '' };
+}
+
+function broadcastUpdaterState(patch) {
+  updaterRuntime.state = { ...updaterRuntime.state, ...patch };
+  try {
+    if (mainWindow && !mainWindow.isDestroyed() && mainWindow.webContents && !mainWindow.webContents.isDestroyed()) {
+      mainWindow.webContents.send('hs-updater:state', updaterRuntime.state);
+    }
+  } catch {}
+}
+
+function isAllowedUpdateDownloadUrl(rawUrl) {
+  try {
+    if (typeof rawUrl !== 'string' || !rawUrl.trim()) return false;
+    const u = new URL(rawUrl.trim());
+    if (u.protocol !== 'https:') return false;
+    const host = u.hostname.toLowerCase();
+    return (
+      host === 'github.com' ||
+      host === 'api.github.com' ||
+      host.endsWith('.githubusercontent.com') ||
+      host.endsWith('.github.com')
+    );
+  } catch {
+    return false;
+  }
+}
+
+function downloadUpdateFileWithProgress(downloadUrl, destFilePath, onProgress) {
+  const https = require('https');
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    let redirects = 0;
+    const tmpPath = `${destFilePath}.tmp`;
+    try {
+      if (fs.existsSync(tmpPath)) fs.unlinkSync(tmpPath);
+    } catch {}
+
+    const finishError = (err) => {
+      if (settled) return;
+      settled = true;
+      updaterRuntime.activeRequest = null;
+      try {
+        if (fs.existsSync(tmpPath)) fs.unlinkSync(tmpPath);
+      } catch {}
+      reject(err);
+    };
+
+    const startRequest = (targetUrl) => {
+      if (!isAllowedUpdateDownloadUrl(targetUrl)) {
+        finishError(new Error('更新下载地址不在受信任的 GitHub HTTPS 域名范围内'));
+        return;
+      }
+      const req = https.get(
+        targetUrl,
+        {
+          headers: {
+            'User-Agent': 'HumanSense-Updater',
+            Accept: 'application/octet-stream,*/*',
+          },
+        },
+        (res) => {
+          const status = Number(res.statusCode || 0);
+          if (status >= 300 && status < 400 && res.headers.location) {
+            res.resume();
+            if (redirects >= 6) {
+              finishError(new Error('下载重定向次数过多'));
+              return;
+            }
+            redirects += 1;
+            const nextUrl = new URL(res.headers.location, targetUrl).toString();
+            startRequest(nextUrl);
+            return;
+          }
+          if (status < 200 || status >= 300) {
+            res.resume();
+            finishError(new Error(`下载失败 (HTTP ${status})`));
+            return;
+          }
+          const total = Number(res.headers['content-length'] || 0) || 0;
+          let transferred = 0;
+          let lastEmitAt = 0;
+          let lastSampleAt = Date.now();
+          let lastSampleBytes = 0;
+          let bytesPerSecond = 0;
+          const fileStream = fs.createWriteStream(tmpPath);
+
+          res.on('data', (chunk) => {
+            transferred += chunk.length;
+            const now = Date.now();
+            if (now - lastSampleAt >= 500) {
+              const dt = (now - lastSampleAt) / 1000;
+              bytesPerSecond = dt > 0 ? Math.round((transferred - lastSampleBytes) / dt) : 0;
+              lastSampleAt = now;
+              lastSampleBytes = transferred;
+            }
+            if (now - lastEmitAt >= 150 || (total > 0 && transferred >= total)) {
+              lastEmitAt = now;
+              const percent = total > 0 ? Math.min(100, Number(((transferred / total) * 100).toFixed(1))) : 0;
+              onProgress({ percent, transferred, total, bytesPerSecond });
+            }
+          });
+
+          res.on('error', (err) => {
+            fileStream.destroy();
+            finishError(err);
+          });
+
+          fileStream.on('error', (err) => {
+            res.destroy();
+            finishError(err);
+          });
+
+          fileStream.on('finish', () => {
+            fileStream.close(() => {
+              if (settled) return;
+              try {
+                if (fs.existsSync(destFilePath)) fs.unlinkSync(destFilePath);
+                fs.renameSync(tmpPath, destFilePath);
+                settled = true;
+                updaterRuntime.activeRequest = null;
+                resolve({ filePath: destFilePath, total: total || transferred });
+              } catch (renameErr) {
+                finishError(renameErr);
+              }
+            });
+          });
+
+          res.pipe(fileStream);
+        }
+      );
+
+      req.setTimeout(30000, () => {
+        req.destroy(new Error('下载更新包超时，请检查网络连接后重试'));
+      });
+      req.on('error', (err) => {
+        finishError(err);
+      });
+      updaterRuntime.activeRequest = req;
+    };
+
+    startRequest(downloadUrl);
+  });
+}
+
+function ensureAutoUpdaterInitialized() {
+  if (updaterRuntime.autoUpdater) return updaterRuntime.autoUpdater;
+  const { autoUpdater } = require('electron-updater');
+  autoUpdater.autoDownload = false;
+  autoUpdater.autoInstallOnAppQuit = false;
+  autoUpdater.logger = {
+    info: (m) => writeLog('updater', String(m)),
+    warn: (m) => writeLog('updater-warn', String(m)),
+    error: (m) => writeLog('updater-err', String(m)),
+    debug: () => {},
+  };
+  autoUpdater.on('checking-for-update', () => {
+    broadcastUpdaterState({ status: 'checking', error: undefined });
+  });
+  autoUpdater.on('update-available', (info) => {
+    broadcastUpdaterState({
+      status: updaterRuntime.state.status === 'downloading' ? 'downloading' : 'available',
+      version: info?.version || updaterRuntime.state.version,
+      error: undefined,
+    });
+  });
+  autoUpdater.on('update-not-available', () => {
+    if (updaterRuntime.state.status === 'checking') {
+      broadcastUpdaterState({ status: 'idle', error: undefined });
+    }
+  });
+  autoUpdater.on('download-progress', (prog) => {
+    broadcastUpdaterState({
+      status: 'downloading',
+      percent: typeof prog?.percent === 'number' ? Math.min(100, Number(prog.percent.toFixed(1))) : 0,
+      transferred: Number(prog?.transferred || 0),
+      total: Number(prog?.total || 0),
+      bytesPerSecond: Number(prog?.bytesPerSecond || 0),
+      error: undefined,
+    });
+  });
+  autoUpdater.on('update-downloaded', (info) => {
+    broadcastUpdaterState({
+      status: 'downloaded',
+      version: info?.version || updaterRuntime.state.version,
+      percent: 100,
+      error: undefined,
+    });
+  });
+  autoUpdater.on('error', (err) => {
+    const msg = err?.message || '自动更新过程中发生错误';
+    if (/cancelled/i.test(msg)) return;
+    writeLog('updater-err', msg);
+    broadcastUpdaterState({ status: 'error', error: msg });
+  });
+  updaterRuntime.autoUpdater = autoUpdater;
+  return autoUpdater;
+}
+
+function registerUpdaterIpcHandlers() {
+  if (updaterRuntime.initialized) return;
+  updaterRuntime.initialized = true;
+  const info = getDesktopUpdaterInfo();
+  updaterRuntime.engine = info.engine;
+  updaterRuntime.state = {
+    ...updaterRuntime.state,
+    mode: info.mode,
+  };
+
+  ipcMain.handle('hs-updater:get-info', (event) => {
+    if (!isAuthorizedCryptoIpcEvent(event)) {
+      return { isElectron: true, supported: false, mode: 'unsupported', engine: 'none' };
+    }
+    const current = getDesktopUpdaterInfo();
+    return {
+      isElectron: current.isElectron,
+      supported: current.supported,
+      mode: current.mode,
+      engine: current.engine,
+    };
+  });
+
+  ipcMain.handle('hs-updater:get-state', (event) => {
+    if (!isAuthorizedCryptoIpcEvent(event)) {
+      return { status: 'idle', mode: 'unsupported' };
+    }
+    return updaterRuntime.state;
+  });
+
+  ipcMain.handle('hs-updater:download', async (event, payload) => {
+    if (!isAuthorizedCryptoIpcEvent(event)) {
+      return { ok: false, error: '未授权的更新请求' };
+    }
+    const currentInfo = getDesktopUpdaterInfo();
+    if (!currentInfo.supported) {
+      return { ok: false, error: '当前非打包桌面客户端，请使用浏览器下载更新包' };
+    }
+    if (updaterRuntime.state.status === 'downloading' || updaterRuntime.state.status === 'installing') {
+      return { ok: true, state: updaterRuntime.state };
+    }
+    if (updaterRuntime.state.status === 'downloaded') {
+      return { ok: true, state: updaterRuntime.state };
+    }
+
+    const targetVersion = typeof payload?.version === 'string' ? payload.version.trim() : undefined;
+
+    if (currentInfo.engine === 'electron-updater') {
+      try {
+        const autoUpdater = ensureAutoUpdaterInitialized();
+        const { CancellationToken } = require('electron-updater');
+        broadcastUpdaterState({
+          status: 'checking',
+          mode: currentInfo.mode,
+          version: targetVersion,
+          percent: 0,
+          transferred: 0,
+          total: 0,
+          bytesPerSecond: 0,
+          error: undefined,
+        });
+        const checkRes = await autoUpdater.checkForUpdates();
+        if (!checkRes || !checkRes.updateInfo) {
+          throw new Error('未在 GitHub Releases 检测到更新元数据 (latest.yml)');
+        }
+        const token = new CancellationToken();
+        updaterRuntime.cancellationToken = token;
+        broadcastUpdaterState({
+          status: 'downloading',
+          mode: currentInfo.mode,
+          version: checkRes.updateInfo.version || targetVersion,
+          percent: 0,
+          error: undefined,
+        });
+        await autoUpdater.downloadUpdate(token);
+        updaterRuntime.cancellationToken = null;
+        return { ok: true, state: updaterRuntime.state };
+      } catch (err) {
+        updaterRuntime.cancellationToken = null;
+        const msg = err?.message || '自动更新下载失败';
+        if (/cancelled/i.test(msg)) {
+          broadcastUpdaterState({ status: 'idle', percent: 0, transferred: 0, total: 0, bytesPerSecond: 0, error: undefined });
+          return { ok: false, cancelled: true };
+        }
+        writeLog('updater-err', `electron-updater download failed: ${msg}`);
+        broadcastUpdaterState({ status: 'error', error: msg });
+        return { ok: false, error: msg };
+      }
+    }
+
+    // Portable or direct-download fallback engine
+    const downloadUrl =
+      currentInfo.mode === 'portable'
+        ? payload?.portableDownloadUrl || payload?.downloadUrl
+        : payload?.installerDownloadUrl || payload?.downloadUrl;
+    if (!isAllowedUpdateDownloadUrl(downloadUrl)) {
+      const msg = '未获取到有效的受信任 GitHub 安装包下载地址';
+      broadcastUpdaterState({ status: 'error', error: msg });
+      return { ok: false, error: msg };
+    }
+
+    try {
+      const os = require('os');
+      const updatesDir = path.join(os.tmpdir(), 'HumanSense-Updates');
+      fs.mkdirSync(updatesDir, { recursive: true });
+      const rawName = String(
+        (currentInfo.mode === 'portable' ? payload?.portableAssetName : payload?.installerAssetName) ||
+        payload?.assetName ||
+        `HumanSense-${targetVersion || 'latest'}.exe`
+      ).replace(/[^A-Za-z0-9._-]/g, '_');
+      const safeFileName = rawName.toLowerCase().endsWith('.exe') ? rawName : `${rawName}.exe`;
+      const destPath = path.join(updatesDir, safeFileName);
+
+      updaterRuntime.downloadedFilePath = null;
+      broadcastUpdaterState({
+        status: 'downloading',
+        mode: currentInfo.mode,
+        version: targetVersion,
+        percent: 0,
+        transferred: 0,
+        total: 0,
+        bytesPerSecond: 0,
+        error: undefined,
+      });
+
+      const dlResult = await downloadUpdateFileWithProgress(downloadUrl, destPath, (prog) => {
+        broadcastUpdaterState({
+          status: 'downloading',
+          percent: prog.percent,
+          transferred: prog.transferred,
+          total: prog.total,
+          bytesPerSecond: prog.bytesPerSecond,
+          error: undefined,
+        });
+      });
+
+      updaterRuntime.downloadedFilePath = dlResult.filePath;
+      broadcastUpdaterState({
+        status: 'downloaded',
+        percent: 100,
+        transferred: dlResult.total,
+        total: dlResult.total,
+        bytesPerSecond: 0,
+        error: undefined,
+      });
+      return { ok: true, state: updaterRuntime.state };
+    } catch (err) {
+      const msg = err?.message || '下载更新包失败';
+      if (/aborted|cancelled|destroy/i.test(msg) && updaterRuntime.state.status === 'idle') {
+        return { ok: false, cancelled: true };
+      }
+      writeLog('updater-err', `direct download failed: ${msg}`);
+      broadcastUpdaterState({ status: 'error', error: msg });
+      return { ok: false, error: msg };
+    }
+  });
+
+  ipcMain.handle('hs-updater:cancel', (event) => {
+    if (!isAuthorizedCryptoIpcEvent(event)) return { ok: false };
+    try {
+      if (updaterRuntime.cancellationToken) {
+        updaterRuntime.cancellationToken.cancel();
+        updaterRuntime.cancellationToken = null;
+      }
+      if (updaterRuntime.activeRequest) {
+        const req = updaterRuntime.activeRequest;
+        updaterRuntime.activeRequest = null;
+        broadcastUpdaterState({ status: 'idle', percent: 0, transferred: 0, total: 0, bytesPerSecond: 0, error: undefined });
+        req.destroy(new Error('cancelled'));
+      } else {
+        broadcastUpdaterState({ status: 'idle', percent: 0, transferred: 0, total: 0, bytesPerSecond: 0, error: undefined });
+      }
+      return { ok: true };
+    } catch {
+      return { ok: false };
+    }
+  });
+
+  ipcMain.handle('hs-updater:install', async (event) => {
+    if (!isAuthorizedCryptoIpcEvent(event)) {
+      return { ok: false, error: '未授权的安装请求' };
+    }
+    if (updaterRuntime.state.status === 'installing') {
+      return { ok: true };
+    }
+    if (updaterRuntime.state.status !== 'downloaded') {
+      return { ok: false, error: '更新包尚未下载完成' };
+    }
+
+    const currentInfo = getDesktopUpdaterInfo();
+    broadcastUpdaterState({ status: 'installing', error: undefined });
+
+    try {
+      isQuitting = true;
+      await cleanupBackendResources();
+
+      if (currentInfo.engine === 'electron-updater' && updaterRuntime.autoUpdater) {
+        writeLog('info', 'Triggering electron-updater quitAndInstall(false, true)...');
+        setImmediate(() => {
+          try {
+            updaterRuntime.autoUpdater.quitAndInstall(false, true);
+          } catch (e) {
+            writeLog('error', `quitAndInstall failed: ${e.message}`);
+            app.exit(1);
+          }
+        });
+        return { ok: true };
+      }
+
+      const downloadedPath = updaterRuntime.downloadedFilePath;
+      if (!downloadedPath || !fs.existsSync(downloadedPath)) {
+        isQuitting = false;
+        const msg = '更新安装包文件不存在，请重新下载';
+        broadcastUpdaterState({ status: 'error', error: msg });
+        return { ok: false, error: msg };
+      }
+
+      const { spawn } = require('child_process');
+      if (process.platform === 'win32' && currentInfo.mode === 'portable' && currentInfo.portableExePath) {
+        const os = require('os');
+        const scriptPath = path.join(os.tmpdir(), `hs_portable_swap_${Date.now()}.cmd`);
+        const cmdBody = [
+          '@echo off',
+          'setlocal',
+          'set /a tries=0',
+          ':waitloop',
+          'set /a tries+=1',
+          'timeout /t 1 /nobreak >nul',
+          'copy /y "%HS_SRC_EXE%" "%HS_DST_EXE%.new" >nul 2>&1',
+          'if errorlevel 1 (',
+          '  if %tries% lss 25 goto waitloop',
+          '  start "" "%HS_SRC_EXE%"',
+          '  goto cleanup',
+          ')',
+          'move /y "%HS_DST_EXE%.new" "%HS_DST_EXE%" >nul 2>&1',
+          'if errorlevel 1 (',
+          '  if %tries% lss 25 goto waitloop',
+          '  del /f /q "%HS_DST_EXE%.new" >nul 2>&1',
+          '  start "" "%HS_SRC_EXE%"',
+          '  goto cleanup',
+          ')',
+          'del /f /q "%HS_SRC_EXE%" >nul 2>&1',
+          'start "" "%HS_DST_EXE%"',
+          ':cleanup',
+          'del /f /q "%~f0" >nul 2>&1',
+        ].join('\r\n');
+        fs.writeFileSync(scriptPath, cmdBody, 'utf8');
+        const child = spawn('cmd.exe', ['/d', '/c', scriptPath], {
+          detached: true,
+          stdio: 'ignore',
+          windowsHide: true,
+          env: {
+            ...process.env,
+            HS_SRC_EXE: downloadedPath,
+            HS_DST_EXE: currentInfo.portableExePath,
+          },
+        });
+        child.unref();
+        writeLog('info', `Scheduled portable self-update swap -> ${currentInfo.portableExePath}`);
+        setTimeout(() => app.exit(0), 150);
+        return { ok: true };
+      }
+
+      // Direct-download NSIS installer fallback
+      const child = spawn(downloadedPath, [], {
+        detached: true,
+        stdio: 'ignore',
+        windowsHide: false,
+      });
+      child.unref();
+      setTimeout(() => app.exit(0), 150);
+      return { ok: true };
+    } catch (err) {
+      isQuitting = false;
+      const msg = err?.message || '启动更新安装失败';
+      writeLog('updater-err', `installNow failed: ${msg}`);
+      broadcastUpdaterState({ status: 'error', error: msg });
+      return { ok: false, error: msg };
+    }
+  });
+}
+
 app.whenReady().then(() => {
   registerCryptoIpcHandlers();
+  registerUpdaterIpcHandlers();
   return createWindow();
 });
 

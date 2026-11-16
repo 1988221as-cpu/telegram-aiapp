@@ -20,6 +20,7 @@ import {
   reconnectTelegramSessionsApi,
   checkAppUpdateApi,
   type AppUpdateCheckResult,
+  type DesktopUpdaterState,
 } from '../services/apiService';
 import { getCryptoStorageSecurityInfo } from '../services/cryptoStorage';
 
@@ -29,6 +30,8 @@ interface SystemSettingsModalProps {
   onOpenDatabase?: () => void;
   onOpenTranslation?: () => void;
   onUpdateAvailable?: (info: AppUpdateCheckResult) => void;
+  updaterState?: DesktopUpdaterState;
+  onOpenUpdateModal?: () => void;
 }
 
 export const SystemSettingsModal: React.FC<SystemSettingsModalProps> = ({
@@ -37,6 +40,8 @@ export const SystemSettingsModal: React.FC<SystemSettingsModalProps> = ({
   onOpenDatabase,
   onOpenTranslation,
   onUpdateAvailable,
+  updaterState,
+  onOpenUpdateModal,
 }) => {
   const [jwtMode, setJwtMode] = useState<'asymmetric' | 'hs256' | 'unconfigured' | null>(null);
   const [proxyEnabled, setProxyEnabled] = useState(false);
@@ -378,11 +383,27 @@ export const SystemSettingsModal: React.FC<SystemSettingsModalProps> = ({
             >
               {isCheckingUpdate ? '检查中...' : '检查更新'}
             </button>
-            {updateCheckMessage && (
+            {updaterState?.status === 'downloading' ? (
+              <button
+                type="button"
+                onClick={onOpenUpdateModal}
+                className="text-[11px] text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf] hover:underline truncate cursor-pointer"
+              >
+                正在下载更新 {Math.round(updaterState.percent || 0)}%
+              </button>
+            ) : updaterState?.status === 'downloaded' ? (
+              <button
+                type="button"
+                onClick={onOpenUpdateModal}
+                className="text-[11px] font-medium text-[#16a34a] dark:text-[#4ade80] hover:underline truncate cursor-pointer"
+              >
+                新版已就绪，点击重启更新
+              </button>
+            ) : updateCheckMessage ? (
               <span className="text-[11px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] truncate">
                 {updateCheckMessage}
               </span>
-            )}
+            ) : null}
           </div>
           <button
             onClick={onClose}

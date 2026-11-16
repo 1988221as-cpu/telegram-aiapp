@@ -2462,7 +2462,7 @@ export async function fetchTelegramUserDialogs(client: TelegramClient, limit = 1
   const ownerUserId = explicitUserId || ((client as any)?._selfId ? String((client as any)._selfId) : '');
   const accountScope = ownerUserId ? `acc_tg_${ownerUserId}` : '';
   try {
-    const mainDialogs = await client.getDialogs({ limit });
+    const mainDialogs = await client.getDialogs({ limit, folder: 0 });
     let archivedDialogs: any[] = [];
     try {
       archivedDialogs = await client.getDialogs({ limit: Math.min(limit, 80), folder: 1 });
@@ -2567,6 +2567,40 @@ export async function fetchTelegramUserDialogs(client: TelegramClient, limit = 1
   }
 }
 
+function patchConnectedDialogCache(
+  connected: ConnectedTelegramUser | undefined,
+  chatId: string | number,
+  patch: Record<string, any>
+) {
+  if (!connected) return;
+  const raw = String(chatId || '').trim();
+  const canonicalChatId = raw.startsWith('tg_') ? raw : `tg_${raw}`;
+  const rawPeerId = canonicalChatId.replace(/^tg_/, '');
+  if (Array.isArray(connected.dialogs)) {
+    connected.dialogs = connected.dialogs.map((d: any) =>
+      d && (String(d.id || '') === canonicalChatId || String(d.rawId || '') === rawPeerId)
+        ? { ...d, ...patch }
+        : d
+    );
+  }
+  connected.dialogsFetchedAt = 0;
+  connected.dialogsInFlight = undefined;
+}
+
+function removeConnectedDialogFromCache(connected: ConnectedTelegramUser | undefined, chatId: string | number) {
+  if (!connected) return;
+  const raw = String(chatId || '').trim();
+  const canonicalChatId = raw.startsWith('tg_') ? raw : `tg_${raw}`;
+  const rawPeerId = canonicalChatId.replace(/^tg_/, '');
+  if (Array.isArray(connected.dialogs)) {
+    connected.dialogs = connected.dialogs.filter(
+      (d: any) => !(d && (String(d.id || '') === canonicalChatId || String(d.rawId || '') === rawPeerId))
+    );
+  }
+  connected.dialogsFetchedAt = 0;
+  connected.dialogsInFlight = undefined;
+}
+
 export async function getOrFetchConnectedAccountDialogs(
   connected: ConnectedTelegramUser,
   opts?: { force?: boolean; limit?: number }
@@ -2591,8 +2625,10 @@ export async function getOrFetchConnectedAccountDialogs(
   const limit = opts?.limit ?? 150;
   const fetchPromise = fetchTelegramUserDialogs(connected.client, limit, connected.userId)
     .then((dialogs) => {
-      connected.dialogs = dialogs;
-      connected.dialogsFetchedAt = Date.now();
+      if (connected.dialogsInFlight === fetchPromise) {
+        connected.dialogs = dialogs;
+        connected.dialogsFetchedAt = Date.now();
+      }
       return dialogs;
     })
     .finally(() => {
@@ -18267,7 +18303,7 @@ function readLocalAppVersion(): string {
       }
     } catch {}
   }
-  return '1.0.0';
+  return '1.0.8';
 }
 
 // Lightweight GitHub Releases version check (portable & installer compatible)
@@ -18330,6 +18366,7 @@ app.get('/api/system/check-update', requireTenantAuth, async (_req: Request, res
         a.browser_download_url.startsWith('https://')
     );
     const portableExe = exeAssets.find((a) => !/setup|installer/i.test(a.name));
+    const installerExe = exeAssets.find((a) => /setup|installer/i.test(a.name));
     const preferredAsset = portableExe || exeAssets[0] || null;
     const downloadUrl = preferredAsset?.browser_download_url || releaseUrl;
 
@@ -18346,6 +18383,10 @@ app.get('/api/system/check-update', requireTenantAuth, async (_req: Request, res
       releaseUrl,
       downloadUrl,
       assetName: preferredAsset?.name || undefined,
+      portableDownloadUrl: portableExe?.browser_download_url || undefined,
+      portableAssetName: portableExe?.name || undefined,
+      installerDownloadUrl: installerExe?.browser_download_url || undefined,
+      installerAssetName: installerExe?.name || undefined,
     });
   } catch (err: any) {
     const isAbort = err?.name === 'AbortError';
@@ -22649,7 +22690,7 @@ app.post('/api/telegram/user/dialogs/pin', requireTenantAuth, async (req: Reques
         pinned: Boolean(pinned),
       })
     );
-    connected.dialogsFetchedAt = 0;
+    patchConnectedDialogCache(connected, chatId, { isPinned: Boolean(pinned) });
 
     return res.json({ ok: true, cloudSynced: true, pinned: Boolean(pinned) });
   } catch (err: any) {
@@ -22681,7 +22722,7 @@ app.post('/api/telegram/user/dialogs/mute', requireTenantAuth, async (req: Reque
         }),
       })
     );
-    connected.dialogsFetchedAt = 0;
+    patchConnectedDialogCache(connected, chatId, { isMuted: Boolean(muted) });
 
     return res.json({ ok: true, cloudSynced: true, muted: Boolean(muted) });
   } catch (err: any) {
@@ -22713,7 +22754,7 @@ app.post('/api/telegram/user/dialogs/archive', requireTenantAuth, async (req: Re
         ],
       })
     );
-    connected.dialogsFetchedAt = 0;
+    patchConnectedDialogCache(connected, chatId, { isArchived: Boolean(archived) });
 
     return res.json({ ok: true, cloudSynced: true, archived: Boolean(archived) });
   } catch (err: any) {
@@ -22746,7 +22787,7 @@ app.post('/api/telegram/user/dialogs/unread', requireTenantAuth, async (req: Req
         await connected.client.markAsRead(inputPeer);
       } catch {}
     }
-    connected.dialogsFetchedAt = 0;
+    patchConnectedDialogCache(connected, chatId, { unreadCount: unread ? 1 : 0 });
 
     return res.json({ ok: true, cloudSynced: true, unread: Boolean(unread) });
   } catch (err: any) {
@@ -22785,7 +22826,7 @@ app.post('/api/telegram/user/dialogs/clear-history', requireTenantAuth, async (r
         .prepare(`DELETE FROM messages WHERE (chat_id = ? OR chat_id = ?) AND account_id IN (${accPlaceholders})`)
         .run(String(chatId), altChatId, ...accVariants);
     } catch {}
-    connected.dialogsFetchedAt = 0;
+    patchConnectedDialogCache(connected, chatId, { lastMessage: '暂无消息', unreadCount: 0 });
 
     return res.json({ ok: true, cloudSynced: true });
   } catch (err: any) {
@@ -22847,7 +22888,7 @@ app.post('/api/telegram/user/dialogs/delete', requireTenantAuth, async (req: Req
         .prepare(`DELETE FROM messages WHERE (chat_id = ? OR chat_id = ?) AND account_id IN (${accPlaceholders})`)
         .run(String(chatId), altChatId, ...accVariants);
     } catch {}
-    connected.dialogsFetchedAt = 0;
+    removeConnectedDialogFromCache(connected, chatId);
 
     return res.json({ ok: true, cloudSynced: true });
   } catch (err: any) {
@@ -22886,7 +22927,7 @@ app.post('/api/telegram/user/dialogs/read', requireTenantAuth, async (req: Reque
         })
       );
     } catch {}
-    connected.dialogsFetchedAt = 0;
+    patchConnectedDialogCache(connected, chatId, { unreadCount: 0 });
 
     return res.json({ ok: true, cloudSynced: true });
   } catch (err: any) {
@@ -23172,6 +23213,7 @@ app.post('/api/telegram/user/contacts/rename', requireTenantAuth, async (req: Re
         .run(cleanTitle, now, ...chatCandidates, ...accVariants);
     } catch {}
 
+    patchConnectedDialogCache(connected, chatId, { title: cleanTitle });
     return res.json({ ok: true, cloudSynced: true, title: cleanTitle });
   } catch (err: any) {
     return await handleMtprotoRouteError(res, err, {
@@ -25873,7 +25915,7 @@ app.post('/api/telegram/autopilot/toggle', requireTenantAuth, (req: Request, res
 // Real-time MTProto NewMessage event listener for personal Telegram account
 export interface LocalIncomingUpdate {
   id: string;
-  type?: 'message' | 'edit' | 'delete' | 'read_outbox' | 'read_inbox' | 'dialog_pinned' | 'pin' | 'user_status' | 'peer_blocked' | 'reactions' | 'phone_call_ringing';
+  type?: 'message' | 'edit' | 'delete' | 'read_outbox' | 'read_inbox' | 'dialog_pinned' | 'dialog_archived' | 'pin' | 'user_status' | 'peer_blocked' | 'reactions' | 'phone_call_ringing';
   telegramMessageId?: number;
   deletedMessageIds?: number[];
   readOutboxMaxId?: number;
@@ -25921,6 +25963,7 @@ export interface LocalIncomingUpdate {
   replyTo?: { id: string; telegramMessageId?: number; senderName?: string; text: string };
   isEdited?: boolean;
   isPinned?: boolean;
+  isArchived?: boolean;
 }
 export const pendingLocalUpdates: LocalIncomingUpdate[] = [];
 
@@ -26781,12 +26824,18 @@ ${memories.slice(-3).map((m: any) => `  * [${m.date}] ${m.topic}: ${m.summary}`)
         if (update instanceof Api.UpdateReadHistoryInbox) {
           const peerChatId = resolveRawPeerChatId(update.peer);
           if (!peerChatId) return;
+          const nextUnread = Math.max(0, Number(update.stillUnreadCount || 0));
+          const nextReadMaxId = Number(update.maxId || 0) || undefined;
+          patchConnectedDialogCache(connectedUserClients.get(accountId), peerChatId, {
+            unreadCount: nextUnread,
+            ...(nextReadMaxId ? { readInboxMaxId: nextReadMaxId } : {}),
+          });
           pushPendingLocalUpdate({
             id: `readin_${userId}_${peerChatId}_${Number(update.maxId || 0)}_${Date.now()}`,
             type: 'read_inbox',
             chatId: peerChatId,
-            readInboxMaxId: Number(update.maxId || 0) || undefined,
-            unreadCount: Math.max(0, Number(update.stillUnreadCount || 0)),
+            readInboxMaxId: nextReadMaxId,
+            unreadCount: nextUnread,
             accountId,
             sender: 'peer',
             senderName: '',
@@ -26800,12 +26849,18 @@ ${memories.slice(-3).map((m: any) => `  * [${m.date}] ${m.topic}: ${m.summary}`)
         if (update instanceof Api.UpdateReadChannelInbox) {
           const channelChatId = update.channelId ? `tg_-100${String(update.channelId)}` : '';
           if (!channelChatId) return;
+          const nextUnread = Math.max(0, Number(update.stillUnreadCount || 0));
+          const nextReadMaxId = Number(update.maxId || 0) || undefined;
+          patchConnectedDialogCache(connectedUserClients.get(accountId), channelChatId, {
+            unreadCount: nextUnread,
+            ...(nextReadMaxId ? { readInboxMaxId: nextReadMaxId } : {}),
+          });
           pushPendingLocalUpdate({
             id: `readchin_${userId}_${channelChatId}_${Number(update.maxId || 0)}_${Date.now()}`,
             type: 'read_inbox',
             chatId: channelChatId,
-            readInboxMaxId: Number(update.maxId || 0) || undefined,
-            unreadCount: Math.max(0, Number(update.stillUnreadCount || 0)),
+            readInboxMaxId: nextReadMaxId,
+            unreadCount: nextUnread,
             accountId,
             sender: 'peer',
             senderName: '',
@@ -26820,8 +26875,9 @@ ${memories.slice(-3).map((m: any) => `  * [${m.date}] ${m.topic}: ${m.summary}`)
           const innerPeer = (update.peer as any)?.peer;
           const peerChatId = resolveRawPeerChatId(innerPeer);
           if (!peerChatId) return;
-          const connObj = connectedUserClients.get(accountId);
-          if (connObj) connObj.dialogsFetchedAt = 0;
+          patchConnectedDialogCache(connectedUserClients.get(accountId), peerChatId, {
+            isPinned: Boolean(update.pinned),
+          });
           pushPendingLocalUpdate({
             id: `dlgpin_${userId}_${peerChatId}_${Date.now()}`,
             type: 'dialog_pinned',
@@ -26834,6 +26890,41 @@ ${memories.slice(-3).map((m: any) => `  * [${m.date}] ${m.topic}: ${m.summary}`)
             timestamp: '',
             createdAt: Date.now(),
           });
+          return;
+        }
+
+        if (update instanceof Api.UpdateFolderPeers) {
+          const connObj = connectedUserClients.get(accountId);
+          const folderUpdates = Array.isArray(update.folderPeers) ? update.folderPeers : [];
+          for (const fp of folderUpdates) {
+            const peerChatId = resolveRawPeerChatId((fp as any)?.peer);
+            if (!peerChatId) continue;
+            const nextArchived = Number((fp as any)?.folderId) === 1;
+            const rawPeerId = peerChatId.replace(/^tg_/, '');
+            if (connObj && Array.isArray(connObj.dialogs)) {
+              connObj.dialogs = connObj.dialogs.map((d: any) =>
+                d && (String(d.id) === peerChatId || String(d.rawId || '') === rawPeerId)
+                  ? { ...d, isArchived: nextArchived }
+                  : d
+              );
+            }
+            pushPendingLocalUpdate({
+              id: `dlgarch_${userId}_${peerChatId}_${Date.now()}`,
+              type: 'dialog_archived',
+              chatId: peerChatId,
+              isArchived: nextArchived,
+              accountId,
+              sender: 'peer',
+              senderName: '',
+              text: '',
+              timestamp: '',
+              createdAt: Date.now(),
+            });
+          }
+          if (connObj) {
+            connObj.dialogsFetchedAt = 0;
+            connObj.dialogsInFlight = undefined;
+          }
           return;
         }
 

@@ -30,7 +30,7 @@ import {
 
 declare const __APP_VERSION__: string | undefined;
 export const APP_VERSION =
-  typeof __APP_VERSION__ !== 'undefined' && __APP_VERSION__ ? __APP_VERSION__ : '1.0.0';
+  typeof __APP_VERSION__ !== 'undefined' && __APP_VERSION__ ? __APP_VERSION__ : '1.0.8';
 
 // ==================== SESSION TOKEN & TENANT AUTHENTICATION HELPERS ====================
 
@@ -2888,8 +2888,58 @@ export interface AppUpdateCheckResult {
   releaseUrl?: string;
   downloadUrl?: string;
   assetName?: string;
+  portableDownloadUrl?: string;
+  portableAssetName?: string;
+  installerDownloadUrl?: string;
+  installerAssetName?: string;
   noReleasesYet?: boolean;
   error?: string;
+}
+
+export interface DesktopUpdaterInfo {
+  isElectron: boolean;
+  supported: boolean;
+  mode: 'nsis' | 'portable' | 'unsupported';
+  engine: 'electron-updater' | 'direct-download' | 'none';
+}
+
+export interface DesktopUpdaterState {
+  status: 'idle' | 'checking' | 'available' | 'downloading' | 'downloaded' | 'installing' | 'error';
+  mode?: 'nsis' | 'portable' | 'unsupported';
+  version?: string;
+  percent?: number;
+  transferred?: number;
+  total?: number;
+  bytesPerSecond?: number;
+  error?: string;
+}
+
+export interface ElectronUpdaterBridge {
+  getInfo: () => Promise<DesktopUpdaterInfo>;
+  getState: () => Promise<DesktopUpdaterState>;
+  startDownload: (payload: {
+    version?: string;
+    downloadUrl?: string;
+    assetName?: string;
+    portableDownloadUrl?: string;
+    portableAssetName?: string;
+    installerDownloadUrl?: string;
+    installerAssetName?: string;
+  }) => Promise<{ ok: boolean; cancelled?: boolean; error?: string; state?: DesktopUpdaterState }>;
+  cancelDownload: () => Promise<{ ok: boolean }>;
+  installNow: () => Promise<{ ok: boolean; error?: string }>;
+  onStateChange: (callback: (state: DesktopUpdaterState) => void) => () => void;
+}
+
+declare global {
+  interface Window {
+    humanSenseUpdater?: ElectronUpdaterBridge;
+  }
+}
+
+export function getDesktopUpdaterBridge(): ElectronUpdaterBridge | null {
+  if (typeof window === 'undefined') return null;
+  return window.humanSenseUpdater || null;
 }
 
 export async function checkAppUpdateApi(): Promise<AppUpdateCheckResult> {

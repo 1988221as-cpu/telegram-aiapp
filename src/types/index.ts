@@ -13,6 +13,14 @@ export interface Account {
   status: 'online' | 'offline' | 'away' | 'expired';
   bio?: string;
   remark?: string;
+  groupId?: string;
+}
+
+export interface AccountGroup {
+  id: string;
+  name: string;
+  color?: string;
+  collapsed?: boolean;
 }
 
 export interface Chat {
