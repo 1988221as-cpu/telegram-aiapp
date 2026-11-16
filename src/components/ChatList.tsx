@@ -638,14 +638,10 @@ export const ChatList: React.FC<ChatListProps> = ({
                 {/* Contact Avatar */}
                 <div className="relative shrink-0 mr-2.5">
                   <div
-                    className={`w-10 h-10 rounded-full flex items-center justify-center font-bold text-xs overflow-hidden relative ${
-                      chat.isArchived ? 'bg-[#64748b] dark:bg-[#1e3148] aurora:bg-[#203742]' : ''
-                    }`}
+                    className="w-10 h-10 rounded-full flex items-center justify-center font-bold text-xs overflow-hidden relative"
                     style={{ backgroundColor: chat.avatarBg }}
                   >
-                    {chat.isArchived ? (
-                      <Archive className="w-4 h-4 text-white" />
-                    ) : chat.isVerified ? (
+                    {chat.isVerified ? (
                       <div className="w-full h-full bg-[#2481cc] dark:bg-[#2ba0ff] aurora:bg-[#14b8a6] flex items-center justify-center text-white">
                         <Check className="w-4 h-4 stroke-[2.5]" />
                       </div>
@@ -676,7 +672,7 @@ export const ChatList: React.FC<ChatListProps> = ({
                   </div>
 
                   {/* Online indicator dot only when real MTProto UserStatus is Online */}
-                  {!chat.isGroup && !chat.isChannel && !chat.isBot && !chat.isArchived && chat.isOnline && (
+                  {!chat.isGroup && !chat.isChannel && !chat.isBot && chat.isOnline && (
                     <span className="absolute bottom-0 right-0 w-2.5 h-2.5 rounded-full bg-emerald-500 border-2 border-white dark:border-[#09111d] aurora:border-[#0f171c]" />
                   )}
                 </div>

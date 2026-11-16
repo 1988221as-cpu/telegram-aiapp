@@ -22,6 +22,7 @@ import {
   UserPlus,
   Play,
   CornerUpLeft,
+  Copy,
 } from 'lucide-react';
 import { Chat, Message, TelegramChatFullInfo, TelegramContact } from '../types';
 import {
@@ -52,6 +53,15 @@ interface TelegramChatInfoDrawerProps {
   onRemoveContact?: (contactId: string) => void;
   onRefreshMediaUrls?: (urls: string[]) => Promise<Record<string, string>>;
   onJumpToMessage?: (message: Message) => void;
+  onSelectMember?: (member: {
+    id: string;
+    name: string;
+    username?: string;
+    avatarUrl?: string;
+    statusText?: string;
+    isOnline?: boolean;
+    isBot?: boolean;
+  }) => void;
 }
 
 export const TelegramChatInfoDrawer: React.FC<TelegramChatInfoDrawerProps> = ({
@@ -69,6 +79,7 @@ export const TelegramChatInfoDrawer: React.FC<TelegramChatInfoDrawerProps> = ({
   onRemoveContact,
   onRefreshMediaUrls,
   onJumpToMessage,
+  onSelectMember,
 }) => {
   const [activeTab, setActiveTab] = useState<'media' | 'files' | 'voice' | 'links' | 'members'>('media');
   const [isEditingRemark, setIsEditingRemark] = useState(false);
@@ -88,6 +99,8 @@ export const TelegramChatInfoDrawer: React.FC<TelegramChatInfoDrawerProps> = ({
   const [confirmAddContact, setConfirmAddContact] = useState(false);
   const [addContactName, setAddContactName] = useState('');
   const [isAddingContact, setIsAddingContact] = useState(false);
+  const [copiedField, setCopiedField] = useState<'username' | 'phone' | 'id' | 'inviteLink' | null>(null);
+  const copyTimerRef = useRef<number | null>(null);
   const [refreshedUrlsMap, setRefreshedUrlsMap] = useState<Record<string, string>>({});
   const attemptedRefreshUrlsRef = useRef<Set<string>>(new Set());
 
@@ -186,6 +199,7 @@ export const TelegramChatInfoDrawer: React.FC<TelegramChatInfoDrawerProps> = ({
     setConfirmBlockToggle(false);
     setConfirmDeleteContact(false);
     setConfirmAddContact(false);
+    setCopiedField(null);
     setAddContactName(chat.title || '');
     if (chat.id.startsWith('tg_')) {
       void loadFullInfo();
@@ -261,6 +275,18 @@ export const TelegramChatInfoDrawer: React.FC<TelegramChatInfoDrawerProps> = ({
     } finally {
       setIsSavingRemark(false);
     }
+  };
+
+  const handleCopyField = (field: 'username' | 'phone' | 'id' | 'inviteLink', value: string) => {
+    if (!value) return;
+    void navigator.clipboard?.writeText(value);
+    setCopiedField(field);
+    if (copyTimerRef.current) {
+      window.clearTimeout(copyTimerRef.current);
+    }
+    copyTimerRef.current = window.setTimeout(() => {
+      setCopiedField((cur) => (cur === field ? null : cur));
+    }, 1500);
   };
 
   if (!isOpen || !chat) return null;
@@ -419,17 +445,76 @@ export const TelegramChatInfoDrawer: React.FC<TelegramChatInfoDrawerProps> = ({
                 );
               })()}
             </p>
-            {(fullInfo?.username || chat.username || fullInfo?.phone || chat.phone || fullInfo?.description || chat.description || fullInfo?.inviteLink || chat.inviteLink) && (
+            {(fullInfo?.username || chat.username || chat.id.startsWith('tg_') || fullInfo?.phone || chat.phone || fullInfo?.description || chat.description || fullInfo?.inviteLink || chat.inviteLink) && (
               <div className="mt-2.5 w-full text-center space-y-1">
-                {(fullInfo?.username || chat.username) && (
-                  <div className="text-[11px] text-[#2481cc] dark:text-[#7cc4ff] aurora:text-[#5eead4] font-medium">
-                    {fullInfo?.username || chat.username}
-                  </div>
-                )}
+                {(fullInfo?.username || chat.username) && (() => {
+                  const rawUsername = (fullInfo?.username || chat.username || '').trim();
+                  const formattedUsername = rawUsername.startsWith('@') ? rawUsername : `@${rawUsername}`;
+                  const isCopied = copiedField === 'username';
+                  return (
+                    <div className="flex items-center justify-center">
+                      <button
+                        type="button"
+                        onClick={() => handleCopyField('username', formattedUsername)}
+                        className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] text-[#2481cc] dark:text-[#7cc4ff] aurora:text-[#5eead4] font-medium hover:bg-[#e8f3ff] dark:hover:bg-[#132234] aurora:hover:bg-[#13252e] transition-colors cursor-pointer select-text"
+                        title="点击复制用户名"
+                      >
+                        <span>{formattedUsername}</span>
+                        {isCopied ? (
+                          <span className="inline-flex items-center gap-0.5 text-emerald-600 dark:text-emerald-400 text-[10px]">
+                            <Check className="w-3 h-3" />
+                            已复制
+                          </span>
+                        ) : (
+                          <Copy className="w-3 h-3 opacity-60" />
+                        )}
+                      </button>
+                    </div>
+                  );
+                })()}
+                {chat.id.startsWith('tg_') && (() => {
+                  const numericId = chat.id.replace(/^tg_/, '');
+                  const isCopied = copiedField === 'id';
+                  return (
+                    <div className="flex items-center justify-center">
+                      <button
+                        type="button"
+                        onClick={() => handleCopyField('id', numericId)}
+                        className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] hover:bg-[#e2e8f0]/60 dark:hover:bg-[#132234] aurora:hover:bg-[#13252e] transition-colors cursor-pointer tabular-nums"
+                        title="点击复制 Telegram ID"
+                      >
+                        <span>ID: <span className="font-mono">{numericId}</span></span>
+                        {isCopied ? (
+                          <span className="inline-flex items-center gap-0.5 text-emerald-600 dark:text-emerald-400 text-[10px]">
+                            <Check className="w-3 h-3" />
+                            已复制
+                          </span>
+                        ) : (
+                          <Copy className="w-3 h-3 opacity-60" />
+                        )}
+                      </button>
+                    </div>
+                  );
+                })()}
                 {(fullInfo?.phone || chat.phone) && (
-                  <div className="text-[11px] text-[#475569] dark:text-[#b4c6d8] aurora:text-[#b7d0d8] flex items-center justify-center gap-1 tabular-nums">
-                    <Phone className="w-3 h-3" />
-                    <span>{fullInfo?.phone || chat.phone}</span>
+                  <div className="flex items-center justify-center">
+                    <button
+                      type="button"
+                      onClick={() => handleCopyField('phone', fullInfo?.phone || chat.phone || '')}
+                      className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] text-[#475569] dark:text-[#b4c6d8] aurora:text-[#b7d0d8] hover:bg-[#e2e8f0]/60 dark:hover:bg-[#132234] aurora:hover:bg-[#13252e] transition-colors cursor-pointer tabular-nums"
+                      title="点击复制手机号"
+                    >
+                      <Phone className="w-3 h-3" />
+                      <span>{fullInfo?.phone || chat.phone}</span>
+                      {copiedField === 'phone' ? (
+                        <span className="inline-flex items-center gap-0.5 text-emerald-600 dark:text-emerald-400 text-[10px]">
+                          <Check className="w-3 h-3" />
+                          已复制
+                        </span>
+                      ) : (
+                        <Copy className="w-3 h-3 opacity-60" />
+                      )}
+                    </button>
                   </div>
                 )}
                 {(fullInfo?.description || chat.description) && (
@@ -438,8 +523,23 @@ export const TelegramChatInfoDrawer: React.FC<TelegramChatInfoDrawerProps> = ({
                   </div>
                 )}
                 {(fullInfo?.inviteLink || chat.inviteLink) && (
-                  <div className="text-[11px] text-[#2481cc] dark:text-[#7cc4ff] aurora:text-[#5eead4] truncate px-2">
-                    邀请链接: {fullInfo?.inviteLink || chat.inviteLink}
+                  <div className="flex items-center justify-center px-2">
+                    <button
+                      type="button"
+                      onClick={() => handleCopyField('inviteLink', fullInfo?.inviteLink || chat.inviteLink || '')}
+                      className="inline-flex items-center gap-1 max-w-full px-2 py-0.5 rounded-md text-[11px] text-[#2481cc] dark:text-[#7cc4ff] aurora:text-[#5eead4] hover:bg-[#e8f3ff] dark:hover:bg-[#132234] aurora:hover:bg-[#13252e] transition-colors cursor-pointer"
+                      title="点击复制邀请链接"
+                    >
+                      <span className="truncate">邀请链接: {fullInfo?.inviteLink || chat.inviteLink}</span>
+                      {copiedField === 'inviteLink' ? (
+                        <span className="inline-flex items-center gap-0.5 text-emerald-600 dark:text-emerald-400 text-[10px] shrink-0">
+                          <Check className="w-3 h-3" />
+                          已复制
+                        </span>
+                      ) : (
+                        <Copy className="w-3 h-3 opacity-60 shrink-0" />
+                      )}
+                    </button>
                   </div>
                 )}
               </div>
@@ -1050,7 +1150,11 @@ export const TelegramChatInfoDrawer: React.FC<TelegramChatInfoDrawerProps> = ({
                   fullInfo.participants.map((member) => (
                     <div
                       key={member.id}
-                      className="flex items-center justify-between p-2 rounded-xl hover:bg-[#f1f5f9] dark:hover:bg-[#132234] aurora:hover:bg-[#13252e] transition-colors"
+                      onClick={() => onSelectMember?.(member)}
+                      className={`flex items-center justify-between p-2 rounded-xl hover:bg-[#f1f5f9] dark:hover:bg-[#132234] aurora:hover:bg-[#13252e] transition-colors ${
+                        onSelectMember ? 'cursor-pointer' : ''
+                      }`}
+                      title={onSelectMember ? '点击查看该成员个人资料' : undefined}
                     >
                       <div className="flex items-center gap-2.5 min-w-0">
                         <div className="w-8 h-8 rounded-full bg-[#2481cc] dark:bg-[#2ba0ff] aurora:bg-[#0d9488] text-white font-bold text-xs flex items-center justify-center relative overflow-hidden shrink-0">

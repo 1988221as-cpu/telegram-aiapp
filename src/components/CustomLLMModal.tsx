@@ -490,7 +490,7 @@ export const CustomLLMModal: React.FC<CustomLLMModalProps> = ({
                 <div className="flex items-center gap-2 min-w-0">
                   <Database className="w-4 h-4 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf] shrink-0" />
                   <span className="text-xs font-bold text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] truncate">
-                    启用 HumanSense 云端引擎与话术检索
+                    启用 HumanSense 官方大模型
                   </span>
                 </div>
                 <label className="relative inline-flex items-center cursor-pointer shrink-0">
