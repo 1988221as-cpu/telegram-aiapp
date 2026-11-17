@@ -293,7 +293,7 @@ export const LeftSidebar: React.FC<LeftSidebarProps> = ({
   return (
     <aside
       ref={asideRef}
-      className="w-[84px] bg-[#f8fafc]/95 dark:bg-[#060b13]/95 aurora:bg-[#0b1318]/95 backdrop-blur-md border-r border-[#e2e8f0] dark:border-[#162436] aurora:border-[#182b34] flex flex-col items-center py-3.5 shrink-0 select-none h-full z-30 relative transition-colors text-[#475569] dark:text-[#eef4fb] aurora:text-[#ecf6f8]"
+      className="w-[120px] bg-[#f8fafc]/95 dark:bg-[#060b13]/95 aurora:bg-[#0b1318]/95 backdrop-blur-md border-r border-[#e2e8f0] dark:border-[#162436] aurora:border-[#182b34] flex flex-col items-center py-3.5 shrink-0 select-none h-full z-30 relative transition-colors text-[#475569] dark:text-[#eef4fb] aurora:text-[#ecf6f8]"
     >
       {/* 1. Top Section: HumanSense Brand Logo + Main Menu + Feature Activity Rail */}
       <div ref={topSectionRef} className="flex flex-col items-center w-full gap-2 shrink-0">
@@ -565,7 +565,7 @@ export const LeftSidebar: React.FC<LeftSidebarProps> = ({
                         }
                       }}
                       title={`自定义名: ${remarkText}（原名: ${acc.name}）`}
-                      className={`mt-1 w-[82px] max-w-[82px] truncate px-1 py-0.5 rounded text-[10px] leading-tight cursor-pointer transition-colors text-center ${
+                      className={`mt-1 w-[108px] max-w-[108px] truncate px-1.5 py-0.5 rounded text-[10px] leading-tight cursor-pointer transition-colors text-center ${
                         isSelected
                           ? 'bg-[#e8f3ff] dark:bg-[#12253c] aurora:bg-[#112e37] text-[#0284c7] dark:text-[#2ba0ff] aurora:text-[#5eead4] font-medium'
                           : 'text-[#64748b] dark:text-[#8ea4ba] aurora:text-[#8ca9b3] hover:text-[#0f172a] dark:hover:text-[#eef4fb]'
@@ -602,13 +602,13 @@ export const LeftSidebar: React.FC<LeftSidebarProps> = ({
                             openGroupEditor('edit', grp, e.currentTarget);
                           }}
                           title={`${grp.name} (${groupAccounts.length} 个账号)${groupUnread > 0 ? ` · ${groupUnread} 条未读` : ''} · 点击${grp.collapsed ? '展开' : '折叠'}，右键管理分组`}
-                          className="flex-1 min-w-0 flex items-center gap-1 px-1.5 py-1 rounded-md text-[10px] font-medium bg-black/[0.03] dark:bg-white/[0.04] aurora:bg-[#112028]/80 hover:bg-black/[0.07] dark:hover:bg-white/[0.08] aurora:hover:bg-[#162b35] text-[#475569] dark:text-[#9cb2c9] aurora:text-[#8eb2bd] transition-colors cursor-pointer"
+                          className="flex-1 min-w-0 flex items-center gap-1 px-1.5 py-1 rounded-md text-[10.5px] font-medium bg-black/[0.03] dark:bg-white/[0.04] aurora:bg-[#112028]/80 hover:bg-black/[0.07] dark:hover:bg-white/[0.08] aurora:hover:bg-[#162b35] text-[#475569] dark:text-[#9cb2c9] aurora:text-[#8eb2bd] transition-colors cursor-pointer"
                         >
                           <span
                             className="w-1.5 h-1.5 rounded-full shrink-0"
                             style={{ backgroundColor: grp.color || '#2ba0ff' }}
                           />
-                          <span className="truncate flex-1 text-left">{grp.name}</span>
+                          <span className="truncate flex-1 text-left" title={grp.name}>{grp.name}</span>
                           <span className="text-[9px] opacity-65 tabular-nums shrink-0">{groupAccounts.length}</span>
                           <ChevronDown
                             className={`w-2.5 h-2.5 shrink-0 opacity-60 transition-transform ${
@@ -624,7 +624,7 @@ export const LeftSidebar: React.FC<LeftSidebarProps> = ({
                               openGroupEditor('edit', grp, e.currentTarget);
                             }}
                             title={`管理分组「${grp.name}」`}
-                            className="opacity-0 group-hover/grp:opacity-100 focus:opacity-100 p-0.5 rounded text-[#64748b] hover:text-[#2ba0ff] aurora:hover:text-[#2dd4bf] transition-opacity cursor-pointer shrink-0"
+                            className="hidden group-hover/grp:inline-flex focus:inline-flex p-0.5 rounded text-[#64748b] hover:text-[#2ba0ff] aurora:hover:text-[#2dd4bf] cursor-pointer shrink-0"
                           >
                             <Pencil className="w-2.5 h-2.5" />
                           </button>

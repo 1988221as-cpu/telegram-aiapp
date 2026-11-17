@@ -2595,32 +2595,43 @@ export async function fetchTelegramUserDialogs(
       archivedDialogs = [];
     }
 
-    const mergedMap = new Map<string, { dialog: any; forcedArchived: boolean; pinOrder?: number }>();
+    const resolveDialogFolderId = (dlg: any): number => {
+      const rawFolder = dlg?.folderId ?? dlg?.dialog?.folderId;
+      return rawFolder === undefined || rawFolder === null ? 0 : Number(rawFolder);
+    };
+
+    const mergedMap = new Map<string, { dialog: any; isArchived: boolean; pinOrder?: number }>();
     let mainPinIdx = 0;
     for (const d of mainDialogs) {
       if (!d || d.id === undefined || d.id === null) continue;
+      const folderId = resolveDialogFolderId(d);
+      if (folderId === 1) continue;
       const dPinned = Boolean(d.pinned || d.dialog?.pinned);
       mergedMap.set(String(d.id), {
         dialog: d,
-        forcedArchived: false,
+        isArchived: false,
         pinOrder: dPinned ? mainPinIdx++ : undefined,
       });
     }
     let archPinIdx = 0;
     for (const d of archivedDialogs) {
       if (!d || d.id === undefined || d.id === null) continue;
+      const folderId = resolveDialogFolderId(d);
+      if (folderId !== 1) continue;
       const key = String(d.id);
+      const existingMain = mergedMap.get(key);
+      if (existingMain && !existingMain.isArchived) continue;
       const dPinned = Boolean(d.pinned || d.dialog?.pinned);
       mergedMap.set(key, {
         dialog: d,
-        forcedArchived: true,
+        isArchived: true,
         pinOrder: dPinned ? archPinIdx++ : undefined,
       });
     }
 
     const nowSec = Math.floor(Date.now() / 1000);
 
-    const serializedDialogs = Array.from(mergedMap.values()).map(({ dialog: d, forcedArchived, pinOrder }) => {
+    const serializedDialogs = Array.from(mergedMap.values()).map(({ dialog: d, isArchived: entryArchived, pinOrder }) => {
       const entity: any = d.entity || {};
       const isOfficial = String(d.id) === '777000' || String(entity?.id) === '777000' || String(d.id) === '42777';
       const isBroadcastChannel = Boolean(
@@ -2631,7 +2642,7 @@ export async function fetchTelegramUserDialogs(
       const isChannel = Boolean(isBroadcastChannel);
       const isBot = Boolean(entity?.className === 'User' && entity?.bot);
       const isPinned = Boolean(d.pinned || d.dialog?.pinned);
-      const isArchived = Boolean(forcedArchived || d.folderId === 1 || d.dialog?.folderId === 1);
+      const isArchived = Boolean(entryArchived && resolveDialogFolderId(d) === 1);
       const notify = d.dialog?.notifySettings;
       const isMuted = Boolean(
         notify?.silent ||
@@ -2714,21 +2725,28 @@ export async function fetchTelegramUserDialogs(
 function patchConnectedDialogCache(
   connected: ConnectedTelegramUser | undefined,
   chatId: string | number,
-  patch: Record<string, any>
+  patch: Record<string, any>,
+  options?: { invalidateCache?: boolean }
 ) {
   if (!connected) return;
   const raw = String(chatId || '').trim();
   const canonicalChatId = raw.startsWith('tg_') ? raw : `tg_${raw}`;
   const rawPeerId = canonicalChatId.replace(/^tg_/, '');
+  let matchedInCache = false;
   if (Array.isArray(connected.dialogs)) {
-    connected.dialogs = connected.dialogs.map((d: any) =>
-      d && (String(d.id || '') === canonicalChatId || String(d.rawId || '') === rawPeerId)
-        ? { ...d, ...patch }
-        : d
-    );
+    connected.dialogs = connected.dialogs.map((d: any) => {
+      if (d && (String(d.id || '') === canonicalChatId || String(d.rawId || '') === rawPeerId)) {
+        matchedInCache = true;
+        return { ...d, ...patch };
+      }
+      return d;
+    });
   }
-  connected.dialogsFetchedAt = 0;
-  connected.dialogsInFlight = undefined;
+  const shouldInvalidate = !matchedInCache || Boolean(options?.invalidateCache);
+  if (shouldInvalidate) {
+    connected.dialogsFetchedAt = 0;
+    connected.dialogsInFlight = undefined;
+  }
 }
 
 function removeConnectedDialogFromCache(connected: ConnectedTelegramUser | undefined, chatId: string | number) {
@@ -6476,6 +6494,124 @@ async function readMediaBufferStrict(mediaUrl: string, label: string): Promise<B
   return buf;
 }
 
+export interface OutboundDialogState {
+  chatId: string;
+  isPinned: boolean;
+  isArchived: boolean;
+  isMuted: boolean;
+  unreadCount: number;
+  readOutboxMaxId?: number;
+  readInboxMaxId?: number;
+  lastDate: number;
+  lastMessage?: string;
+  lastTime?: string;
+}
+
+async function syncOutboundTelegramDialogState(params: {
+  connected: ConnectedTelegramUser;
+  inputPeer: Api.TypeInputPeer;
+  chatId: string;
+  fallbackSummary: string;
+  fallbackDateSec?: number;
+}): Promise<OutboundDialogState | undefined> {
+  const { connected, inputPeer, chatId, fallbackSummary, fallbackDateSec } = params;
+  const rawChat = String(chatId || '').trim();
+  const canonicalChatId = rawChat.startsWith('tg_') ? rawChat : `tg_${rawChat}`;
+  const nowSec = Math.floor(Date.now() / 1000);
+  const safeFallbackDate = Number(fallbackDateSec || 0) > 0 ? Number(fallbackDateSec) : nowSec;
+  const formatTime = (sec: number) =>
+    new Date(sec * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false });
+
+  try {
+    const peerDialogs: any = await connected.client.invoke(
+      new Api.messages.GetPeerDialogs({
+        peers: [new Api.InputDialogPeer({ peer: inputPeer })],
+      })
+    );
+    const d = Array.isArray(peerDialogs?.dialogs) ? peerDialogs.dialogs[0] : undefined;
+    if (d) {
+      const topMsgId = Number(d.topMessage || 0);
+      const msgs: any[] = Array.isArray(peerDialogs?.messages) ? peerDialogs.messages : [];
+      const topMsg = msgs.find((m: any) => Number(m?.id || 0) === topMsgId) || msgs[0];
+      const lastDate = Number(topMsg?.date || 0) > 0 ? Number(topMsg.date) : safeFallbackDate;
+      const lastMessage = topMsg ? summarizeTelegramDialogMedia(topMsg) : fallbackSummary;
+      const lastTime = formatTime(lastDate);
+      const notify = d.notifySettings;
+      const isMuted = Boolean(
+        notify?.silent ||
+          (notify?.muteUntil !== undefined && notify?.muteUntil !== null && Number(notify.muteUntil) > nowSec)
+      );
+      const folderId = d.folderId === undefined || d.folderId === null ? 0 : Number(d.folderId);
+      const dialogState: OutboundDialogState = {
+        chatId: canonicalChatId,
+        isPinned: Boolean(d.pinned),
+        isArchived: folderId === 1,
+        isMuted,
+        unreadCount: Number(d.unreadCount || 0) || (d.unreadMark ? 1 : 0),
+        ...(Number(d.readOutboxMaxId || 0) > 0 ? { readOutboxMaxId: Number(d.readOutboxMaxId) } : {}),
+        ...(Number(d.readInboxMaxId || 0) > 0 ? { readInboxMaxId: Number(d.readInboxMaxId) } : {}),
+        lastDate,
+        lastMessage,
+        lastTime,
+      };
+
+      patchConnectedDialogCache(
+        connected,
+        canonicalChatId,
+        {
+          lastMessage: dialogState.lastMessage,
+          lastTime: dialogState.lastTime,
+          lastDate: dialogState.lastDate,
+          isPinned: dialogState.isPinned,
+          isArchived: dialogState.isArchived,
+          isMuted: dialogState.isMuted,
+          unreadCount: dialogState.unreadCount,
+          ...(dialogState.readOutboxMaxId !== undefined ? { readOutboxMaxId: dialogState.readOutboxMaxId } : {}),
+          ...(dialogState.readInboxMaxId !== undefined ? { readInboxMaxId: dialogState.readInboxMaxId } : {}),
+        },
+        { invalidateCache: false }
+      );
+      return dialogState;
+    }
+  } catch (syncErr: any) {
+    console.warn('[MTProto Outbound Dialog Sync Warning]:', formatTelegramError(syncErr));
+  }
+
+  const fallbackTime = formatTime(safeFallbackDate);
+  patchConnectedDialogCache(
+    connected,
+    canonicalChatId,
+    {
+      lastMessage: fallbackSummary,
+      lastTime: fallbackTime,
+      lastDate: safeFallbackDate,
+    },
+    { invalidateCache: false }
+  );
+  const cachedDlg: any = Array.isArray(connected.dialogs)
+    ? connected.dialogs.find(
+        (item: any) =>
+          item &&
+          (String(item.id || '') === canonicalChatId ||
+            String(item.rawId || '') === canonicalChatId.replace(/^tg_/, ''))
+      )
+    : undefined;
+  return cachedDlg
+    ? {
+        chatId: canonicalChatId,
+        isPinned: Boolean(cachedDlg.isPinned),
+        isArchived: Boolean(cachedDlg.isArchived),
+        isMuted: Boolean(cachedDlg.isMuted),
+        unreadCount: Number(cachedDlg.unreadCount || 0),
+        ...(cachedDlg.readOutboxMaxId ? { readOutboxMaxId: Number(cachedDlg.readOutboxMaxId) } : {}),
+        ...(cachedDlg.readInboxMaxId ? { readInboxMaxId: Number(cachedDlg.readInboxMaxId) } : {}),
+        lastDate: safeFallbackDate,
+        lastMessage: fallbackSummary,
+        lastTime: fallbackTime,
+      }
+    : undefined;
+}
+
 async function deliverOutboundTelegramMessage(
   payload: any,
   effectiveAccountId: string,
@@ -6484,6 +6620,7 @@ async function deliverOutboundTelegramMessage(
   delivered: boolean;
   channel: 'mtproto' | 'bot' | 'local' | 'none';
   telegramMessageId?: number;
+  dialogState?: OutboundDialogState;
   error?: string;
   sessionExpired?: boolean;
   floodWait?: boolean;
@@ -6663,7 +6800,11 @@ async function deliverOutboundTelegramMessage(
     }
 
     const rawTgId = String(chatId).replace(/^tg_/, '');
-    const rawPeer: any = rawTgId === personalAccount.userId ? 'me' : (/^-?\d+$/.test(rawTgId) ? Number(rawTgId) : rawTgId);
+    const { inputPeer: resolvedPeer } = await resolveTelegramInputPeer(
+      personalAccount.client,
+      String(chatId),
+      personalAccount.userId
+    );
 
     if (isAudio) {
       if (!audioUrl && !_localDiskPath) {
@@ -6676,7 +6817,7 @@ async function deliverOutboundTelegramMessage(
         const voiceFile = new CustomFile('voice.ogg', oggBuffer.length, '', oggBuffer);
         const voiceEchoText = (sttText || text || '').trim() || '🎤 语音消息';
         markOutboundMessageSent(chatId, voiceEchoText, effectiveAccountId);
-        const sentVoice: any = await personalAccount.client.sendFile(rawPeer, {
+        const sentVoice: any = await personalAccount.client.sendFile(resolvedPeer, {
           file: voiceFile,
           voiceNote: true,
           caption: sttText || text || undefined,
@@ -6684,8 +6825,15 @@ async function deliverOutboundTelegramMessage(
         });
         const sentVoiceTgId = Number(sentVoice?.id) || undefined;
         if (sentVoiceTgId) markOutboundTelegramMessageIdSent(chatId, sentVoiceTgId, effectiveAccountId);
+        const dialogState = await syncOutboundTelegramDialogState({
+          connected: personalAccount,
+          inputPeer: resolvedPeer,
+          chatId: String(chatId),
+          fallbackSummary: voiceEchoText,
+          fallbackDateSec: Number(sentVoice?.date || 0) || undefined,
+        });
         console.log(`[MTProto Outbound] Successfully delivered native OGG Opus voice note to ${rawTgId}`);
-        return { delivered: true, channel: 'mtproto', telegramMessageId: sentVoiceTgId };
+        return { delivered: true, channel: 'mtproto', telegramMessageId: sentVoiceTgId, dialogState };
       } catch (voiceErr: any) {
         const errMsg = formatTelegramError(voiceErr);
         console.error(`[MTProto Voice Send Error]:`, errMsg);
@@ -6737,15 +6885,22 @@ async function deliverOutboundTelegramMessage(
 
         const photoEchoText = (explicitCaption || '').trim() || '🖼️ 图片消息';
         markOutboundMessageSent(chatId, photoEchoText, effectiveAccountId);
-        const sentPhoto: any = await personalAccount.client.sendFile(rawPeer, {
+        const sentPhoto: any = await personalAccount.client.sendFile(resolvedPeer, {
           file: photoFile,
           caption: explicitCaption || undefined,
           ...(resolvedReplyToTgId ? { replyTo: resolvedReplyToTgId } : {}),
         });
         const sentPhotoTgId = Number(sentPhoto?.id) || undefined;
         if (sentPhotoTgId) markOutboundTelegramMessageIdSent(chatId, sentPhotoTgId, effectiveAccountId);
+        const dialogState = await syncOutboundTelegramDialogState({
+          connected: personalAccount,
+          inputPeer: resolvedPeer,
+          chatId: String(chatId),
+          fallbackSummary: photoEchoText,
+          fallbackDateSec: Number(sentPhoto?.date || 0) || undefined,
+        });
         console.log(`[MTProto Outbound] Successfully delivered photo to ${rawTgId}`);
-        return { delivered: true, channel: 'mtproto', telegramMessageId: sentPhotoTgId };
+        return { delivered: true, channel: 'mtproto', telegramMessageId: sentPhotoTgId, dialogState };
       } catch (photoErr: any) {
         const errMsg = formatTelegramError(photoErr);
         console.error(`[MTProto Photo Send Error]:`, errMsg);
@@ -6796,7 +6951,7 @@ async function deliverOutboundTelegramMessage(
 
         const videoEchoText = (explicitCaption || '').trim() || '🎬 视频';
         markOutboundMessageSent(chatId, videoEchoText, effectiveAccountId);
-        const sentVideo: any = await personalAccount.client.sendFile(rawPeer, {
+        const sentVideo: any = await personalAccount.client.sendFile(resolvedPeer, {
           file: videoFile,
           supportsStreaming: true,
           workers: source.size > 10 * 1024 * 1024 ? 4 : 1,
@@ -6805,8 +6960,15 @@ async function deliverOutboundTelegramMessage(
         });
         const sentVideoTgId = Number(sentVideo?.id) || undefined;
         if (sentVideoTgId) markOutboundTelegramMessageIdSent(chatId, sentVideoTgId, effectiveAccountId);
+        const dialogState = await syncOutboundTelegramDialogState({
+          connected: personalAccount,
+          inputPeer: resolvedPeer,
+          chatId: String(chatId),
+          fallbackSummary: videoEchoText,
+          fallbackDateSec: Number(sentVideo?.date || 0) || undefined,
+        });
         console.log(`[MTProto Outbound] Successfully delivered video to ${rawTgId}`);
-        return { delivered: true, channel: 'mtproto', telegramMessageId: sentVideoTgId };
+        return { delivered: true, channel: 'mtproto', telegramMessageId: sentVideoTgId, dialogState };
       } catch (vidErr: any) {
         const errMsg = formatTelegramError(vidErr);
         console.error(`[MTProto Video Send Error]:`, errMsg);
@@ -6848,7 +7010,7 @@ async function deliverOutboundTelegramMessage(
         const docCaption = text !== `[文件] ${fileName}` ? (text || undefined) : undefined;
         const fileEchoText = (docCaption || '').trim() || `📎 ${resolvedDocName || '文件附件'}`;
         markOutboundMessageSent(chatId, fileEchoText, effectiveAccountId);
-        const sentDoc: any = await personalAccount.client.sendFile(rawPeer, {
+        const sentDoc: any = await personalAccount.client.sendFile(resolvedPeer, {
           file: docFile,
           caption: docCaption,
           forceDocument: true,
@@ -6857,8 +7019,15 @@ async function deliverOutboundTelegramMessage(
         });
         const sentDocTgId = Number(sentDoc?.id) || undefined;
         if (sentDocTgId) markOutboundTelegramMessageIdSent(chatId, sentDocTgId, effectiveAccountId);
+        const dialogState = await syncOutboundTelegramDialogState({
+          connected: personalAccount,
+          inputPeer: resolvedPeer,
+          chatId: String(chatId),
+          fallbackSummary: fileEchoText,
+          fallbackDateSec: Number(sentDoc?.date || 0) || undefined,
+        });
         console.log(`[MTProto Outbound] Successfully delivered document to ${rawTgId}`);
-        return { delivered: true, channel: 'mtproto', telegramMessageId: sentDocTgId };
+        return { delivered: true, channel: 'mtproto', telegramMessageId: sentDocTgId, dialogState };
       } catch (fileErr: any) {
         const errMsg = formatTelegramError(fileErr);
         console.error(`[MTProto File Send Error]:`, errMsg);
@@ -6892,13 +7061,20 @@ async function deliverOutboundTelegramMessage(
 
     console.log(`[MTProto Outbound] Personal account sending text message to ${rawTgId}: "${outText.slice(0, 30)}..."`);
     markOutboundMessageSent(chatId, outText, effectiveAccountId);
-    const sentMsg: any = await personalAccount.client.sendMessage(rawPeer, {
+    const sentMsg: any = await personalAccount.client.sendMessage(resolvedPeer, {
       message: outText,
       ...(resolvedReplyToTgId ? { replyTo: resolvedReplyToTgId } : {}),
     });
     const sentTextTgId = Number(sentMsg?.id) || undefined;
     if (sentTextTgId) markOutboundTelegramMessageIdSent(chatId, sentTextTgId, effectiveAccountId);
-    return { delivered: true, channel: 'mtproto', telegramMessageId: sentTextTgId };
+    const dialogState = await syncOutboundTelegramDialogState({
+      connected: personalAccount,
+      inputPeer: resolvedPeer,
+      chatId: String(chatId),
+      fallbackSummary: outText,
+      fallbackDateSec: Number(sentMsg?.date || 0) || undefined,
+    });
+    return { delivered: true, channel: 'mtproto', telegramMessageId: sentTextTgId, dialogState };
   } catch (tgSyncErr: any) {
     const errMsg = formatTelegramError(tgSyncErr);
     console.warn(`[Telegram Outbound Push Error]:`, errMsg);
@@ -7005,6 +7181,7 @@ app.post('/api/messages', requireTenantAuth, parseMultipartMessageUpload, async 
       success: deliveryResult.delivered,
       id: msgId,
       telegramMessageId: deliveryResult.telegramMessageId,
+      ...(deliveryResult.dialogState ? { dialogState: deliveryResult.dialogState } : {}),
       syncedToStore,
       localOnly: false,
       delivered: deliveryResult.delivered,
@@ -7104,6 +7281,7 @@ app.post('/api/messages/:id/retry', requireTenantAuth, parseMultipartMessageUplo
         success: retryResult.delivered,
         delivered: retryResult.delivered,
         telegramMessageId: retryResult.telegramMessageId,
+        ...(retryResult.dialogState ? { dialogState: retryResult.dialogState } : {}),
         deliveryStatus: nextStatus,
         ...(mediaUrl ? { mediaUrl } : {}),
         ...(outboundPayload.imageUrl ? { imageUrl: outboundPayload.imageUrl } : {}),
@@ -7233,6 +7411,7 @@ app.post('/api/messages/:id/retry', requireTenantAuth, parseMultipartMessageUplo
       success: dbRetryResult.delivered,
       delivered: dbRetryResult.delivered,
       telegramMessageId: dbRetryResult.telegramMessageId,
+      ...(dbRetryResult.dialogState ? { dialogState: dbRetryResult.dialogState } : {}),
       deliveryStatus: nextStatus,
       ...(dbMediaUrl ? { mediaUrl: dbMediaUrl } : {}),
       ...(dbOutboundPayload.imageUrl ? { imageUrl: dbOutboundPayload.imageUrl } : {}),
@@ -23121,7 +23300,15 @@ app.post('/api/telegram/user/dialogs/pin', requireTenantAuth, async (req: Reques
         pinned: Boolean(pinned),
       })
     );
-    patchConnectedDialogCache(connected, chatId, { isPinned: Boolean(pinned) });
+    patchConnectedDialogCache(
+      connected,
+      chatId,
+      {
+        isPinned: Boolean(pinned),
+        pinOrder: pinned ? -Date.now() : undefined,
+      },
+      { invalidateCache: false }
+    );
 
     return res.json({ ok: true, cloudSynced: true, pinned: Boolean(pinned) });
   } catch (err: any) {
@@ -27112,7 +27299,21 @@ export function attachTelegramClientMessageListener(client: TelegramClient, phon
           const matchedCachedDlg: any = msgConnObj.dialogs.find(
             (d: any) => d && (String(d.id) === canonicalChatId || String(d.rawId || '') === rawChatId)
           );
-          if (matchedCachedDlg?.isArchived && !matchedCachedDlg?.isMuted) {
+          if (matchedCachedDlg) {
+            const summaryText = summarizeTelegramDialogMedia(message);
+            const msgDateSec = message.date ? Number(message.date) : Math.floor(createdAt / 1000);
+            patchConnectedDialogCache(
+              msgConnObj,
+              canonicalChatId,
+              {
+                lastMessage: summaryText,
+                lastTime: timestamp,
+                lastDate: Math.max(Number(matchedCachedDlg.lastDate || 0), msgDateSec),
+                ...(!isOut ? { unreadCount: Number(matchedCachedDlg.unreadCount || 0) + 1 } : {}),
+              },
+              { invalidateCache: Boolean(!isOut && matchedCachedDlg.isArchived && !matchedCachedDlg.isMuted) }
+            );
+          } else {
             msgConnObj.dialogsFetchedAt = 0;
             msgConnObj.dialogsInFlight = undefined;
           }
@@ -27851,15 +28052,34 @@ ${memories.slice(-3).map((m: any) => `  * [${m.date}] ${m.topic}: ${m.summary}`)
           if (!peerChatId) return;
           const nextPinned = Boolean(update.pinned);
           const nextPinOrder = nextPinned ? -Date.now() : undefined;
+          const hasExplicitFolder = update.folderId !== undefined && update.folderId !== null;
+          const folderId = Number(update.folderId || 0);
+          const isArchivedTarget = folderId === 1;
           const connObj = connectedUserClients.get(accountId) || connectedUserClients.get(userId);
-          patchConnectedDialogCache(connObj, peerChatId, {
-            isPinned: nextPinned,
-            pinOrder: nextPinOrder,
-          });
+          const rawPeerId = peerChatId.replace(/^tg_/, '');
+          const matchedCachedDlg: any = connObj?.dialogs?.find(
+            (d: any) => d && (String(d.id) === peerChatId || String(d.rawId || '') === rawPeerId)
+          );
+          if (matchedCachedDlg && (!hasExplicitFolder || Boolean(matchedCachedDlg.isArchived) === isArchivedTarget)) {
+            patchConnectedDialogCache(
+              connObj,
+              peerChatId,
+              {
+                isPinned: nextPinned,
+                pinOrder: nextPinOrder,
+              },
+              { invalidateCache: false }
+            );
+          } else if (!matchedCachedDlg && connObj) {
+            connObj.dialogsFetchedAt = 0;
+            connObj.dialogsInFlight = undefined;
+          }
           pushPendingLocalUpdate({
             id: `dlgpin_${userId}_${peerChatId}_${Date.now()}`,
             type: 'dialog_pinned',
             chatId: peerChatId,
+            ...(hasExplicitFolder ? { folderId } : {}),
+            ...(!matchedCachedDlg ? { needsDialogRefresh: true } : {}),
             isPinned: nextPinned,
             ...(nextPinOrder !== undefined ? { pinOrder: nextPinOrder } : {}),
             accountId,
@@ -28054,7 +28274,7 @@ ${memories.slice(-3).map((m: any) => `  * [${m.date}] ${m.topic}: ${m.summary}`)
               createdAt: Date.now(),
             });
           }
-          if (connObj) {
+          if (connObj && hasMissingCachedDialog) {
             connObj.dialogsFetchedAt = 0;
             connObj.dialogsInFlight = undefined;
           }

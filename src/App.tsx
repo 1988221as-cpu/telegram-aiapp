@@ -148,6 +148,14 @@ function msgBucketKey(accountId: string | undefined, chatId: string): string {
   return accountId ? `${accountId}::${chatId}` : chatId;
 }
 
+function isAppWindowActivelyFocused(): boolean {
+  return (
+    typeof document !== 'undefined' &&
+    document.visibilityState === 'visible' &&
+    document.hasFocus()
+  );
+}
+
 function getBucketMessages(
   map: Record<string, Message[]>,
   accountId: string | undefined,
@@ -2215,6 +2223,40 @@ export default function App() {
     activeChatIdRef.current = activeChatId;
   }, [activeChatId]);
 
+  const pendingAutoReadOnFocusRef = useRef<{ accountId: string; chatId: string; maxId?: number } | null>(null);
+
+  useEffect(() => {
+    const flushPendingAutoReadOnFocus = () => {
+      if (!isAppWindowActivelyFocused()) return;
+      const pending = pendingAutoReadOnFocusRef.current;
+      if (!pending) return;
+      if (pending.chatId !== activeChatIdRef.current || pending.accountId !== activeAccountIdRef.current) {
+        pendingAutoReadOnFocusRef.current = null;
+        return;
+      }
+      pendingAutoReadOnFocusRef.current = null;
+      recordDialogMutationOverride(pending.accountId, pending.chatId, { unreadCount: 0 });
+      setChats((prev) =>
+        prev.map((c) =>
+          c.id === pending.chatId && c.accountId === pending.accountId
+            ? { ...c, unreadCount: 0 }
+            : c
+        )
+      );
+      markTelegramDialogReadApi({
+        accountId: pending.accountId,
+        chatId: pending.chatId,
+        ...(pending.maxId ? { maxId: pending.maxId } : {}),
+      }).catch(() => {});
+    };
+    window.addEventListener('focus', flushPendingAutoReadOnFocus);
+    document.addEventListener('visibilitychange', flushPendingAutoReadOnFocus);
+    return () => {
+      window.removeEventListener('focus', flushPendingAutoReadOnFocus);
+      document.removeEventListener('visibilitychange', flushPendingAutoReadOnFocus);
+    };
+  }, []);
+
   const attemptedInboundBackfillRef = useRef<Set<string>>(new Set());
   const backfillRetryCountRef = useRef<Map<string, number>>(new Map());
   const backfillCooldownUntilRef = useRef<Map<string, number>>(new Map());
@@ -2724,8 +2766,13 @@ export default function App() {
             }
 
             if (updType === 'dialog_pinned') {
+              if (upd.needsDialogRefresh && targetAccountId === currentAccId) {
+                void triggerAccountDialogRefreshRef.current?.(targetAccountId, { force: true });
+              }
               const nextPinned = Boolean(upd.isPinned);
               const nextPinOrder = nextPinned ? (typeof upd.pinOrder === 'number' ? upd.pinOrder : -Date.now()) : undefined;
+              const hasExplicitFolder = upd.folderId !== undefined && upd.folderId !== null;
+              const isArchivedTarget = Number(upd.folderId || 0) === 1;
               const override = recentDialogOverridesRef.current[msgBucketKey(targetAccountId, targetChatId)];
               if (
                 override &&
@@ -2737,7 +2784,9 @@ export default function App() {
               }
               setChats((prev) =>
                 prev.map((c) =>
-                  c.id === targetChatId && c.accountId === targetAccountId
+                  c.id === targetChatId &&
+                  c.accountId === targetAccountId &&
+                  (!hasExplicitFolder || Boolean(c.isArchived) === isArchivedTarget)
                     ? { ...c, isPinned: nextPinned, pinOrder: nextPinOrder }
                     : c
                 )
@@ -3195,11 +3244,27 @@ export default function App() {
               targetChatId.startsWith('tg_') &&
               targetAccountId !== 'acc_telegram_bot'
             ) {
-              markTelegramDialogReadApi({
-                accountId: targetAccountId,
-                chatId: targetChatId,
-                maxId: incomingMsg.telegramMessageId,
-              }).catch(() => {});
+              if (isAppWindowActivelyFocused()) {
+                pendingAutoReadOnFocusRef.current = null;
+                markTelegramDialogReadApi({
+                  accountId: targetAccountId,
+                  chatId: targetChatId,
+                  maxId: incomingMsg.telegramMessageId,
+                }).catch(() => {});
+              } else {
+                const prevPending = pendingAutoReadOnFocusRef.current;
+                const nextMaxId = Math.max(
+                  prevPending && prevPending.chatId === targetChatId && prevPending.accountId === targetAccountId
+                    ? (prevPending.maxId || 0)
+                    : 0,
+                  incomingMsg.telegramMessageId || 0
+                );
+                pendingAutoReadOnFocusRef.current = {
+                  accountId: targetAccountId,
+                  chatId: targetChatId,
+                  ...(nextMaxId > 0 ? { maxId: nextMaxId } : {}),
+                };
+              }
             }
 
             // Real Auto-translate inbound message if enabled (using latest settings & chat language)
@@ -3337,6 +3402,7 @@ export default function App() {
               void triggerAccountDialogRefreshRef.current?.(targetAccountId);
             }
 
+            const isWindowActivelyFocused = isAppWindowActivelyFocused();
             setChats((prev) => {
               const exists = prev.some((c) => c.id === targetChatId && c.accountId === targetAccountId);
               if (!exists) {
@@ -3346,7 +3412,9 @@ export default function App() {
                   title: isOfficialNotice ? officialTitle : (upd.senderName || `Telegram (${targetChatId.replace('tg_', '')})`),
                   unreadCount:
                     incomingMsg.sender === 'me' ||
-                    (targetChatId === activeChatIdRef.current && targetAccountId === activeAccountIdRef.current)
+                    (targetChatId === activeChatIdRef.current &&
+                      targetAccountId === activeAccountIdRef.current &&
+                      isWindowActivelyFocused)
                       ? 0
                       : 1,
                   lastMessage: summaryText,
@@ -3371,7 +3439,9 @@ export default function App() {
                       lastTime: incomingMsg.timestamp,
                       lastDate: Math.max(c.lastDate || 0, incomingEpochSec),
                       unreadCount:
-                        c.id === activeChatIdRef.current && c.accountId === activeAccountIdRef.current
+                        c.id === activeChatIdRef.current &&
+                        c.accountId === activeAccountIdRef.current &&
+                        isWindowActivelyFocused
                           ? 0
                           : incomingMsg.sender === 'me'
                             ? (c.unreadCount || 0)
@@ -3462,14 +3532,23 @@ export default function App() {
     const targetChatObj = chatsRef.current.find(
       (c) => c.id === chatId && (!targetAccId || c.accountId === targetAccId)
     );
+    const isWindowActivelyFocused = isAppWindowActivelyFocused();
+    if (
+      isWindowActivelyFocused ||
+      (pendingAutoReadOnFocusRef.current &&
+        (pendingAutoReadOnFocusRef.current.chatId !== chatId ||
+          pendingAutoReadOnFocusRef.current.accountId !== targetAccId))
+    ) {
+      pendingAutoReadOnFocusRef.current = null;
+    }
     setChats((prev) =>
       prev.map((c) =>
-        c.id === chatId && (!targetAccId || c.accountId === targetAccId)
+        isWindowActivelyFocused && c.id === chatId && (!targetAccId || c.accountId === targetAccId)
           ? { ...c, unreadCount: 0 }
           : c
       )
     );
-    if (chatId.startsWith('tg_') && targetAccId !== 'acc_telegram_bot') {
+    if (isWindowActivelyFocused && chatId.startsWith('tg_') && targetAccId !== 'acc_telegram_bot') {
       const existingMsgs = getBucketMessages(messagesMapRef.current, targetAccId, chatId);
       const fallbackMsgs = existingMsgs.length > 0 ? existingMsgs : getLocalMessages(chatId, targetAccId);
       const tgIds = fallbackMsgs
@@ -3593,6 +3672,33 @@ export default function App() {
       if (result.ok) {
         pendingMediaFilesRef.current.delete(fullMessage.id);
         void cleanupPersistedPendingMedia(targetAccountId, fullMessage.id);
+        if (result.dialogState) {
+          const ds = result.dialogState;
+          const chatExistsInList = chatsRef.current.some(
+            (c) => c.id === targetChatId && (!targetAccountId || c.accountId === targetAccountId)
+          );
+          if (!chatExistsInList && targetChatId.startsWith('tg_') && targetAccountId) {
+            void triggerAccountDialogRefreshRef.current?.(targetAccountId, { force: true });
+          }
+          setChats((prev) =>
+            prev.map((c) =>
+              c.id === targetChatId && (!targetAccountId || c.accountId === targetAccountId)
+                ? {
+                    ...c,
+                    isPinned: ds.isPinned,
+                    isArchived: ds.isArchived,
+                    isMuted: ds.isMuted,
+                    unreadCount: ds.unreadCount,
+                    ...(ds.readOutboxMaxId !== undefined ? { readOutboxMaxId: ds.readOutboxMaxId } : {}),
+                    ...(ds.readInboxMaxId !== undefined ? { readInboxMaxId: ds.readInboxMaxId } : {}),
+                    ...(ds.lastMessage ? { lastMessage: ds.lastMessage } : {}),
+                    ...(ds.lastTime ? { lastTime: ds.lastTime } : {}),
+                    ...(ds.lastDate > 0 ? { lastDate: ds.lastDate } : {}),
+                  }
+                : c
+            )
+          );
+        }
       }
 
       if (result.code === 'TELEGRAM_SESSION_EXPIRED' && targetAccountId) {
@@ -3682,6 +3788,27 @@ export default function App() {
     if (result.ok) {
       pendingMediaFilesRef.current.delete(messageId);
       void cleanupPersistedPendingMedia(targetAccountId, messageId);
+      if (result.dialogState) {
+        const ds = result.dialogState;
+        setChats((prev) =>
+          prev.map((c) =>
+            c.id === targetChatId && (!targetAccountId || c.accountId === targetAccountId)
+              ? {
+                  ...c,
+                  isPinned: ds.isPinned,
+                  isArchived: ds.isArchived,
+                  isMuted: ds.isMuted,
+                  unreadCount: ds.unreadCount,
+                  ...(ds.readOutboxMaxId !== undefined ? { readOutboxMaxId: ds.readOutboxMaxId } : {}),
+                  ...(ds.readInboxMaxId !== undefined ? { readInboxMaxId: ds.readInboxMaxId } : {}),
+                  ...(ds.lastMessage ? { lastMessage: ds.lastMessage } : {}),
+                  ...(ds.lastTime ? { lastTime: ds.lastTime } : {}),
+                  ...(ds.lastDate > 0 ? { lastDate: ds.lastDate } : {}),
+                }
+              : c
+          )
+        );
+      }
     }
 
     if (result.code === 'TELEGRAM_SESSION_EXPIRED' && targetAccountId) {
@@ -4887,6 +5014,13 @@ export default function App() {
       }
     }
     if (targetAccountId) {
+      if (
+        nextUnread &&
+        pendingAutoReadOnFocusRef.current?.chatId === chatId &&
+        pendingAutoReadOnFocusRef.current?.accountId === targetAccountId
+      ) {
+        pendingAutoReadOnFocusRef.current = null;
+      }
       recordDialogMutationOverride(targetAccountId, chatId, { unreadCount: nextUnread ? 1 : 0 });
     }
     setChats((prev) =>

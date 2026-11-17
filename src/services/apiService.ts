@@ -2207,10 +2207,24 @@ function resolveUploadBlobForMessage(
   return { fileName: message.fileName || 'file.bin' };
 }
 
+export interface OutboundDialogState {
+  chatId: string;
+  isPinned: boolean;
+  isArchived: boolean;
+  isMuted: boolean;
+  unreadCount: number;
+  readOutboxMaxId?: number;
+  readInboxMaxId?: number;
+  lastDate: number;
+  lastMessage?: string;
+  lastTime?: string;
+}
+
 export interface OutboundDeliveryResponse {
   ok: boolean;
   deliveryStatus: 'delivered' | 'failed';
   telegramMessageId?: number;
+  dialogState?: OutboundDialogState;
   mediaUrl?: string;
   imageUrl?: string;
   videoUrl?: string;
@@ -2281,6 +2295,7 @@ export async function saveMessageToDb(
       ok: true,
       deliveryStatus: 'delivered',
       telegramMessageId: typeof data?.telegramMessageId === 'number' ? data.telegramMessageId : undefined,
+      ...(data?.dialogState && typeof data.dialogState === 'object' ? { dialogState: data.dialogState } : {}),
       ...returnedMedia,
     };
   } catch (err: any) {
@@ -2361,6 +2376,7 @@ export async function retryMessageDelivery(
       ok: true,
       deliveryStatus: 'delivered',
       telegramMessageId: typeof data?.telegramMessageId === 'number' ? data.telegramMessageId : undefined,
+      ...(data?.dialogState && typeof data.dialogState === 'object' ? { dialogState: data.dialogState } : {}),
       ...returnedMedia,
     };
   } catch (err: any) {
