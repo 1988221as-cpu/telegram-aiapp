@@ -1127,8 +1127,13 @@ function registerUpdaterIpcHandlers() {
       if (process.platform === 'win32' && currentInfo.mode === 'portable' && currentInfo.portableExePath) {
         const os = require('os');
         const scriptPath = path.join(os.tmpdir(), `hs_portable_swap_${Date.now()}.cmd`);
+        const swapFailMarker = path.join(app.getPath('userData'), 'logs', 'portable_swap_failed.txt');
+        try {
+          if (fs.existsSync(swapFailMarker)) fs.unlinkSync(swapFailMarker);
+        } catch {}
         const cmdBody = [
           '@echo off',
+          'chcp 65001 >nul',
           'setlocal',
           'set /a tries=0',
           ':waitloop',
@@ -1136,14 +1141,16 @@ function registerUpdaterIpcHandlers() {
           'timeout /t 1 /nobreak >nul',
           'copy /y "%HS_SRC_EXE%" "%HS_DST_EXE%.new" >nul 2>&1',
           'if errorlevel 1 (',
-          '  if %tries% lss 25 goto waitloop',
+          '  if %tries% lss 30 goto waitloop',
+          '  echo Portable swap copy failed after 30s: "%HS_SRC_EXE%" -> "%HS_DST_EXE%" > "%HS_SWAP_FAIL_MARKER%"',
           '  start "" "%HS_SRC_EXE%"',
           '  goto cleanup',
           ')',
           'move /y "%HS_DST_EXE%.new" "%HS_DST_EXE%" >nul 2>&1',
           'if errorlevel 1 (',
-          '  if %tries% lss 25 goto waitloop',
+          '  if %tries% lss 30 goto waitloop',
           '  del /f /q "%HS_DST_EXE%.new" >nul 2>&1',
+          '  echo Portable swap move failed after 30s: "%HS_SRC_EXE%" -> "%HS_DST_EXE%" > "%HS_SWAP_FAIL_MARKER%"',
           '  start "" "%HS_SRC_EXE%"',
           '  goto cleanup',
           ')',
@@ -1161,6 +1168,7 @@ function registerUpdaterIpcHandlers() {
             ...process.env,
             HS_SRC_EXE: downloadedPath,
             HS_DST_EXE: currentInfo.portableExePath,
+            HS_SWAP_FAIL_MARKER: swapFailMarker,
           },
         });
         child.unref();
@@ -1191,6 +1199,22 @@ function registerUpdaterIpcHandlers() {
 app.whenReady().then(() => {
   registerCryptoIpcHandlers();
   registerUpdaterIpcHandlers();
+  try {
+    const swapFailMarker = path.join(app.getPath('userData'), 'logs', 'portable_swap_failed.txt');
+    if (fs.existsSync(swapFailMarker)) {
+      const detail = fs.readFileSync(swapFailMarker, 'utf8').trim();
+      fs.unlinkSync(swapFailMarker);
+      writeLog('warn', `Detected previous portable update swap failure: ${detail}`);
+      setTimeout(() => {
+        dialog.showMessageBox({
+          type: 'warning',
+          title: '便携版自动覆盖提示',
+          message: '新版本已启动，但未能自动替换原位置的旧版程序文件',
+          detail: `${detail}\n\n原因通常是原目录缺少写入权限（如 Program Files）或被杀毒软件锁定。请手动删除旧版 .exe 并将软件放到有读写权限的目录（如桌面或非系统盘），否则下次从原快捷方式启动仍会打开旧版本。`,
+        }).catch(() => {});
+      }, 1500);
+    }
+  } catch {}
   return createWindow();
 });
 
