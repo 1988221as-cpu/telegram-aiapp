@@ -963,8 +963,8 @@ async function handleWorkerRequest(request: Request, env: Env, url: URL): Promis
         const cardKey = String(body.cardKey || '').trim().toUpperCase();
         const deviceId = normalizeDeviceId(body.deviceId);
 
-        if (!username || !cardKey) {
-          return jsonResponse({ ok: false, error: '请输入会员账号与新卡密' }, 400);
+        if (!username || !password || !cardKey) {
+          return jsonResponse({ ok: false, error: '请输入会员账号、登录密码与新卡密' }, 400);
         }
         if (!deviceId) {
           return jsonResponse({ ok: false, error: '缺少设备指纹 (deviceId)' }, 400);
@@ -985,11 +985,8 @@ async function handleWorkerRequest(request: Request, env: Env, url: URL): Promis
             max_accounts: number;
           }>();
 
-        if (!user) {
-          return jsonResponse({ ok: false, error: '会员账号不存在' }, 404);
-        }
-        if (password && !(await verifyPassword(password, user.password_hash))) {
-          return jsonResponse({ ok: false, error: '会员密码校验失败' }, 401);
+        if (!user || !(await verifyPassword(password, user.password_hash))) {
+          return jsonResponse({ ok: false, code: 'INVALID_CREDENTIALS', error: '会员账号或密码错误' }, 401);
         }
 
         if (user.bound_device_id && user.bound_device_id !== deviceId) {

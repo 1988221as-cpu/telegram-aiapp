@@ -368,6 +368,43 @@ app.post('/api/v1/training/feedback', requireCloudAuth, (req: Request, res: Resp
   res.json({ ok: true, stored: true, totalSkills: learnedSkillsCache.length });
 });
 
+function buildSafeUpstreamChatBody(
+  rawBody: unknown,
+  upstreamModel: string,
+  mergedMessages: any[]
+): Record<string, any> {
+  const src =
+    rawBody && typeof rawBody === 'object' && !Array.isArray(rawBody)
+      ? (rawBody as Record<string, any>)
+      : {};
+  const payload: Record<string, any> = {
+    model: upstreamModel,
+    messages: mergedMessages,
+    stream: false,
+  };
+  const allowedOptionalKeys = [
+    'temperature',
+    'max_tokens',
+    'top_p',
+    'presence_penalty',
+    'frequency_penalty',
+    'stop',
+    'seed',
+    'n',
+    'response_format',
+    'user',
+  ] as const;
+  for (const key of allowedOptionalKeys) {
+    if (src[key] !== undefined) {
+      payload[key] = src[key];
+    }
+  }
+  if (payload.max_tokens === undefined && src.maxOutputTokens !== undefined) {
+    payload.max_tokens = src.maxOutputTokens;
+  }
+  return payload;
+}
+
 app.post('/v1/chat/completions', requireCloudAuth, async (req: Request, res: Response) => {
   const upstreamBase = String(process.env.UPSTREAM_LLM_BASE_URL || '').replace(/\/+$/, '');
   const upstreamKey = String(process.env.UPSTREAM_LLM_API_KEY || '').trim();
@@ -524,26 +561,44 @@ app.post('/v1/chat/completions', requireCloudAuth, async (req: Request, res: Res
   }
 
   try {
-    const {
-      purpose: _ignoredPurpose,
-      contextPayload: _ignoredContextPayload,
-      ...forwardBody
-    } = (req.body && typeof req.body === 'object' ? req.body : {}) as Record<string, any>;
+    const upstreamPayload = buildSafeUpstreamChatBody(req.body, upstreamModel, mergedMessages);
     const upstreamRes = await fetch(`${upstreamBase}/chat/completions`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         Authorization: `Bearer ${upstreamKey}`,
       },
-      body: JSON.stringify({
-        ...forwardBody,
-        model: upstreamModel,
-        messages: mergedMessages,
-      }),
+      body: JSON.stringify(upstreamPayload),
     });
 
-    const data = await upstreamRes.json().catch(() => ({}));
-    if (Array.isArray(data?.choices)) {
+    const contentType = String(upstreamRes.headers.get('content-type') || '').toLowerCase();
+    const rawText = await upstreamRes.text();
+    if (contentType.includes('text/event-stream')) {
+      return res.status(502).json({
+        ok: false,
+        error: 'Upstream LLM gateway returned SSE stream despite stream=false',
+      });
+    }
+
+    let data: any;
+    try {
+      data = rawText ? JSON.parse(rawText) : null;
+    } catch {
+      const status = upstreamRes.ok ? 502 : upstreamRes.status;
+      return res.status(status).json({
+        ok: false,
+        error: `Upstream LLM gateway returned non-JSON response (HTTP ${upstreamRes.status})`,
+      });
+    }
+
+    if (!data || typeof data !== 'object' || Array.isArray(data)) {
+      return res.status(upstreamRes.ok ? 502 : upstreamRes.status).json({
+        ok: false,
+        error: `Upstream LLM gateway returned empty or invalid JSON payload (HTTP ${upstreamRes.status})`,
+      });
+    }
+
+    if (Array.isArray(data.choices)) {
       for (const ch of data.choices) {
         if (typeof ch?.message?.content === 'string') {
           ch.message.content = stripCloudThinkingTags(ch.message.content);

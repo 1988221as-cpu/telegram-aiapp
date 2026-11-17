@@ -63,6 +63,48 @@ export function formatChatSubtitle(chat: Chat): string {
   return '未设置用户名';
 }
 
+export function formatChatListTime(
+  chat: Pick<Chat, 'lastDate' | 'lastTime'>,
+  nowMs = Date.now()
+): string {
+  const rawDate = typeof chat.lastDate === 'number' && Number.isFinite(chat.lastDate) ? chat.lastDate : 0;
+  if (rawDate > 0) {
+    const epochMs = rawDate > 1e12 ? rawDate : rawDate * 1000;
+    const msgDate = new Date(epochMs);
+    const nowDate = new Date(nowMs);
+    if (!Number.isNaN(msgDate.getTime())) {
+      const startOfToday = new Date(nowDate.getFullYear(), nowDate.getMonth(), nowDate.getDate()).getTime();
+      const startOfMsgDay = new Date(msgDate.getFullYear(), msgDate.getMonth(), msgDate.getDate()).getTime();
+      const dayDiff = Math.round((startOfToday - startOfMsgDay) / 86400000);
+      const hhmm = msgDate.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false });
+      if (dayDiff === 0 || (dayDiff < 0 && epochMs - nowMs <= 300_000)) {
+        return hhmm;
+      }
+      if (dayDiff === 1) return '昨天';
+      if (dayDiff === 2) return '前天';
+      const mm = String(msgDate.getMonth() + 1).padStart(2, '0');
+      const dd = String(msgDate.getDate()).padStart(2, '0');
+      return msgDate.getFullYear() === nowDate.getFullYear()
+        ? `${mm}/${dd}`
+        : `${msgDate.getFullYear()}/${mm}/${dd}`;
+    }
+  }
+  return chat.lastTime || '';
+}
+
+export function formatChatListTimeTitle(chat: Pick<Chat, 'lastDate' | 'lastTime'>): string | undefined {
+  const rawDate = typeof chat.lastDate === 'number' && Number.isFinite(chat.lastDate) ? chat.lastDate : 0;
+  if (rawDate <= 0) return chat.lastTime || undefined;
+  const epochMs = rawDate > 1e12 ? rawDate : rawDate * 1000;
+  const d = new Date(epochMs);
+  if (Number.isNaN(d.getTime())) return chat.lastTime || undefined;
+  const yyyy = d.getFullYear();
+  const mm = String(d.getMonth() + 1).padStart(2, '0');
+  const dd = String(d.getDate()).padStart(2, '0');
+  const hhmm = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false });
+  return `${yyyy}-${mm}-${dd} ${hhmm}`;
+}
+
 interface ChatListProps {
   chats: Chat[];
   activeChatId: string | null;
@@ -176,7 +218,13 @@ export const ChatList: React.FC<ChatListProps> = ({
   const [draggedChatId, setDraggedChatId] = useState<string | null>(null);
   const [dropChatTarget, setDropChatTarget] = useState<{ chatId: string; position: 'before' | 'after' } | null>(null);
   const [refreshedAvatars, setRefreshedAvatars] = useState<Record<string, string>>({});
+  const [nowTick, setNowTick] = useState<number>(() => Date.now());
   const attemptedAvatarRefreshRef = useRef<Set<string>>(new Set());
+
+  useEffect(() => {
+    const timer = window.setInterval(() => setNowTick(Date.now()), 60000);
+    return () => window.clearInterval(timer);
+  }, []);
 
   const resolveAvatarUrl = useCallback(
     (rawUrl?: string) => {
@@ -903,13 +951,14 @@ export const ChatList: React.FC<ChatListProps> = ({
                     </div>
 
                     <span
+                      title={formatChatListTimeTitle(chat)}
                       className={`text-[11px] shrink-0 font-normal tabular-nums ${
                         isSelected
                           ? 'text-[#0284c7] dark:text-[#7cc4ff] aurora:text-[#5eead4] font-medium'
                           : 'text-[#64748b] dark:text-[#7f95ab] aurora:text-[#7e9aa5]'
                       }`}
                     >
-                      {chat.lastTime}
+                      {formatChatListTime(chat, nowTick)}
                     </span>
                   </div>
 

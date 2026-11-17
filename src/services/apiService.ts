@@ -31,7 +31,7 @@ import {
 
 declare const __APP_VERSION__: string | undefined;
 export const APP_VERSION =
-  typeof __APP_VERSION__ !== 'undefined' && __APP_VERSION__ ? __APP_VERSION__ : '1.0.8';
+  typeof __APP_VERSION__ !== 'undefined' && __APP_VERSION__ ? __APP_VERSION__ : '1.1.5';
 
 // ==================== SESSION TOKEN & TENANT AUTHENTICATION HELPERS ====================
 
@@ -530,9 +530,12 @@ export async function memberLogin(
 export async function memberRedeemCardKey(
   username: string,
   cardKey: string,
-  password?: string
+  password: string
 ): Promise<{ ok: boolean; message?: string; error?: string; code?: string; proxyEnabled?: boolean; token?: string; user?: MemberUser }> {
   try {
+    if (!password) {
+      return { ok: false, error: '请输入会员登录密码' };
+    }
     const { deviceId } = await fetchLocalDeviceId();
     const headers: Record<string, string> = { 'Content-Type': 'application/json' };
     if (currentSessionToken) {
@@ -547,7 +550,7 @@ export async function memberRedeemCardKey(
         body: JSON.stringify({
           username: username.trim(),
           cardKey: cardKey.trim(),
-          ...(password ? { password } : {}),
+          password,
           deviceId,
         }),
       },
@@ -2909,6 +2912,7 @@ export interface AppUpdateCheckResult {
   portableAssetName?: string;
   installerDownloadUrl?: string;
   installerAssetName?: string;
+  latestYmlUrl?: string;
   noReleasesYet?: boolean;
   error?: string;
 }
@@ -2942,6 +2946,7 @@ export interface ElectronUpdaterBridge {
     portableAssetName?: string;
     installerDownloadUrl?: string;
     installerAssetName?: string;
+    latestYmlUrl?: string;
   }) => Promise<{ ok: boolean; cancelled?: boolean; error?: string; state?: DesktopUpdaterState }>;
   cancelDownload: () => Promise<{ ok: boolean }>;
   installNow: () => Promise<{ ok: boolean; error?: string }>;

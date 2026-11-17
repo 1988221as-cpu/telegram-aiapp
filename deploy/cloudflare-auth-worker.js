@@ -737,8 +737,8 @@ async function handleWorkerRequest(request, env, url) {
         const password = String(body.password || "");
         const cardKey = String(body.cardKey || "").trim().toUpperCase();
         const deviceId = normalizeDeviceId(body.deviceId);
-        if (!username || !cardKey) {
-          return jsonResponse({ ok: false, error: "\u8BF7\u8F93\u5165\u4F1A\u5458\u8D26\u53F7\u4E0E\u65B0\u5361\u5BC6" }, 400);
+        if (!username || !password || !cardKey) {
+          return jsonResponse({ ok: false, error: "\u8BF7\u8F93\u5165\u4F1A\u5458\u8D26\u53F7\u3001\u767B\u5F55\u5BC6\u7801\u4E0E\u65B0\u5361\u5BC6" }, 400);
         }
         if (!deviceId) {
           return jsonResponse({ ok: false, error: "\u7F3A\u5C11\u8BBE\u5907\u6307\u7EB9 (deviceId)" }, 400);
@@ -746,11 +746,8 @@ async function handleWorkerRequest(request, env, url) {
         const user = await db.prepare(
           "SELECT id, username, password_hash, role, plan, vip_expires_at, bound_device_id, max_accounts FROM users WHERE username = ?"
         ).bind(username).first();
-        if (!user) {
-          return jsonResponse({ ok: false, error: "\u4F1A\u5458\u8D26\u53F7\u4E0D\u5B58\u5728" }, 404);
-        }
-        if (password && !await verifyPassword(password, user.password_hash)) {
-          return jsonResponse({ ok: false, error: "\u4F1A\u5458\u5BC6\u7801\u6821\u9A8C\u5931\u8D25" }, 401);
+        if (!user || !await verifyPassword(password, user.password_hash)) {
+          return jsonResponse({ ok: false, code: "INVALID_CREDENTIALS", error: "\u4F1A\u5458\u8D26\u53F7\u6216\u5BC6\u7801\u9519\u8BEF" }, 401);
         }
         if (user.bound_device_id && user.bound_device_id !== deviceId) {
           return jsonResponse(

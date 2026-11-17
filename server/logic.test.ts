@@ -882,27 +882,32 @@ test('performStrictTranslation rejects engine=auto cascade and supports keyless 
   assert.equal(formatted.system, 'Translator prompt\n\nExtra rule');
   assert.deepEqual(formatted.messages, [{ role: 'user', content: 'Hi\nTranslate this' }]);
 
-  const prevFetch2 = globalThis.fetch;
+  const mockHttp = await import('node:http');
+  let sentHeaders: Record<string, string | string[] | undefined> = {};
+  let sentBody: any = null;
+  const anthropicSrv = mockHttp.createServer((req, res) => {
+    sentHeaders = req.headers || {};
+    const chunks: Buffer[] = [];
+    req.on('data', (c) => chunks.push(c));
+    req.on('end', () => {
+      try {
+        sentBody = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+      } catch {
+        sentBody = null;
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ content: [{ type: 'text', text: 'Bonjour' }] }));
+    });
+  });
+  await new Promise<void>((r) => anthropicSrv.listen(0, '127.0.0.1', r));
+  const anthropicPort = (anthropicSrv.address() as any).port;
   try {
-    let sentHeaders: Record<string, string> = {};
-    let sentBody: any = null;
-    globalThis.fetch = (async (_input: any, init: any) => {
-      sentHeaders = init?.headers || {};
-      sentBody = init?.body ? JSON.parse(init.body) : null;
-      return new Response(
-        JSON.stringify({
-          content: [{ type: 'text', text: 'Bonjour' }],
-        }),
-        { status: 200, headers: { 'Content-Type': 'application/json' } }
-      );
-    }) as any;
-
     const anthropicReply = await callCustomLlm({
       customConfig: {
         enabled: true,
         engineMode: 'custom',
         protocol: 'anthropic',
-        baseUrl: 'http://127.0.0.1:11434/v1',
+        baseUrl: `http://127.0.0.1:${anthropicPort}/v1`,
         apiKey: 'sk-ant-test-key',
         modelName: 'claude-3-5-sonnet-20241022',
         temperature: 1.4,
@@ -918,7 +923,8 @@ test('performStrictTranslation rejects engine=auto cascade and supports keyless 
     assert.equal(sentBody.model, 'claude-3-5-sonnet-20241022');
     assert.equal(sentBody.temperature, 1);
   } finally {
-    globalThis.fetch = prevFetch2;
+    anthropicSrv.closeAllConnections?.();
+    await new Promise<void>((r) => anthropicSrv.close(() => r()));
   }
 });
 
@@ -2159,7 +2165,7 @@ test('Priority Custom Key mode: mutually exclusive with Cloud RAG and routes cha
   // 2. Verify CustomLLMModal mutual exclusion & priority switch contracts
   const customLlmSrc = readFileSync(resolve(process.cwd(), 'src/components/CustomLLMModal.tsx'), 'utf8');
   assert.equal(customLlmSrc.includes('启用优先自有密钥回复'), true);
-  assert.equal(customLlmSrc.includes('启用 HumanSense 云端引擎与话术检索'), true);
+  assert.equal(customLlmSrc.includes('启用 HumanSense 官方大模型'), true);
   assert.equal(customLlmSrc.includes('对话与记忆模型型号'), true);
   assert.match(customLlmSrc, /engineMode:\s*'custom'[\s\S]*?enableKnowledgeBaseRAG:\s*false/);
   assert.match(customLlmSrc, /engineMode:\s*'cloud'[\s\S]*?enableKnowledgeBaseRAG:\s*true/);
@@ -3978,7 +3984,8 @@ test('P1/P2 #6: handleSyncContacts title sync, group read tooltip, drawer add-to
   assert.equal(syncSlice.includes('!c.isChannel'), true);
 
   // ② Group read tooltip distinguishes private ('对方已读') vs group ('已有成员已读')
-  assert.equal(chatAreaSrc.includes("chat.isGroup ? '已有成员已读' : '对方已读'"), true);
+  assert.equal(chatAreaSrc.includes('title="已有成员已读（点击查看谁已读）"'), true);
+  assert.equal(chatAreaSrc.includes('title="对方已读"'), true);
   assert.equal(chatAreaSrc.includes("chat.isGroup ? '已送达（暂未有成员已读）' : '已送达（对方未读）'"), true);
 
   // ③ TelegramChatInfoDrawer renders '添加到通讯录' for non-friend private chats & passes chatId to backend
@@ -4793,26 +4800,37 @@ test('Audit #2 & #3 regressions: translateText 3-state race elimination, /api/au
     const customAudioBuf = Buffer.from('ID3mock-mp3-audio-payload');
     const prevFetch = globalThis.fetch;
     const calledUrls: string[] = [];
+    const mockHttp = await import('node:http');
+    const customMediaSrv = mockHttp.createServer((req, res) => {
+      const reqUrl = String(req.url || '');
+      calledUrls.push(reqUrl);
+      if (reqUrl === '/v1/audio/speech') {
+        res.writeHead(200, { 'Content-Type': 'audio/mpeg' });
+        res.end(customAudioBuf);
+        return;
+      }
+      if (reqUrl === '/v1/audio/transcriptions') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ text: 'Custom Whisper Hello' }));
+        return;
+      }
+      res.writeHead(404);
+      res.end();
+    });
+    await new Promise<void>((r) => customMediaSrv.listen(0, '127.0.0.1', r));
+    const customMediaPort = (customMediaSrv.address() as any).port;
+    const customMediaBaseUrl = `http://127.0.0.1:${customMediaPort}/v1`;
     try {
-      globalThis.fetch = (async (input: any) => {
-        const u = String(input);
-        calledUrls.push(u);
-        return new Response(customAudioBuf, {
-          status: 200,
-          headers: { 'Content-Type': 'audio/mpeg' },
-        });
-      }) as any;
-
       const customTtsRes = await generateTtsAudio('Hello custom TTS', 'Kore', 'Warm', {
         enabled: true,
         explicitlyDisabled: false,
         engineMode: 'custom',
         protocol: 'openai',
-        baseUrl: 'http://127.0.0.1:19999/v1',
+        baseUrl: customMediaBaseUrl,
         apiKey: 'sk-custom-tts',
         modelName: 'tts-1',
       });
-      assert.ok(calledUrls.some((u) => u === 'http://127.0.0.1:19999/v1/audio/speech'));
+      assert.ok(calledUrls.some((u) => u === '/v1/audio/speech'));
       assert.ok(customTtsRes.audioUrl.startsWith('data:audio/mpeg;base64,'));
 
       // #3c downloadAndTranscribeTelegramVoice enforces Dual-Off & Custom Priority
@@ -4831,12 +4849,6 @@ test('Audit #2 & #3 regressions: translateText 3-state race elimination, /api/au
           return new Response(mockOggBytes, {
             status: 200,
             headers: { 'Content-Type': 'audio/ogg' },
-          });
-        }
-        if (u === 'http://127.0.0.1:19999/v1/audio/transcriptions') {
-          return new Response(JSON.stringify({ text: 'Custom Whisper Hello' }), {
-            status: 200,
-            headers: { 'Content-Type': 'application/json' },
           });
         }
         throw new Error(`Unexpected fetch URL: ${u}`);
@@ -4866,13 +4878,16 @@ test('Audit #2 & #3 regressions: translateText 3-state race elimination, /api/au
         explicitlyDisabled: false,
         engineMode: 'custom',
         protocol: 'openai',
-        baseUrl: 'http://127.0.0.1:19999/v1',
+        baseUrl: customMediaBaseUrl,
         apiKey: 'sk-custom-stt',
       });
       assert.equal(customSttVoiceRes.ok, true);
       assert.equal(customSttVoiceRes.text, 'Custom Whisper Hello');
+      assert.ok(calledUrls.some((u) => u === '/v1/audio/transcriptions'));
     } finally {
       globalThis.fetch = prevFetch;
+      customMediaSrv.closeAllConnections?.();
+      await new Promise<void>((r) => customMediaSrv.close(() => r()));
     }
   } finally {
     if (prevBotToken === undefined) delete process.env.TELEGRAM_BOT_TOKEN;
@@ -9004,6 +9019,7 @@ test('P2 #6: Electron error page HTML escaping, strict Helmet CSP, and frontend 
     currentPort: 38271,
     FIXED_APP_PORT: 38271,
     getLogFilePath: () => 'C:\\Users\\<svg onload=alert(9)>\\startup.log',
+    getAppWindowTitle: () => 'HumanSense v1.1.5',
     encodeURIComponent,
     Number,
     String,
@@ -10534,6 +10550,511 @@ test('Personal voiceprint sample upload/fetch/delete and zero-shot voice cloning
   }
 });
 
+test('Cloudflare Worker /api/auth/redeem and frontend redeem flow strictly enforce password verification', async () => {
+  const { readFileSync } = await import('node:fs');
+  const { resolve } = await import('node:path');
+  const http = await import('node:http');
+  const { app } = await import('../server.ts');
 
+  for (const workerFile of ['deploy/cloudflare-auth-worker.ts', 'deploy/cloudflare-auth-worker.js']) {
+    const src = readFileSync(resolve(process.cwd(), workerFile), 'utf8');
+    const match = src.match(/path\s*===\s*['"]\/api\/auth\/redeem['"]/);
+    assert.ok(match && match.index !== undefined, `${workerFile} must define /api/auth/redeem handler`);
+    const redeemSlice = src.slice(match.index, match.index + 1800);
+    assert.equal(redeemSlice.includes('!username || !password || !cardKey'), true, `${workerFile} must require password`);
+    assert.equal(redeemSlice.includes('if (password &&'), false, `${workerFile} must not conditionally skip verifyPassword`);
+    assert.equal(redeemSlice.includes('!user ||'), true, `${workerFile} must uniformly reject missing user or bad password`);
+  }
 
+  const modalSrc = readFileSync(resolve(process.cwd(), 'src/components/MemberAuthModal.tsx'), 'utf8');
+  assert.equal(modalSrc.includes("required={activeTab !== 'redeem'}"), false);
+  assert.equal(modalSrc.includes('password || undefined'), false);
 
+  const apiSvcSrc = readFileSync(resolve(process.cwd(), 'src/services/apiService.ts'), 'utf8');
+  assert.equal(apiSvcSrc.includes('...(password ? { password } : {})'), false);
+
+  const srv = http.createServer(app);
+  await new Promise<void>((r) => srv.listen(0, '127.0.0.1', r));
+  const port = (srv.address() as any).port;
+  try {
+    for (const badBody of [
+      { username: 'alice', cardKey: 'LX30D-1111-2222' },
+      { username: 'alice', cardKey: 'LX30D-1111-2222', password: '' },
+    ]) {
+      const res = await fetch(`http://127.0.0.1:${port}/api/auth/cloud-redeem`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(badBody),
+      });
+      assert.equal(res.status, 400);
+      const json: any = await res.json();
+      assert.equal(json.ok, false);
+    }
+  } finally {
+    srv.closeAllConnections?.();
+    await new Promise<void>((r) => srv.close(() => r()));
+  }
+});
+
+test('Electron Auto-Updater enforces repo URL allowlist, latest.yml SHA-512 integrity, Authenticode signature verification, and pre-install re-verification', async () => {
+  const fs = await import('node:fs');
+  const os = await import('node:os');
+  const path = await import('node:path');
+  const crypto = await import('node:crypto');
+  const vm = await import('node:vm');
+
+  const mainSrc = fs.readFileSync(path.resolve(process.cwd(), 'main.cjs'), 'utf8');
+  const sliceMatch = mainSrc.match(
+    /function getConfiguredUpdateRepo\(\)[\s\S]*?(?=\nfunction downloadUpdateFileWithProgress)/
+  );
+  assert.ok(sliceMatch, 'Expected updater verification helpers in main.cjs');
+
+  let mockExecResult: { err?: Error | null; stdout?: string } = {
+    err: null,
+    stdout: JSON.stringify({
+      targetStatus: 'Valid',
+      targetThumbprint: 'AABBCCDD1122',
+      targetSubject: 'CN=HumanSense Publisher',
+      currentStatus: 'Valid',
+      currentThumbprint: 'AABBCCDD1122',
+    }),
+  };
+
+  const sandbox: Record<string, any> = {
+    __dirname: process.cwd(),
+    fs,
+    path,
+    crypto,
+    Buffer,
+    URL,
+    process: { ...process, platform: 'win32' },
+    require: (id: string) => {
+      if (id === 'child_process') {
+        return {
+          execFile: (_cmd: string, _args: string[], _opts: any, cb: (err: any, stdout: string) => void) => {
+            cb(mockExecResult.err || null, mockExecResult.stdout || '');
+          },
+        };
+      }
+      if (id === 'https') return {};
+      throw new Error(`Unexpected require in sandbox: ${id}`);
+    },
+  };
+
+  vm.runInNewContext(
+    `${sliceMatch[0]}
+     this.__exports = {
+       getConfiguredUpdateRepo,
+       isAllowedUpdateDownloadUrl,
+       deriveLatestYmlUrlFromDownloadUrl,
+       parseLatestYmlAssets,
+       findExpectedAssetIntegrity,
+       verifyFileSha512,
+       verifyWindowsAuthenticodeSignature,
+     };`,
+    sandbox
+  );
+
+  const u = sandbox.__exports;
+  assert.equal(u.getConfiguredUpdateRepo(), '1988221as-cpu/telegram-aiapp');
+
+  // 1. URL allowlist: only configured repo on initial download, CDN allowed only on redirect
+  assert.equal(
+    u.isAllowedUpdateDownloadUrl('https://github.com/1988221as-cpu/telegram-aiapp/releases/download/v1.0.9/HumanSense-1.0.9.exe'),
+    true
+  );
+  assert.equal(
+    u.isAllowedUpdateDownloadUrl('https://github.com/evil-attacker/malware/releases/download/v1.0.9/HumanSense-1.0.9.exe'),
+    false
+  );
+  assert.equal(
+    u.isAllowedUpdateDownloadUrl('https://user:pass@github.com/1988221as-cpu/telegram-aiapp/releases/download/v1.0.9/HumanSense-1.0.9.exe'),
+    false
+  );
+  assert.equal(
+    u.isAllowedUpdateDownloadUrl('https://objects.githubusercontent.com/github-production-release-asset/foo.exe'),
+    false
+  );
+  assert.equal(
+    u.isAllowedUpdateDownloadUrl('https://objects.githubusercontent.com/github-production-release-asset/foo.exe', { isRedirect: true }),
+    true
+  );
+
+  // 2. latest.yml URL derivation and parsing (including URL-encoded Portable + Setup entries)
+  assert.equal(
+    u.deriveLatestYmlUrlFromDownloadUrl('https://github.com/1988221as-cpu/telegram-aiapp/releases/download/v1.0.9/HumanSense.exe'),
+    'https://github.com/1988221as-cpu/telegram-aiapp/releases/download/v1.0.9/latest.yml'
+  );
+  assert.equal(
+    u.deriveLatestYmlUrlFromDownloadUrl(
+      'https://github.com/1988221as-cpu/telegram-aiapp/releases/download/v1.0.9/HumanSense.exe',
+      'https://github.com/1988221as-cpu/telegram-aiapp/releases/download/v1.0.9/not-yml.exe'
+    ),
+    'https://github.com/1988221as-cpu/telegram-aiapp/releases/download/v1.0.9/latest.yml'
+  );
+
+  const sampleBytes = Buffer.from('MZ-simulated-portable-binary-payload-v1.0.9', 'utf8');
+  const expectedSha512 = crypto.createHash('sha512').update(sampleBytes).digest('base64');
+  const wrongSha512 = crypto.createHash('sha512').update('other-binary').digest('base64');
+  const sampleYml = [
+    'version: 1.0.9',
+    'files:',
+    `  - url: 'HumanSense%20Portable%201.0.9.exe'`,
+    `    sha512: ${expectedSha512}`,
+    `    size: ${sampleBytes.length}`,
+    `  - url: HumanSense-Setup-1.0.9.exe`,
+    `    sha512: ${wrongSha512}`,
+    `    size: 123`,
+    'path: HumanSense-Setup-1.0.9.exe',
+    `sha512: ${wrongSha512}`,
+  ].join('\n');
+
+  const parsedYml = u.parseLatestYmlAssets(sampleYml);
+  assert.equal(parsedYml.version, '1.0.9');
+  const integrity = u.findExpectedAssetIntegrity(parsedYml, ['HumanSense Portable 1.0.9.exe']);
+  assert.ok(integrity);
+  assert.equal(integrity.sha512, expectedSha512);
+  assert.equal(integrity.size, sampleBytes.length);
+
+  // 3. Streaming SHA-512 + size verification
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'hs-updater-test-'));
+  const tmpExe = path.join(tmpDir, 'HumanSense.exe');
+  try {
+    fs.writeFileSync(tmpExe, sampleBytes);
+    const okRes = await u.verifyFileSha512(tmpExe, expectedSha512, sampleBytes.length);
+    assert.equal(okRes.sha512, expectedSha512);
+
+    await assert.rejects(
+      () => u.verifyFileSha512(tmpExe, expectedSha512, sampleBytes.length + 1),
+      /大小校验失败/
+    );
+
+    fs.writeFileSync(tmpExe, Buffer.from('MZ-tampered-payload', 'utf8'));
+    await assert.rejects(
+      () => u.verifyFileSha512(tmpExe, expectedSha512, 0),
+      /SHA-512 完整性校验失败/
+    );
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+
+  // 4. Authenticode verification branches (Strategy B: anti-downgrade compatibility mode)
+  const validSig = await u.verifyWindowsAuthenticodeSignature('C:\\fake\\new.exe', 'C:\\fake\\cur.exe');
+  assert.equal(validSig.targetStatus, 'Valid');
+
+  // Both unsigned -> allowed (relies on latest.yml SHA-512)
+  mockExecResult = {
+    err: null,
+    stdout: '\uFEFF' + JSON.stringify({
+      targetStatus: 'NotSigned',
+      targetThumbprint: '',
+      currentStatus: 'NotSigned',
+      currentThumbprint: '',
+    }),
+  };
+  const bothUnsigned = await u.verifyWindowsAuthenticodeSignature('C:\\fake\\new.exe', 'C:\\fake\\cur.exe');
+  assert.equal(bothUnsigned.targetStatus, 'NotSigned');
+
+  // Upgrading from unsigned current exe to Valid signed release -> allowed
+  mockExecResult = {
+    err: null,
+    stdout: JSON.stringify({
+      targetStatus: 'Valid',
+      targetThumbprint: 'AABBCCDD1122',
+      currentStatus: 'NotSigned',
+      currentThumbprint: '',
+    }),
+  };
+  const upgradeToSigned = await u.verifyWindowsAuthenticodeSignature('C:\\fake\\new.exe', 'C:\\fake\\cur.exe');
+  assert.equal(upgradeToSigned.targetStatus, 'Valid');
+
+  // Signed current exe -> unsigned target (downgrade attack) -> rejected
+  mockExecResult = {
+    err: null,
+    stdout: JSON.stringify({
+      targetStatus: 'NotSigned',
+      targetThumbprint: '',
+      currentStatus: 'Valid',
+      currentThumbprint: 'AABBCCDD1122',
+    }),
+  };
+  await assert.rejects(
+    () => u.verifyWindowsAuthenticodeSignature('C:\\fake\\new.exe', 'C:\\fake\\cur.exe'),
+    /已拒绝降级安装未签名的更新包/
+  );
+
+  // Tampered or untrusted signature (HashMismatch / NotTrusted) -> rejected even when current is NotSigned
+  for (const badStatus of ['HashMismatch', 'NotTrusted']) {
+    mockExecResult = {
+      err: null,
+      stdout: JSON.stringify({
+        targetStatus: badStatus,
+        targetThumbprint: 'BAD000',
+        currentStatus: 'NotSigned',
+        currentThumbprint: '',
+      }),
+    };
+    await assert.rejects(
+      () => u.verifyWindowsAuthenticodeSignature('C:\\fake\\new.exe', 'C:\\fake\\cur.exe'),
+      /Authenticode 数字签名异常或不受信任/
+    );
+  }
+
+  mockExecResult = {
+    err: null,
+    stdout: JSON.stringify({
+      targetStatus: 'Valid',
+      targetThumbprint: 'DEADBEEF9999',
+      currentStatus: 'Valid',
+      currentThumbprint: 'AABBCCDD1122',
+    }),
+  };
+  await assert.rejects(
+    () => u.verifyWindowsAuthenticodeSignature('C:\\fake\\new.exe', 'C:\\fake\\cur.exe'),
+    /证书指纹与当前受信任主程序不一致/
+  );
+
+  // 5. IPC handlers & server/client metadata wiring checks
+  assert.equal(mainSrc.includes("path.join(app.getPath('userData'), 'pending-updates')"), true);
+  const dlIdx = mainSrc.indexOf("ipcMain.handle('hs-updater:download'");
+  const installIdx = mainSrc.indexOf("ipcMain.handle('hs-updater:install'");
+  assert.ok(dlIdx > 0 && installIdx > dlIdx);
+  const dlSlice = mainSrc.slice(dlIdx, installIdx);
+  const installSlice = mainSrc.slice(installIdx, installIdx + 2600);
+  assert.equal(dlSlice.includes('verifyFileSha512('), true);
+  assert.equal(dlSlice.includes('verifyWindowsAuthenticodeSignature('), true);
+  assert.equal(installSlice.includes('verifyFileSha512('), true);
+  assert.equal(installSlice.includes('verifyWindowsAuthenticodeSignature('), true);
+
+  const serverSrc = fs.readFileSync(path.resolve(process.cwd(), 'server.ts'), 'utf8');
+  assert.equal(serverSrc.includes('latestYmlUrl: latestYmlAsset?.browser_download_url || undefined'), true);
+
+  const workflowSrc = fs.readFileSync(path.resolve(process.cwd(), '.github/workflows/build.yml'), 'utf8');
+  const latestYmlStepIdx = workflowSrc.indexOf('Ensure Portable & NSIS SHA-512 Entries In latest.yml');
+  assert.ok(latestYmlStepIdx > 0);
+  const wfNodeMatch = workflowSrc.slice(latestYmlStepIdx, latestYmlStepIdx + 900).match(/node -e "([^"]+)"/);
+  assert.ok(wfNodeMatch, 'Expected latest.yml node script in .github/workflows/build.yml');
+  assert.equal(wfNodeMatch[1].includes('$'), false, 'pwsh double-quoted node -e script must not contain $');
+  assert.equal(wfNodeMatch[1].includes('`'), false, 'pwsh double-quoted node -e script must not contain backticks');
+});
+
+test('Railway Cloud Brain /v1/chat/completions filters unsafe forward fields, forces stream=false, and rejects SSE/non-JSON with 502', async () => {
+  const http = await import('node:http');
+  const net = await import('node:net');
+  const path = await import('node:path');
+  const { spawn } = await import('node:child_process');
+
+  let upstreamMode: 'normal' | 'sse' | 'non-json' | 'empty-body' = 'normal';
+  let lastUpstreamBody: Record<string, any> | null = null;
+
+  const upstreamSrv = http.createServer((req, res) => {
+    const chunks: Buffer[] = [];
+    req.on('data', (c) => chunks.push(c));
+    req.on('end', () => {
+      try {
+        lastUpstreamBody = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+      } catch {
+        lastUpstreamBody = null;
+      }
+      if (upstreamMode === 'sse') {
+        res.writeHead(200, { 'Content-Type': 'text/event-stream; charset=utf-8' });
+        res.end('data: {"choices":[{"delta":{"content":"hi"}}]}\n\ndata: [DONE]\n\n');
+        return;
+      }
+      if (upstreamMode === 'non-json') {
+        res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+        res.end('<html><body>Upstream proxy glitch</body></html>');
+        return;
+      }
+      if (upstreamMode === 'empty-body') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end('');
+        return;
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(
+        JSON.stringify({
+          id: 'chatcmpl-upstream-1',
+          object: 'chat.completion',
+          choices: [
+            {
+              index: 0,
+              message: { role: 'assistant', content: '<thought>internal</thought>哈哈，忙完记得歇会儿呀！' },
+              finish_reason: 'stop',
+            },
+          ],
+        })
+      );
+    });
+  });
+
+  await new Promise<void>((r) => upstreamSrv.listen(0, '127.0.0.1', r));
+  const upstreamPort = (upstreamSrv.address() as any).port;
+
+  const brainPort = await new Promise<number>((resolvePort, rejectPort) => {
+    const probe = net.createServer();
+    probe.listen(0, '127.0.0.1', () => {
+      const addr = probe.address() as any;
+      const port = addr.port;
+      probe.close((err) => (err ? rejectPort(err) : resolvePort(port)));
+    });
+    probe.on('error', rejectPort);
+  });
+
+  const brainEntry = path.resolve(process.cwd(), 'deploy', 'railway-brain-server.ts');
+  const brainProc = spawn(process.execPath, ['--import', 'tsx', brainEntry], {
+    cwd: process.cwd(),
+    env: {
+      ...process.env,
+      PORT: String(brainPort),
+      GEMINI_API_KEY: '',
+      UPSTREAM_LLM_BASE_URL: `http://127.0.0.1:${upstreamPort}/v1`,
+      UPSTREAM_LLM_API_KEY: 'test-upstream-key',
+      UPSTREAM_LLM_MODEL: 'gpt-4o-mini',
+      ENGINE_LICENSE_KEYS: 'lx-sk-test-brain-key',
+    },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+
+  let procStderr = '';
+  brainProc.stderr?.on('data', (d) => {
+    procStderr += d.toString();
+  });
+
+  try {
+    const deadline = Date.now() + 8000;
+    let healthy = false;
+    while (Date.now() < deadline) {
+      if (brainProc.exitCode !== null) {
+        throw new Error(`railway-brain-server exited early (${brainProc.exitCode}): ${procStderr}`);
+      }
+      try {
+        const hRes = await fetch(`http://127.0.0.1:${brainPort}/health`);
+        if (hRes.ok) {
+          healthy = true;
+          break;
+        }
+      } catch {}
+      await new Promise((r) => setTimeout(r, 120));
+    }
+    assert.equal(healthy, true, `railway-brain-server did not become healthy in time: ${procStderr}`);
+
+    const sendChat = async (extra: Record<string, any> = {}) =>
+      fetch(`http://127.0.0.1:${brainPort}/v1/chat/completions`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Engine-Key': 'lx-sk-test-brain-key',
+        },
+        body: JSON.stringify({
+          model: 'gpt-4o-mini',
+          stream: true,
+          stream_options: { include_usage: true },
+          tools: [{ type: 'function', function: { name: 'leak_tool', parameters: {} } }],
+          tool_choice: 'auto',
+          temperature: 0.4,
+          maxOutputTokens: 256,
+          purpose: 'chat',
+          messages: [{ role: 'user', content: '今天加班好累' }],
+          ...extra,
+        }),
+      });
+
+    // 1. Safe allowlist filtering & forced stream=false + <thought> stripping
+    upstreamMode = 'normal';
+    const okRes = await sendChat();
+    assert.equal(okRes.status, 200);
+    const okJson: any = await okRes.json();
+    assert.equal(okJson.choices?.[0]?.message?.content, '哈哈，忙完记得歇会儿呀！');
+    const capturedBody = lastUpstreamBody as Record<string, any> | null;
+    assert.ok(capturedBody, 'Expected upstream request payload');
+    assert.equal(capturedBody.stream, false);
+    assert.equal(capturedBody.temperature, 0.4);
+    assert.equal(capturedBody.max_tokens, 256);
+    assert.equal('tools' in capturedBody, false);
+    assert.equal('tool_choice' in capturedBody, false);
+    assert.equal('stream_options' in capturedBody, false);
+    assert.equal('purpose' in capturedBody, false);
+
+    // 2. Upstream returning SSE stream despite stream=false -> HTTP 502 (NOT HTTP 200 {})
+    upstreamMode = 'sse';
+    const sseRes = await sendChat();
+    assert.equal(sseRes.status, 502);
+    const sseJson: any = await sseRes.json();
+    assert.equal(sseJson.ok, false);
+    assert.match(String(sseJson.error || ''), /SSE stream/i);
+
+    // 3. Upstream returning HTML / non-JSON -> HTTP 502 (NOT HTTP 200 {})
+    upstreamMode = 'non-json';
+    const htmlRes = await sendChat();
+    assert.equal(htmlRes.status, 502);
+    const htmlJson: any = await htmlRes.json();
+    assert.equal(htmlJson.ok, false);
+    assert.match(String(htmlJson.error || ''), /non-JSON/i);
+
+    // 4. Upstream returning empty HTTP 200 body -> HTTP 502 (NOT HTTP 200 {})
+    upstreamMode = 'empty-body';
+    const emptyRes = await sendChat();
+    assert.equal(emptyRes.status, 502);
+    const emptyJson: any = await emptyRes.json();
+    assert.equal(emptyJson.ok, false);
+    assert.match(String(emptyJson.error || ''), /empty or invalid JSON/i);
+  } finally {
+    brainProc.kill('SIGKILL');
+    brainProc.stdout?.destroy();
+    brainProc.stderr?.destroy();
+    await new Promise<void>((r) => {
+      if (brainProc.exitCode !== null) return r();
+      brainProc.once('exit', () => r());
+      setTimeout(r, 1000);
+    });
+    upstreamSrv.closeAllConnections?.();
+    await new Promise<void>((r) => upstreamSrv.close(() => r()));
+  }
+});
+
+test('ChatList formatChatListTime displays HH:mm for today, 昨天/前天 for 1-2 days ago, MM/DD or YYYY/MM/DD for older, and falls back to lastTime', async () => {
+  const { formatChatListTime, formatChatListTimeTitle } = await import('../src/components/ChatList.tsx');
+  const nowMs = new Date(2026, 10, 17, 14, 30, 0).getTime();
+
+  const todaySec = Math.floor(new Date(2026, 10, 17, 4, 59, 0).getTime() / 1000);
+  const yesterdaySec = Math.floor(new Date(2026, 10, 16, 20, 8, 0).getTime() / 1000);
+  const dayBeforeYesterdaySec = Math.floor(new Date(2026, 10, 15, 23, 50, 0).getTime() / 1000);
+  const threeDaysAgoSec = Math.floor(new Date(2026, 10, 14, 9, 5, 0).getTime() / 1000);
+  const lastYearSec = Math.floor(new Date(2025, 11, 31, 23, 55, 0).getTime() / 1000);
+
+  assert.equal(formatChatListTime({ lastDate: todaySec, lastTime: '00:00' }, nowMs), '04:59');
+  assert.equal(formatChatListTime({ lastDate: yesterdaySec, lastTime: '20:08' }, nowMs), '昨天');
+  assert.equal(formatChatListTime({ lastDate: dayBeforeYesterdaySec, lastTime: '23:50' }, nowMs), '前天');
+  assert.equal(formatChatListTime({ lastDate: threeDaysAgoSec, lastTime: '09:05' }, nowMs), '11/14');
+  assert.equal(formatChatListTime({ lastDate: lastYearSec, lastTime: '23:55' }, nowMs), '2025/12/31');
+  assert.equal(formatChatListTime({ lastDate: 0, lastTime: '刚刚' }, nowMs), '刚刚');
+  assert.equal(formatChatListTimeTitle({ lastDate: yesterdaySec, lastTime: '20:08' }), '2026-11-16 20:08');
+});
+
+test('Historical messages expose clickable manual translate button, restore hover toolbar, keep manual translation visible when auto-translate is off, and support fallbackMessage', async () => {
+  const { readFileSync } = await import('node:fs');
+  const { resolve } = await import('node:path');
+
+  const chatAreaSrc = readFileSync(resolve(process.cwd(), 'src/components/ChatArea.tsx'), 'utf8');
+  const appSrc = readFileSync(resolve(process.cwd(), 'src/App.tsx'), 'utf8');
+
+  // 1. Hover toolbar bindings restored on message wrapper
+  assert.match(chatAreaSrc, /onMouseEnter=\{\(\) => \{\s*if \(!isMultiSelectMode\) setHoveredMessageId\(msg\.id\);/);
+  assert.match(chatAreaSrc, /onMouseLeave=\{\(\) => \{\s*setHoveredMessageId\(\(prev\) => \(prev === msg\.id \? null : prev\)\);/);
+
+  // 2. Direct clickable manual translate button next to message timestamp
+  assert.equal(chatAreaSrc.includes("title={msg.isTranslating ? '正在翻译中...' : '手动翻译此消息'}"), true);
+  assert.match(chatAreaSrc, /triggerManualTranslate\(msg\)/);
+
+  // 3. Inline translation card remains visible for manually translated/translating/error messages even when auto-translate is disabled
+  assert.equal(
+    chatAreaSrc.includes('(!isChatTransEnabled && !msg.isTranslating && !msg.translatedText && !msg.translationError)'),
+    true
+  );
+
+  // 4. App handleRetranslateMessage supports fallbackMessage for cloud-searched historical messages and returns result
+  assert.match(appSrc, /const handleRetranslateMessage = async \(\s*messageId: string,\s*fallbackMessage\?: Message/);
+  assert.match(appSrc, /fallbackMessage && fallbackMessage\.id === messageId \? fallbackMessage : undefined/);
+  assert.equal(appSrc.includes('return { translatedText: finalTranslatedText };'), true);
+});

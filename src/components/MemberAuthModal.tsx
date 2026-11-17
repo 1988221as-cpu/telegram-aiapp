@@ -204,12 +204,16 @@ export const MemberAuthModal: React.FC<MemberAuthModalProps> = ({
       }
       setIsLoading(false);
     } else if (activeTab === 'redeem') {
+      if (!password) {
+        setErrorMsg('请输入登录密码以验证账号归属');
+        return;
+      }
       if (!cardKey.trim()) {
         setErrorMsg('请输入新的 3 天试用或 30 天包月卡密');
         return;
       }
       setIsLoading(true);
-      const res = await memberRedeemCardKey(cleanUser, cardKey, password || undefined);
+      const res = await memberRedeemCardKey(cleanUser, cardKey, password);
       if (res.ok && res.user) {
         await verifyLocalJwtAndUnlock(res.user, res.message || '卡密续费成功！正在进入工作台...');
       } else {
@@ -362,7 +366,7 @@ export const MemberAuthModal: React.FC<MemberAuthModalProps> = ({
               onChange={(e) => setPassword(e.target.value)}
               placeholder="请输入登录密码"
               className="w-full bg-[#f8fafc] dark:bg-[#08101a] aurora:bg-[#081014] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] focus:border-[#2481cc] dark:focus:border-[#2ba0ff] aurora:focus:border-[#2dd4bf] text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] placeholder-[#94a3b8] dark:placeholder-[#4e657e] aurora:placeholder-[#5a7782] rounded-xl px-3.5 py-2.5 text-xs focus:outline-none transition-colors"
-              required={activeTab !== 'redeem'}
+              required
             />
           </div>
 

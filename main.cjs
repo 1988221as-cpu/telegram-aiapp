@@ -685,6 +685,7 @@ const updaterRuntime = {
   cancellationToken: null,
   activeRequest: null,
   downloadedFilePath: null,
+  downloadedIntegrity: null,
   initialized: false,
 };
 
@@ -718,21 +719,271 @@ function broadcastUpdaterState(patch) {
   } catch {}
 }
 
-function isAllowedUpdateDownloadUrl(rawUrl) {
+function getConfiguredUpdateRepo() {
+  try {
+    const pkgPath = path.join(__dirname, 'package.json');
+    if (fs.existsSync(pkgPath)) {
+      const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8'));
+      const pub = Array.isArray(pkg?.build?.publish) ? pkg.build.publish[0] : pkg?.build?.publish;
+      if (pub?.owner && pub?.repo) {
+        return `${String(pub.owner).trim()}/${String(pub.repo).trim()}`;
+      }
+    }
+  } catch {}
+  return '1988221as-cpu/telegram-aiapp';
+}
+
+function isAllowedUpdateDownloadUrl(rawUrl, options = {}) {
   try {
     if (typeof rawUrl !== 'string' || !rawUrl.trim()) return false;
     const u = new URL(rawUrl.trim());
     if (u.protocol !== 'https:') return false;
+    if (u.username || u.password) return false;
     const host = u.hostname.toLowerCase();
-    return (
-      host === 'github.com' ||
-      host === 'api.github.com' ||
-      host.endsWith('.githubusercontent.com') ||
-      host.endsWith('.github.com')
-    );
+    if (options.isRedirect) {
+      return (
+        host === 'github.com' ||
+        host === 'objects.githubusercontent.com' ||
+        host === 'release-assets.githubusercontent.com' ||
+        host === 'github-releases.githubusercontent.com' ||
+        host.endsWith('.githubusercontent.com')
+      );
+    }
+    if (host !== 'github.com') return false;
+    const expectedRepo = (options.expectedRepo || getConfiguredUpdateRepo()).toLowerCase();
+    const normalizedPath = u.pathname.toLowerCase();
+    return normalizedPath.startsWith(`/${expectedRepo}/releases/`);
   } catch {
     return false;
   }
+}
+
+function deriveLatestYmlUrlFromDownloadUrl(downloadUrl, explicitLatestYmlUrl) {
+  if (explicitLatestYmlUrl && isAllowedUpdateDownloadUrl(explicitLatestYmlUrl)) {
+    try {
+      const explicitUrl = new URL(explicitLatestYmlUrl.trim());
+      if (/\/latest\.yml$/i.test(explicitUrl.pathname)) {
+        return explicitUrl.toString();
+      }
+    } catch {}
+  }
+  const u = new URL(downloadUrl.trim());
+  const parts = u.pathname.split('/').filter(Boolean);
+  if (parts.length >= 6 && parts[2] === 'releases' && parts[3] === 'download') {
+    return `${u.origin}/${parts[0]}/${parts[1]}/releases/download/${parts[4]}/latest.yml`;
+  }
+  if (parts.length >= 5 && parts[2] === 'releases' && parts[3] === 'latest' && parts[4] === 'download') {
+    return `${u.origin}/${parts[0]}/${parts[1]}/releases/latest/download/latest.yml`;
+  }
+  return '';
+}
+
+function parseLatestYmlAssets(ymlText) {
+  const text = String(ymlText || '');
+  const stripQuotes = (v) => String(v || '').trim().replace(/^['"]|['"]$/g, '');
+  const versionMatch = text.match(/^version:\s*(.+)$/m);
+  const topPathMatch = text.match(/^path:\s*(.+)$/m);
+  const topShaMatch = text.match(/^sha512:\s*(.+)$/m);
+  const files = [];
+
+  const lines = text.split(/\r?\n/);
+  let inFiles = false;
+  let current = null;
+  for (const rawLine of lines) {
+    const line = rawLine.replace(/\r$/, '');
+    if (/^files:\s*$/.test(line)) {
+      inFiles = true;
+      continue;
+    }
+    if (inFiles && /^[A-Za-z0-9_-]+:\s*/.test(line)) {
+      if (current && current.url) files.push(current);
+      current = null;
+      inFiles = false;
+      continue;
+    }
+    if (!inFiles) continue;
+    const itemUrl = line.match(/^\s*-\s*url:\s*(.+)$/);
+    if (itemUrl) {
+      if (current && current.url) files.push(current);
+      current = { url: stripQuotes(itemUrl[1]), sha512: '', size: 0 };
+      continue;
+    }
+    if (!current) continue;
+    const shaMatch = line.match(/^\s+sha512:\s*(.+)$/);
+    if (shaMatch) current.sha512 = stripQuotes(shaMatch[1]);
+    const sizeMatch = line.match(/^\s+size:\s*(\d+)\s*$/);
+    if (sizeMatch) current.size = Number(sizeMatch[1]) || 0;
+  }
+  if (current && current.url) files.push(current);
+
+  if (topPathMatch && topShaMatch) {
+    const topUrl = stripQuotes(topPathMatch[1]);
+    const topSha = stripQuotes(topShaMatch[1]);
+    if (!files.some((f) => f.url.toLowerCase() === topUrl.toLowerCase())) {
+      files.push({ url: topUrl, sha512: topSha, size: 0 });
+    }
+  }
+  return { version: versionMatch ? stripQuotes(versionMatch[1]) : '', files };
+}
+
+function findExpectedAssetIntegrity(ymlMeta, candidateNames) {
+  const safeDecode = (s) => {
+    try {
+      return decodeURIComponent(s);
+    } catch {
+      return s;
+    }
+  };
+  const names = (candidateNames || [])
+    .map((n) => safeDecode(String(n || '').trim()).toLowerCase())
+    .filter(Boolean);
+  for (const entry of ymlMeta?.files || []) {
+    const entryName = safeDecode(path.posix.basename(String(entry.url || '').trim())).toLowerCase();
+    if (!entryName || !names.includes(entryName)) continue;
+    const decoded = Buffer.from(String(entry.sha512 || '').trim(), 'base64');
+    if (decoded.length === 64) {
+      return { url: entry.url, sha512: String(entry.sha512).trim(), size: Number(entry.size || 0) };
+    }
+  }
+  return null;
+}
+
+function downloadTextWithAllowedRedirects(targetUrl, maxBytes = 1024 * 1024) {
+  const https = require('https');
+  return new Promise((resolve, reject) => {
+    let redirects = 0;
+    const runReq = (urlStr, isRedirect = false) => {
+      if (!isAllowedUpdateDownloadUrl(urlStr, { isRedirect })) {
+        return reject(new Error('latest.yml 地址不在受信任的 GitHub 仓库范围内'));
+      }
+      const req = https.get(
+        urlStr,
+        { headers: { 'User-Agent': 'HumanSense-Updater', Accept: 'text/yaml,text/plain,*/*' } },
+        (res) => {
+          const status = Number(res.statusCode || 0);
+          if (status >= 300 && status < 400 && res.headers.location) {
+            res.resume();
+            if (redirects >= 6) return reject(new Error('latest.yml 重定向次数过多'));
+            redirects += 1;
+            return runReq(new URL(res.headers.location, urlStr).toString(), true);
+          }
+          if (status < 200 || status >= 300) {
+            res.resume();
+            return reject(new Error(`拉取 latest.yml 元数据失败 (HTTP ${status})`));
+          }
+          const chunks = [];
+          let total = 0;
+          res.on('data', (chunk) => {
+            total += chunk.length;
+            if (total > maxBytes) {
+              res.destroy();
+              return reject(new Error('latest.yml 元数据体积超出安全限制'));
+            }
+            chunks.push(chunk);
+          });
+          res.on('error', reject);
+          res.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
+        }
+      );
+      req.setTimeout(15000, () => req.destroy(new Error('拉取 latest.yml 元数据超时')));
+      req.on('error', reject);
+    };
+    runReq(targetUrl, false);
+  });
+}
+
+function verifyFileSha512(filePath, expectedBase64Sha512, expectedSize = 0) {
+  return new Promise((resolve, reject) => {
+    try {
+      const expectedBuf = Buffer.from(String(expectedBase64Sha512 || '').trim(), 'base64');
+      if (expectedBuf.length !== 64) {
+        return reject(new Error('更新元数据 SHA-512 摘要格式无效'));
+      }
+      const stat = fs.statSync(filePath);
+      if (expectedSize > 0 && stat.size !== expectedSize) {
+        return reject(new Error(`安装包大小校验失败 (期望 ${expectedSize} 字节，实际 ${stat.size} 字节)`));
+      }
+      const hash = crypto.createHash('sha512');
+      const stream = fs.createReadStream(filePath);
+      stream.on('data', (chunk) => hash.update(chunk));
+      stream.on('error', (err) => reject(err));
+      stream.on('end', () => {
+        const actualBuf = hash.digest();
+        if (actualBuf.length !== expectedBuf.length || !crypto.timingSafeEqual(actualBuf, expectedBuf)) {
+          return reject(new Error('安装包 SHA-512 完整性校验失败，文件可能已损坏或被篡改'));
+        }
+        resolve({ sha512: actualBuf.toString('base64'), size: stat.size });
+      });
+    } catch (err) {
+      reject(err);
+    }
+  });
+}
+
+function verifyWindowsAuthenticodeSignature(filePath, currentExePath) {
+  return new Promise((resolve, reject) => {
+    if (process.platform !== 'win32') {
+      return reject(new Error('仅支持在 Windows 平台执行 Authenticode 数字签名验证'));
+    }
+    const { execFile } = require('child_process');
+    const psScript = [
+      '$ErrorActionPreference = "Stop";',
+      '$target = Get-AuthenticodeSignature -LiteralPath $env:HS_VERIFY_TARGET_EXE;',
+      '$cur = $null;',
+      'if ($env:HS_VERIFY_CURRENT_EXE -and (Test-Path -LiteralPath $env:HS_VERIFY_CURRENT_EXE)) { $cur = Get-AuthenticodeSignature -LiteralPath $env:HS_VERIFY_CURRENT_EXE; }',
+      '$out = @{',
+      '  targetStatus = [string]$target.Status;',
+      '  targetThumbprint = if ($target.SignerCertificate) { [string]$target.SignerCertificate.Thumbprint } else { "" };',
+      '  targetSubject = if ($target.SignerCertificate) { [string]$target.SignerCertificate.Subject } else { "" };',
+      '  currentStatus = if ($cur) { [string]$cur.Status } else { "" };',
+      '  currentThumbprint = if ($cur -and $cur.SignerCertificate) { [string]$cur.SignerCertificate.Thumbprint } else { "" };',
+      '};',
+      '$out | ConvertTo-Json -Compress',
+    ].join(' ');
+    execFile(
+      'powershell.exe',
+      ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', psScript],
+      {
+        timeout: 15000,
+        windowsHide: true,
+        env: {
+          ...process.env,
+          HS_VERIFY_TARGET_EXE: filePath,
+          HS_VERIFY_CURRENT_EXE: currentExePath || '',
+        },
+      },
+      (err, stdout) => {
+        if (err) {
+          return reject(new Error(`Authenticode 数字签名验证调用失败: ${err.message}`));
+        }
+        let parsed;
+        try {
+          parsed = JSON.parse(String(stdout || '').replace(/^\uFEFF/, '').trim());
+        } catch {
+          return reject(new Error('Authenticode 数字签名验证输出解析失败'));
+        }
+        if (parsed.targetStatus === 'NotSigned') {
+          if (parsed.currentStatus === 'NotSigned') {
+            return resolve(parsed);
+          }
+          return reject(
+            new Error(
+              parsed.currentStatus === 'Valid'
+                ? '当前主程序已受数字签名保护，已拒绝降级安装未签名的更新包'
+                : `无法确认当前主程序签名状态 (${parsed.currentStatus || 'Unknown'})，已拒绝未签名更新包`
+            )
+          );
+        }
+        if (parsed.targetStatus !== 'Valid' || !parsed.targetThumbprint) {
+          return reject(new Error(`安装包 Authenticode 数字签名异常或不受信任 (${parsed.targetStatus || 'Unknown'})`));
+        }
+        if (parsed.currentStatus === 'Valid' && parsed.currentThumbprint && parsed.targetThumbprint !== parsed.currentThumbprint) {
+          return reject(new Error('安装包数字签名证书指纹与当前受信任主程序不一致，已拒绝更新'));
+        }
+        resolve(parsed);
+      }
+    );
+  });
 }
 
 function downloadUpdateFileWithProgress(downloadUrl, destFilePath, onProgress) {
@@ -755,8 +1006,8 @@ function downloadUpdateFileWithProgress(downloadUrl, destFilePath, onProgress) {
       reject(err);
     };
 
-    const startRequest = (targetUrl) => {
-      if (!isAllowedUpdateDownloadUrl(targetUrl)) {
+    const startRequest = (targetUrl, isRedirect = false) => {
+      if (!isAllowedUpdateDownloadUrl(targetUrl, { isRedirect })) {
         finishError(new Error('更新下载地址不在受信任的 GitHub HTTPS 域名范围内'));
         return;
       }
@@ -778,7 +1029,7 @@ function downloadUpdateFileWithProgress(downloadUrl, destFilePath, onProgress) {
             }
             redirects += 1;
             const nextUrl = new URL(res.headers.location, targetUrl).toString();
-            startRequest(nextUrl);
+            startRequest(nextUrl, true);
             return;
           }
           if (status < 200 || status >= 300) {
@@ -1002,14 +1253,19 @@ function registerUpdaterIpcHandlers() {
         ? payload?.portableDownloadUrl || payload?.downloadUrl
         : payload?.installerDownloadUrl || payload?.downloadUrl;
     if (!isAllowedUpdateDownloadUrl(downloadUrl)) {
-      const msg = '未获取到有效的受信任 GitHub 安装包下载地址';
+      const msg = '未获取到有效的受信任 GitHub 仓库安装包下载地址';
+      broadcastUpdaterState({ status: 'error', error: msg });
+      return { ok: false, error: msg };
+    }
+    const latestYmlUrl = deriveLatestYmlUrlFromDownloadUrl(downloadUrl, payload?.latestYmlUrl);
+    if (!latestYmlUrl || !isAllowedUpdateDownloadUrl(latestYmlUrl)) {
+      const msg = '未获取到有效的受信任 latest.yml 更新校验元数据地址';
       broadcastUpdaterState({ status: 'error', error: msg });
       return { ok: false, error: msg };
     }
 
     try {
-      const os = require('os');
-      const updatesDir = path.join(os.tmpdir(), 'HumanSense-Updates');
+      const updatesDir = path.join(app.getPath('userData'), 'pending-updates');
       fs.mkdirSync(updatesDir, { recursive: true });
       const rawName = String(
         (currentInfo.mode === 'portable' ? payload?.portableAssetName : payload?.installerAssetName) ||
@@ -1020,13 +1276,38 @@ function registerUpdaterIpcHandlers() {
       const destPath = path.join(updatesDir, safeFileName);
 
       updaterRuntime.downloadedFilePath = null;
+      updaterRuntime.downloadedIntegrity = null;
+      broadcastUpdaterState({
+        status: 'checking',
+        mode: currentInfo.mode,
+        version: targetVersion,
+        percent: 0,
+        transferred: 0,
+        total: 0,
+        bytesPerSecond: 0,
+        error: undefined,
+      });
+
+      const ymlText = await downloadTextWithAllowedRedirects(latestYmlUrl);
+      const ymlMeta = parseLatestYmlAssets(ymlText);
+      const urlAssetName = path.posix.basename(new URL(downloadUrl).pathname);
+      const expectedIntegrity = findExpectedAssetIntegrity(ymlMeta, [
+        currentInfo.mode === 'portable' ? payload?.portableAssetName : payload?.installerAssetName,
+        payload?.assetName,
+        urlAssetName,
+        safeFileName,
+      ]);
+      if (!expectedIntegrity) {
+        throw new Error(`latest.yml 中缺少目标安装包 (${urlAssetName}) 的有效 SHA-512 校验摘要，已拒绝更新`);
+      }
+
       broadcastUpdaterState({
         status: 'downloading',
         mode: currentInfo.mode,
         version: targetVersion,
         percent: 0,
         transferred: 0,
-        total: 0,
+        total: expectedIntegrity.size || 0,
         bytesPerSecond: 0,
         error: undefined,
       });
@@ -1042,7 +1323,21 @@ function registerUpdaterIpcHandlers() {
         });
       });
 
+      try {
+        await verifyFileSha512(dlResult.filePath, expectedIntegrity.sha512, expectedIntegrity.size);
+        await verifyWindowsAuthenticodeSignature(
+          dlResult.filePath,
+          currentInfo.portableExePath || process.execPath
+        );
+      } catch (verifyErr) {
+        try {
+          if (fs.existsSync(dlResult.filePath)) fs.unlinkSync(dlResult.filePath);
+        } catch {}
+        throw verifyErr;
+      }
+
       updaterRuntime.downloadedFilePath = dlResult.filePath;
+      updaterRuntime.downloadedIntegrity = expectedIntegrity;
       broadcastUpdaterState({
         status: 'downloaded',
         percent: 100,
@@ -1116,9 +1411,28 @@ function registerUpdaterIpcHandlers() {
       }
 
       const downloadedPath = updaterRuntime.downloadedFilePath;
-      if (!downloadedPath || !fs.existsSync(downloadedPath)) {
+      const expectedIntegrity = updaterRuntime.downloadedIntegrity;
+      if (!downloadedPath || !fs.existsSync(downloadedPath) || !expectedIntegrity?.sha512) {
         isQuitting = false;
-        const msg = '更新安装包文件不存在，请重新下载';
+        const msg = '更新安装包文件不存在或缺少完整性摘要，请重新下载';
+        broadcastUpdaterState({ status: 'error', error: msg });
+        return { ok: false, error: msg };
+      }
+
+      try {
+        await verifyFileSha512(downloadedPath, expectedIntegrity.sha512, expectedIntegrity.size);
+        await verifyWindowsAuthenticodeSignature(
+          downloadedPath,
+          currentInfo.portableExePath || process.execPath
+        );
+      } catch (reverifyErr) {
+        isQuitting = false;
+        try {
+          if (fs.existsSync(downloadedPath)) fs.unlinkSync(downloadedPath);
+        } catch {}
+        updaterRuntime.downloadedFilePath = null;
+        updaterRuntime.downloadedIntegrity = null;
+        const msg = reverifyErr?.message || '安装前安装包完整性或数字签名复验失败';
         broadcastUpdaterState({ status: 'error', error: msg });
         return { ok: false, error: msg };
       }

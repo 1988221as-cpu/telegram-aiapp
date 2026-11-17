@@ -3870,6 +3870,48 @@ export function isAllowedLocalhostEndpoint(hostname: string): boolean {
   return clean === 'localhost' || clean === '127.0.0.1' || clean === '::1' || clean === '[::1]';
 }
 
+let activeHttpServer: http.Server | null = null;
+
+export function isLocalhostAiEndpointAllowedInRuntime(options?: {
+  allowLocalhostOverride?: boolean;
+  isProductionOverride?: boolean;
+  isElectronOverride?: boolean;
+  isRailwayOverride?: boolean;
+  nodeEnvOverride?: string;
+}): boolean {
+  if (options?.allowLocalhostOverride !== undefined) {
+    return options.allowLocalhostOverride;
+  }
+  const envFlag = String(process.env.ALLOW_LOCALHOST_AI_ENDPOINTS || '').trim().toLowerCase();
+  if (envFlag === 'true') return true;
+  if (envFlag === 'false') return false;
+
+  const effectiveIsRailway = options?.isRailwayOverride ?? isRailway;
+  if (effectiveIsRailway) return false;
+
+  const effectiveIsElectron = options?.isElectronOverride ?? isElectronMainProcess;
+  if (effectiveIsElectron) return true;
+
+  const effectiveNodeEnv = options?.nodeEnvOverride ?? process.env.NODE_ENV;
+  if (effectiveNodeEnv === 'test') return true;
+
+  const effectiveIsProduction =
+    options?.isProductionOverride ?? (isProduction || effectiveNodeEnv === 'production');
+  return !effectiveIsProduction;
+}
+
+function isStrictLoopbackAddress(ip: string): boolean {
+  const clean = ip.trim().toLowerCase().replace(/^\[|\]$/g, '').split('%')[0];
+  if (clean === '127.0.0.1' || clean === '::1') return true;
+  const h = parseIpv6Hextets(clean);
+  if (!h) return false;
+  const isV6Loopback =
+    h[0] === 0 && h[1] === 0 && h[2] === 0 && h[3] === 0 && h[4] === 0 && h[5] === 0 && h[6] === 0 && h[7] === 1;
+  const isMappedLoopback =
+    h[0] === 0 && h[1] === 0 && h[2] === 0 && h[3] === 0 && h[4] === 0 && h[5] === 0xffff && h[6] === 0x7f00 && h[7] === 0x0001;
+  return isV6Loopback || isMappedLoopback;
+}
+
 const BLOCKED_SSRF_NON_HTTP_PORTS = new Set<number>([
   21, 22, 23, 25, 110, 135, 137, 138, 139, 143, 445, 1433, 1521, 3306, 3389, 5432, 6379, 11211, 27017,
 ]);
@@ -3880,6 +3922,7 @@ export type SafeSsrfFetchHooks = {
   requestImpl?: typeof http.request;
   socksConnectImpl?: typeof SocksClient.createConnection;
   isProductionOverride?: boolean;
+  allowLocalhostOverride?: boolean;
 };
 
 export type ValidatedSsrfTarget = {
@@ -3896,6 +3939,7 @@ export async function validateSafeSsrfTargetUrl(
     dnsLookup?: (hostname: string) => Promise<Array<{ address: string; family: number }>>;
     disallowLocalhost?: boolean;
     isProductionOverride?: boolean;
+    allowLocalhostOverride?: boolean;
   }
 ): Promise<ValidatedSsrfTarget> {
   const rawStr = String(rawUrl || '').trim();
@@ -3950,11 +3994,17 @@ export async function validateSafeSsrfTargetUrl(
     throw new Error('SSRF 安全拦截：无效的主机名');
   }
 
-  const isLocalAiEndpoint = !options?.disallowLocalhost && isAllowedLocalhostEndpoint(cleanHost);
   const effectiveIsProduction =
     options?.isProductionOverride !== undefined
       ? options.isProductionOverride
       : isProduction || process.env.NODE_ENV === 'production';
+  const isLoopbackCandidate = isAllowedLocalhostEndpoint(cleanHost);
+  const localhostAllowedInRuntime = isLocalhostAiEndpointAllowedInRuntime({
+    allowLocalhostOverride: options?.allowLocalhostOverride,
+    isProductionOverride: options?.isProductionOverride,
+  });
+  const isLocalAiEndpoint =
+    !options?.disallowLocalhost && isLoopbackCandidate && localhostAllowedInRuntime;
 
   // Allow HTTP for local desktop models (e.g. Ollama http://127.0.0.1:11434, LM Studio http://localhost:1234)
   // For remote public endpoints, strictly enforce HTTPS in production
@@ -3965,12 +4015,56 @@ export async function validateSafeSsrfTargetUrl(
   }
 
   if (isLocalAiEndpoint) {
+    const activeAddr = activeHttpServer?.address();
+    const activePort =
+      activeAddr && typeof activeAddr === 'object' && typeof activeAddr.port === 'number'
+        ? activeAddr.port
+        : null;
+    const isRunningRuntime =
+      process.env.NODE_ENV !== 'test' && process.env.AIS_TEST_IMPORT !== 'true';
+    if (
+      (activePort !== null && targetPort === activePort) ||
+      (isRunningRuntime && Number.isInteger(PORT) && targetPort === PORT)
+    ) {
+      throw new Error(`SSRF 安全拦截：禁止回环请求访问本服务自身监听端口 (${targetPort})`);
+    }
+
+    let localPinned: { address: string; family: 4 | 6 };
+    if (cleanHost === '127.0.0.1') {
+      localPinned = { address: '127.0.0.1', family: 4 };
+    } else if (cleanHost === '::1') {
+      localPinned = { address: '::1', family: 6 };
+    } else {
+      const resolver =
+        options?.dnsLookup || ((h: string) => dns.lookup(h, { all: true, verbatim: true }));
+      let localLookup: Array<{ address: string; family: number }>;
+      try {
+        localLookup = await resolver(cleanHost);
+      } catch (err: any) {
+        throw new Error(`SSRF 安全拦截：本机域名解析失败 (${cleanHost}): ${err?.message || err}`);
+      }
+      if (!Array.isArray(localLookup) || localLookup.length === 0) {
+        throw new Error(`SSRF 安全拦截：本机域名未返回有效解析记录 (${cleanHost})`);
+      }
+      for (const rec of localLookup) {
+        if (!rec?.address || !isStrictLoopbackAddress(rec.address)) {
+          throw new Error(
+            `SSRF 安全拦截：禁止访问非本机回环地址 (${cleanHost} -> ${rec?.address || 'unknown'})`
+          );
+        }
+      }
+      const preferred =
+        localLookup.find((r) => r.address === '127.0.0.1') || localLookup[0];
+      const fam = net.isIP(preferred.address) || (preferred.family === 6 ? 6 : 4);
+      localPinned = { address: preferred.address, family: fam === 6 ? 6 : 4 };
+    }
+
     return {
       parsedUrl,
       cleanHost,
       isLocalAiEndpoint: true,
       targetPort,
-      pinnedAddress: null,
+      pinnedAddress: localPinned,
     };
   }
 
@@ -4209,27 +4303,21 @@ export async function safeSsrfFetch(
       dnsLookup: _hooks?.dnsLookup,
       disallowLocalhost: hop > 0,
       isProductionOverride: _hooks?.isProductionOverride,
+      allowLocalhostOverride: _hooks?.allowLocalhostOverride,
     });
 
     let res: globalThis.Response;
-    if (validated.isLocalAiEndpoint) {
-      res = await fetch(validated.parsedUrl.toString(), {
-        ...currentOptions,
-        redirect: 'manual',
-      });
+    const proxy = validated.isLocalAiEndpoint ? null : getConfiguredTelegramProxy();
+    if (proxy) {
+      res = await fetchWithSystemProxySupport(
+        validated.parsedUrl.toString(),
+        { ...currentOptions, redirect: 'manual' },
+        20000,
+        validated.pinnedAddress || undefined,
+        _hooks?.socksConnectImpl
+      );
     } else {
-      const proxy = getConfiguredTelegramProxy();
-      if (proxy) {
-        res = await fetchWithSystemProxySupport(
-          validated.parsedUrl.toString(),
-          { ...currentOptions, redirect: 'manual' },
-          20000,
-          validated.pinnedAddress || undefined,
-          _hooks?.socksConnectImpl
-        );
-      } else {
-        res = await performPinnedHttpFetch(validated, currentOptions, _hooks?.requestImpl);
-      }
+      res = await performPinnedHttpFetch(validated, currentOptions, _hooks?.requestImpl);
     }
 
     if (res.status >= 300 && res.status < 400) {
@@ -4973,6 +5061,9 @@ async function handleCloudAuthProxyForward(
     }
     if (typeof payloadBody.cardKey === 'string') {
       payloadBody.cardKey = payloadBody.cardKey.trim();
+    }
+    if (action === 'redeem' && (!payloadBody.username || !payloadBody.cardKey || !String(payloadBody.password || ''))) {
+      return res.status(400).json({ ok: false, error: '请输入会员账号、登录密码与新卡密' });
     }
 
     const upstreamRes = await fetchWithSystemProxySupport(
@@ -6674,6 +6765,9 @@ app.get('/api/chats', requireTenantAuth, async (req: Request, res: Response) => 
           isVerified: isTgOfficial,
           lastMessage: lastMsg?.is_audio ? '🎤 语音消息' : (lastMsg?.translated_text || lastMsg?.text || '暂无消息'),
           lastTime: lastMsg?.timestamp || '刚刚',
+          ...(typeof lastMsg?.created_at === 'number' && lastMsg.created_at > 0
+            ? { lastDate: Math.floor(lastMsg.created_at / 1000) }
+            : {}),
           unreadCount: 0,
           sourceLang: langPref?.sourceLang || 'Auto',
           targetLang: langPref?.targetLang || 'Auto',
@@ -19811,6 +19905,13 @@ app.get('/api/system/check-update', requireTenantAuth, async (_req: Request, res
     );
     const portableExe = exeAssets.find((a) => !/setup|installer/i.test(a.name));
     const installerExe = exeAssets.find((a) => /setup|installer/i.test(a.name));
+    const latestYmlAsset = assets.find(
+      (a) =>
+        typeof a?.name === 'string' &&
+        a.name.toLowerCase() === 'latest.yml' &&
+        typeof a?.browser_download_url === 'string' &&
+        a.browser_download_url.startsWith('https://')
+    );
     const preferredAsset = portableExe || exeAssets[0] || null;
     const downloadUrl = preferredAsset?.browser_download_url || releaseUrl;
 
@@ -19831,6 +19932,7 @@ app.get('/api/system/check-update', requireTenantAuth, async (_req: Request, res
       portableAssetName: portableExe?.name || undefined,
       installerDownloadUrl: installerExe?.browser_download_url || undefined,
       installerAssetName: installerExe?.name || undefined,
+      latestYmlUrl: latestYmlAsset?.browser_download_url || undefined,
     });
   } catch (err: any) {
     const isAbort = err?.name === 'AbortError';
@@ -24094,6 +24196,9 @@ app.get('/api/telegram/user/saved-messages', requireTenantAuth, async (req: Requ
         isVerified: false,
         lastMessage: last ? (last.isAudio ? '🎤 语音消息' : last.isImage ? '🖼️ 图片' : last.text) : 'Telegram 官方云端收藏与备忘录',
         lastTime: last?.timestamp || '刚刚',
+        ...(typeof last?.createdAt === 'number' && last.createdAt > 0
+          ? { lastDate: Math.floor(last.createdAt / 1000) }
+          : {}),
         unreadCount: 0,
         sourceLang: 'Auto',
         targetLang: 'Auto',
@@ -30058,8 +30163,6 @@ export function stopTelegramConnectionWatchdog(): void {
     telegramWatchdogInterval = null;
   }
 }
-
-let activeHttpServer: http.Server | null = null;
 
 export async function gracefulShutdownServer(reason = 'shutdown'): Promise<void> {
   console.log(`[Server Shutdown] Initiating graceful cleanup (${reason})...`);

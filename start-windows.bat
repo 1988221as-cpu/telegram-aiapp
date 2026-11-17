@@ -11,6 +11,7 @@ echo.
 set PORT=38271
 set HOST=127.0.0.1
 set NODE_ENV=production
+set ALLOW_LOCALHOST_AI_ENDPOINTS=true
 if "%DATA_DIR%"=="" set DATA_DIR=%LOCALAPPDATA%\HumanSense\data
 if not exist "%DATA_DIR%" mkdir "%DATA_DIR%"
 

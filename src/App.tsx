@@ -4236,7 +4236,14 @@ export default function App() {
       setChats((chatList) =>
         chatList.map((c) =>
           c.id === targetChatId && (!targetAccountId || c.accountId === targetAccountId)
-            ? { ...c, lastMessage: summary, lastTime: last.timestamp || c.lastTime }
+            ? {
+                ...c,
+                lastMessage: summary,
+                lastTime: last.timestamp || c.lastTime,
+                ...(typeof last.createdAt === 'number' && last.createdAt > 0
+                  ? { lastDate: Math.floor(last.createdAt / 1000) }
+                  : {}),
+              }
             : c
         )
       );
@@ -4319,7 +4326,14 @@ export default function App() {
       setChats((chatList) =>
         chatList.map((c) =>
           c.id === targetChatId && (!targetAccountId || c.accountId === targetAccountId)
-            ? { ...c, lastMessage: summary, lastTime: last.timestamp || c.lastTime }
+            ? {
+                ...c,
+                lastMessage: summary,
+                lastTime: last.timestamp || c.lastTime,
+                ...(typeof last.createdAt === 'number' && last.createdAt > 0
+                  ? { lastDate: Math.floor(last.createdAt / 1000) }
+                  : {}),
+              }
             : c
         )
       );
@@ -4367,7 +4381,12 @@ export default function App() {
         setChats((prev) =>
           prev.map((c) =>
             c.id === payload.toChatId && (!targetAccountId || c.accountId === targetAccountId)
-              ? { ...c, lastMessage: summary, lastTime: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false }) }
+              ? {
+                  ...c,
+                  lastMessage: summary,
+                  lastTime: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false }),
+                  lastDate: Math.floor(Date.now() / 1000),
+                }
               : c
           )
         );
@@ -4425,7 +4444,7 @@ export default function App() {
       setChats((prev) =>
         prev.map((c) =>
           c.id === payload.toChatId && (!targetAccountId || c.accountId === targetAccountId)
-            ? { ...c, lastMessage: summary, lastTime: nowTime }
+            ? { ...c, lastMessage: summary, lastTime: nowTime, lastDate: Math.floor(Date.now() / 1000) }
             : c
         )
       );
@@ -4597,13 +4616,22 @@ export default function App() {
     }
   };
 
-  const handleRetranslateMessage = async (messageId: string): Promise<void> => {
+  const handleRetranslateMessage = async (
+    messageId: string,
+    fallbackMessage?: Message
+  ): Promise<{
+    translatedText?: string;
+    translationError?: string;
+    translationErrorChannel?: Message['translationErrorChannel'];
+  } | void> => {
     const targetChatId = activeChatIdRef.current;
     const targetAccountId = activeAccountIdRef.current;
     if (!targetChatId) return;
     const bucketKey = msgBucketKey(targetAccountId, targetChatId);
     const currentList = getBucketMessages(messagesMapRef.current, targetAccountId, targetChatId);
-    const targetMsg = currentList.find((m) => m.id === messageId);
+    const targetMsg =
+      currentList.find((m) => m.id === messageId) ||
+      (fallbackMessage && fallbackMessage.id === messageId ? fallbackMessage : undefined);
     if (!targetMsg) return;
 
     const rawText = (targetMsg.sttText || targetMsg.text || targetMsg.imageCaption || '').trim();
@@ -4690,7 +4718,7 @@ export default function App() {
         telegramMessageId: targetMsg.telegramMessageId,
         accountId: targetAccountId,
       }).catch(() => {});
-      return;
+      return { translatedText: '' };
     }
 
     setMessagesMap((prev) => {
@@ -4752,6 +4780,7 @@ export default function App() {
         telegramMessageId: targetMsg.telegramMessageId,
         accountId: targetAccountId,
       });
+      return { translatedText: finalTranslatedText };
     } catch {
       const errMsg = '翻译失败，请检查翻译通道';
       const errChannel: Message['translationErrorChannel'] = isHistoricalTarget
@@ -4772,6 +4801,7 @@ export default function App() {
         return { ...prev, [bucketKey]: updated };
       });
       showCloudError(errMsg);
+      return { translationError: errMsg, translationErrorChannel: errChannel };
     }
   };
 
@@ -6013,6 +6043,7 @@ export default function App() {
             portableAssetName: appUpdateInfo.portableAssetName,
             installerDownloadUrl: appUpdateInfo.installerDownloadUrl,
             installerAssetName: appUpdateInfo.installerAssetName,
+            latestYmlUrl: appUpdateInfo.latestYmlUrl,
           });
         };
 

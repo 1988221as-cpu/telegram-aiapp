@@ -35,9 +35,11 @@ test('safeSsrfFetch hardens protocol, credentials, ports, IPv4/IPv6, mixed DNS A
     safeSsrfFetch,
     validateSafeSsrfTargetUrl,
     safeSsrfFetchForSdk,
+    isPrivateOrReservedIp,
+    isLocalhostAiEndpointAllowedInRuntime,
   } = await import('../server.ts');
 
-  // 1. Illegal protocols, credentials, blocked ports, non-canonical numeric hostnames
+  // 1. Illegal protocols, credentials, blocked ports, non-canonical numeric hostnames & IPv6 bypass variants
   for (const badUrl of [
     'file:///etc/passwd',
     'file://localhost/etc/passwd',
@@ -59,6 +61,9 @@ test('safeSsrfFetch hardens protocol, credentials, ports, IPv4/IPv6, mixed DNS A
     'http://[fe80::1]/v1beta',
     'http://[fc00::1]/v1beta',
     'http://[::ffff:127.0.0.1]/v1beta',
+    'http://[::ffff:7f00:1]/v1beta',
+    'http://[0:0:0:0:0:ffff:127.0.0.1]/v1beta',
+    'http://[::127.0.0.1]/v1beta',
     'http://[::ffff:169.254.169.254]/v1beta',
     'http://0x7f000001/v1beta',
     'http://2130706433/v1beta',
@@ -71,8 +76,61 @@ test('safeSsrfFetch hardens protocol, credentials, ports, IPv4/IPv6, mixed DNS A
       `Expected SSRF block for ${badUrl}`
     );
   }
+  for (const v6Bypass of ['::ffff:7f00:1', '0:0:0:0:0:ffff:127.0.0.1', '::127.0.0.1']) {
+    assert.equal(isPrivateOrReservedIp(v6Bypass), true);
+  }
 
-  // 2. Production HTTPS enforcement for remote hosts while keeping localhost Ollama / LM Studio HTTP allowed
+  // 2. Production HTTPS enforcement for remote hosts while keeping desktop localhost AI allowed, and blocking localhost in remote/cloud deployments
+  assert.equal(
+    isLocalhostAiEndpointAllowedInRuntime({
+      isProductionOverride: true,
+      isElectronOverride: false,
+      isRailwayOverride: false,
+      nodeEnvOverride: 'production',
+    }),
+    false
+  );
+  assert.equal(
+    isLocalhostAiEndpointAllowedInRuntime({
+      isProductionOverride: true,
+      isElectronOverride: true,
+      isRailwayOverride: false,
+      nodeEnvOverride: 'production',
+    }),
+    true
+  );
+  assert.equal(
+    isLocalhostAiEndpointAllowedInRuntime({
+      isProductionOverride: false,
+      isElectronOverride: false,
+      isRailwayOverride: true,
+      nodeEnvOverride: 'development',
+    }),
+    false
+  );
+  for (const blockedLocalInServerMode of [
+    'http://127.0.0.1:11434/v1',
+    'http://localhost:1234/v1',
+    'http://[::1]:11434/v1',
+    'https://127.0.0.1:8443/v1',
+  ]) {
+    await assert.rejects(
+      () =>
+        validateSafeSsrfTargetUrl(blockedLocalInServerMode, {
+          isProductionOverride: true,
+          allowLocalhostOverride: false,
+        }),
+      /SSRF 安全拦截/
+    );
+  }
+  await assert.rejects(
+    () =>
+      validateSafeSsrfTargetUrl('http://localhost:11434/v1', {
+        isProductionOverride: false,
+        dnsLookup: async () => [{ address: '169.254.169.254', family: 4 }],
+      }),
+    /SSRF 安全拦截/
+  );
   await assert.rejects(
     () =>
       validateSafeSsrfTargetUrl('http://custom-gateway.example.com/v1beta', {
@@ -86,8 +144,12 @@ test('safeSsrfFetch hardens protocol, credentials, ports, IPv4/IPv6, mixed DNS A
     'http://localhost:1234/v1',
     'http://[::1]:11434/v1',
   ]) {
-    const res = await validateSafeSsrfTargetUrl(localOk, { isProductionOverride: true });
+    const res = await validateSafeSsrfTargetUrl(localOk, {
+      isProductionOverride: true,
+      dnsLookup: async () => [{ address: '127.0.0.1', family: 4 }],
+    });
     assert.equal(res.isLocalAiEndpoint, true);
+    assert.ok(res.pinnedAddress);
   }
 
   // 3. Mixed DNS A + AAAA resolution (any private/link-local/loopback record must reject)

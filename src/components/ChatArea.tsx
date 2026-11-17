@@ -574,7 +574,7 @@ interface ChatAreaProps {
   onForwardMessages?: (payload: { messageIds: string[]; telegramMessageIds: number[]; toChatId: string; dropAuthor?: boolean }) => Promise<{ ok: boolean; error?: string }>;
   onEditMessage?: (messageId: string, newText: string, options?: { translatedText?: string }) => void | Promise<{ ok: boolean; error?: string } | void>;
   onUpdateMessage?: (messageId: string, patch: Partial<Message>, scope?: { chatId?: string; accountId?: string }) => void;
-  onRetranslateMessage?: (messageId: string) => void | Promise<void>;
+  onRetranslateMessage?: (messageId: string, fallbackMessage?: Message) => void | Promise<any>;
   onRetryMessage?: (messageId: string) => Promise<{ ok: boolean; error?: string }>;
   onToggleReaction?: (messageId: string, emoji: string) => void | Promise<any>;
   onTogglePinMessage?: (messageId: string) => void | Promise<any>;
@@ -612,6 +612,9 @@ function formatMessageDayLabel(dayKey: string): string {
   const yest = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1);
   const yestKey = `${yest.getFullYear()}-${String(yest.getMonth() + 1).padStart(2, '0')}-${String(yest.getDate()).padStart(2, '0')}`;
   if (dayKey === yestKey) return '昨天';
+  const dayBefore = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 2);
+  const dayBeforeKey = `${dayBefore.getFullYear()}-${String(dayBefore.getMonth() + 1).padStart(2, '0')}-${String(dayBefore.getDate()).padStart(2, '0')}`;
+  if (dayKey === dayBeforeKey) return '前天';
   const [yStr, mStr, dStr] = dayKey.split('-');
   const y = Number(yStr);
   const m = Number(mStr);
@@ -3089,6 +3092,59 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
     }
   };
 
+  const triggerManualTranslate = async (targetMsg: Message) => {
+    if (!onRetranslateMessage) return;
+    const existsInWindow = messages.some((m) => m.id === targetMsg.id);
+    if (existsInWindow) {
+      await onRetranslateMessage(targetMsg.id, targetMsg);
+      return;
+    }
+    setUncontrolledMsgPatches((prev) => ({
+      ...prev,
+      [targetMsg.id]: {
+        ...prev[targetMsg.id],
+        isTranslating: true,
+        translationError: undefined,
+        translationErrorChannel: undefined,
+      },
+    }));
+    try {
+      const res = await onRetranslateMessage(targetMsg.id, targetMsg);
+      if (res && typeof res === 'object') {
+        setUncontrolledMsgPatches((prev) => ({
+          ...prev,
+          [targetMsg.id]: {
+            ...prev[targetMsg.id],
+            isTranslating: false,
+            ...(res.translatedText !== undefined
+              ? {
+                  translatedText: res.translatedText,
+                  translationError: undefined,
+                  translationErrorChannel: undefined,
+                }
+              : {}),
+            ...(res.translationError !== undefined
+              ? {
+                  translationError: res.translationError,
+                  translationErrorChannel: res.translationErrorChannel,
+                }
+              : {}),
+          },
+        }));
+      } else {
+        setUncontrolledMsgPatches((prev) => ({
+          ...prev,
+          [targetMsg.id]: { ...prev[targetMsg.id], isTranslating: false },
+        }));
+      }
+    } catch {
+      setUncontrolledMsgPatches((prev) => ({
+        ...prev,
+        [targetMsg.id]: { ...prev[targetMsg.id], isTranslating: false },
+      }));
+    }
+  };
+
   const handlePlayAudio = async (msgId: string, audioUrl?: string) => {
     if (playingAudioId === msgId) {
       audioPlaySeqRef.current += 1;
@@ -4199,6 +4255,12 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
               <div
                 data-msg-id={msg.id}
                 onClick={isMultiSelectMode ? () => toggleSelectMessage(msg.id) : undefined}
+                onMouseEnter={() => {
+                  if (!isMultiSelectMode) setHoveredMessageId(msg.id);
+                }}
+                onMouseLeave={() => {
+                  setHoveredMessageId((prev) => (prev === msg.id ? null : prev));
+                }}
                 className={`w-full min-w-0 flex ${isMultiSelectMode ? 'items-center gap-2.5 cursor-pointer rounded-xl px-1.5 py-0.5 transition-colors ' + (isSelectedMulti ? 'bg-[#2481cc]/10 dark:bg-[#2ba0ff]/15 aurora:bg-[#14b8a6]/15' : 'hover:bg-black/5 dark:hover:bg-white/5 aurora:hover:bg-white/5') : 'flex-col'} ${
                   isMe ? (isMultiSelectMode ? 'justify-end' : 'items-end') : (isMultiSelectMode ? 'justify-start' : 'items-start')
                 } group relative ${hoveredMessageId === msg.id ? 'z-30' : ''} ${isSameSenderAsPrev ? 'mt-0.5' : 'mt-1'} ${isSameSenderAsNext ? 'mb-0.5' : 'mb-1'}`}
@@ -4276,7 +4338,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                       <button
                         type="button"
                         disabled={Boolean(msg.isTranslating)}
-                        onClick={() => void onRetranslateMessage(msg.id)}
+                        onClick={() => void triggerManualTranslate(msg)}
                         className="p-1 text-[#64748b] hover:text-[#2481cc] dark:text-[#7b93ad] dark:hover:text-[#2ba0ff] aurora:text-[#7e9aa5] aurora:hover:text-[#5eead4] cursor-pointer disabled:opacity-50"
                         title={msg.translatedText ? '重新翻译' : '翻译此消息'}
                       >
@@ -4797,7 +4859,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                                 type="button"
                                 onClick={(e) => {
                                   e.stopPropagation();
-                                  void onRetranslateMessage(msg.id);
+                                  void triggerManualTranslate(msg);
                                 }}
                                 className={`shrink-0 px-1.5 py-0.5 rounded font-semibold text-[10px] cursor-pointer transition-colors ${
                                   isMe
@@ -4938,7 +5000,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                           )}
 
                           {/* Official Telegram Inline Translation Card */}
-                          {(!isChatTransEnabled ||
+                          {((!isChatTransEnabled && !msg.isTranslating && !msg.translatedText && !msg.translationError) ||
                             msg.isCall ||
                             (msg.isImage && msg.imageUrl && (!msg.text?.trim() || isSystemMediaPlaceholder(msg.text, msg))) ||
                             (msg.isVideo && msg.videoUrl && (!msg.text?.trim() || isSystemMediaPlaceholder(msg.text, msg)))) ? null : msg.isTranslating ? (
@@ -4975,7 +5037,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                                       type="button"
                                       onClick={(e) => {
                                         e.stopPropagation();
-                                        void onRetranslateMessage(msg.id);
+                                        void triggerManualTranslate(msg);
                                       }}
                                       title="重新翻译"
                                       className={`p-0.5 rounded transition-colors cursor-pointer ${
@@ -5026,7 +5088,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                                   type="button"
                                   onClick={(e) => {
                                     e.stopPropagation();
-                                    void onRetranslateMessage(msg.id);
+                                    void triggerManualTranslate(msg);
                                   }}
                                   className={`shrink-0 px-2 py-0.5 rounded font-semibold text-[10.5px] cursor-pointer transition-colors ${
                                     isMe
@@ -5084,6 +5146,37 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                       isMe ? 'text-white/80' : 'text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5]'
                     }`}
                   >
+                    {onRetranslateMessage &&
+                      !isMultiSelectMode &&
+                      !msg.isCall &&
+                      (!msg.isAudio || Boolean(msg.sttText?.trim())) &&
+                      !(msg.isImage && msg.imageUrl && (!msg.text?.trim() || isSystemMediaPlaceholder(msg.text, msg))) &&
+                      !(msg.isVideo && msg.videoUrl && (!msg.text?.trim() || isSystemMediaPlaceholder(msg.text, msg))) &&
+                      Boolean((msg.sttText || msg.text || msg.imageCaption || '').trim()) &&
+                      !msg.translatedText &&
+                      !msg.translationError && (
+                      <button
+                        type="button"
+                        disabled={Boolean(msg.isTranslating)}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          void triggerManualTranslate(msg);
+                        }}
+                        title={msg.isTranslating ? '正在翻译中...' : '手动翻译此消息'}
+                        className={`inline-flex items-center gap-0.5 px-1.5 py-[1px] rounded text-[10px] font-medium transition-colors cursor-pointer disabled:opacity-60 mr-1 ${
+                          isMe
+                            ? 'bg-white/15 hover:bg-white/25 text-white/95'
+                            : 'bg-[#2481cc]/10 hover:bg-[#2481cc]/20 text-[#2481cc] dark:bg-[#2ba0ff]/15 dark:hover:bg-[#2ba0ff]/25 dark:text-[#7cc4ff] aurora:bg-[#2dd4bf]/12 aurora:hover:bg-[#2dd4bf]/22 aurora:text-[#5eead4]'
+                        }`}
+                      >
+                        {msg.isTranslating ? (
+                          <RotateCw className="w-2.5 h-2.5 animate-spin" />
+                        ) : (
+                          <Languages className="w-2.5 h-2.5" />
+                        )}
+                        <span>{msg.isTranslating ? '翻译中' : '翻译'}</span>
+                      </button>
+                    )}
                     {msg.isPinned && (
                       <Pin
                         className={`w-3 h-3 fill-current mr-0.5 ${
@@ -6051,7 +6144,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
               onClick={() => {
                 const target = messageContextMenu.message;
                 setMessageContextMenu(null);
-                void onRetranslateMessage(target.id);
+                void triggerManualTranslate(target);
               }}
               className="w-full flex items-center gap-2.5 px-3 py-2 rounded-xl hover:bg-[#f1f5f9] dark:hover:bg-[#152438] aurora:hover:bg-[#152934] text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] cursor-pointer font-medium"
             >

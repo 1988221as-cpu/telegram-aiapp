@@ -36,7 +36,7 @@ jobs:
           npm install --legacy-peer-deps
           npm install @rolldown/binding-win32-x64-msvc @libsql/win32-x64-msvc --save-optional --legacy-peer-deps
         env:
-          FFMPEG_STatic_Skip_Download: "1"
+          FFMPEG_STATIC_SKIP_DOWNLOAD: "1"
 
       - name: Sync Version From Git Tag
         if: startsWith(github.ref, 'refs/tags/')
@@ -53,6 +53,11 @@ jobs:
         run: npx electron-builder --win nsis portable --publish never
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Ensure Portable & NSIS SHA-512 Entries In latest.yml
+        shell: pwsh
+        run: |
+          node -e "const fs=require('fs'),path=require('path'),crypto=require('crypto');const ymlPath=path.join('dist-electron','latest.yml');if(!fs.existsSync(ymlPath))process.exit(0);let yml=fs.readFileSync(ymlPath,'utf8');for(const f of fs.readdirSync('dist-electron')){const lf=f.toLowerCase();if(!lf.endsWith('.exe')||lf.startsWith('uninstall'))continue;if(yml.includes(f))continue;const buf=fs.readFileSync(path.join('dist-electron',f));const sha=crypto.createHash('sha512').update(buf).digest('base64');const size=buf.length;const entry='  - url: '+f+'\n    sha512: '+sha+'\n    size: '+size+'\n';yml=/^files:\r?\n/m.test(yml)?yml.replace(/^(files:\r?\n)/m,function(_,p){return p+entry;}):'files:\n'+entry+yml;}fs.writeFileSync(ymlPath,yml,'utf8');"
 
       - name: Run Packaged Desktop Smoke Test
         run: |
