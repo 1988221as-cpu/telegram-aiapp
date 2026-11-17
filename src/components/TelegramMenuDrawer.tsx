@@ -16,7 +16,7 @@ import {
   Sparkles,
 } from 'lucide-react';
 import { Account, AppThemeMode, MemberUser } from '../types';
-import { APP_VERSION, disconnectTelegramAccount } from '../services/apiService';
+import { APP_VERSION, disconnectTelegramAccount, checkAppUpdateApi } from '../services/apiService';
 
 interface TelegramMenuDrawerProps {
   isOpen: boolean;
@@ -534,11 +534,33 @@ export const TelegramMenuDrawer: React.FC<TelegramMenuDrawerProps> = ({
         )}
 
         {/* 4. Drawer Footer */}
-        <div className="p-3 bg-[#f8fafc] dark:bg-[#0d1726] aurora:bg-[#0e1920] border-t border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] flex items-center justify-center gap-2 text-[11px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5]">
-          <img src="/app-icon.png" alt="HumanSense" className="w-4 h-4 rounded-sm object-cover" />
-          <span className="font-medium text-[#475569] dark:text-[#b4c6d8] aurora:text-[#b7d0d8]">HumanSense Desktop</span>
-          <span className="font-bold">·</span>
-          <span>v{APP_VERSION}</span>
+        <div className="p-3 bg-[#f8fafc] dark:bg-[#0d1726] aurora:bg-[#0e1920] border-t border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] flex items-center justify-between gap-2 text-[11px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5]">
+          <div className="flex items-center gap-1.5 min-w-0">
+            <img src="/app-icon.png" alt="HumanSense" className="w-4 h-4 rounded-sm object-cover shrink-0" />
+            <span className="font-medium text-[#475569] dark:text-[#b4c6d8] aurora:text-[#b7d0d8] truncate">v{APP_VERSION}</span>
+          </div>
+          <button
+            type="button"
+            onClick={async () => {
+              showToast('正在检查更新...');
+              try {
+                const res = await checkAppUpdateApi();
+                if (!res.ok) {
+                  showToast(res.error || '检查更新失败');
+                } else if (res.hasUpdate) {
+                  showToast(`发现新版本 v${res.latestVersion}`);
+                } else {
+                  showToast(`已是最新版本 (v${res.currentVersion || APP_VERSION})`);
+                }
+              } catch (err: any) {
+                showToast('检查更新出错: ' + (err?.message || '未知错误'));
+              }
+            }}
+            className="px-2 py-1 rounded-md bg-[#2ba0ff]/10 hover:bg-[#2ba0ff]/25 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf] font-medium transition-colors cursor-pointer shrink-0"
+            title="检查软件更新"
+          >
+            检查更新
+          </button>
         </div>
       </div>
     </div>

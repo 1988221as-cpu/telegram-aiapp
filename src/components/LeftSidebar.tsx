@@ -565,7 +565,7 @@ export const LeftSidebar: React.FC<LeftSidebarProps> = ({
                         }
                       }}
                       title={`自定义名: ${remarkText}（原名: ${acc.name}）`}
-                      className={`mt-1 max-w-[74px] truncate px-1.5 py-0.5 rounded text-[10px] leading-tight cursor-pointer transition-colors ${
+                      className={`mt-1 w-[82px] max-w-[82px] truncate px-1 py-0.5 rounded text-[10px] leading-tight cursor-pointer transition-colors text-center ${
                         isSelected
                           ? 'bg-[#e8f3ff] dark:bg-[#12253c] aurora:bg-[#112e37] text-[#0284c7] dark:text-[#2ba0ff] aurora:text-[#5eead4] font-medium'
                           : 'text-[#64748b] dark:text-[#8ea4ba] aurora:text-[#8ca9b3] hover:text-[#0f172a] dark:hover:text-[#eef4fb]'
