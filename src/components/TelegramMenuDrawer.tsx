@@ -16,7 +16,12 @@ import {
   Sparkles,
 } from 'lucide-react';
 import { Account, AppThemeMode, MemberUser } from '../types';
-import { APP_VERSION, disconnectTelegramAccount, checkAppUpdateApi } from '../services/apiService';
+import {
+  APP_VERSION,
+  disconnectTelegramAccount,
+  checkAppUpdateApi,
+  type AppUpdateCheckResult,
+} from '../services/apiService';
 
 interface TelegramMenuDrawerProps {
   isOpen: boolean;
@@ -40,6 +45,7 @@ interface TelegramMenuDrawerProps {
   onOpenKnowledgeEvolution?: () => void;
   currentMember?: MemberUser | null;
   onMemberLogout?: () => void;
+  onUpdateAvailable?: (info: AppUpdateCheckResult) => void;
 }
 
 export const TelegramMenuDrawer: React.FC<TelegramMenuDrawerProps> = ({
@@ -61,6 +67,7 @@ export const TelegramMenuDrawer: React.FC<TelegramMenuDrawerProps> = ({
   onOpenTelegramSettings,
   currentMember,
   onMemberLogout,
+  onUpdateAvailable,
 }) => {
   const safeAccount: Account = currentAccount || {
     id: '',
@@ -79,6 +86,7 @@ export const TelegramMenuDrawer: React.FC<TelegramMenuDrawerProps> = ({
   const [confirmingDeleteId, setConfirmingDeleteId] = useState<string | null>(null);
   const [confirmingMemberLogout, setConfirmingMemberLogout] = useState(false);
   const [disconnectingId, setDisconnectingId] = useState<string | null>(null);
+  const [isCheckingUpdate, setIsCheckingUpdate] = useState(false);
   const [disconnectError, setDisconnectError] = useState<{
     accountId: string;
     message: string;
@@ -541,7 +549,10 @@ export const TelegramMenuDrawer: React.FC<TelegramMenuDrawerProps> = ({
           </div>
           <button
             type="button"
+            disabled={isCheckingUpdate}
             onClick={async () => {
+              if (isCheckingUpdate) return;
+              setIsCheckingUpdate(true);
               showToast('正在检查更新...');
               try {
                 const res = await checkAppUpdateApi();
@@ -549,17 +560,21 @@ export const TelegramMenuDrawer: React.FC<TelegramMenuDrawerProps> = ({
                   showToast(res.error || '检查更新失败');
                 } else if (res.hasUpdate) {
                   showToast(`发现新版本 v${res.latestVersion}`);
+                  onUpdateAvailable?.(res);
+                  onClose();
                 } else {
                   showToast(`已是最新版本 (v${res.currentVersion || APP_VERSION})`);
                 }
               } catch (err: any) {
                 showToast('检查更新出错: ' + (err?.message || '未知错误'));
+              } finally {
+                setIsCheckingUpdate(false);
               }
             }}
-            className="px-2 py-1 rounded-md bg-[#2ba0ff]/10 hover:bg-[#2ba0ff]/25 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf] font-medium transition-colors cursor-pointer shrink-0"
+            className="px-2 py-1 rounded-md bg-[#2ba0ff]/10 hover:bg-[#2ba0ff]/25 disabled:opacity-50 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf] font-medium transition-colors cursor-pointer shrink-0"
             title="检查软件更新"
           >
-            检查更新
+            {isCheckingUpdate ? '检查中...' : '检查更新'}
           </button>
         </div>
       </div>

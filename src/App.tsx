@@ -5653,6 +5653,10 @@ export default function App() {
         onOpenKnowledgeEvolution={() => openRightPanel('persona')}
         currentMember={currentMember}
         onMemberLogout={handleMemberLogout}
+        onUpdateAvailable={(info) => {
+          setAppUpdateInfo(info);
+          setIsUpdateModalOpen(true);
+        }}
       />
 
       {/* 5. Multi-Account Switcher & Login Modal */}
@@ -5848,7 +5852,6 @@ export default function App() {
             ? appUpdateInfo.installerDownloadUrl || appUpdateInfo.downloadUrl
             : appUpdateInfo.portableDownloadUrl || appUpdateInfo.downloadUrl
         );
-        const releaseHref = safeHref(appUpdateInfo.releaseUrl);
         const displayAssetName =
           desktopUpdaterInfo?.mode === 'nsis'
             ? appUpdateInfo.installerAssetName || appUpdateInfo.assetName
@@ -6037,14 +6040,6 @@ export default function App() {
                     </>
                   ) : (
                     <>
-                      <a
-                        href={releaseHref}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="px-3 py-1.5 rounded-lg border border-[#cbd5e1] dark:border-[#1e3148] hover:border-[#2481cc] text-[#334155] dark:text-[#b4c6d8] font-medium"
-                      >
-                        查看 Release
-                      </a>
                       <a
                         href={downloadHref}
                         target="_blank"
