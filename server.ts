@@ -2573,35 +2573,54 @@ function formatTelegramUserStatus(userEntity: any): { isOnline: boolean; statusT
   return { isOnline: false, statusText: '很久未上线' };
 }
 
-export async function fetchTelegramUserDialogs(client: TelegramClient, limit = 150, explicitUserId?: string) {
+export async function fetchTelegramUserDialogs(
+  client: TelegramClient,
+  limit = 150,
+  explicitUserId?: string,
+  fallbackCachedDialogs?: any[]
+) {
   const ownerUserId = explicitUserId || ((client as any)?._selfId ? String((client as any)._selfId) : '');
   const accountScope = ownerUserId ? `acc_tg_${ownerUserId}` : '';
   try {
     const mainDialogs = await client.getDialogs({ limit, folder: 0 });
     let archivedDialogs: any[] = [];
+    let archivedFetchFailed = false;
     try {
-      archivedDialogs = await client.getDialogs({ limit: Math.min(limit, 80), folder: 1 });
+      archivedDialogs = await client.getDialogs({ limit: Math.max(limit, 200), folder: 1 });
     } catch (archivedErr: any) {
       if (isTelegramSessionExpiredError(archivedErr) || extractFloodWaitSeconds(archivedErr) !== null) {
         throw archivedErr;
       }
+      archivedFetchFailed = true;
       archivedDialogs = [];
     }
 
-    const mergedMap = new Map<string, { dialog: any; forcedArchived: boolean }>();
+    const mergedMap = new Map<string, { dialog: any; forcedArchived: boolean; pinOrder?: number }>();
+    let mainPinIdx = 0;
     for (const d of mainDialogs) {
       if (!d || d.id === undefined || d.id === null) continue;
-      mergedMap.set(String(d.id), { dialog: d, forcedArchived: false });
+      const dPinned = Boolean(d.pinned || d.dialog?.pinned);
+      mergedMap.set(String(d.id), {
+        dialog: d,
+        forcedArchived: false,
+        pinOrder: dPinned ? mainPinIdx++ : undefined,
+      });
     }
+    let archPinIdx = 0;
     for (const d of archivedDialogs) {
       if (!d || d.id === undefined || d.id === null) continue;
       const key = String(d.id);
-      mergedMap.set(key, { dialog: d, forcedArchived: true });
+      const dPinned = Boolean(d.pinned || d.dialog?.pinned);
+      mergedMap.set(key, {
+        dialog: d,
+        forcedArchived: true,
+        pinOrder: dPinned ? archPinIdx++ : undefined,
+      });
     }
 
     const nowSec = Math.floor(Date.now() / 1000);
 
-    return Array.from(mergedMap.values()).map(({ dialog: d, forcedArchived }) => {
+    const serializedDialogs = Array.from(mergedMap.values()).map(({ dialog: d, forcedArchived, pinOrder }) => {
       const entity: any = d.entity || {};
       const isOfficial = String(d.id) === '777000' || String(entity?.id) === '777000' || String(d.id) === '42777';
       const isBroadcastChannel = Boolean(
@@ -2645,6 +2664,7 @@ export async function fetchTelegramUserDialogs(client: TelegramClient, limit = 1
         isChannel,
         isBot,
         isPinned,
+        ...(isPinned && typeof pinOrder === 'number' ? { pinOrder } : {}),
         isArchived,
         isMuted,
         isVerified,
@@ -2662,6 +2682,15 @@ export async function fetchTelegramUserDialogs(client: TelegramClient, limit = 1
         avatarBg: isChannel ? '#3b5998' : isGroup ? '#1e3a5f' : isBot ? '#6b4fbb' : '#2481cc',
       };
     });
+    if (archivedFetchFailed && Array.isArray(fallbackCachedDialogs) && fallbackCachedDialogs.length > 0) {
+      const seenIds = new Set(serializedDialogs.map((item) => String(item.id)));
+      for (const prevDlg of fallbackCachedDialogs) {
+        if (prevDlg?.isArchived && prevDlg?.id && !seenIds.has(String(prevDlg.id))) {
+          serializedDialogs.push(prevDlg);
+        }
+      }
+    }
+    return serializedDialogs;
   } catch (err: any) {
     if (isTelegramSessionExpiredError(err)) {
       throw err;
@@ -2738,7 +2767,7 @@ export async function getOrFetchConnectedAccountDialogs(
   }
 
   const limit = opts?.limit ?? 150;
-  const fetchPromise = fetchTelegramUserDialogs(connected.client, limit, connected.userId)
+  const fetchPromise = fetchTelegramUserDialogs(connected.client, limit, connected.userId, connected.dialogs)
     .then((dialogs) => {
       if (connected.dialogsInFlight === fetchPromise) {
         connected.dialogs = dialogs;
@@ -2757,7 +2786,11 @@ export async function getOrFetchConnectedAccountDialogs(
   return { dialogs, cached: false };
 }
 
-async function refreshDialogEntityCacheSafely(client: TelegramClient, limit = 60): Promise<void> {
+async function refreshDialogEntityCacheSafely(
+  client: TelegramClient,
+  limit = 60,
+  includeArchived = false
+): Promise<void> {
   const uid = (client as any)?._selfId ? String((client as any)._selfId) : undefined;
   const floodCtx = uid ? { userId: uid, accountId: `acc_tg_${uid}` } : undefined;
   if (floodCtx && getTelegramFloodCooldown(floodCtx)) {
@@ -2768,10 +2801,13 @@ async function refreshDialogEntityCacheSafely(client: TelegramClient, limit = 60
     try {
       await connected.dialogsInFlight;
     } catch {}
-    return;
+    if (!includeArchived) return;
   }
   try {
     await client.getDialogs({ limit });
+    if (includeArchived) {
+      await client.getDialogs({ limit: Math.min(Math.max(limit, 100), 200), folder: 1 }).catch(() => {});
+    }
   } catch (err: any) {
     if (floodCtx) {
       recordTelegramFloodWait(floodCtx, err, 'messages.GetDialogs');
@@ -7276,8 +7312,14 @@ async function resolveTelegramInputPeer(
   } catch {
     // Refresh dialog entity cache once before failing (protected by FLOOD_WAIT breaker & in-flight dedup)
     await refreshDialogEntityCacheSafely(client, 60);
-    const inputPeer = await client.getInputEntity(rawPeer);
-    return { inputPeer, rawPeer };
+    try {
+      const inputPeer = await client.getInputEntity(rawPeer);
+      return { inputPeer, rawPeer };
+    } catch {
+      await refreshDialogEntityCacheSafely(client, 150, true);
+      const inputPeer = await client.getInputEntity(rawPeer);
+      return { inputPeer, rawPeer };
+    }
   }
 }
 
@@ -17017,8 +17059,14 @@ async function processIncomingBotUpdate(
   if (isEditedUpdate && incomingTgMsgId) {
     try {
       await db
-        .prepare('UPDATE messages SET text = ?, is_edited = 1 WHERE chat_id = ? AND account_id = ? AND telegram_message_id = ?')
-        .run(textContent, tgChatId, 'acc_telegram_bot', incomingTgMsgId);
+        .prepare(
+          `UPDATE messages
+           SET text = ?,
+               image_caption = CASE WHEN is_image = 1 OR is_video = 1 THEN ? ELSE image_caption END,
+               is_edited = 1
+           WHERE chat_id = ? AND account_id = ? AND telegram_message_id = ?`
+        )
+        .run(textContent, textContent, tgChatId, 'acc_telegram_bot', incomingTgMsgId);
     } catch {}
     pushPendingLocalUpdate({
       id: `bot_edit_${tgChatId}_${incomingTgMsgId}_${updateId}`,
@@ -21681,6 +21729,13 @@ export function parsePrivacyRulesToMode(rules: any[], users?: any[]): ParsedPriv
   const disallowUsers: ParsedPrivacyExceptionUser[] = [];
   const seenAllow = new Set<string>();
   const seenDisallow = new Set<string>();
+  let allowChatCount = 0;
+  let disallowChatCount = 0;
+  let hasAllowCloseFriends = false;
+  let hasAllowPremium = false;
+  let hasAllowBots = false;
+  let hasDisallowBots = false;
+  let hasDisallowContacts = false;
 
   for (const r of list) {
     const cls = r?.className || r?.constructor?.name || '';
@@ -21710,21 +21765,72 @@ export function parsePrivacyRulesToMode(rules: any[], users?: any[]): ParsedPriv
         seenDisallow.add(uid);
         disallowUsers.push(userMap.get(uid) || { id: uid, name: `用户 ${uid}` });
       }
+    } else if (cls === 'PrivacyValueAllowChatParticipants' && Array.isArray(r?.chats)) {
+      allowChatCount += r.chats.length;
+    } else if (cls === 'PrivacyValueDisallowChatParticipants' && Array.isArray(r?.chats)) {
+      disallowChatCount += r.chats.length;
+    } else if (cls === 'PrivacyValueAllowCloseFriends') {
+      hasAllowCloseFriends = true;
+    } else if (cls === 'PrivacyValueAllowPremium') {
+      hasAllowPremium = true;
+    } else if (cls === 'PrivacyValueAllowBots') {
+      hasAllowBots = true;
+    } else if (cls === 'PrivacyValueDisallowBots') {
+      hasDisallowBots = true;
+    } else if (cls === 'PrivacyValueDisallowContacts') {
+      hasDisallowContacts = true;
     }
   }
 
   const extraTags: string[] = [];
   if (allowUsers.length > 0) extraTags.push(`+${allowUsers.length} 始终允许`);
   if (disallowUsers.length > 0) extraTags.push(`-${disallowUsers.length} 永不允许`);
+  if (allowChatCount > 0) extraTags.push(`+${allowChatCount} 个允许群组`);
+  if (disallowChatCount > 0) extraTags.push(`-${disallowChatCount} 个禁止群组`);
+  if (hasAllowCloseFriends) extraTags.push('+密友');
+  if (hasAllowPremium) extraTags.push('+Premium 会员');
+  if (hasAllowBots) extraTags.push('+机器人');
+  if (hasDisallowBots) extraTags.push('-机器人');
+  if (hasDisallowContacts) extraTags.push('-联系人');
   const summary = extraTags.length > 0 ? `${baseSummary}（${extraTags.join(' / ')}）` : baseSummary;
 
   return { mode, summary, allowUsers, disallowUsers };
 }
 
+export function extractPreservedExtraInputPrivacyRules(
+  existingRules: any[] = [],
+  targetMode: string = 'nobody'
+): Api.TypeInputPrivacyRule[] {
+  const preserved: Api.TypeInputPrivacyRule[] = [];
+  if (!Array.isArray(existingRules)) return preserved;
+  for (const r of existingRules) {
+    const cls = r?.className || r?.constructor?.name || '';
+    if (cls === 'PrivacyValueAllowChatParticipants' && targetMode !== 'everybody' && Array.isArray(r?.chats)) {
+      const chats = r.chats.filter((id: any) => id !== undefined && id !== null);
+      if (chats.length > 0) preserved.push(new Api.InputPrivacyValueAllowChatParticipants({ chats }));
+    } else if (cls === 'PrivacyValueDisallowChatParticipants' && targetMode !== 'nobody' && Array.isArray(r?.chats)) {
+      const chats = r.chats.filter((id: any) => id !== undefined && id !== null);
+      if (chats.length > 0) preserved.push(new Api.InputPrivacyValueDisallowChatParticipants({ chats }));
+    } else if (cls === 'PrivacyValueAllowCloseFriends' && targetMode !== 'everybody') {
+      preserved.push(new Api.InputPrivacyValueAllowCloseFriends());
+    } else if (cls === 'PrivacyValueAllowPremium' && targetMode !== 'everybody') {
+      preserved.push(new Api.InputPrivacyValueAllowPremium());
+    } else if (cls === 'PrivacyValueAllowBots' && targetMode !== 'everybody') {
+      preserved.push(new Api.InputPrivacyValueAllowBots());
+    } else if (cls === 'PrivacyValueDisallowBots' && targetMode !== 'nobody') {
+      preserved.push(new Api.InputPrivacyValueDisallowBots());
+    } else if (cls === 'PrivacyValueDisallowContacts' && targetMode === 'everybody') {
+      preserved.push(new Api.InputPrivacyValueDisallowContacts());
+    }
+  }
+  return preserved;
+}
+
 export function buildPrivacyInputRules(
   mode: string,
   allowUsers: Api.TypeInputUser[] = [],
-  disallowUsers: Api.TypeInputUser[] = []
+  disallowUsers: Api.TypeInputUser[] = [],
+  preservedExtraRules: Api.TypeInputPrivacyRule[] = []
 ): Api.TypeInputPrivacyRule[] {
   const rules: Api.TypeInputPrivacyRule[] = [];
   if (Array.isArray(allowUsers) && allowUsers.length > 0) {
@@ -21732,6 +21838,9 @@ export function buildPrivacyInputRules(
   }
   if (Array.isArray(disallowUsers) && disallowUsers.length > 0) {
     rules.push(new Api.InputPrivacyValueDisallowUsers({ users: disallowUsers }));
+  }
+  if (Array.isArray(preservedExtraRules) && preservedExtraRules.length > 0) {
+    rules.push(...preservedExtraRules);
   }
   if (mode === 'everybody') {
     rules.push(new Api.InputPrivacyValueAllowAll());
@@ -21749,7 +21858,18 @@ function extractDialogFilterTitle(rawTitle: any): string {
   return '未命名分组';
 }
 
-function serializeDialogFilter(f: any) {
+function serializeInputPeerToChatId(peer: any, selfUserId?: string): string {
+  if (!peer) return '';
+  if (peer.userId !== undefined) return `tg_${String(peer.userId)}`;
+  if (peer.chatId !== undefined) return `tg_-${String(peer.chatId)}`;
+  if (peer.channelId !== undefined) return `tg_-100${String(peer.channelId)}`;
+  if (peer.className === 'InputPeerSelf' && selfUserId) return `tg_${String(selfUserId)}`;
+  return '';
+}
+
+function serializeDialogFilter(f: any, selfUserId?: string) {
+  const toIdList = (arr: any): string[] =>
+    Array.isArray(arr) ? arr.map((p: any) => serializeInputPeerToChatId(p, selfUserId)).filter(Boolean) : [];
   return {
     id: Number(f.id),
     title: extractDialogFilterTitle(f.title),
@@ -21766,6 +21886,9 @@ function serializeDialogFilter(f: any) {
     pinnedCount: Array.isArray(f.pinnedPeers) ? f.pinnedPeers.length : 0,
     includeCount: Array.isArray(f.includePeers) ? f.includePeers.length : 0,
     excludeCount: Array.isArray(f.excludePeers) ? f.excludePeers.length : 0,
+    pinnedPeerIds: toIdList(f.pinnedPeers),
+    includePeerIds: toIdList(f.includePeers),
+    excludePeerIds: toIdList(f.excludePeers),
     isChatlist: (f.className || '').includes('DialogFilterChatlist'),
   };
 }
@@ -21793,6 +21916,7 @@ app.get('/api/telegram/user/settings', requireTenantAuth, async (req: Request, r
       client.invoke(new Api.account.GetAuthorizations()),
       client.invoke(new Api.account.GetNotifySettings({ peer: new Api.InputNotifyUsers() })),
       client.invoke(new Api.account.GetNotifySettings({ peer: new Api.InputNotifyChats() })),
+      client.invoke(new Api.account.GetNotifySettings({ peer: new Api.InputNotifyBroadcasts() })),
       client.invoke(new Api.messages.GetDialogFilters()),
       client.invoke(new Api.account.GetGlobalPrivacySettings()),
       client.invoke(new Api.account.GetAccountTTL()),
@@ -21805,6 +21929,7 @@ app.get('/api/telegram/user/settings', requireTenantAuth, async (req: Request, r
       authorizationsSettled,
       usersNotifySettled,
       chatsNotifySettled,
+      broadcastsNotifySettled,
       dialogFiltersSettled,
       globalPrivacySettled,
       accountTtlSettled,
@@ -21834,6 +21959,7 @@ app.get('/api/telegram/user/settings', requireTenantAuth, async (req: Request, r
     const authorizationsRes = authorizationsSettled.status === 'fulfilled' ? authorizationsSettled.value : null;
     const usersNotifyRes = usersNotifySettled.status === 'fulfilled' ? usersNotifySettled.value : null;
     const chatsNotifyRes = chatsNotifySettled.status === 'fulfilled' ? chatsNotifySettled.value : null;
+    const broadcastsNotifyRes = broadcastsNotifySettled.status === 'fulfilled' ? broadcastsNotifySettled.value : null;
     const dialogFiltersRes = dialogFiltersSettled.status === 'fulfilled' ? dialogFiltersSettled.value : null;
     const globalPrivacyRes = globalPrivacySettled.status === 'fulfilled' ? (globalPrivacySettled.value as any) : null;
     const accountTtlRes = accountTtlSettled.status === 'fulfilled' ? (accountTtlSettled.value as any) : null;
@@ -21901,7 +22027,7 @@ app.get('/api/telegram/user/settings', requireTenantAuth, async (req: Request, r
         : [];
     const folders = rawFilters
       .filter((f: any) => f && f.className !== 'DialogFilterDefault' && typeof f.id === 'number')
-      .map(serializeDialogFilter);
+      .map((f: any) => serializeDialogFilter(f, connected.userId));
 
     return res.json({
       ok: true,
@@ -21938,10 +22064,11 @@ app.get('/api/telegram/user/settings', requireTenantAuth, async (req: Request, r
       accountTtlDays: accountTtlRes && typeof accountTtlRes.days === 'number' ? Number(accountTtlRes.days) : undefined,
       sessions: authorizationsRes ? authList : undefined,
       notifications:
-        usersNotifyRes || chatsNotifyRes
+        usersNotifyRes || chatsNotifyRes || broadcastsNotifyRes
           ? {
               users: parseNotify(usersNotifyRes),
               chats: parseNotify(chatsNotifyRes),
+              broadcasts: parseNotify(broadcastsNotifyRes),
             }
           : undefined,
       folders: dialogFiltersRes ? folders : undefined,
@@ -21952,6 +22079,35 @@ app.get('/api/telegram/user/settings', requireTenantAuth, async (req: Request, r
       phone: (req.query.phone as string) || '',
       userId: (req.query.userId as string) || '',
     }, 500);
+  }
+});
+
+// Lightweight Dialog Filters endpoint for main ChatList folder tab sync
+app.get('/api/telegram/user/folders', requireTenantAuth, async (req: Request, res: Response) => {
+  try {
+    const accountId = (req.query.accountId as string) || (req.headers['x-account-id'] as string) || '';
+    const phone = (req.query.phone as string) || '';
+    const userId = (req.query.userId as string) || '';
+    const connected = resolveConnectedTelegramUser(accountId, phone, userId);
+    if (!connected || !connected.client) {
+      return res.status(400).json({ ok: false, error: '当前账号未在线连接 Telegram MTProto' });
+    }
+    const resFilters: any = await connected.client.invoke(new Api.messages.GetDialogFilters());
+    const rawFilters: any[] = Array.isArray(resFilters?.filters)
+      ? resFilters.filters
+      : Array.isArray(resFilters)
+        ? resFilters
+        : [];
+    const folders = rawFilters
+      .filter((f: any) => f && f.className !== 'DialogFilterDefault' && typeof f.id === 'number')
+      .map((f: any) => serializeDialogFilter(f, connected.userId));
+    return res.json({ ok: true, cloudSynced: true, folders });
+  } catch (err: any) {
+    return await handleMtprotoRouteError(res, err, {
+      accountId: (req.query.accountId as string) || (req.headers['x-account-id'] as string) || '',
+      phone: (req.query.phone as string) || '',
+      userId: (req.query.userId as string) || '',
+    }, 400);
   }
 });
 
@@ -22191,10 +22347,21 @@ app.post('/api/telegram/user/settings/privacy', requireTenantAuth, async (req: R
     const allowInputUsers = await resolveExceptionList(req.body?.allowUserRefs, '始终允许名单');
     const disallowInputUsers = await resolveExceptionList(req.body?.disallowUserRefs, '永不允许名单');
 
+    let existingCloudRules: any[] = [];
+    try {
+      const currentPrivacy: any = await connected.client.invoke(
+        new Api.account.GetPrivacy({ key: createInputPrivacyKey(rawKey) })
+      );
+      if (Array.isArray(currentPrivacy?.rules)) {
+        existingCloudRules = currentPrivacy.rules;
+      }
+    } catch {}
+    const preservedExtraRules = extractPreservedExtraInputPrivacyRules(existingCloudRules, mode);
+
     const result: any = await connected.client.invoke(
       new Api.account.SetPrivacy({
         key: createInputPrivacyKey(rawKey),
-        rules: buildPrivacyInputRules(mode, allowInputUsers, disallowInputUsers),
+        rules: buildPrivacyInputRules(mode, allowInputUsers, disallowInputUsers, preservedExtraRules),
       })
     );
 
@@ -22362,41 +22529,53 @@ app.post('/api/telegram/user/settings/notifications', requireTenantAuth, async (
     const accountId = (req.body?.accountId as string) || (req.headers['x-account-id'] as string) || '';
     const phone = (req.body?.phone as string) || '';
     const userId = (req.body?.userId as string) || '';
-    const scope: 'users' | 'chats' | 'both' = req.body?.scope || 'both';
+    const scope: 'users' | 'chats' | 'broadcasts' | 'both' | 'all' = req.body?.scope || 'both';
     const enabled = Boolean(req.body?.enabled);
     const previewText = req.body?.previewText !== false;
+    const preserveEnabled = Boolean(req.body?.preserveEnabled);
 
     const connected = resolveConnectedTelegramUser(accountId, phone, userId);
     if (!connected || !connected.client) {
       return res.status(400).json({ ok: false, error: '当前账号未在线连接 Telegram MTProto，无法同步云端通知设置。' });
     }
 
-    const inputSettings = new Api.InputPeerNotifySettings({
-      showPreviews: previewText,
-      silent: !enabled,
-      muteUntil: enabled ? 0 : 2147483647,
-    });
+    const nowSecCheck = Math.floor(Date.now() / 1000);
+    const targetPeers: Api.TypeInputNotifyPeer[] = [];
+    if (scope === 'users' || scope === 'both' || scope === 'all') {
+      targetPeers.push(new Api.InputNotifyUsers());
+    }
+    if (scope === 'chats' || scope === 'both' || scope === 'all') {
+      targetPeers.push(new Api.InputNotifyChats());
+    }
+    if (scope === 'broadcasts' || scope === 'all') {
+      targetPeers.push(new Api.InputNotifyBroadcasts());
+    }
 
-    if (scope === 'users' || scope === 'both') {
+    for (const notifyPeer of targetPeers) {
+      let peerEnabled = enabled;
+      if (preserveEnabled) {
+        try {
+          const cur: any = await connected.client.invoke(new Api.account.GetNotifySettings({ peer: notifyPeer }));
+          const curMute = Number(cur?.muteUntil || 0);
+          peerEnabled = !(Boolean(cur?.silent) || curMute > nowSecCheck);
+        } catch {}
+      }
       await connected.client.invoke(
         new Api.account.UpdateNotifySettings({
-          peer: new Api.InputNotifyUsers(),
-          settings: inputSettings,
+          peer: notifyPeer,
+          settings: new Api.InputPeerNotifySettings({
+            showPreviews: previewText,
+            silent: !peerEnabled,
+            muteUntil: peerEnabled ? 0 : 2147483647,
+          }),
         })
       );
     }
-    if (scope === 'chats' || scope === 'both') {
-      await connected.client.invoke(
-        new Api.account.UpdateNotifySettings({
-          peer: new Api.InputNotifyChats(),
-          settings: inputSettings,
-        })
-      );
-    }
 
-    const [usersNotifyRes, chatsNotifyRes] = await Promise.all([
+    const [usersNotifyRes, chatsNotifyRes, broadcastsNotifyRes] = await Promise.all([
       connected.client.invoke(new Api.account.GetNotifySettings({ peer: new Api.InputNotifyUsers() })),
       connected.client.invoke(new Api.account.GetNotifySettings({ peer: new Api.InputNotifyChats() })),
+      connected.client.invoke(new Api.account.GetNotifySettings({ peer: new Api.InputNotifyBroadcasts() })),
     ]);
 
     const nowSec = Math.floor(Date.now() / 1000);
@@ -22417,6 +22596,7 @@ app.post('/api/telegram/user/settings/notifications', requireTenantAuth, async (
       notifications: {
         users: parseNotify(usersNotifyRes),
         chats: parseNotify(chatsNotifyRes),
+        broadcasts: parseNotify(broadcastsNotifyRes),
       },
     });
   } catch (err: any) {
@@ -22461,23 +22641,56 @@ app.post('/api/telegram/user/settings/folders', requireTenantAuth, async (req: R
       while (usedIds.has(targetId) && targetId < 255) targetId += 1;
     }
 
-    const tlFilter = new Api.DialogFilter({
-      id: targetId,
-      title: new Api.TextWithEntities({ text: cleanTitle.slice(0, 12), entities: [] }),
-      emoticon: folder?.emoticon ?? existingObj?.emoticon,
-      color: folder?.color ?? existingObj?.color,
-      contacts: Boolean(folder?.contacts),
-      nonContacts: Boolean(folder?.nonContacts),
-      groups: Boolean(folder?.groups),
-      broadcasts: Boolean(folder?.broadcasts),
-      bots: Boolean(folder?.bots),
-      excludeMuted: Boolean(folder?.excludeMuted),
-      excludeRead: Boolean(folder?.excludeRead),
-      excludeArchived: Boolean(folder?.excludeArchived),
-      pinnedPeers: Array.isArray(existingObj?.pinnedPeers) ? existingObj.pinnedPeers : [],
-      includePeers: Array.isArray(existingObj?.includePeers) ? existingObj.includePeers : [],
-      excludePeers: Array.isArray(existingObj?.excludePeers) ? existingObj.excludePeers : [],
-    });
+    const resolveFilterPeers = async (peerIds: any, fallbackPeers: any[]) => {
+      if (!Array.isArray(peerIds)) return Array.isArray(fallbackPeers) ? fallbackPeers : [];
+      const resolved: any[] = [];
+      const seen = new Set<string>();
+      for (const rawId of peerIds) {
+        const cid = String(rawId || '').trim();
+        if (!cid || seen.has(cid)) continue;
+        seen.add(cid);
+        try {
+          const { inputPeer } = await resolveTelegramInputPeer(connected.client, cid, connected.userId);
+          if (inputPeer) resolved.push(inputPeer);
+        } catch {}
+      }
+      return resolved;
+    };
+
+    const pinnedPeers = await resolveFilterPeers(folder?.pinnedPeerIds, existingObj?.pinnedPeers);
+    const includePeers = await resolveFilterPeers(folder?.includePeerIds, existingObj?.includePeers);
+    const excludePeers = await resolveFilterPeers(folder?.excludePeerIds, existingObj?.excludePeers);
+    const isExistingChatlist = Boolean(
+      existingObj && String(existingObj.className || '').includes('DialogFilterChatlist')
+    );
+
+    const tlFilter = isExistingChatlist
+      ? new Api.DialogFilterChatlist({
+          id: targetId,
+          hasMyInvites: Boolean(existingObj?.hasMyInvites),
+          title: new Api.TextWithEntities({ text: cleanTitle.slice(0, 12), entities: [] }),
+          emoticon: folder?.emoticon ?? existingObj?.emoticon,
+          color: folder?.color ?? existingObj?.color,
+          pinnedPeers,
+          includePeers,
+        })
+      : new Api.DialogFilter({
+          id: targetId,
+          title: new Api.TextWithEntities({ text: cleanTitle.slice(0, 12), entities: [] }),
+          emoticon: folder?.emoticon ?? existingObj?.emoticon,
+          color: folder?.color ?? existingObj?.color,
+          contacts: Boolean(folder?.contacts),
+          nonContacts: Boolean(folder?.nonContacts),
+          groups: Boolean(folder?.groups),
+          broadcasts: Boolean(folder?.broadcasts),
+          bots: Boolean(folder?.bots),
+          excludeMuted: Boolean(folder?.excludeMuted),
+          excludeRead: Boolean(folder?.excludeRead),
+          excludeArchived: Boolean(folder?.excludeArchived),
+          pinnedPeers,
+          includePeers,
+          excludePeers,
+        });
 
     await connected.client.invoke(
       new Api.messages.UpdateDialogFilter({
@@ -22494,7 +22707,64 @@ app.post('/api/telegram/user/settings/folders', requireTenantAuth, async (req: R
         : [];
     const folders = updatedRaw
       .filter((f: any) => f && f.className !== 'DialogFilterDefault' && typeof f.id === 'number')
-      .map(serializeDialogFilter);
+      .map((f: any) => serializeDialogFilter(f, connected.userId));
+
+    return res.json({
+      ok: true,
+      cloudSynced: true,
+      folders,
+    });
+  } catch (err: any) {
+    return await handleMtprotoRouteError(res, err, {
+      accountId: (req.body?.accountId as string) || (req.headers['x-account-id'] as string) || '',
+      phone: (req.body?.phone as string) || '',
+      userId: (req.body?.userId as string) || '',
+    }, 400);
+  }
+});
+
+// 20.3.1h2 Reorder Official Telegram Dialog Folders (messages.UpdateDialogFiltersOrder)
+app.post('/api/telegram/user/settings/folders/order', requireTenantAuth, async (req: Request, res: Response) => {
+  try {
+    const accountId = (req.body?.accountId as string) || (req.headers['x-account-id'] as string) || '';
+    const phone = (req.body?.phone as string) || '';
+    const userId = (req.body?.userId as string) || '';
+    const rawOrder = Array.isArray(req.body?.order) ? req.body.order : [];
+    const customOrder = rawOrder.map((n: any) => Number(n)).filter((n: number) => Number.isInteger(n) && n >= 2);
+
+    if (customOrder.length === 0) {
+      return res.status(400).json({ ok: false, error: '文件夹排序参数不能为空' });
+    }
+
+    const connected = resolveConnectedTelegramUser(accountId, phone, userId);
+    if (!connected || !connected.client) {
+      return res.status(400).json({ ok: false, error: '当前账号未在线连接 Telegram MTProto，无法调整云端文件夹顺序。' });
+    }
+
+    const existingRes: any = await connected.client.invoke(new Api.messages.GetDialogFilters());
+    const existingRaw: any[] = Array.isArray(existingRes?.filters)
+      ? existingRes.filters
+      : Array.isArray(existingRes)
+        ? existingRes
+        : [];
+    const hasDefault = existingRaw.some((f: any) => f?.className === 'DialogFilterDefault' || Number(f?.id) === 0);
+    const orderPayload = hasDefault ? [0, ...customOrder] : customOrder;
+
+    await connected.client.invoke(
+      new Api.messages.UpdateDialogFiltersOrder({
+        order: orderPayload,
+      })
+    );
+
+    const updatedRes: any = await connected.client.invoke(new Api.messages.GetDialogFilters());
+    const updatedRaw: any[] = Array.isArray(updatedRes?.filters)
+      ? updatedRes.filters
+      : Array.isArray(updatedRes)
+        ? updatedRes
+        : [];
+    const folders = updatedRaw
+      .filter((f: any) => f && f.className !== 'DialogFilterDefault' && typeof f.id === 'number')
+      .map((f: any) => serializeDialogFilter(f, connected.userId));
 
     return res.json({
       ok: true,
@@ -22541,7 +22811,7 @@ app.delete('/api/telegram/user/settings/folders/:id', requireTenantAuth, async (
         : [];
     const folders = updatedRaw
       .filter((f: any) => f && f.className !== 'DialogFilterDefault' && typeof f.id === 'number')
-      .map(serializeDialogFilter);
+      .map((f: any) => serializeDialogFilter(f, connected.userId));
 
     return res.json({
       ok: true,
@@ -22873,14 +23143,31 @@ app.post('/api/telegram/user/dialogs/mute', requireTenantAuth, async (req: Reque
     }
 
     const { inputPeer } = await resolveTelegramInputPeer(connected.client, chatId, connected.userId);
+    let existingNotify: any = null;
+    try {
+      existingNotify = await connected.client.invoke(
+        new Api.account.GetNotifySettings({
+          peer: new Api.InputNotifyPeer({ peer: inputPeer }),
+        })
+      );
+    } catch {}
+    const notifySettingsPayload: Record<string, any> = {
+      silent: Boolean(muted),
+      muteUntil: muted ? 2147483647 : 0,
+    };
+    if (typeof existingNotify?.showPreviews === 'boolean') {
+      notifySettingsPayload.showPreviews = existingNotify.showPreviews;
+    }
+    if (typeof existingNotify?.storiesMuted === 'boolean') {
+      notifySettingsPayload.storiesMuted = existingNotify.storiesMuted;
+    }
+    if (typeof existingNotify?.storiesHideSender === 'boolean') {
+      notifySettingsPayload.storiesHideSender = existingNotify.storiesHideSender;
+    }
     await connected.client.invoke(
       new Api.account.UpdateNotifySettings({
         peer: new Api.InputNotifyPeer({ peer: inputPeer }),
-        settings: new Api.InputPeerNotifySettings({
-          silent: Boolean(muted),
-          muteUntil: muted ? 2147483647 : 0,
-          showPreviews: true,
-        }),
+        settings: new Api.InputPeerNotifySettings(notifySettingsPayload),
       })
     );
     patchConnectedDialogCache(connected, chatId, { isMuted: Boolean(muted) });
@@ -22905,7 +23192,7 @@ app.post('/api/telegram/user/dialogs/archive', requireTenantAuth, async (req: Re
     }
 
     const { inputPeer } = await resolveTelegramInputPeer(connected.client, chatId, connected.userId);
-    await connected.client.invoke(
+    const editRes: any = await connected.client.invoke(
       new Api.folders.EditPeerFolders({
         folderPeers: [
           new Api.InputFolderPeer({
@@ -22915,9 +23202,16 @@ app.post('/api/telegram/user/dialogs/archive', requireTenantAuth, async (req: Re
         ],
       })
     );
-    patchConnectedDialogCache(connected, chatId, { isArchived: Boolean(archived) });
+    let resolvedArchived = Boolean(archived);
+    const resUpdates: any[] = Array.isArray(editRes?.updates) ? editRes.updates : [];
+    for (const u of resUpdates) {
+      if (u instanceof Api.UpdateFolderPeers && Array.isArray(u.folderPeers) && u.folderPeers.length > 0) {
+        resolvedArchived = Number((u.folderPeers[0] as any)?.folderId) === 1;
+      }
+    }
+    patchConnectedDialogCache(connected, chatId, { isArchived: resolvedArchived });
 
-    return res.json({ ok: true, cloudSynced: true, archived: Boolean(archived) });
+    return res.json({ ok: true, cloudSynced: true, archived: resolvedArchived });
   } catch (err: any) {
     return await handleMtprotoRouteError(res, err, {
       accountId: (req.body?.accountId as string) || (req.headers['x-account-id'] as string) || '',
@@ -23101,7 +23395,7 @@ app.post('/api/telegram/user/dialogs/read', requireTenantAuth, async (req: Reque
 // 20.3.1s3 Batch Delete Messages in Telegram Cloud & DB (supports revoke: boolean + local failed items)
 app.post('/api/telegram/user/messages/batch-delete', requireTenantAuth, async (req: Request, res: Response) => {
   try {
-    const scope = resolveScopedAccountFromRequest(req, { allowBot: false });
+    const scope = resolveScopedAccountFromRequest(req, { allowBot: true });
     if (!scope.ok) {
       return res.status(scope.status).json({ ok: false, code: scope.code, error: scope.error });
     }
@@ -26339,7 +26633,7 @@ app.post('/api/telegram/autopilot/toggle', requireTenantAuth, (req: Request, res
 // Real-time MTProto NewMessage event listener for personal Telegram account
 export interface LocalIncomingUpdate {
   id: string;
-  type?: 'message' | 'edit' | 'delete' | 'read_outbox' | 'read_inbox' | 'dialog_pinned' | 'dialog_archived' | 'pin' | 'user_status' | 'peer_blocked' | 'reactions' | 'phone_call_ringing';
+  type?: 'message' | 'edit' | 'delete' | 'read_outbox' | 'read_inbox' | 'dialog_pinned' | 'dialogs_pinned_order' | 'dialog_unread_mark' | 'dialog_muted' | 'dialog_archived' | 'self_profile' | 'peer_profile' | 'chat_meta' | 'settings_updated' | 'folders_updated' | 'pin' | 'user_status' | 'peer_blocked' | 'reactions' | 'phone_call_ringing';
   telegramMessageId?: number;
   deletedMessageIds?: number[];
   readOutboxMaxId?: number;
@@ -26387,7 +26681,16 @@ export interface LocalIncomingUpdate {
   replyTo?: { id: string; telegramMessageId?: number; senderName?: string; text: string };
   isEdited?: boolean;
   isPinned?: boolean;
+  pinOrder?: number;
+  pinnedChatOrder?: string[];
+  folderId?: number;
+  unreadMark?: boolean;
+  isMuted?: boolean;
   isArchived?: boolean;
+  needsDialogRefresh?: boolean;
+  profileName?: string;
+  profileUsername?: string;
+  profileAvatarUrl?: string;
 }
 export const pendingLocalUpdates: LocalIncomingUpdate[] = [];
 
@@ -26804,6 +27107,16 @@ export function attachTelegramClientMessageListener(client: TelegramClient, phon
           isPinned: Boolean((message as any).pinned),
         };
         pushPendingLocalUpdate(realtimeUpdate);
+        const msgConnObj = connectedUserClients.get(accountId) || connectedUserClients.get(userId);
+        if (msgConnObj && Array.isArray(msgConnObj.dialogs)) {
+          const matchedCachedDlg: any = msgConnObj.dialogs.find(
+            (d: any) => d && (String(d.id) === canonicalChatId || String(d.rawId || '') === rawChatId)
+          );
+          if (matchedCachedDlg?.isArchived && !matchedCachedDlg?.isMuted) {
+            msgConnObj.dialogsFetchedAt = 0;
+            msgConnObj.dialogsInFlight = undefined;
+          }
+        }
 
         // Persist real-time MTProto message into unified conversation store so customer analysis/evolution/transcripts never read stale empty tables
         void upsertSyncedMessageToDb(realtimeUpdate, canonicalChatId, accountId);
@@ -27159,9 +27472,240 @@ ${memories.slice(-3).map((m: any) => `  * [${m.date}] ${m.topic}: ${m.summary}`)
       return '';
     };
 
+    let lastSelfProfileSyncAt = 0;
+    const peerMetaSyncAt = new Map<string, number>();
+
     client.addEventHandler(async (update: any) => {
       try {
         const accountId = `acc_tg_${userId}`;
+        if (update instanceof Api.UpdateUserName) {
+          const firstName = String(update.firstName || '').trim();
+          const lastName = String(update.lastName || '').trim();
+          const fullName = [firstName, lastName].filter(Boolean).join(' ').trim() || 'Telegram 用户';
+          const usernamesList = Array.isArray(update.usernames) ? update.usernames : [];
+          const primaryU =
+            usernamesList.find((u: any) => u?.active !== false && u?.editable && u?.username) ||
+            usernamesList.find((u: any) => u?.active !== false && u?.username);
+          const cleanU = primaryU?.username ? String(primaryU.username).replace(/^@/, '').trim() : '';
+          const formattedU = cleanU ? `@${cleanU}` : '';
+          const connObj = connectedUserClients.get(accountId) || connectedUserClients.get(userId);
+          if (String(update.userId) !== String(userId)) {
+            const targetUid = update.userId !== undefined ? String(update.userId) : '';
+            if (!targetUid) return;
+            const peerChatId = `tg_${targetUid}`;
+            let resolvedTitle: string | undefined = [firstName, lastName].filter(Boolean).join(' ').trim() || undefined;
+            try {
+              const { inputPeer } = await resolveTelegramInputPeer(client, peerChatId, userId);
+              const ent: any = await client.getEntity(inputPeer);
+              if (ent?.contact) {
+                const savedContactName = [ent?.firstName, ent?.lastName].filter(Boolean).join(' ').trim();
+                resolvedTitle = savedContactName || undefined;
+              }
+            } catch {}
+            patchConnectedDialogCache(connObj, peerChatId, {
+              ...(resolvedTitle ? { title: resolvedTitle } : {}),
+              username: cleanU,
+            });
+            pushPendingLocalUpdate({
+              id: `peername_${userId}_${targetUid}_${Date.now()}`,
+              type: 'peer_profile',
+              chatId: peerChatId,
+              accountId,
+              sender: 'peer',
+              senderName: resolvedTitle || formattedU || targetUid,
+              ...(resolvedTitle ? { profileName: resolvedTitle } : {}),
+              profileUsername: formattedU,
+              text: '',
+              timestamp: '',
+              createdAt: Date.now(),
+            });
+            return;
+          }
+          if (connObj) {
+            connObj.firstName = firstName;
+            connObj.lastName = lastName;
+            connObj.username = formattedU;
+            connObj.avatarInitial = fullName.slice(0, 2).toUpperCase();
+          }
+          try {
+            await db
+              .prepare('UPDATE telegram_user_sessions SET first_name = ?, username = ?, updated_at = ? WHERE user_id = ?')
+              .run(fullName, cleanU, Date.now(), String(userId));
+          } catch {}
+          pushPendingLocalUpdate({
+            id: `selfprof_${userId}_${Date.now()}`,
+            type: 'self_profile',
+            chatId: '',
+            accountId,
+            sender: 'me',
+            senderName: fullName,
+            profileName: fullName,
+            profileUsername: formattedU,
+            text: '',
+            timestamp: '',
+            createdAt: Date.now(),
+          });
+          return;
+        }
+
+        if (update instanceof Api.UpdateUser) {
+          const targetUid = update.userId !== undefined ? String(update.userId) : '';
+          if (!targetUid) return;
+          telegramAvatarCache.delete(targetUid);
+          telegramAvatarCache.delete(`acc_tg_${userId}:${targetUid}`);
+          telegramAvatarCache.delete(`${userId}:${targetUid}`);
+          telegramAvatarCache.delete(`shared:${targetUid}`);
+          if (targetUid !== String(userId)) {
+            const nowMs = Date.now();
+            const prevSync = peerMetaSyncAt.get(`u:${targetUid}`) || 0;
+            if (nowMs - prevSync >= 3000) {
+              peerMetaSyncAt.set(`u:${targetUid}`, nowMs);
+              if (peerMetaSyncAt.size > 300) {
+                const oldestKey = peerMetaSyncAt.keys().next().value;
+                if (oldestKey) peerMetaSyncAt.delete(oldestKey);
+              }
+              try {
+                const peerChatId = `tg_${targetUid}`;
+                const { inputPeer } = await resolveTelegramInputPeer(client, peerChatId, userId);
+                const peerEntity: any = await client.getEntity(inputPeer);
+                const fullName = [peerEntity?.firstName, peerEntity?.lastName].filter(Boolean).join(' ').trim();
+                const cleanU = peerEntity?.username ? String(peerEntity.username).replace(/^@/, '').trim() : '';
+                const formattedU = cleanU ? `@${cleanU}` : '';
+                const connObj = connectedUserClients.get(accountId) || connectedUserClients.get(userId);
+                patchConnectedDialogCache(connObj, peerChatId, {
+                  ...(fullName ? { title: fullName } : {}),
+                  username: cleanU,
+                });
+                pushPendingLocalUpdate({
+                  id: `peeruser_${userId}_${targetUid}_${nowMs}`,
+                  type: 'peer_profile',
+                  chatId: peerChatId,
+                  accountId,
+                  sender: 'peer',
+                  senderName: fullName || formattedU || targetUid,
+                  ...(fullName ? { profileName: fullName } : {}),
+                  profileUsername: formattedU,
+                  profileAvatarUrl: signTelegramResourceUrl(`/api/telegram/user/avatar/${targetUid}?v=${nowMs}`, accountId),
+                  text: '',
+                  timestamp: '',
+                  createdAt: nowMs,
+                });
+              } catch {}
+            }
+            return;
+          }
+          const nowMs = Date.now();
+          if (nowMs - lastSelfProfileSyncAt >= 3000) {
+            lastSelfProfileSyncAt = nowMs;
+            try {
+              const fullRes: any = await client.invoke(new Api.users.GetFullUser({ id: new Api.InputUserSelf() }));
+              const meU: any = Array.isArray(fullRes?.users)
+                ? fullRes.users.find((u: any) => u?.self || String(u?.id) === String(userId)) || fullRes.users[0]
+                : null;
+              if (meU) {
+                const firstName = String(meU.firstName || '').trim();
+                const lastName = String(meU.lastName || '').trim();
+                const fullName = [firstName, lastName].filter(Boolean).join(' ').trim() || 'Telegram 用户';
+                const cleanU = meU.username ? String(meU.username).replace(/^@/, '').trim() : '';
+                const formattedU = cleanU ? `@${cleanU}` : '';
+                const connObj = connectedUserClients.get(accountId) || connectedUserClients.get(userId);
+                if (connObj) {
+                  connObj.firstName = firstName;
+                  connObj.lastName = lastName;
+                  connObj.username = formattedU;
+                  connObj.avatarInitial = fullName.slice(0, 2).toUpperCase();
+                }
+                try {
+                  await db
+                    .prepare('UPDATE telegram_user_sessions SET first_name = ?, username = ?, updated_at = ? WHERE user_id = ?')
+                    .run(fullName, cleanU, Date.now(), String(userId));
+                } catch {}
+                pushPendingLocalUpdate({
+                  id: `selfuser_${userId}_${Date.now()}`,
+                  type: 'self_profile',
+                  chatId: '',
+                  accountId,
+                  sender: 'me',
+                  senderName: fullName,
+                  profileName: fullName,
+                  profileUsername: formattedU,
+                  profileAvatarUrl: signTelegramResourceUrl(`/api/telegram/user/avatar/${userId}?v=${Date.now()}`, accountId),
+                  text: '',
+                  timestamp: '',
+                  createdAt: Date.now(),
+                });
+              }
+            } catch {}
+          }
+          return;
+        }
+
+        if (update instanceof Api.UpdateChat || update instanceof Api.UpdateChannel) {
+          const isCh = update instanceof Api.UpdateChannel;
+          const rawEntityId = isCh
+            ? String((update as Api.UpdateChannel).channelId || '')
+            : String((update as Api.UpdateChat).chatId || '');
+          if (!rawEntityId) return;
+          const peerChatId = isCh ? `tg_-100${rawEntityId}` : `tg_-${rawEntityId}`;
+          const rawNumId = isCh ? `-100${rawEntityId}` : `-${rawEntityId}`;
+          const nowMs = Date.now();
+          const prevSync = peerMetaSyncAt.get(peerChatId) || 0;
+          if (nowMs - prevSync < 3000) return;
+          peerMetaSyncAt.set(peerChatId, nowMs);
+          if (peerMetaSyncAt.size > 300) {
+            const oldestKey = peerMetaSyncAt.keys().next().value;
+            if (oldestKey) peerMetaSyncAt.delete(oldestKey);
+          }
+          telegramAvatarCache.delete(rawNumId);
+          telegramAvatarCache.delete(`acc_tg_${userId}:${rawNumId}`);
+          telegramAvatarCache.delete(`${userId}:${rawNumId}`);
+          try {
+            const { inputPeer } = await resolveTelegramInputPeer(client, peerChatId, userId);
+            const ent: any = await client.getEntity(inputPeer);
+            const nextTitle = String(ent?.title || '').trim();
+            const cleanU = ent?.username ? String(ent.username).replace(/^@/, '').trim() : '';
+            const connObj = connectedUserClients.get(accountId) || connectedUserClients.get(userId);
+            patchConnectedDialogCache(connObj, peerChatId, {
+              ...(nextTitle ? { title: nextTitle } : {}),
+              ...(isCh ? { username: cleanU } : {}),
+            });
+            pushPendingLocalUpdate({
+              id: `chatmeta_${userId}_${rawNumId}_${nowMs}`,
+              type: 'chat_meta',
+              chatId: peerChatId,
+              accountId,
+              sender: 'peer',
+              senderName: nextTitle,
+              ...(nextTitle ? { profileName: nextTitle } : {}),
+              ...(isCh ? { profileUsername: cleanU ? `@${cleanU}` : '' } : {}),
+              profileAvatarUrl: signTelegramResourceUrl(`/api/telegram/user/avatar/${encodeURIComponent(rawNumId)}?v=${nowMs}`, accountId),
+              text: '',
+              timestamp: '',
+              createdAt: nowMs,
+            });
+          } catch {}
+          return;
+        }
+
+        if (
+          update instanceof Api.UpdateDialogFilter ||
+          update instanceof Api.UpdateDialogFilterOrder ||
+          update instanceof Api.UpdateDialogFilters
+        ) {
+          pushPendingLocalUpdate({
+            id: `fld_${userId}_${Date.now()}`,
+            type: 'folders_updated',
+            chatId: '',
+            accountId,
+            sender: 'peer',
+            senderName: '',
+            text: '',
+            timestamp: '',
+            createdAt: Date.now(),
+          });
+          return;
+        }
+
         if (update instanceof Api.UpdateEditMessage || update instanceof Api.UpdateEditChannelMessage) {
           const msgObj: any = update.message;
           if (!msgObj || !msgObj.id) return;
@@ -27185,8 +27729,14 @@ ${memories.slice(-3).map((m: any) => `  * [${m.date}] ${m.topic}: ${m.summary}`)
           try {
             const altChatId = peerChatId.replace(/^tg_/, '');
             await db
-              .prepare(`UPDATE messages SET text = CASE WHEN ? != '' THEN ? ELSE text END, is_edited = 1 WHERE (chat_id = ? OR chat_id = ?) AND telegram_message_id = ? AND account_id = ?`)
-              .run(editedText, editedText, peerChatId, altChatId, tgMsgId, accountId);
+              .prepare(
+                `UPDATE messages
+                 SET text = CASE WHEN ? != '' THEN ? ELSE text END,
+                     image_caption = CASE WHEN (is_image = 1 OR is_video = 1) THEN ? ELSE image_caption END,
+                     is_edited = 1
+                 WHERE (chat_id = ? OR chat_id = ?) AND telegram_message_id = ? AND account_id = ?`
+              )
+              .run(editedText, editedText, editedText, peerChatId, altChatId, tgMsgId, accountId);
           } catch {}
           return;
         }
@@ -27299,14 +27849,167 @@ ${memories.slice(-3).map((m: any) => `  * [${m.date}] ${m.topic}: ${m.summary}`)
           const innerPeer = (update.peer as any)?.peer;
           const peerChatId = resolveRawPeerChatId(innerPeer);
           if (!peerChatId) return;
-          patchConnectedDialogCache(connectedUserClients.get(accountId), peerChatId, {
-            isPinned: Boolean(update.pinned),
+          const nextPinned = Boolean(update.pinned);
+          const nextPinOrder = nextPinned ? -Date.now() : undefined;
+          const connObj = connectedUserClients.get(accountId) || connectedUserClients.get(userId);
+          patchConnectedDialogCache(connObj, peerChatId, {
+            isPinned: nextPinned,
+            pinOrder: nextPinOrder,
           });
           pushPendingLocalUpdate({
             id: `dlgpin_${userId}_${peerChatId}_${Date.now()}`,
             type: 'dialog_pinned',
             chatId: peerChatId,
-            isPinned: Boolean(update.pinned),
+            isPinned: nextPinned,
+            ...(nextPinOrder !== undefined ? { pinOrder: nextPinOrder } : {}),
+            accountId,
+            sender: 'peer',
+            senderName: '',
+            text: '',
+            timestamp: '',
+            createdAt: Date.now(),
+          });
+          return;
+        }
+
+        if (update instanceof Api.UpdatePinnedDialogs) {
+          const folderId = Number(update.folderId || 0);
+          const isArchivedTarget = folderId === 1;
+          const connObj = connectedUserClients.get(accountId) || connectedUserClients.get(userId);
+          if (Array.isArray(update.order)) {
+            const orderedChatIds = update.order
+              .map((dp: any) => (dp?.peer ? resolveRawPeerChatId(dp.peer) : ''))
+              .filter(Boolean);
+            const orderIndexMap = new Map<string, number>();
+            orderedChatIds.forEach((cid: string, idx: number) => orderIndexMap.set(cid, idx));
+            let hasMissingCachedDialog = false;
+            if (connObj && Array.isArray(connObj.dialogs)) {
+              const existingIdSet = new Set(connObj.dialogs.map((d: any) => String(d?.id || '')));
+              hasMissingCachedDialog = orderedChatIds.some((cid: string) => !existingIdSet.has(cid));
+              connObj.dialogs = connObj.dialogs.map((d: any) => {
+                if (!d || Boolean(d.isArchived) !== isArchivedTarget) return d;
+                const cid = String(d.id || '');
+                const idx = orderIndexMap.get(cid);
+                return idx !== undefined
+                  ? { ...d, isPinned: true, pinOrder: idx }
+                  : { ...d, isPinned: false, pinOrder: undefined };
+              });
+            }
+            pushPendingLocalUpdate({
+              id: `dlgpinorder_${userId}_${folderId}_${Date.now()}`,
+              type: 'dialogs_pinned_order',
+              chatId: '',
+              folderId,
+              pinnedChatOrder: orderedChatIds,
+              ...(hasMissingCachedDialog ? { needsDialogRefresh: true } : {}),
+              accountId,
+              sender: 'peer',
+              senderName: '',
+              text: '',
+              timestamp: '',
+              createdAt: Date.now(),
+            });
+          } else {
+            if (connObj) {
+              connObj.dialogsFetchedAt = 0;
+              connObj.dialogsInFlight = undefined;
+            }
+            pushPendingLocalUpdate({
+              id: `dlgpinorder_${userId}_${folderId}_${Date.now()}`,
+              type: 'dialogs_pinned_order',
+              chatId: '',
+              folderId,
+              needsDialogRefresh: true,
+              accountId,
+              sender: 'peer',
+              senderName: '',
+              text: '',
+              timestamp: '',
+              createdAt: Date.now(),
+            });
+          }
+          return;
+        }
+
+        if (update instanceof Api.UpdateDialogUnreadMark) {
+          const innerPeer = (update.peer as any)?.peer;
+          const peerChatId = resolveRawPeerChatId(innerPeer);
+          if (!peerChatId) return;
+          const nextUnreadMark = Boolean(update.unread);
+          const connObj = connectedUserClients.get(accountId) || connectedUserClients.get(userId);
+          const rawPeerId = peerChatId.replace(/^tg_/, '');
+          const cachedDlg = connObj?.dialogs?.find(
+            (d: any) => d && (String(d.id) === peerChatId || String(d.rawId || '') === rawPeerId)
+          );
+          const nextUnread = nextUnreadMark ? Math.max(1, Number(cachedDlg?.unreadCount || 0)) : 0;
+          patchConnectedDialogCache(connObj, peerChatId, { unreadCount: nextUnread });
+          pushPendingLocalUpdate({
+            id: `dlgunread_${userId}_${peerChatId}_${Date.now()}`,
+            type: 'dialog_unread_mark',
+            chatId: peerChatId,
+            unreadCount: nextUnread,
+            unreadMark: nextUnreadMark,
+            accountId,
+            sender: 'peer',
+            senderName: '',
+            text: '',
+            timestamp: '',
+            createdAt: Date.now(),
+          });
+          return;
+        }
+
+        if (update instanceof Api.UpdateNotifySettings) {
+          if (!(update.peer instanceof Api.NotifyPeer)) {
+            if (
+              update.peer instanceof Api.NotifyUsers ||
+              update.peer instanceof Api.NotifyChats ||
+              update.peer instanceof Api.NotifyBroadcasts
+            ) {
+              pushPendingLocalUpdate({
+                id: `setnotify_${userId}_${Date.now()}`,
+                type: 'settings_updated',
+                chatId: '',
+                accountId,
+                sender: 'peer',
+                senderName: '',
+                text: '',
+                timestamp: '',
+                createdAt: Date.now(),
+              });
+            }
+            return;
+          }
+          const peerChatId = resolveRawPeerChatId((update.peer as any).peer);
+          if (!peerChatId) return;
+          const notify: any = update.notifySettings || {};
+          const nowSec = Math.floor(Date.now() / 1000);
+          const nextMuted = Boolean(
+            notify.silent ||
+              (notify.muteUntil !== undefined && notify.muteUntil !== null && Number(notify.muteUntil) > nowSec)
+          );
+          const connObj = connectedUserClients.get(accountId) || connectedUserClients.get(userId);
+          patchConnectedDialogCache(connObj, peerChatId, { isMuted: nextMuted });
+          pushPendingLocalUpdate({
+            id: `dlgmute_${userId}_${peerChatId}_${Date.now()}`,
+            type: 'dialog_muted',
+            chatId: peerChatId,
+            isMuted: nextMuted,
+            accountId,
+            sender: 'peer',
+            senderName: '',
+            text: '',
+            timestamp: '',
+            createdAt: Date.now(),
+          });
+          return;
+        }
+
+        if (update instanceof Api.UpdatePrivacy) {
+          pushPendingLocalUpdate({
+            id: `setpriv_${userId}_${Date.now()}`,
+            type: 'settings_updated',
+            chatId: '',
             accountId,
             sender: 'peer',
             senderName: '',
@@ -27318,14 +28021,19 @@ ${memories.slice(-3).map((m: any) => `  * [${m.date}] ${m.topic}: ${m.summary}`)
         }
 
         if (update instanceof Api.UpdateFolderPeers) {
-          const connObj = connectedUserClients.get(accountId);
+          const connObj = connectedUserClients.get(accountId) || connectedUserClients.get(userId);
           const folderUpdates = Array.isArray(update.folderPeers) ? update.folderPeers : [];
+          let hasMissingCachedDialog = false;
           for (const fp of folderUpdates) {
             const peerChatId = resolveRawPeerChatId((fp as any)?.peer);
             if (!peerChatId) continue;
             const nextArchived = Number((fp as any)?.folderId) === 1;
             const rawPeerId = peerChatId.replace(/^tg_/, '');
             if (connObj && Array.isArray(connObj.dialogs)) {
+              const existed = connObj.dialogs.some(
+                (d: any) => d && (String(d.id) === peerChatId || String(d.rawId || '') === rawPeerId)
+              );
+              if (!existed) hasMissingCachedDialog = true;
               connObj.dialogs = connObj.dialogs.map((d: any) =>
                 d && (String(d.id) === peerChatId || String(d.rawId || '') === rawPeerId)
                   ? { ...d, isArchived: nextArchived }
@@ -27337,6 +28045,7 @@ ${memories.slice(-3).map((m: any) => `  * [${m.date}] ${m.topic}: ${m.summary}`)
               type: 'dialog_archived',
               chatId: peerChatId,
               isArchived: nextArchived,
+              ...(hasMissingCachedDialog ? { needsDialogRefresh: true } : {}),
               accountId,
               sender: 'peer',
               senderName: '',

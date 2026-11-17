@@ -57,6 +57,8 @@ import {
   reconnectTelegramSessionsApi,
   pollIncomingTelegramUpdates,
   ackIncomingTelegramUpdates,
+  fetchTelegramDialogFiltersApi,
+  TelegramOfficialDialogFilter,
   getLocalMessages,
   saveLocalMessage,
   setLocalMessages,
@@ -182,6 +184,7 @@ function mapCloudDialogToChat(d: any, accountId: string, existing?: Chat): Chat 
     isChannel,
     isBot,
     isPinned: Boolean(d.isPinned),
+    pinOrder: Boolean(d.isPinned) && typeof d.pinOrder === 'number' ? d.pinOrder : undefined,
     isArchived: Boolean(d.isArchived),
     isMuted: Boolean(d.isMuted),
     isVerified: Boolean(d.isVerified),
@@ -814,6 +817,8 @@ export default function App() {
   const [contacts, setContacts] = useState<TelegramContact[]>(() => {
     return getScopedContacts(activeAccountId || accounts[0]?.id || '');
   });
+  const [foldersByAccount, setFoldersByAccount] = useState<Record<string, TelegramOfficialDialogFilter[]>>({});
+  const [telegramSettingsRefreshNonce, setTelegramSettingsRefreshNonce] = useState(0);
 
   const initialCallsAccId = activeAccountId || accounts[0]?.id || '';
   const callRecordsScopeRef = useRef<string>(initialCallsAccId);
@@ -1676,11 +1681,12 @@ export default function App() {
             continue;
           }
           delete recentDialogOverridesRef.current[overrideKey];
-        } else if ((meta?.isCached || isStaleComparedToMutation) && existing) {
+        } else if (isStaleComparedToMutation && existing) {
           nextAccountChats.push({
             ...mapped,
             isArchived: Boolean(existing.isArchived),
             isPinned: Boolean(existing.isPinned),
+            pinOrder: Boolean(existing.isPinned) ? existing.pinOrder : undefined,
             isMuted: Boolean(existing.isMuted),
             unreadCount: existing.unreadCount,
             title: existing.title,
@@ -1862,6 +1868,11 @@ export default function App() {
           handleSyncContacts(res.contacts, targetAccId);
         }
       }).catch(() => {});
+      fetchTelegramDialogFiltersApi(targetAccId).then((fRes) => {
+        if (isMounted && fRes.ok && Array.isArray(fRes.folders)) {
+          setFoldersByAccount((prev) => ({ ...prev, [targetAccId]: fRes.folders! }));
+        }
+      }).catch(() => {});
     }
 
     const LOW_FREQUENCY_DIALOG_FALLBACK_INTERVAL_MS = 180_000;
@@ -2007,7 +2018,7 @@ export default function App() {
         hiddenAt = Date.now();
         return;
       }
-      if (document.visibilityState === 'visible' && hiddenAt > 0 && Date.now() - hiddenAt >= 120_000) {
+      if (document.visibilityState === 'visible' && hiddenAt > 0 && Date.now() - hiddenAt >= 25_000) {
         hiddenAt = 0;
         const lastAt = lastDialogsSyncAtRef.current[targetAccId] || 0;
         if (Date.now() - lastAt >= DIALOG_MIN_REFRESH_GAP_MS) {
@@ -2556,6 +2567,23 @@ export default function App() {
               const targetBucketKey = msgBucketKey(targetAccountId, targetChatId);
               const editedTgId = typeof upd.telegramMessageId === 'number' ? upd.telegramMessageId : undefined;
               const newText = String(upd.text || '');
+              const currentBucketList = getBucketMessages(messagesMapRef.current, targetAccountId, targetChatId);
+              const latestBucketMsg = currentBucketList.length > 0 ? currentBucketList[currentBucketList.length - 1] : undefined;
+              let editedLatestSummary: string | null = null;
+              if (
+                latestBucketMsg &&
+                ((editedTgId !== undefined && latestBucketMsg.telegramMessageId === editedTgId) ||
+                  (upd.messageId && latestBucketMsg.id === upd.messageId))
+              ) {
+                const hasVisualMedia = Boolean(
+                  latestBucketMsg.isImage || latestBucketMsg.imageUrl || latestBucketMsg.isVideo || latestBucketMsg.videoUrl
+                );
+                editedLatestSummary = formatChatMessageSummary({
+                  ...latestBucketMsg,
+                  text: newText,
+                  ...(hasVisualMedia ? { imageCaption: newText } : {}),
+                });
+              }
               setMessagesMap((prev) => {
                 const list = getBucketMessages(prev, targetAccountId, targetChatId);
                 if (list.length === 0) return prev;
@@ -2566,13 +2594,28 @@ export default function App() {
                     (upd.messageId && m.id === upd.messageId)
                   ) {
                     changed = true;
-                    return { ...m, text: newText, isEdited: true };
+                    const hasVisualMedia = Boolean(m.isImage || m.imageUrl || m.isVideo || m.videoUrl);
+                    return {
+                      ...m,
+                      text: newText,
+                      ...(hasVisualMedia ? { imageCaption: newText } : {}),
+                      isEdited: true,
+                    };
                   }
                   return m;
                 });
                 if (!changed) return prev;
                 return { ...prev, [targetBucketKey]: updated };
               });
+              if (editedLatestSummary !== null) {
+                setChats((prev) =>
+                  prev.map((c) =>
+                    c.id === targetChatId && c.accountId === targetAccountId
+                      ? { ...c, lastMessage: editedLatestSummary! }
+                      : c
+                  )
+                );
+              }
               return;
             }
 
@@ -2596,6 +2639,7 @@ export default function App() {
                     const chatPart = k.includes('::') ? k.split('::').slice(1).join('::') : k;
                     return !chatPart.startsWith('tg_-100') && !chatPart.startsWith('-100');
                   });
+              const deletedLastSummaryByChat: Record<string, { summary: string; needsDialogRefresh: boolean }> = {};
               for (const key of candidateKeysForRecord) {
                 const list = refSnapshot[key];
                 if (!Array.isArray(list) || list.length === 0) continue;
@@ -2603,6 +2647,15 @@ export default function App() {
                 list.filter(matchesDeletedTgId).forEach((m) =>
                   recordDeletedMessageId(m.id, targetAccountId, m.chatId || chatKey)
                 );
+                const lastBeforeDelete = list[list.length - 1];
+                if (lastBeforeDelete && matchesDeletedTgId(lastBeforeDelete)) {
+                  const remaining = list.filter((m) => !matchesDeletedTgId(m));
+                  const nextLast = remaining.length > 0 ? remaining[remaining.length - 1] : undefined;
+                  deletedLastSummaryByChat[chatKey] = {
+                    summary: nextLast ? formatChatMessageSummary(nextLast) : '暂无消息',
+                    needsDialogRefresh: !nextLast,
+                  };
+                }
               }
               setMessagesMap((prev) => {
                 const next = { ...prev };
@@ -2626,6 +2679,19 @@ export default function App() {
                 }
                 return anyChanged ? next : prev;
               });
+              const summaryEntries = Object.entries(deletedLastSummaryByChat);
+              if (summaryEntries.length > 0) {
+                setChats((prev) =>
+                  prev.map((c) => {
+                    if (c.accountId !== targetAccountId) return c;
+                    const hit = deletedLastSummaryByChat[c.id];
+                    return hit ? { ...c, lastMessage: hit.summary } : c;
+                  })
+                );
+                if (summaryEntries.some(([, v]) => v.needsDialogRefresh) && targetAccountId === currentAccId) {
+                  void triggerAccountDialogRefreshRef.current?.(targetAccountId, { force: true });
+                }
+              }
               return;
             }
 
@@ -2659,6 +2725,7 @@ export default function App() {
 
             if (updType === 'dialog_pinned') {
               const nextPinned = Boolean(upd.isPinned);
+              const nextPinOrder = nextPinned ? (typeof upd.pinOrder === 'number' ? upd.pinOrder : -Date.now()) : undefined;
               const override = recentDialogOverridesRef.current[msgBucketKey(targetAccountId, targetChatId)];
               if (
                 override &&
@@ -2671,7 +2738,82 @@ export default function App() {
               setChats((prev) =>
                 prev.map((c) =>
                   c.id === targetChatId && c.accountId === targetAccountId
-                    ? { ...c, isPinned: nextPinned }
+                    ? { ...c, isPinned: nextPinned, pinOrder: nextPinOrder }
+                    : c
+                )
+              );
+              return;
+            }
+
+            if (updType === 'dialogs_pinned_order') {
+              if (upd.needsDialogRefresh && targetAccountId === currentAccId) {
+                void triggerAccountDialogRefreshRef.current?.(targetAccountId, { force: true });
+              }
+              if (Array.isArray(upd.pinnedChatOrder)) {
+                const isArchivedTarget = Number(upd.folderId || 0) === 1;
+                const orderIndexMap = new Map<string, number>();
+                (upd.pinnedChatOrder as string[]).forEach((cid, idx) => orderIndexMap.set(String(cid), idx));
+                setChats((prev) =>
+                  prev.map((c) => {
+                    if (c.accountId !== targetAccountId || Boolean(c.isArchived) !== isArchivedTarget) return c;
+                    const nextIdx = orderIndexMap.get(c.id);
+                    const nextPinned = nextIdx !== undefined;
+                    const override = recentDialogOverridesRef.current[msgBucketKey(targetAccountId, c.id)];
+                    if (
+                      override &&
+                      Date.now() - override.updatedAt < 15_000 &&
+                      override.isPinned !== undefined &&
+                      override.isPinned !== nextPinned
+                    ) {
+                      return c;
+                    }
+                    return {
+                      ...c,
+                      isPinned: nextPinned,
+                      pinOrder: nextPinned ? nextIdx : undefined,
+                    };
+                  })
+                );
+              }
+              return;
+            }
+
+            if (updType === 'dialog_unread_mark') {
+              const nextUnreadMark = Boolean(upd.unreadMark);
+              const override = recentDialogOverridesRef.current[msgBucketKey(targetAccountId, targetChatId)];
+              if (
+                override &&
+                Date.now() - override.updatedAt < 15_000 &&
+                override.unreadCount !== undefined &&
+                (override.unreadCount > 0) !== nextUnreadMark
+              ) {
+                return;
+              }
+              setChats((prev) =>
+                prev.map((c) =>
+                  c.id === targetChatId && c.accountId === targetAccountId
+                    ? { ...c, unreadCount: nextUnreadMark ? Math.max(1, c.unreadCount || 0) : 0 }
+                    : c
+                )
+              );
+              return;
+            }
+
+            if (updType === 'dialog_muted') {
+              const nextMuted = Boolean(upd.isMuted);
+              const override = recentDialogOverridesRef.current[msgBucketKey(targetAccountId, targetChatId)];
+              if (
+                override &&
+                Date.now() - override.updatedAt < 15_000 &&
+                override.isMuted !== undefined &&
+                override.isMuted !== nextMuted
+              ) {
+                return;
+              }
+              setChats((prev) =>
+                prev.map((c) =>
+                  c.id === targetChatId && c.accountId === targetAccountId
+                    ? { ...c, isMuted: nextMuted }
                     : c
                 )
               );
@@ -2690,6 +2832,12 @@ export default function App() {
               ) {
                 return;
               }
+              const existsInCurrent = currentChats.some(
+                (c) => c.id === targetChatId && c.accountId === targetAccountId
+              );
+              if ((!existsInCurrent || upd.needsDialogRefresh) && targetAccountId === currentAccId) {
+                void triggerAccountDialogRefreshRef.current?.(targetAccountId, { force: true });
+              }
               setChats((prev) =>
                 prev.map((c) =>
                   c.id === targetChatId && c.accountId === targetAccountId
@@ -2697,6 +2845,94 @@ export default function App() {
                     : c
                 )
               );
+              return;
+            }
+
+            if (updType === 'self_profile') {
+              const nextName =
+                typeof upd.profileName === 'string' && upd.profileName.trim()
+                  ? upd.profileName.trim()
+                  : undefined;
+              const nextUsername = typeof upd.profileUsername === 'string' ? upd.profileUsername : undefined;
+              const nextAvatarUrl =
+                typeof upd.profileAvatarUrl === 'string' && upd.profileAvatarUrl
+                  ? upd.profileAvatarUrl
+                  : undefined;
+              setAccounts((prev) =>
+                prev.map((a) =>
+                  a.id === targetAccountId
+                    ? {
+                        ...a,
+                        ...(nextName ? { name: nextName, avatarInitial: nextName.slice(0, 2).toUpperCase() } : {}),
+                        ...(nextUsername !== undefined ? { username: nextUsername } : {}),
+                        ...(nextAvatarUrl ? { avatarUrl: nextAvatarUrl } : {}),
+                      }
+                    : a
+                )
+              );
+              return;
+            }
+
+            if (updType === 'folders_updated') {
+              if (targetAccountId.startsWith('acc_tg_')) {
+                fetchTelegramDialogFiltersApi(targetAccountId)
+                  .then((fRes) => {
+                    if (fRes.ok && Array.isArray(fRes.folders)) {
+                      setFoldersByAccount((prev) => ({ ...prev, [targetAccountId]: fRes.folders! }));
+                    }
+                  })
+                  .catch(() => {});
+              }
+              if (targetAccountId === activeAccountIdRef.current) {
+                setTelegramSettingsRefreshNonce((n) => n + 1);
+              }
+              return;
+            }
+
+            if (updType === 'peer_profile' || updType === 'chat_meta') {
+              const nextTitle =
+                typeof upd.profileName === 'string' && upd.profileName.trim() ? upd.profileName.trim() : undefined;
+              const nextUsername = typeof upd.profileUsername === 'string' ? upd.profileUsername : undefined;
+              const nextAvatar =
+                typeof upd.profileAvatarUrl === 'string' && upd.profileAvatarUrl ? upd.profileAvatarUrl : undefined;
+              setChats((prev) =>
+                prev.map((c) =>
+                  c.id === targetChatId && c.accountId === targetAccountId
+                    ? {
+                        ...c,
+                        ...(nextTitle ? { title: nextTitle, avatarInitial: nextTitle.slice(0, 2).toUpperCase() } : {}),
+                        ...(nextUsername !== undefined ? { username: nextUsername.replace(/^@/, '') } : {}),
+                        ...(nextAvatar ? { avatarUrl: nextAvatar } : {}),
+                      }
+                    : c
+                )
+              );
+              if (updType === 'peer_profile' && targetAccountId === activeAccountIdRef.current) {
+                setContacts((prev) => {
+                  let changed = false;
+                  const next = prev.map((ct) => {
+                    if (ct.id !== targetChatId) return ct;
+                    changed = true;
+                    return {
+                      ...ct,
+                      ...(nextTitle ? { name: nextTitle } : {}),
+                      ...(nextUsername !== undefined ? { username: nextUsername.replace(/^@/, '') } : {}),
+                      ...(nextAvatar ? { avatarUrl: nextAvatar } : {}),
+                    };
+                  });
+                  if (changed) {
+                    saveScopedContacts(next, targetAccountId);
+                  }
+                  return changed ? next : prev;
+                });
+              }
+              return;
+            }
+
+            if (updType === 'settings_updated') {
+              if (targetAccountId === activeAccountIdRef.current) {
+                setTelegramSettingsRefreshNonce((n) => n + 1);
+              }
               return;
             }
 
@@ -3089,8 +3325,15 @@ export default function App() {
 
             const summaryText = formatChatMessageSummary(incomingMsg);
             const incomingEpochSec = Math.floor((incomingMsg.createdAt || Date.now()) / 1000);
-            const hasChatInList = currentChats.some((c) => c.id === targetChatId && c.accountId === targetAccountId);
-            if (!hasChatInList && targetChatId.startsWith('tg_') && targetAccountId === currentAccId) {
+            const matchedExistingChat = currentChats.find(
+              (c) => c.id === targetChatId && c.accountId === targetAccountId
+            );
+            const hasChatInList = Boolean(matchedExistingChat);
+            if (
+              (!hasChatInList || (matchedExistingChat?.isArchived && !matchedExistingChat?.isMuted)) &&
+              targetChatId.startsWith('tg_') &&
+              targetAccountId === currentAccId
+            ) {
               void triggerAccountDialogRefreshRef.current?.(targetAccountId);
             }
 
@@ -3334,6 +3577,7 @@ export default function App() {
               ...c,
               lastMessage: formatChatMessageSummary(fullMessage),
               lastTime: fullMessage.timestamp,
+              lastDate: Math.max(c.lastDate || 0, Math.floor((fullMessage.createdAt || Date.now()) / 1000)),
             }
           : c
       )
@@ -4594,7 +4838,7 @@ export default function App() {
     setChats((prev) =>
       prev.map((c) =>
         c.id === chatId && (!targetAccountId || c.accountId === targetAccountId)
-          ? { ...c, isPinned: nextPinned }
+          ? { ...c, isPinned: nextPinned, pinOrder: nextPinned ? -Date.now() : undefined }
           : c
       )
     );
@@ -5055,6 +5299,8 @@ export default function App() {
             setIsMultiAccountOpen(true);
           }}
           onRefreshMediaUrls={handleRefreshMediaUrls}
+          customFolders={activeAccountId ? (foldersByAccount[activeAccountId] || []) : []}
+          contactChatIds={new Set(contacts.filter((ct) => ct.isContact !== false).map((ct) => ct.id))}
         />
 
         {/* 3. Official Telegram Center Main Chat Workbench Pane (flex-1) */}
@@ -5370,6 +5616,8 @@ export default function App() {
       {/* 18. Official Telegram Account & Client Settings Modal */}
       <TelegramSettingsModal
         isOpen={isTelegramSettingsOpen}
+        refreshSignal={telegramSettingsRefreshNonce}
+        accountChats={chats.filter((c) => !activeAccountId || c.accountId === activeAccountId)}
         onClose={() => setIsTelegramSettingsOpen(false)}
         currentAccount={currentAccount}
         onUpdateAccount={handleUpdateCurrentAccount}
@@ -5380,6 +5628,11 @@ export default function App() {
         clientPrefs={clientPrefs}
         onUpdateClientPrefs={setClientPrefs}
         onBlockStatusChanged={handleContactBlockChanged}
+        onFoldersChanged={(folders, accId) => {
+          const targetId = accId || activeAccountId;
+          if (!targetId) return;
+          setFoldersByAccount((prev) => ({ ...prev, [targetId]: folders }));
+        }}
       />
 
       {/* 22. Member Authentication Gate Modal */}

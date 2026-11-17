@@ -42,6 +42,7 @@ export interface Chat {
   sourceLang: string;
   targetLang: string;
   isPinned?: boolean;
+  pinOrder?: number;
   memberCount?: number;
   onlineCount?: number;
   isChannel?: boolean;

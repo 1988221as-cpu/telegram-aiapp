@@ -3676,6 +3676,9 @@ export interface TelegramOfficialDialogFilter {
   pinnedCount: number;
   includeCount: number;
   excludeCount: number;
+  pinnedPeerIds?: string[];
+  includePeerIds?: string[];
+  excludePeerIds?: string[];
   isChatlist: boolean;
 }
 
@@ -3745,6 +3748,7 @@ export interface TelegramOfficialSettingsResponse {
   notifications?: {
     users: { enabled: boolean; silent: boolean; muteUntil: number; showPreviews: boolean };
     chats: { enabled: boolean; silent: boolean; muteUntil: number; showPreviews: boolean };
+    broadcasts?: { enabled: boolean; silent: boolean; muteUntil: number; showPreviews: boolean };
   };
   folders?: TelegramOfficialDialogFilter[];
 }
@@ -3977,9 +3981,10 @@ export async function terminateTelegramSessionApi(payload: {
 export async function updateTelegramNotificationsApi(payload: {
   accountId?: string;
   phone?: string;
-  scope?: 'users' | 'chats' | 'both';
+  scope?: 'users' | 'chats' | 'broadcasts' | 'both' | 'all';
   enabled: boolean;
   previewText: boolean;
+  preserveEnabled?: boolean;
 }): Promise<{
   ok: boolean;
   cloudSynced?: boolean;
@@ -4012,6 +4017,9 @@ export async function saveTelegramDialogFilterApi(payload: {
     excludeMuted?: boolean;
     excludeRead?: boolean;
     excludeArchived?: boolean;
+    pinnedPeerIds?: string[];
+    includePeerIds?: string[];
+    excludePeerIds?: string[];
   };
 }): Promise<{ ok: boolean; cloudSynced?: boolean; folders?: TelegramOfficialDialogFilter[]; error?: string }> {
   try {
@@ -4023,6 +4031,23 @@ export async function saveTelegramDialogFilterApi(payload: {
     return await res.json();
   } catch (err: any) {
     return { ok: false, error: err.message || '保存云端文件夹失败' };
+  }
+}
+
+export async function reorderTelegramDialogFiltersApi(payload: {
+  accountId?: string;
+  phone?: string;
+  order: number[];
+}): Promise<{ ok: boolean; cloudSynced?: boolean; folders?: TelegramOfficialDialogFilter[]; error?: string }> {
+  try {
+    const res = await fetchWithTimeout('/api/telegram/user/settings/folders/order', {
+      method: 'POST',
+      headers: getAuthHeaders(payload.accountId),
+      body: JSON.stringify(payload),
+    }, 15000);
+    return await res.json();
+  } catch (err: any) {
+    return { ok: false, error: err.message || '调整云端文件夹顺序失败' };
   }
 }
 
@@ -4043,6 +4068,23 @@ export async function deleteTelegramDialogFilterApi(payload: {
     return await res.json();
   } catch (err: any) {
     return { ok: false, error: err.message || '删除云端文件夹失败' };
+  }
+}
+
+export async function fetchTelegramDialogFiltersApi(accountId?: string): Promise<{
+  ok: boolean;
+  cloudSynced?: boolean;
+  folders?: TelegramOfficialDialogFilter[];
+  error?: string;
+}> {
+  try {
+    const query = accountId ? `?accountId=${encodeURIComponent(accountId)}` : '';
+    const res = await fetchWithTimeout(`/api/telegram/user/folders${query}`, {
+      headers: getAuthHeaders(accountId),
+    }, 15000);
+    return await res.json();
+  } catch (err: any) {
+    return { ok: false, error: err?.message || '拉取云端对话文件夹失败' };
   }
 }
 

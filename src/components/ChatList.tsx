@@ -30,6 +30,7 @@ import {
   isSignedResourceUrlExpiringSoon,
   refreshSignedResourceUrlsApi,
   ensureFreshSignedResourceUrl,
+  TelegramOfficialDialogFilter,
 } from '../services/apiService';
 
 export function formatChatSubtitle(chat: Chat): string {
@@ -81,6 +82,8 @@ interface ChatListProps {
   onReconnectAccount?: () => void;
   onReloginCurrentAccount?: () => void;
   onRefreshMediaUrls?: (urls: string[]) => Promise<Record<string, string>>;
+  customFolders?: TelegramOfficialDialogFilter[];
+  contactChatIds?: Set<string>;
 }
 
 interface ContextMenuState {
@@ -108,6 +111,8 @@ export const ChatList: React.FC<ChatListProps> = ({
   onReconnectAccount,
   onReloginCurrentAccount,
   onRefreshMediaUrls,
+  customFolders = [],
+  contactChatIds,
 }) => {
   // 1. Resizable Width State with Persistence
   const [width, setWidth] = useState<number>(() => {
@@ -125,7 +130,18 @@ export const ChatList: React.FC<ChatListProps> = ({
   const startXRef = useRef(0);
   const startWidthRef = useRef(280);
 
-  const [activeFolder, setActiveFolder] = useState<'all' | 'unread' | 'personal' | 'groups' | 'channels' | 'bots' | 'archived'>('all');
+  const [activeFolder, setActiveFolder] = useState<
+    'all' | 'unread' | 'personal' | 'groups' | 'channels' | 'bots' | 'archived' | `folder:${number}`
+  >('all');
+
+  useEffect(() => {
+    if (activeFolder.startsWith('folder:')) {
+      const fid = Number(activeFolder.slice(7));
+      if (!customFolders.some((f) => f.id === fid)) {
+        setActiveFolder('all');
+      }
+    }
+  }, [activeFolder, customFolders]);
   const [isArchivedBoxVisible, setIsArchivedBoxVisible] = useState<boolean>(() => {
     try {
       return localStorage.getItem('tg_pro_show_archived_box') !== 'false';
@@ -325,7 +341,38 @@ export const ChatList: React.FC<ChatListProps> = ({
 
   // Filtered Chats
   const archivedCount = chats.filter((c) => c.isArchived).length;
-  const unreadCount = chats.filter((c) => c.unreadCount > 0).length;
+  const unreadCount = chats.filter((c) => !c.isArchived && c.unreadCount > 0).length;
+
+  const matchesDialogFilter = useCallback(
+    (c: Chat, f: TelegramOfficialDialogFilter, hasSearchQuery: boolean): boolean => {
+      if (Array.isArray(f.excludePeerIds) && f.excludePeerIds.includes(c.id)) return false;
+      if (!hasSearchQuery && f.excludeArchived && c.isArchived) return false;
+      const explicitlyIncluded =
+        (Array.isArray(f.pinnedPeerIds) && f.pinnedPeerIds.includes(c.id)) ||
+        (Array.isArray(f.includePeerIds) && f.includePeerIds.includes(c.id));
+      if (explicitlyIncluded) return true;
+      if (!hasSearchQuery && f.excludeMuted && c.isMuted) return false;
+      if (!hasSearchQuery && f.excludeRead && c.unreadCount <= 0) return false;
+      const isBot = Boolean(c.isBot);
+      const isChannel = Boolean(c.isChannel);
+      const isGroup = Boolean(c.isGroup);
+      const isPrivate = !isBot && !isChannel && !isGroup;
+      const isContact = isPrivate && Boolean(contactChatIds?.has(c.id));
+      const isNonContact = isPrivate && !isContact;
+      return Boolean(
+        (f.bots && isBot) ||
+          (f.broadcasts && isChannel) ||
+          (f.groups && isGroup) ||
+          (f.contacts && isContact) ||
+          (f.nonContacts && isNonContact)
+      );
+    },
+    [contactChatIds]
+  );
+
+  const activeCustomFolder = activeFolder.startsWith('folder:')
+    ? customFolders.find((f) => f.id === Number(activeFolder.slice(7))) || null
+    : null;
 
   const filteredChats = chats.filter((c) => {
     const q = searchQuery.toLowerCase().trim();
@@ -340,6 +387,10 @@ export const ChatList: React.FC<ChatListProps> = ({
           (qDigits.length > 0 && c.phone.replace(/[\s\-\(\)\.+]/g, '').toLowerCase().includes(qDigits))));
 
     if (!matchesSearch) return false;
+
+    if (activeCustomFolder) {
+      return matchesDialogFilter(c, activeCustomFolder, Boolean(q));
+    }
 
     // Folder category filtering
     if (activeFolder === 'archived') return Boolean(c.isArchived);
@@ -356,10 +407,30 @@ export const ChatList: React.FC<ChatListProps> = ({
     return true;
   });
 
-  // Sort: Pinned chats first, then by last message/active
+  // Sort: In custom folders use folder-specific pinnedPeerIds first; otherwise Pinned chats first (by official pinOrder), then by lastDate descending
   const sortedChats = [...filteredChats].sort((a, b) => {
-    if (a.isPinned && !b.isPinned) return -1;
-    if (!a.isPinned && b.isPinned) return 1;
+    if (activeCustomFolder && Array.isArray(activeCustomFolder.pinnedPeerIds) && activeCustomFolder.pinnedPeerIds.length > 0) {
+      const aFolderPinIdx = activeCustomFolder.pinnedPeerIds.indexOf(a.id);
+      const bFolderPinIdx = activeCustomFolder.pinnedPeerIds.indexOf(b.id);
+      const aInFolderPin = aFolderPinIdx !== -1;
+      const bInFolderPin = bFolderPinIdx !== -1;
+      if (aInFolderPin !== bInFolderPin) return aInFolderPin ? -1 : 1;
+      if (aInFolderPin && bInFolderPin && aFolderPinIdx !== bFolderPinIdx) {
+        return aFolderPinIdx - bFolderPinIdx;
+      }
+    } else if (!activeCustomFolder) {
+      const aPinned = Boolean(a.isPinned);
+      const bPinned = Boolean(b.isPinned);
+      if (aPinned !== bPinned) return aPinned ? -1 : 1;
+      if (aPinned && bPinned) {
+        const aOrder = typeof a.pinOrder === 'number' ? a.pinOrder : Number.MAX_SAFE_INTEGER;
+        const bOrder = typeof b.pinOrder === 'number' ? b.pinOrder : Number.MAX_SAFE_INTEGER;
+        if (aOrder !== bOrder) return aOrder - bOrder;
+      }
+    }
+    const aDate = typeof a.lastDate === 'number' ? a.lastDate : 0;
+    const bDate = typeof b.lastDate === 'number' ? b.lastDate : 0;
+    if (aDate !== bDate) return bDate - aDate;
     return 0;
   });
 
@@ -535,6 +606,30 @@ export const ChatList: React.FC<ChatListProps> = ({
         >
           机器人
         </button>
+
+        {customFolders.map((folder) => {
+          const folderKey = `folder:${folder.id}` as const;
+          const folderUnread = chats.filter((c) => matchesDialogFilter(c, folder, false) && c.unreadCount > 0).length;
+          return (
+            <button
+              key={folder.id}
+              onClick={() => setActiveFolder(folderKey)}
+              className={`px-2.5 py-1 rounded-lg transition-all cursor-pointer whitespace-nowrap shrink-0 flex items-center gap-1 border ${
+                activeFolder === folderKey
+                  ? 'text-[#0284c7] dark:text-[#2ba0ff] aurora:text-[#5eead4] font-semibold bg-[#e8f3ff] dark:bg-[#13253b] aurora:bg-[#112e37] border-[#bfdbfe]/70 dark:border-[#2ba0ff]/30 aurora:border-[#2dd4bf]/35'
+                  : 'border-transparent text-[#64748b] dark:text-[#7f95ab] aurora:text-[#7e9aa5] hover:text-[#0f172a] dark:hover:text-white aurora:hover:text-[#ecf6f8] hover:bg-[#f1f5f9] dark:hover:bg-[#0e1726] aurora:hover:bg-[#132129]'
+              }`}
+              title={folder.title}
+            >
+              <span>{folder.title}</span>
+              {folderUnread > 0 && (
+                <span className="px-1.5 py-0.2 rounded-full text-[10px] bg-[#2ba0ff] aurora:bg-[#14b8a6] text-white font-bold leading-none tabular-nums">
+                  {folderUnread}
+                </span>
+              )}
+            </button>
+          );
+        })}
 
         {archivedCount > 0 && (
           <button

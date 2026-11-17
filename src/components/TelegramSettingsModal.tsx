@@ -29,7 +29,7 @@ import {
   ShieldAlert,
   ShieldCheck,
 } from 'lucide-react';
-import { Account, AppThemeMode, TelegramContact } from '../types';
+import { Account, AppThemeMode, Chat, TelegramContact } from '../types';
 import {
   updateTelegramUserProfileApi,
   fetchTelegramUserSettingsApi,
@@ -43,6 +43,7 @@ import {
   terminateTelegramSessionApi,
   updateTelegramNotificationsApi,
   saveTelegramDialogFilterApi,
+  reorderTelegramDialogFiltersApi,
   deleteTelegramDialogFilterApi,
   fetchTelegramBlockedContactsApi,
   unblockTelegramUserContactApi,
@@ -98,6 +99,9 @@ interface TelegramSettingsModalProps {
   clientPrefs?: TelegramClientPrefs;
   onUpdateClientPrefs?: (updated: TelegramClientPrefs) => void;
   onBlockStatusChanged?: (contactId: string, isBlocked: boolean) => void;
+  onFoldersChanged?: (folders: TelegramOfficialDialogFilter[], accountId?: string) => void;
+  refreshSignal?: number;
+  accountChats?: Chat[];
 }
 
 function formatUnixTimestamp(ts?: number): string {
@@ -126,6 +130,9 @@ export const TelegramSettingsModal: React.FC<TelegramSettingsModalProps> = ({
   clientPrefs: externalPrefs,
   onUpdateClientPrefs,
   onBlockStatusChanged,
+  onFoldersChanged,
+  refreshSignal,
+  accountChats = [],
 }) => {
   const [activeTab, setActiveTab] = useState<'profile' | 'privacy' | 'notifications' | 'appearance' | 'folders'>('profile');
 
@@ -189,10 +196,16 @@ export const TelegramSettingsModal: React.FC<TelegramSettingsModalProps> = ({
     excludeMuted: boolean;
     excludeRead: boolean;
     excludeArchived: boolean;
+    includePeerIds: string[];
+    excludePeerIds: string[];
+    isChatlist?: boolean;
   } | null>(null);
+  const [folderPeerSearch, setFolderPeerSearch] = useState('');
+  const [folderPeerPickerMode, setFolderPeerPickerMode] = useState<'none' | 'include' | 'exclude'>('none');
 
   const currentAccountIdRef = useRef<string | undefined>(currentAccount?.id);
   currentAccountIdRef.current = currentAccount?.id;
+  const lastHandledRefreshSignalRef = useRef<number>(refreshSignal || 0);
 
   const [localPrefs, setLocalPrefs] = useState<TelegramClientPrefs>(() => loadStoredClientPrefs(currentAccount?.id));
   const effectivePrefs = externalPrefs || localPrefs;
@@ -210,24 +223,32 @@ export const TelegramSettingsModal: React.FC<TelegramSettingsModalProps> = ({
     }
   };
 
-  const loadOfficialCloudSettings = async () => {
+  const loadOfficialCloudSettings = async (options?: { silent?: boolean } | React.SyntheticEvent) => {
+    const silent = Boolean(options && typeof options === 'object' && 'silent' in options && options.silent);
     if (!currentAccount) {
       setCloudSettings(null);
       setCloudError('当前尚未登录/关联任何在线 Telegram 账号，请先在左侧点击「+ 添加账号」登录您的 Telegram 账号后再修改云端设置。');
       return;
     }
     const targetAccountId = currentAccount.id;
-    setIsLoadingCloud(true);
-    setCloudError('');
+    if (!silent) {
+      setIsLoadingCloud(true);
+      setCloudError('');
+    }
     try {
       const res = await fetchTelegramUserSettingsApi(targetAccountId, currentAccount.phone);
       if (currentAccountIdRef.current !== targetAccountId) return;
       if (!res.ok) {
-        setCloudSettings(null);
-        setCloudError(res.error || '拉取 Telegram 官方云端设置失败');
+        if (!silent) {
+          setCloudSettings(null);
+          setCloudError(res.error || '拉取 Telegram 官方云端设置失败');
+        }
         return;
       }
       setCloudSettings(res);
+      if (Array.isArray(res.folders)) {
+        onFoldersChanged?.(res.folders, targetAccountId);
+      }
       if (res.profile) {
         setName(res.profile.name);
         setUsername(res.profile.username);
@@ -311,10 +332,21 @@ export const TelegramSettingsModal: React.FC<TelegramSettingsModalProps> = ({
     setCloudError('');
     setBlockedUsers([]);
     setEditingFolder(null);
+    setFolderPeerSearch('');
+    setFolderPeerPickerMode('none');
     setLocalPrefs(loadStoredClientPrefs(currentAccount?.id));
+    lastHandledRefreshSignalRef.current = refreshSignal || 0;
     loadOfficialCloudSettings();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isOpen, currentAccount?.id]);
+
+  useEffect(() => {
+    const sig = refreshSignal || 0;
+    if (!isOpen || sig <= lastHandledRefreshSignalRef.current) return;
+    lastHandledRefreshSignalRef.current = sig;
+    void loadOfficialCloudSettings({ silent: true });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isOpen, refreshSignal]);
 
   if (!isOpen) return null;
 
@@ -675,9 +707,10 @@ export const TelegramSettingsModal: React.FC<TelegramSettingsModalProps> = ({
   };
 
   const handleUpdateNotifications = async (
-    scope: 'users' | 'chats' | 'both',
+    scope: 'users' | 'chats' | 'broadcasts' | 'both' | 'all',
     enabled: boolean,
-    previewText: boolean
+    previewText: boolean,
+    preserveEnabled = false
   ) => {
     setActionBusy(true);
     setActionFeedback(null);
@@ -688,6 +721,7 @@ export const TelegramSettingsModal: React.FC<TelegramSettingsModalProps> = ({
         scope,
         enabled,
         previewText,
+        preserveEnabled,
       });
       if (!res.ok || !res.notifications) {
         setActionFeedback({ type: 'err', text: res.error || '同步通知设置至云端失败' });
@@ -719,9 +753,42 @@ export const TelegramSettingsModal: React.FC<TelegramSettingsModalProps> = ({
         setActionFeedback({ type: 'err', text: res.error || '保存对话文件夹失败' });
         return;
       }
-      setCloudSettings((prev) => (prev ? { ...prev, folders: res.folders || [] } : prev));
+      const nextFolders = res.folders || [];
+      setCloudSettings((prev) => (prev ? { ...prev, folders: nextFolders } : prev));
+      onFoldersChanged?.(nextFolders, currentAccount?.id);
       setEditingFolder(null);
+      setFolderPeerSearch('');
+      setFolderPeerPickerMode('none');
       setActionFeedback({ type: 'ok', text: '对话文件夹已真实同步至 Telegram 云端' });
+    } finally {
+      setActionBusy(false);
+    }
+  };
+
+  const handleMoveFolder = async (folderId: number, direction: -1 | 1) => {
+    const list = cloudSettings?.folders || [];
+    const idx = list.findIndex((f) => f.id === folderId);
+    const swapIdx = idx + direction;
+    if (idx < 0 || swapIdx < 0 || swapIdx >= list.length) return;
+    const reordered = [...list];
+    const [moved] = reordered.splice(idx, 1);
+    reordered.splice(swapIdx, 0, moved);
+    setActionBusy(true);
+    setActionFeedback(null);
+    try {
+      const res = await reorderTelegramDialogFiltersApi({
+        accountId: currentAccount?.id,
+        phone: currentAccount?.phone,
+        order: reordered.map((f) => f.id),
+      });
+      if (!res.ok) {
+        setActionFeedback({ type: 'err', text: res.error || '调整文件夹顺序失败' });
+        return;
+      }
+      const nextFolders = res.folders || reordered;
+      setCloudSettings((prev) => (prev ? { ...prev, folders: nextFolders } : prev));
+      onFoldersChanged?.(nextFolders, currentAccount?.id);
+      setActionFeedback({ type: 'ok', text: '文件夹顺序已同步至 Telegram 云端' });
     } finally {
       setActionBusy(false);
     }
@@ -740,7 +807,9 @@ export const TelegramSettingsModal: React.FC<TelegramSettingsModalProps> = ({
         setActionFeedback({ type: 'err', text: res.error || '删除对话文件夹失败' });
         return;
       }
-      setCloudSettings((prev) => (prev ? { ...prev, folders: res.folders || [] } : prev));
+      const nextFolders = res.folders || [];
+      setCloudSettings((prev) => (prev ? { ...prev, folders: nextFolders } : prev));
+      onFoldersChanged?.(nextFolders, currentAccount?.id);
       setActionFeedback({ type: 'ok', text: '已从 Telegram 云端删除该对话文件夹' });
     } finally {
       setActionBusy(false);
@@ -1855,7 +1924,7 @@ export const TelegramSettingsModal: React.FC<TelegramSettingsModalProps> = ({
                 </div>
 
                 <div className="p-3.5 rounded-xl bg-[#f8fafc] dark:bg-[#0e1726]/85 aurora:bg-[#101c23]/90 border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] flex items-center justify-between">
-                  <div className="font-semibold text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8]">群组与频道通知</div>
+                  <div className="font-semibold text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8]">群组新消息通知</div>
                   <input
                     type="checkbox"
                     disabled={actionBusy || !cloudSettings?.notifications}
@@ -1872,6 +1941,26 @@ export const TelegramSettingsModal: React.FC<TelegramSettingsModalProps> = ({
                 </div>
 
                 <div className="p-3.5 rounded-xl bg-[#f8fafc] dark:bg-[#0e1726]/85 aurora:bg-[#101c23]/90 border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] flex items-center justify-between">
+                  <div className="font-semibold text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8]">频道新消息通知</div>
+                  <input
+                    type="checkbox"
+                    disabled={actionBusy || !cloudSettings?.notifications}
+                    checked={Boolean(cloudSettings?.notifications?.broadcasts?.enabled)}
+                    onChange={(e) =>
+                      handleUpdateNotifications(
+                        'broadcasts',
+                        e.target.checked,
+                        Boolean(
+                          cloudSettings?.notifications?.broadcasts?.showPreviews ??
+                            cloudSettings?.notifications?.users?.showPreviews
+                        )
+                      )
+                    }
+                    className="w-4 h-4 accent-[#2481cc] dark:accent-[#2ba0ff] aurora:accent-[#14b8a6] rounded cursor-pointer disabled:opacity-40"
+                  />
+                </div>
+
+                <div className="p-3.5 rounded-xl bg-[#f8fafc] dark:bg-[#0e1726]/85 aurora:bg-[#101c23]/90 border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] flex items-center justify-between">
                   <div className="font-semibold text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8]">消息内容预览</div>
                   <input
                     type="checkbox"
@@ -1879,9 +1968,10 @@ export const TelegramSettingsModal: React.FC<TelegramSettingsModalProps> = ({
                     checked={Boolean(cloudSettings?.notifications?.users?.showPreviews)}
                     onChange={(e) =>
                       handleUpdateNotifications(
-                        'both',
+                        'all',
                         Boolean(cloudSettings?.notifications?.users?.enabled),
-                        e.target.checked
+                        e.target.checked,
+                        true
                       )
                     }
                     className="w-4 h-4 accent-[#2481cc] dark:accent-[#2ba0ff] aurora:accent-[#14b8a6] rounded cursor-pointer disabled:opacity-40"
@@ -1961,7 +2051,9 @@ export const TelegramSettingsModal: React.FC<TelegramSettingsModalProps> = ({
                   {cloudSettings && !editingFolder && (
                     <button
                       type="button"
-                      onClick={() =>
+                      onClick={() => {
+                        setFolderPeerSearch('');
+                        setFolderPeerPickerMode('none');
                         setEditingFolder({
                           title: '',
                           contacts: true,
@@ -1972,8 +2064,11 @@ export const TelegramSettingsModal: React.FC<TelegramSettingsModalProps> = ({
                           excludeMuted: false,
                           excludeRead: false,
                           excludeArchived: true,
-                        })
-                      }
+                          includePeerIds: [],
+                          excludePeerIds: [],
+                          isChatlist: false,
+                        });
+                      }}
                       className="px-2.5 py-1.5 rounded-lg bg-[#2481cc] hover:bg-[#1d6fb3] dark:bg-[#2ba0ff] dark:hover:bg-[#1e8ee8] aurora:bg-[#0d9488] aurora:hover:bg-[#0f766e] text-white text-[11px] font-medium flex items-center gap-1 cursor-pointer shrink-0 transition-colors"
                     >
                       <Plus className="w-3.5 h-3.5" />
@@ -1984,8 +2079,15 @@ export const TelegramSettingsModal: React.FC<TelegramSettingsModalProps> = ({
 
                 {editingFolder && (
                   <form onSubmit={handleSaveFolder} className="p-3.5 rounded-xl bg-[#f8fafc] dark:bg-[#0e1726]/85 aurora:bg-[#101c23]/90 space-y-3 border border-[#2481cc]/35 dark:border-[#2ba0ff]/35 aurora:border-[#2dd4bf]/35">
-                    <div className="font-semibold text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8]">
-                      {editingFolder.id ? '编辑云端文件夹' : '新建云端文件夹'}
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="font-semibold text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8]">
+                        {editingFolder.id ? '编辑云端文件夹' : '新建云端文件夹'}
+                      </div>
+                      {editingFolder.isChatlist && (
+                        <span className="px-2 py-0.5 rounded bg-[#e8f3ff] dark:bg-[#2ba0ff]/15 aurora:bg-[#112d36] text-[#0284c7] dark:text-[#7cc4ff] aurora:text-[#5eead4] text-[10px] font-medium">
+                          分享型对话文件夹
+                        </span>
+                      )}
                     </div>
                     <input
                       type="text"
@@ -1996,32 +2098,137 @@ export const TelegramSettingsModal: React.FC<TelegramSettingsModalProps> = ({
                       placeholder="文件夹名称（最多 12 个字符）"
                       className="w-full px-3 py-2 text-xs rounded-lg bg-white dark:bg-[#08101a] aurora:bg-[#081014] text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] placeholder-[#94a3b8] dark:placeholder-[#4e657e] aurora:placeholder-[#5a7782] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] focus:outline-none focus:border-[#2481cc] dark:focus:border-[#2ba0ff] aurora:focus:border-[#2dd4bf]"
                     />
-                    <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 text-[11px] text-[#334155] dark:text-[#b4c6d8] aurora:text-[#b7d0d8]">
-                      {([
-                        ['contacts', '包含联系人'],
-                        ['nonContacts', '包含非联系人'],
-                        ['groups', '包含群组'],
-                        ['broadcasts', '包含频道'],
-                        ['bots', '包含机器人'],
-                        ['excludeMuted', '排除已静音'],
-                        ['excludeRead', '排除已读'],
-                        ['excludeArchived', '排除已归档'],
-                      ] as const).map(([field, label]) => (
-                        <label key={field} className="flex items-center gap-1.5 cursor-pointer select-none">
+                    {!editingFolder.isChatlist && (
+                      <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 text-[11px] text-[#334155] dark:text-[#b4c6d8] aurora:text-[#b7d0d8]">
+                        {([
+                          ['contacts', '包含联系人'],
+                          ['nonContacts', '包含非联系人'],
+                          ['groups', '包含群组'],
+                          ['broadcasts', '包含频道'],
+                          ['bots', '包含机器人'],
+                          ['excludeMuted', '排除已静音'],
+                          ['excludeRead', '排除已读'],
+                          ['excludeArchived', '排除已归档'],
+                        ] as const).map(([field, label]) => (
+                          <label key={field} className="flex items-center gap-1.5 cursor-pointer select-none">
+                            <input
+                              type="checkbox"
+                              checked={editingFolder[field]}
+                              onChange={(e) => setEditingFolder({ ...editingFolder, [field]: e.target.checked })}
+                              className="w-3.5 h-3.5 accent-[#2481cc] dark:accent-[#2ba0ff] aurora:accent-[#14b8a6] rounded"
+                            />
+                            <span>{label}</span>
+                          </label>
+                        ))}
+                      </div>
+                    )}
+
+                    {/* 额外包含 / 排除特定会话选择器 */}
+                    <div className="space-y-2 pt-1 border-t border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34]">
+                      <div className="flex flex-wrap items-center gap-2 text-[11px]">
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setFolderPeerPickerMode((cur) => (cur === 'include' ? 'none' : 'include'))
+                          }
+                          className={`px-2.5 py-1 rounded-lg border cursor-pointer transition-colors ${
+                            folderPeerPickerMode === 'include'
+                              ? 'bg-[#e8f3ff] dark:bg-[#2ba0ff]/15 aurora:bg-[#112d36] border-[#2481cc] dark:border-[#2ba0ff] aurora:border-[#2dd4bf] text-[#0284c7] dark:text-[#7cc4ff] aurora:text-[#5eead4] font-medium'
+                              : 'bg-white dark:bg-[#08101a] aurora:bg-[#081014] border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] text-[#475569] dark:text-[#b4c6d8] aurora:text-[#b7d0d8]'
+                          }`}
+                        >
+                          包含特定会话 ({editingFolder.includePeerIds.length})
+                        </button>
+                        {!editingFolder.isChatlist && (
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setFolderPeerPickerMode((cur) => (cur === 'exclude' ? 'none' : 'exclude'))
+                            }
+                            className={`px-2.5 py-1 rounded-lg border cursor-pointer transition-colors ${
+                              folderPeerPickerMode === 'exclude'
+                                ? 'bg-rose-500/10 border-rose-500/40 text-rose-600 dark:text-rose-400 aurora:text-rose-400 font-medium'
+                                : 'bg-white dark:bg-[#08101a] aurora:bg-[#081014] border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] text-[#475569] dark:text-[#b4c6d8] aurora:text-[#b7d0d8]'
+                            }`}
+                          >
+                            排除特定会话 ({editingFolder.excludePeerIds.length})
+                          </button>
+                        )}
+                      </div>
+
+                      {folderPeerPickerMode !== 'none' && (
+                        <div className="p-2.5 rounded-lg bg-white dark:bg-[#08101a] aurora:bg-[#081014] border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] space-y-2">
                           <input
-                            type="checkbox"
-                            checked={editingFolder[field]}
-                            onChange={(e) => setEditingFolder({ ...editingFolder, [field]: e.target.checked })}
-                            className="w-3.5 h-3.5 accent-[#2481cc] dark:accent-[#2ba0ff] aurora:accent-[#14b8a6] rounded"
+                            type="text"
+                            value={folderPeerSearch}
+                            onChange={(e) => setFolderPeerSearch(e.target.value)}
+                            placeholder="搜索会话名称或 @username..."
+                            className="w-full px-2.5 py-1.5 text-[11px] rounded-md bg-[#f8fafc] dark:bg-[#0d1726] aurora:bg-[#0e1920] text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] focus:outline-none"
                           />
-                          <span>{label}</span>
-                        </label>
-                      ))}
+                          <div className="max-h-36 overflow-y-auto space-y-1">
+                            {accountChats
+                              .filter((c) => {
+                                if (!c.id.startsWith('tg_')) return false;
+                                const q = folderPeerSearch.trim().toLowerCase();
+                                if (!q) return true;
+                                return (
+                                  c.title.toLowerCase().includes(q) ||
+                                  (c.username || '').toLowerCase().includes(q)
+                                );
+                              })
+                              .slice(0, 80)
+                              .map((c) => {
+                                const targetField = folderPeerPickerMode === 'include' ? 'includePeerIds' : 'excludePeerIds';
+                                const otherField = folderPeerPickerMode === 'include' ? 'excludePeerIds' : 'includePeerIds';
+                                const isChecked = editingFolder[targetField].includes(c.id);
+                                return (
+                                  <label
+                                    key={c.id}
+                                    className="flex items-center justify-between gap-2 px-2 py-1 rounded hover:bg-[#f1f5f9] dark:hover:bg-[#132234] aurora:hover:bg-[#13252e] cursor-pointer text-[11px]"
+                                  >
+                                    <div className="flex items-center gap-2 min-w-0">
+                                      <input
+                                        type="checkbox"
+                                        checked={isChecked}
+                                        onChange={(e) => {
+                                          const checked = e.target.checked;
+                                          const nextTarget = checked
+                                            ? Array.from(new Set([...editingFolder[targetField], c.id]))
+                                            : editingFolder[targetField].filter((id) => id !== c.id);
+                                          const nextOther = checked
+                                            ? editingFolder[otherField].filter((id) => id !== c.id)
+                                            : editingFolder[otherField];
+                                          setEditingFolder({
+                                            ...editingFolder,
+                                            [targetField]: nextTarget,
+                                            [otherField]: nextOther,
+                                          });
+                                        }}
+                                        className="w-3.5 h-3.5 accent-[#2481cc] dark:accent-[#2ba0ff] aurora:accent-[#14b8a6] rounded shrink-0"
+                                      />
+                                      <span className="truncate text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8]">
+                                        {c.title}
+                                      </span>
+                                    </div>
+                                    <span className="text-[10px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] shrink-0">
+                                      {c.isChannel ? '频道' : c.isGroup ? '群组' : c.isBot ? '机器人' : '私聊'}
+                                    </span>
+                                  </label>
+                                );
+                              })}
+                          </div>
+                        </div>
+                      )}
                     </div>
+
                     <div className="flex items-center justify-end gap-2">
                       <button
                         type="button"
-                        onClick={() => setEditingFolder(null)}
+                        onClick={() => {
+                          setEditingFolder(null);
+                          setFolderPeerSearch('');
+                          setFolderPeerPickerMode('none');
+                        }}
                         className="px-3 py-1.5 rounded-lg bg-[#f1f5f9] hover:bg-[#e2e8f0] dark:bg-[#132234] dark:hover:bg-[#1b2f47] aurora:bg-[#13252e] aurora:hover:bg-[#1a3340] text-[#475569] dark:text-[#b4c6d8] aurora:text-[#b7d0d8] text-xs cursor-pointer transition-colors"
                       >
                         取消
@@ -2045,7 +2252,7 @@ export const TelegramSettingsModal: React.FC<TelegramSettingsModalProps> = ({
                   </div>
                 ) : (
                   <div className="space-y-2">
-                    {cloudSettings.folders.map((folder) => (
+                    {cloudSettings.folders.map((folder, folderIndex) => (
                       <div key={folder.id} className="p-3 rounded-xl bg-[#f8fafc] dark:bg-[#0e1726]/85 aurora:bg-[#101c23]/90 border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] flex items-center justify-between gap-2">
                         <div className="min-w-0">
                           <div className="flex items-center gap-2 font-medium text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8]">
@@ -2059,8 +2266,28 @@ export const TelegramSettingsModal: React.FC<TelegramSettingsModalProps> = ({
                         <div className="flex items-center gap-1 shrink-0">
                           <button
                             type="button"
+                            disabled={actionBusy || folderIndex === 0}
+                            onClick={() => handleMoveFolder(folder.id, -1)}
+                            title="上移文件夹"
+                            className="p-1.5 rounded-lg text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] hover:text-[#2481cc] dark:hover:text-[#2ba0ff] aurora:hover:text-[#2dd4bf] hover:bg-[#e2e8f0]/60 dark:hover:bg-[#1b2f47]/60 aurora:hover:bg-[#1a3340]/60 cursor-pointer disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+                          >
+                            <ChevronUp className="w-3.5 h-3.5" />
+                          </button>
+                          <button
+                            type="button"
+                            disabled={actionBusy || folderIndex === cloudSettings.folders!.length - 1}
+                            onClick={() => handleMoveFolder(folder.id, 1)}
+                            title="下移文件夹"
+                            className="p-1.5 rounded-lg text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] hover:text-[#2481cc] dark:hover:text-[#2ba0ff] aurora:hover:text-[#2dd4bf] hover:bg-[#e2e8f0]/60 dark:hover:bg-[#1b2f47]/60 aurora:hover:bg-[#1a3340]/60 cursor-pointer disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+                          >
+                            <ChevronDown className="w-3.5 h-3.5" />
+                          </button>
+                          <button
+                            type="button"
                             disabled={actionBusy}
-                            onClick={() =>
+                            onClick={() => {
+                              setFolderPeerSearch('');
+                              setFolderPeerPickerMode('none');
                               setEditingFolder({
                                 id: folder.id,
                                 title: folder.title,
@@ -2072,8 +2299,11 @@ export const TelegramSettingsModal: React.FC<TelegramSettingsModalProps> = ({
                                 excludeMuted: folder.excludeMuted,
                                 excludeRead: folder.excludeRead,
                                 excludeArchived: folder.excludeArchived,
-                              })
-                            }
+                                includePeerIds: Array.isArray(folder.includePeerIds) ? folder.includePeerIds : [],
+                                excludePeerIds: Array.isArray(folder.excludePeerIds) ? folder.excludePeerIds : [],
+                                isChatlist: Boolean(folder.isChatlist),
+                              });
+                            }}
                             title="编辑文件夹规则"
                             className="p-1.5 rounded-lg text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] hover:text-[#2481cc] dark:hover:text-[#2ba0ff] aurora:hover:text-[#2dd4bf] hover:bg-[#e2e8f0]/60 dark:hover:bg-[#1b2f47]/60 aurora:hover:bg-[#1a3340]/60 cursor-pointer transition-colors"
                           >
