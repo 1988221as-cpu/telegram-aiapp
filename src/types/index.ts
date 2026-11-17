@@ -97,6 +97,25 @@ export interface TelegramChatFullInfo {
   error?: string;
 }
 
+export interface TelegramMessageReadParticipant {
+  id: string;
+  name: string;
+  username?: string;
+  avatarUrl?: string;
+  readAt?: number;
+  isOnline?: boolean;
+  statusText?: string;
+}
+
+export interface TelegramMessageReadParticipantsResponse {
+  ok: boolean;
+  chatId?: string;
+  telegramMessageId?: number;
+  participants?: TelegramMessageReadParticipant[];
+  hint?: string;
+  error?: string;
+}
+
 export interface TelegramStickerItem {
   docId: string;
   accessHash: string;

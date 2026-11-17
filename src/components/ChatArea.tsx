@@ -47,8 +47,9 @@ import {
   Phone,
   AtSign,
   Loader2,
+  Eye,
 } from 'lucide-react';
-import { Chat, Message, TranslationSettings, MasterVoiceprint, TelegramStickerItem, TelegramContact, TelegramChatFullInfo } from '../types';
+import { Chat, Message, TranslationSettings, MasterVoiceprint, TelegramStickerItem, TelegramContact, TelegramChatFullInfo, TelegramMessageReadParticipant } from '../types';
 import { VoiceCloneStudioModal } from './VoiceCloneStudioModal';
 import { MasterVoiceprintModal } from './MasterVoiceprintModal';
 import { TelegramEmojiPicker } from './TelegramEmojiPicker';
@@ -78,6 +79,7 @@ import {
   joinTelegramInviteApi,
   generateTTSVoice,
   fetchTelegramChatFullInfoApi,
+  fetchTelegramMessageReadParticipantsApi,
   addTelegramUserContactApi,
   blockTelegramUserContactApi,
   unblockTelegramUserContactApi,
@@ -961,9 +963,18 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
     isTogglingBlock?: boolean;
   } | null>(null);
 
+  const [readReceiptsModal, setReadReceiptsModal] = useState<{
+    message: Message;
+    loading: boolean;
+    participants: TelegramMessageReadParticipant[];
+    hint?: string;
+    error?: string;
+  } | null>(null);
+
   useEffect(() => {
     setLightboxMedia(null);
     setMemberProfileModal(null);
+    setReadReceiptsModal(null);
   }, [chat?.id, currentAccountId]);
   const [inviteModalState, setInviteModalState] = useState<{
     url: string;
@@ -1195,12 +1206,40 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
     return nodes.length > 0 ? nodes : text;
   }, [isTelegramJoinOrChatUrl, handleOpenTelegramInviteLink]);
 
+  const handleOpenReadReceipts = useCallback(async (msg: Message) => {
+    if (!chat || !chat.id.startsWith('tg_') || !chat.isGroup || chat.isChannel || msg.sender !== 'me') return;
+    if (typeof msg.telegramMessageId !== 'number') return;
+    setReadReceiptsModal({
+      message: msg,
+      loading: true,
+      participants: [],
+    });
+    const res = await fetchTelegramMessageReadParticipantsApi({
+      accountId: currentAccountId,
+      chatId: chat.id,
+      messageId: msg.id,
+      telegramMessageId: msg.telegramMessageId,
+    });
+    setReadReceiptsModal((prev) => {
+      if (!prev || prev.message.id !== msg.id) return prev;
+      if (!res.ok) {
+        return { ...prev, loading: false, error: res.error || '无法加载已读成员列表' };
+      }
+      return {
+        ...prev,
+        loading: false,
+        participants: Array.isArray(res.participants) ? res.participants : [],
+        hint: res.hint,
+      };
+    });
+  }, [chat, currentAccountId]);
+
   const handleMessageContextMenu = (e: React.MouseEvent, msg: Message) => {
     e.preventDefault();
     e.stopPropagation();
 
     const menuWidth = 190;
-    const menuHeight = 310;
+    const menuHeight = 352;
     let x = e.clientX;
     let y = e.clientY;
 
@@ -1824,7 +1863,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
     const handleGlobalKeyDown = (e: KeyboardEvent) => {
       if ((e.ctrlKey || e.metaKey) && !e.altKey) {
         const hasBlockingModal =
-          Boolean(lightboxMedia || memberProfileModal || inviteModalState) ||
+          Boolean(lightboxMedia || memberProfileModal || readReceiptsModal || inviteModalState) ||
           Boolean(document.querySelector('.z-50'));
         if (!hasBlockingModal) {
           if (e.key === '=' || e.key === '+' || e.code === 'Equal' || e.code === 'NumpadAdd') {
@@ -1854,6 +1893,11 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
         if (memberProfileModal) {
           e.preventDefault();
           setMemberProfileModal(null);
+          return;
+        }
+        if (readReceiptsModal) {
+          e.preventDefault();
+          setReadReceiptsModal(null);
           return;
         }
         if (inviteModalState) {
@@ -1955,6 +1999,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
     messageToDelete,
     lightboxMedia,
     memberProfileModal,
+    readReceiptsModal,
     inviteModalState,
     onCloseChat,
     stepChatFontScale,
@@ -5087,9 +5132,23 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                         </span>
                       ) : chat.id.startsWith('tg_') && currentAccountId !== 'acc_telegram_bot' && typeof msg.telegramMessageId === 'number' ? (
                         typeof chat.readOutboxMaxId === 'number' && msg.telegramMessageId <= chat.readOutboxMaxId ? (
-                          <span title={chat.isGroup ? '已有成员已读' : '对方已读'} className="inline-flex items-center">
-                            <CheckCheck className="w-3.5 h-3.5 text-white/95 dark:text-[#7cc4ff] aurora:text-[#5eead4]" />
-                          </span>
+                          chat.isGroup && !isMultiSelectMode ? (
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                void handleOpenReadReceipts(msg);
+                              }}
+                              title="已有成员已读（点击查看谁已读）"
+                              className="inline-flex items-center hover:opacity-80 cursor-pointer"
+                            >
+                              <CheckCheck className="w-3.5 h-3.5 text-white/95 dark:text-[#7cc4ff] aurora:text-[#5eead4]" />
+                            </button>
+                          ) : (
+                            <span title="对方已读" className="inline-flex items-center">
+                              <CheckCheck className="w-3.5 h-3.5 text-white/95 dark:text-[#7cc4ff] aurora:text-[#5eead4]" />
+                            </span>
+                          )
                         ) : (
                           <span title={chat.isGroup ? '已送达（暂未有成员已读）' : '已送达（对方未读）'} className="inline-flex items-center">
                             <Check className="w-3.5 h-3.5 text-white/80 dark:text-[#7b93ad] aurora:text-[#7e9aa5]" />
@@ -6013,6 +6072,28 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
             <span>{messageContextMenu.message.isPinned ? '取消置顶' : '置顶消息'}</span>
           </button>
 
+          {chat.isGroup &&
+            !chat.isChannel &&
+            chat.id.startsWith('tg_') &&
+            currentAccountId !== 'acc_telegram_bot' &&
+            messageContextMenu.message.sender === 'me' &&
+            messageContextMenu.message.deliveryStatus !== 'failed' &&
+            messageContextMenu.message.deliveryStatus !== 'pending' &&
+            typeof messageContextMenu.message.telegramMessageId === 'number' && (
+            <button
+              type="button"
+              onClick={() => {
+                const target = messageContextMenu.message;
+                setMessageContextMenu(null);
+                void handleOpenReadReceipts(target);
+              }}
+              className="w-full flex items-center gap-2.5 px-3 py-2 rounded-xl hover:bg-[#f1f5f9] dark:hover:bg-[#152438] aurora:hover:bg-[#152934] text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] cursor-pointer font-medium"
+            >
+              <Eye className="w-4 h-4 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#5eead4]" />
+              <span>查看已读成员</span>
+            </button>
+          )}
+
           {messageContextMenu.message.sender === 'me' &&
             !messageContextMenu.message.isAudio &&
             messageContextMenu.message.deliveryStatus !== 'failed' &&
@@ -6762,6 +6843,155 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                     </div>
                   );
                 })()}
+              </div>
+            </div>
+          </div>,
+          document.body
+        )}
+
+      {/* Group Message Read Receipts Modal */}
+      {readReceiptsModal &&
+        createPortal(
+          <div
+            className="fixed inset-0 z-[75] bg-black/50 backdrop-blur-xs flex items-center justify-center p-4 animate-in fade-in duration-150"
+            onClick={() => setReadReceiptsModal(null)}
+          >
+            <div
+              className="w-full max-w-sm rounded-2xl bg-white dark:bg-[#0e1726] aurora:bg-[#0d181e] border border-[#e2e8f0] dark:border-[#1e3148] aurora:border-[#1d343d] shadow-2xl overflow-hidden text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8]"
+              onClick={(e) => e.stopPropagation()}
+            >
+              {/* Header */}
+              <div className="px-4 py-3 border-b border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] flex items-center justify-between gap-2">
+                <div className="flex items-center gap-2 min-w-0">
+                  <CheckCheck className="w-4 h-4 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#5eead4] shrink-0" />
+                  <span className="text-xs font-semibold truncate">
+                    {readReceiptsModal.loading
+                      ? '消息已读成员'
+                      : `已读成员 (${readReceiptsModal.participants.length})`}
+                  </span>
+                </div>
+                <div className="flex items-center gap-1 shrink-0">
+                  <button
+                    type="button"
+                    disabled={readReceiptsModal.loading}
+                    onClick={() => void handleOpenReadReceipts(readReceiptsModal.message)}
+                    title="刷新已读状态"
+                    className="p-1 rounded-lg hover:bg-[#f1f5f9] dark:hover:bg-[#132234] aurora:hover:bg-[#13252e] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] disabled:opacity-40 cursor-pointer"
+                  >
+                    <RotateCw className={`w-3.5 h-3.5 ${readReceiptsModal.loading ? 'animate-spin' : ''}`} />
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setReadReceiptsModal(null)}
+                    className="p-1 rounded-lg hover:bg-[#f1f5f9] dark:hover:bg-[#132234] aurora:hover:bg-[#13252e] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] cursor-pointer"
+                  >
+                    <X className="w-4 h-4" />
+                  </button>
+                </div>
+              </div>
+
+              {/* Message Preview Snippet */}
+              <div className="px-4 pt-3 pb-1">
+                <div className="px-2.5 py-1.5 rounded-xl bg-[#f8fafc] dark:bg-[#08101a] aurora:bg-[#081014] border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] text-[11px] text-[#475569] dark:text-[#b4c6d8] aurora:text-[#b7d0d8] truncate">
+                  {readReceiptsModal.message.text?.trim() ||
+                    (readReceiptsModal.message.isImage
+                      ? '🖼️ 图片消息'
+                      : readReceiptsModal.message.isVideo
+                      ? '🎬 视频消息'
+                      : readReceiptsModal.message.isAudio
+                      ? '🎤 语音消息'
+                      : '我发出的消息')}
+                </div>
+              </div>
+
+              {/* Body */}
+              <div className="p-4 pt-2 max-h-[55vh] overflow-y-auto space-y-2">
+                {readReceiptsModal.loading ? (
+                  <div className="py-8 flex flex-col items-center justify-center gap-2 text-xs text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5]">
+                    <Loader2 className="w-5 h-5 animate-spin text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#5eead4]" />
+                    <span>正在查询云端已读成员...</span>
+                  </div>
+                ) : readReceiptsModal.error ? (
+                  <div className="py-6 text-center space-y-2">
+                    <p className="text-xs text-rose-600 dark:text-rose-400">{readReceiptsModal.error}</p>
+                    <button
+                      type="button"
+                      onClick={() => void handleOpenReadReceipts(readReceiptsModal.message)}
+                      className="px-3 py-1.5 rounded-lg bg-[#f1f5f9] dark:bg-[#132234] aurora:bg-[#13252e] text-xs font-medium cursor-pointer hover:opacity-85"
+                    >
+                      重试
+                    </button>
+                  </div>
+                ) : readReceiptsModal.participants.length === 0 ? (
+                  <div className="py-6 text-center space-y-1.5">
+                    <p className="text-xs font-medium text-[#475569] dark:text-[#cbd5e1] aurora:text-[#b7d0d8]">
+                      暂无已读记录
+                    </p>
+                    <p className="text-[11px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] leading-relaxed">
+                      {readReceiptsModal.hint || '成员可能尚未查看此消息，或群规模超过约 100 人 / 消息已超过 7 天（Telegram 官方不返回明细）。'}
+                    </p>
+                  </div>
+                ) : (
+                  <div className="divide-y divide-[#f1f5f9] dark:divide-[#152336] aurora:divide-[#162933]">
+                    {readReceiptsModal.participants.map((reader) => {
+                      const safeAvatar = reader.avatarUrl ? resolveDisplayUrl(reader.avatarUrl) || '' : '';
+                      const readTimeText = reader.readAt
+                        ? (() => {
+                            const d = new Date(reader.readAt * 1000);
+                            const now = new Date();
+                            const isToday =
+                              d.getFullYear() === now.getFullYear() &&
+                              d.getMonth() === now.getMonth() &&
+                              d.getDate() === now.getDate();
+                            const hm = `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+                            return isToday ? `今天 ${hm}` : `${d.getMonth() + 1}-${d.getDate()} ${hm}`;
+                          })()
+                        : '已读';
+                      return (
+                        <div key={reader.id} className="py-2 flex items-center gap-2.5">
+                          <div className="relative w-8 h-8 rounded-full bg-[#2481cc] dark:bg-[#2ba0ff] aurora:bg-[#14b8a6] flex items-center justify-center text-white text-xs font-semibold shrink-0 overflow-hidden">
+                            {safeAvatar ? (
+                              <img
+                                src={safeAvatar}
+                                alt={reader.name}
+                                referrerPolicy="no-referrer"
+                                className="w-full h-full object-cover"
+                                onError={(e) => {
+                                  const imgEl = e.currentTarget;
+                                  if (reader.avatarUrl) {
+                                    void triggerSilentUrlRefresh(reader.avatarUrl, true).then((nextUrl) => {
+                                      if (!nextUrl) {
+                                        imgEl.style.display = 'none';
+                                      }
+                                    });
+                                  } else {
+                                    imgEl.style.display = 'none';
+                                  }
+                                }}
+                              />
+                            ) : (
+                              <span>{getSenderAvatarInitial(reader.name, reader.id)}</span>
+                            )}
+                            {reader.isOnline && (
+                              <span className="absolute bottom-0 right-0 w-2 h-2 rounded-full bg-emerald-500 ring-1 ring-white dark:ring-[#0e1726]" />
+                            )}
+                          </div>
+                          <div className="flex-1 min-w-0">
+                            <div className="text-xs font-medium truncate">{reader.name}</div>
+                            {reader.username && (
+                              <div className="text-[10.5px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] truncate">
+                                {reader.username}
+                              </div>
+                            )}
+                          </div>
+                          <div className="text-[11px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] shrink-0 tabular-nums">
+                            {readTimeText}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
               </div>
             </div>
           </div>,

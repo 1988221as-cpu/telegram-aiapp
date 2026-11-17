@@ -84,6 +84,14 @@ interface ChatListProps {
   onRefreshMediaUrls?: (urls: string[]) => Promise<Record<string, string>>;
   customFolders?: TelegramOfficialDialogFilter[];
   contactChatIds?: Set<string>;
+  customChatOrder?: string[];
+  onReorderChats?: (
+    visibleOrderedIds: string[],
+    sourceChatId: string,
+    targetChatId: string,
+    position: 'before' | 'after'
+  ) => void;
+  onResetChatOrder?: () => void;
 }
 
 interface ContextMenuState {
@@ -113,6 +121,9 @@ export const ChatList: React.FC<ChatListProps> = ({
   onRefreshMediaUrls,
   customFolders = [],
   contactChatIds,
+  customChatOrder = [],
+  onReorderChats,
+  onResetChatOrder,
 }) => {
   // 1. Resizable Width State with Persistence
   const [width, setWidth] = useState<number>(() => {
@@ -162,6 +173,8 @@ export const ChatList: React.FC<ChatListProps> = ({
   const [chatToDelete, setChatToDelete] = useState<Chat | null>(null);
   const [revokeDeleteChat, setRevokeDeleteChat] = useState(false);
   const [previewChat, setPreviewChat] = useState<Chat | null>(null);
+  const [draggedChatId, setDraggedChatId] = useState<string | null>(null);
+  const [dropChatTarget, setDropChatTarget] = useState<{ chatId: string; position: 'before' | 'after' } | null>(null);
   const [refreshedAvatars, setRefreshedAvatars] = useState<Record<string, string>>({});
   const attemptedAvatarRefreshRef = useRef<Set<string>>(new Set());
 
@@ -407,8 +420,20 @@ export const ChatList: React.FC<ChatListProps> = ({
     return true;
   });
 
-  // Sort: In custom folders use folder-specific pinnedPeerIds first; otherwise Pinned chats first (by official pinOrder), then by lastDate descending
+  // Sort: Custom user drag order takes priority when present; otherwise folder/global pinned first, then by lastDate descending
+  const customOrderIndexMap = new Map<string, number>();
+  customChatOrder.forEach((id, idx) => customOrderIndexMap.set(id, idx));
+  const hasCustomOrder = customOrderIndexMap.size > 0;
+
   const sortedChats = [...filteredChats].sort((a, b) => {
+    if (hasCustomOrder) {
+      const aIdx = customOrderIndexMap.get(a.id);
+      const bIdx = customOrderIndexMap.get(b.id);
+      const aRanked = aIdx !== undefined;
+      const bRanked = bIdx !== undefined;
+      if (aRanked && bRanked) return aIdx! - bIdx!;
+      if (aRanked !== bRanked) return aRanked ? 1 : -1;
+    }
     if (activeCustomFolder && Array.isArray(activeCustomFolder.pinnedPeerIds) && activeCustomFolder.pinnedPeerIds.length > 0) {
       const aFolderPinIdx = activeCustomFolder.pinnedPeerIds.indexOf(a.id);
       const bFolderPinIdx = activeCustomFolder.pinnedPeerIds.indexOf(b.id);
@@ -647,7 +672,14 @@ export const ChatList: React.FC<ChatListProps> = ({
       </div>
 
       {/* 3. Chat Items List */}
-      <div className="flex-1 overflow-y-auto py-1 space-y-0.5">
+      <div
+        onDragLeave={(e) => {
+          if (!e.currentTarget.contains(e.relatedTarget as Node)) {
+            setDropChatTarget(null);
+          }
+        }}
+        className="flex-1 overflow-y-auto py-1 space-y-0.5"
+      >
         {/* Top "已归档对话" Collapsed Row */}
         {activeFolder !== 'archived' && !searchQuery && archivedCount > 0 && isArchivedBoxVisible && (
           <div
@@ -718,13 +750,55 @@ export const ChatList: React.FC<ChatListProps> = ({
         ) : (
           sortedChats.map((chat) => {
             const isSelected = chat.id === activeChatId;
+            const canDragChat = Boolean(onReorderChats) && !searchQuery.trim();
+            const isDraggingThis = draggedChatId === chat.id;
+            const isDropBefore = dropChatTarget?.chatId === chat.id && dropChatTarget.position === 'before';
+            const isDropAfter = dropChatTarget?.chatId === chat.id && dropChatTarget.position === 'after';
 
             return (
               <div
                 key={chat.id}
+                draggable={canDragChat}
+                onDragStart={(e) => {
+                  if (!canDragChat) return;
+                  setDraggedChatId(chat.id);
+                  e.dataTransfer.effectAllowed = 'move';
+                  try {
+                    e.dataTransfer.setData('text/plain', chat.id);
+                  } catch {}
+                }}
+                onDragOver={(e) => {
+                  if (!canDragChat || !draggedChatId || draggedChatId === chat.id) return;
+                  e.preventDefault();
+                  e.dataTransfer.dropEffect = 'move';
+                  const rect = e.currentTarget.getBoundingClientRect();
+                  const position: 'before' | 'after' = e.clientY < rect.top + rect.height / 2 ? 'before' : 'after';
+                  setDropChatTarget((prev) =>
+                    prev?.chatId === chat.id && prev.position === position ? prev : { chatId: chat.id, position }
+                  );
+                }}
+                onDrop={(e) => {
+                  if (!canDragChat || !draggedChatId || draggedChatId === chat.id) return;
+                  e.preventDefault();
+                  const rect = e.currentTarget.getBoundingClientRect();
+                  const position: 'before' | 'after' = e.clientY < rect.top + rect.height / 2 ? 'before' : 'after';
+                  onReorderChats?.(sortedChats.map((c) => c.id), draggedChatId, chat.id, position);
+                  setDraggedChatId(null);
+                  setDropChatTarget(null);
+                }}
+                onDragEnd={() => {
+                  setDraggedChatId(null);
+                  setDropChatTarget(null);
+                }}
                 onClick={() => onSelectChat(chat.id)}
                 onContextMenu={(e) => handleOpenContextMenu(chat, e)}
                 className={`mx-1.5 flex items-center px-2.5 py-2.5 rounded-xl cursor-pointer transition-all relative group border ${
+                  isDraggingThis ? 'opacity-45 ' : ''
+                }${
+                  isDropBefore ? 'border-t-2 border-t-[#2481cc] dark:border-t-[#2ba0ff] aurora:border-t-[#2dd4bf] ' : ''
+                }${
+                  isDropAfter ? 'border-b-2 border-b-[#2481cc] dark:border-b-[#2ba0ff] aurora:border-b-[#2dd4bf] ' : ''
+                }${
                   isSelected
                     ? 'bg-[#e8f3ff]/90 border-[#bfdbfe] text-[#0f172a] dark:bg-[#12263f]/90 dark:border-[#2ba0ff]/35 dark:text-white aurora:bg-[#122b33]/90 aurora:border-[#2dd4bf]/40 aurora:text-[#ecf6f8] shadow-xs'
                     : 'border-transparent hover:bg-[#f8fafc] dark:hover:bg-[#0e1726]/75 aurora:hover:bg-[#132129]/80 text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8]'
@@ -745,6 +819,7 @@ export const ChatList: React.FC<ChatListProps> = ({
                         <span className="text-white text-xs font-semibold select-none">{chat.avatarInitial}</span>
                         {chat.avatarUrl && (
                           <img
+                            draggable={false}
                             src={resolveAvatarUrl(chat.avatarUrl)}
                             alt={chat.title}
                             referrerPolicy="no-referrer"
@@ -1019,6 +1094,20 @@ export const ChatList: React.FC<ChatListProps> = ({
               </>
             )}
           </button>
+
+          {hasCustomOrder && onResetChatOrder && (
+            <button
+              type="button"
+              onClick={() => {
+                onResetChatOrder();
+                setContextMenu(null);
+              }}
+              className="w-full flex items-center gap-3 px-3.5 py-2 hover:bg-[#f1f5f9] dark:hover:bg-[#152438] aurora:hover:bg-[#152934] transition-colors text-left cursor-pointer"
+            >
+              <RefreshCw className="w-4 h-4 text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5]" />
+              <span className="font-medium">恢复默认排序</span>
+            </button>
+          )}
 
           <div className="h-px bg-[#e2e8f0] dark:bg-[#18273a] aurora:bg-[#182b34] my-1" />
 

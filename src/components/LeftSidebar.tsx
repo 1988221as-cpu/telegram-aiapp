@@ -34,6 +34,9 @@ interface LeftSidebarProps {
   onRenameAccountGroup?: (groupId: string, name: string, color?: string) => void;
   onDeleteAccountGroup?: (groupId: string) => void;
   onToggleAccountGroupCollapse?: (groupId: string) => void;
+  onReorderAccountGroups?: (sourceGroupId: string, targetGroupId: string, position: 'before' | 'after') => void;
+  onReorderAccounts?: (sourceAccountId: string, targetAccountId: string, position: 'before' | 'after') => void;
+  onMoveAccountToGroup?: (accountId: string, targetGroupId?: string) => void;
   onOpenMenuDrawer: () => void;
   onOpenTranslation: () => void;
   onOpenAddAccount: () => void;
@@ -59,6 +62,9 @@ export const LeftSidebar: React.FC<LeftSidebarProps> = ({
   onRenameAccountGroup,
   onDeleteAccountGroup,
   onToggleAccountGroupCollapse,
+  onReorderAccountGroups,
+  onReorderAccounts,
+  onMoveAccountToGroup,
   onOpenMenuDrawer,
   onOpenTranslation,
   onOpenAddAccount,
@@ -103,6 +109,13 @@ export const LeftSidebar: React.FC<LeftSidebarProps> = ({
     name: string;
     color: string;
   } | null>(null);
+  const [dragPayload, setDragPayload] = useState<{ type: 'account' | 'group'; id: string } | null>(null);
+  const [dropTarget, setDropTarget] = useState<
+    | { kind: 'account'; accountId: string; position: 'before' | 'after' }
+    | { kind: 'group-reorder'; groupId: string; position: 'before' | 'after' }
+    | { kind: 'group-drop'; groupId: string }
+    | null
+  >(null);
 
   const asideRef = useRef<HTMLElement | null>(null);
   const topSectionRef = useRef<HTMLDivElement | null>(null);
@@ -468,7 +481,14 @@ export const LeftSidebar: React.FC<LeftSidebarProps> = ({
           </div>
         </div>
 
-        <div className="flex-1 min-h-0 flex flex-col items-center gap-2.5 w-full overflow-y-auto no-scrollbar py-1.5">
+        <div
+          onDragLeave={(e) => {
+            if (!e.currentTarget.contains(e.relatedTarget as Node)) {
+              setDropTarget(null);
+            }
+          }}
+          className="flex-1 min-h-0 flex flex-col items-center gap-2.5 w-full overflow-y-auto no-scrollbar py-1.5"
+        >
           {(() => {
             const canEditAccount = Boolean(onUpdateAccountMeta || onUpdateAccountRemark);
             const renderAccountItem = (acc: Account) => {
@@ -477,10 +497,59 @@ export const LeftSidebar: React.FC<LeftSidebarProps> = ({
               const canRenderAvatarImg = Boolean(acc.avatarUrl) && failedAvatarKeys[acc.id] !== avatarRenderKey;
               const remarkText = acc.remark?.trim() || '';
               const groupObj = acc.groupId ? accountGroups.find((g) => g.id === acc.groupId) : undefined;
+              const canDragAcc = Boolean(onReorderAccounts);
+              const isDraggingThisAcc = dragPayload?.type === 'account' && dragPayload.id === acc.id;
+              const isDropBeforeAcc =
+                dropTarget?.kind === 'account' && dropTarget.accountId === acc.id && dropTarget.position === 'before';
+              const isDropAfterAcc =
+                dropTarget?.kind === 'account' && dropTarget.accountId === acc.id && dropTarget.position === 'after';
               return (
                 <div
                   key={acc.id}
-                  className="relative group flex flex-col items-center shrink-0 w-full px-1"
+                  draggable={canDragAcc}
+                  onDragStart={(e) => {
+                    if (!canDragAcc) return;
+                    e.stopPropagation();
+                    setDragPayload({ type: 'account', id: acc.id });
+                    e.dataTransfer.effectAllowed = 'move';
+                    try {
+                      e.dataTransfer.setData('text/plain', `account:${acc.id}`);
+                    } catch {}
+                  }}
+                  onDragOver={(e) => {
+                    if (!canDragAcc || dragPayload?.type !== 'account' || dragPayload.id === acc.id) return;
+                    e.preventDefault();
+                    e.stopPropagation();
+                    e.dataTransfer.dropEffect = 'move';
+                    const rect = e.currentTarget.getBoundingClientRect();
+                    const position: 'before' | 'after' = e.clientY < rect.top + rect.height / 2 ? 'before' : 'after';
+                    setDropTarget((prev) =>
+                      prev?.kind === 'account' && prev.accountId === acc.id && prev.position === position
+                        ? prev
+                        : { kind: 'account', accountId: acc.id, position }
+                    );
+                  }}
+                  onDrop={(e) => {
+                    if (!canDragAcc || dragPayload?.type !== 'account' || dragPayload.id === acc.id) return;
+                    e.preventDefault();
+                    e.stopPropagation();
+                    const rect = e.currentTarget.getBoundingClientRect();
+                    const position: 'before' | 'after' = e.clientY < rect.top + rect.height / 2 ? 'before' : 'after';
+                    onReorderAccounts?.(dragPayload.id, acc.id, position);
+                    setDragPayload(null);
+                    setDropTarget(null);
+                  }}
+                  onDragEnd={() => {
+                    setDragPayload(null);
+                    setDropTarget(null);
+                  }}
+                  className={`relative group flex flex-col items-center shrink-0 w-full px-1 py-0.5 rounded-lg transition-all ${
+                    isDraggingThisAcc ? 'opacity-45' : ''
+                  } ${
+                    isDropBeforeAcc ? 'border-t-2 border-t-[#2ba0ff] aurora:border-t-[#2dd4bf]' : ''
+                  } ${
+                    isDropAfterAcc ? 'border-b-2 border-b-[#2ba0ff] aurora:border-b-[#2dd4bf]' : ''
+                  }`}
                 >
                   <button
                     onClick={() => onSelectAccount(acc.id)}
@@ -508,6 +577,7 @@ export const LeftSidebar: React.FC<LeftSidebarProps> = ({
                     >
                       {canRenderAvatarImg ? (
                         <img
+                          draggable={false}
                           src={acc.avatarUrl}
                           alt={remarkText || acc.name}
                           referrerPolicy="no-referrer"
@@ -590,9 +660,73 @@ export const LeftSidebar: React.FC<LeftSidebarProps> = ({
                 {accountGroups.map((grp) => {
                   const groupAccounts = accounts.filter((a) => a.groupId === grp.id);
                   const groupUnread = groupAccounts.reduce((sum, a) => sum + (a.unreadTotal || 0), 0);
+                  const canDragGrp = Boolean(onReorderAccountGroups);
+                  const isDraggingThisGrp = dragPayload?.type === 'group' && dragPayload.id === grp.id;
+                  const isGrpDropBefore =
+                    dropTarget?.kind === 'group-reorder' && dropTarget.groupId === grp.id && dropTarget.position === 'before';
+                  const isGrpDropAfter =
+                    dropTarget?.kind === 'group-reorder' && dropTarget.groupId === grp.id && dropTarget.position === 'after';
+                  const isAccIntoThisGrp = dropTarget?.kind === 'group-drop' && dropTarget.groupId === grp.id;
                   return (
                     <div key={grp.id} className="w-full flex flex-col items-center gap-2">
-                      <div className="w-full px-1.5 flex items-center gap-0.5 group/grp">
+                      <div
+                        draggable={canDragGrp}
+                        onDragStart={(e) => {
+                          if (!canDragGrp) return;
+                          setDragPayload({ type: 'group', id: grp.id });
+                          e.dataTransfer.effectAllowed = 'move';
+                          try {
+                            e.dataTransfer.setData('text/plain', `group:${grp.id}`);
+                          } catch {}
+                        }}
+                        onDragOver={(e) => {
+                          if (dragPayload?.type === 'group' && canDragGrp && dragPayload.id !== grp.id) {
+                            e.preventDefault();
+                            e.dataTransfer.dropEffect = 'move';
+                            const rect = e.currentTarget.getBoundingClientRect();
+                            const position: 'before' | 'after' = e.clientY < rect.top + rect.height / 2 ? 'before' : 'after';
+                            setDropTarget((prev) =>
+                              prev?.kind === 'group-reorder' && prev.groupId === grp.id && prev.position === position
+                                ? prev
+                                : { kind: 'group-reorder', groupId: grp.id, position }
+                            );
+                          } else if (dragPayload?.type === 'account' && onMoveAccountToGroup) {
+                            e.preventDefault();
+                            e.dataTransfer.dropEffect = 'move';
+                            setDropTarget((prev) =>
+                              prev?.kind === 'group-drop' && prev.groupId === grp.id
+                                ? prev
+                                : { kind: 'group-drop', groupId: grp.id }
+                            );
+                          }
+                        }}
+                        onDrop={(e) => {
+                          if (dragPayload?.type === 'group' && canDragGrp && dragPayload.id !== grp.id) {
+                            e.preventDefault();
+                            const rect = e.currentTarget.getBoundingClientRect();
+                            const position: 'before' | 'after' = e.clientY < rect.top + rect.height / 2 ? 'before' : 'after';
+                            onReorderAccountGroups?.(dragPayload.id, grp.id, position);
+                          } else if (dragPayload?.type === 'account' && onMoveAccountToGroup) {
+                            e.preventDefault();
+                            onMoveAccountToGroup(dragPayload.id, grp.id);
+                          }
+                          setDragPayload(null);
+                          setDropTarget(null);
+                        }}
+                        onDragEnd={() => {
+                          setDragPayload(null);
+                          setDropTarget(null);
+                        }}
+                        className={`w-full px-1.5 py-0.5 flex items-center gap-0.5 group/grp rounded-md transition-all ${
+                          isDraggingThisGrp ? 'opacity-45' : ''
+                        } ${
+                          isGrpDropBefore ? 'border-t-2 border-t-[#2ba0ff] aurora:border-t-[#2dd4bf]' : ''
+                        } ${
+                          isGrpDropAfter ? 'border-b-2 border-b-[#2ba0ff] aurora:border-b-[#2dd4bf]' : ''
+                        } ${
+                          isAccIntoThisGrp ? 'ring-1 ring-[#2ba0ff] aurora:ring-[#2dd4bf] bg-[#2ba0ff]/10 aurora:bg-[#2dd4bf]/10' : ''
+                        }`}
+                      >
                         <button
                           type="button"
                           onClick={() => onToggleAccountGroupCollapse?.(grp.id)}
@@ -635,11 +769,37 @@ export const LeftSidebar: React.FC<LeftSidebarProps> = ({
                   );
                 })}
 
-                {ungroupedAccounts.length > 0 && (
+                {(ungroupedAccounts.length > 0 ||
+                  (dragPayload?.type === 'account' &&
+                    Boolean(onMoveAccountToGroup) &&
+                    Boolean(accounts.find((a) => a.id === dragPayload.id)?.groupId))) && (
                   <div className="w-full flex flex-col items-center gap-2 pt-0.5">
-                    <div className="w-full px-2 flex items-center justify-center">
+                    <div
+                      onDragOver={(e) => {
+                        if (dragPayload?.type !== 'account' || !onMoveAccountToGroup) return;
+                        e.preventDefault();
+                        e.dataTransfer.dropEffect = 'move';
+                        setDropTarget((prev) =>
+                          prev?.kind === 'group-drop' && prev.groupId === ''
+                            ? prev
+                            : { kind: 'group-drop', groupId: '' }
+                        );
+                      }}
+                      onDrop={(e) => {
+                        if (dragPayload?.type !== 'account' || !onMoveAccountToGroup) return;
+                        e.preventDefault();
+                        onMoveAccountToGroup(dragPayload.id, undefined);
+                        setDragPayload(null);
+                        setDropTarget(null);
+                      }}
+                      className={`w-full px-2 py-0.5 flex items-center justify-center rounded-md transition-all ${
+                        dropTarget?.kind === 'group-drop' && dropTarget.groupId === ''
+                          ? 'ring-1 ring-[#2ba0ff] aurora:ring-[#2dd4bf] bg-[#2ba0ff]/10 aurora:bg-[#2dd4bf]/10'
+                          : ''
+                      }`}
+                    >
                       <span className="text-[9px] text-[#94a3b8] dark:text-[#5c748c] aurora:text-[#5d7b87] truncate">
-                        未分组 ({ungroupedAccounts.length})
+                        {ungroupedAccounts.length > 0 ? `未分组 (${ungroupedAccounts.length})` : '拖到此处移出分组'}
                       </span>
                     </div>
                     {ungroupedAccounts.map(renderAccountItem)}

@@ -11,6 +11,7 @@ import {
   TelegramContact,
   Chat,
   TelegramChatFullInfo,
+  TelegramMessageReadParticipantsResponse,
   TelegramStickerPack,
   TelegramStickerItem,
   TranslationSettings,
@@ -4178,6 +4179,30 @@ export async function pinTelegramMessageApi(payload: {
     return await res.json();
   } catch (err: any) {
     return { ok: false, error: err?.message || '同步云端消息置顶失败' };
+  }
+}
+
+export async function fetchTelegramMessageReadParticipantsApi(params: {
+  accountId?: string;
+  chatId: string;
+  messageId?: string;
+  telegramMessageId?: number;
+}): Promise<TelegramMessageReadParticipantsResponse> {
+  try {
+    const query = new URLSearchParams();
+    if (params.accountId) query.set('accountId', params.accountId);
+    query.set('chatId', params.chatId);
+    if (params.messageId) query.set('messageId', params.messageId);
+    if (typeof params.telegramMessageId === 'number') {
+      query.set('telegramMessageId', String(params.telegramMessageId));
+    }
+    const res = await fetchWithTimeout(`/api/telegram/user/messages/read-participants?${query.toString()}`, {
+      headers: getAuthHeaders(params.accountId),
+      credentials: 'include',
+    }, 15000);
+    return await res.json();
+  } catch (err: any) {
+    return { ok: false, error: err?.message || '获取消息已读成员失败' };
   }
 }
 

@@ -23282,6 +23282,150 @@ app.post('/api/telegram/user/messages/pin', requireTenantAuth, async (req: Reque
   }
 });
 
+// 20.3.1m-2 Fetch Read Participants for a Group Message (messages.GetMessageReadParticipants)
+app.get('/api/telegram/user/messages/read-participants', requireTenantAuth, async (req: Request, res: Response) => {
+  try {
+    const accountId = (req.query.accountId as string) || (req.headers['x-account-id'] as string) || '';
+    const chatId = String(req.query.chatId || '').trim();
+    const messageId = String(req.query.messageId || '').trim();
+    const telegramMessageId = req.query.telegramMessageId ? Number(req.query.telegramMessageId) : undefined;
+
+    const connected = resolveConnectedTelegramUser(accountId);
+    if (!connected || !connected.client) {
+      return res.status(400).json({ ok: false, error: '当前账号未在线连接 Telegram MTProto，无法查看消息已读成员' });
+    }
+
+    const activeFlood = getTelegramFloodCooldown({
+      accountId: accountId || `acc_tg_${connected.userId}`,
+      userId: connected.userId,
+      phone: connected.phone,
+    });
+    if (activeFlood) {
+      return res.status(429).json({
+        ok: false,
+        code: 'TELEGRAM_FLOOD_WAIT',
+        retryAfterSeconds: activeFlood.retryAfterSeconds,
+        floodWaitUntil: activeFlood.floodWaitUntil,
+        error: formatTelegramError({ errorMessage: `FLOOD_WAIT_${activeFlood.retryAfterSeconds}` }),
+      });
+    }
+
+    const tgMsgId = resolveTelegramMessageNumericId(messageId, telegramMessageId);
+    if (!chatId || !tgMsgId) {
+      return res.status(400).json({ ok: false, error: '该消息缺少 Telegram 云端消息 ID，无法查看已读成员' });
+    }
+
+    const { inputPeer } = await resolveTelegramInputPeer(connected.client, chatId, connected.userId);
+    let rawReaders: any[] = [];
+    try {
+      const resList = await connected.client.invoke(
+        new Api.messages.GetMessageReadParticipants({
+          peer: inputPeer,
+          msgId: tgMsgId,
+        })
+      );
+      rawReaders = Array.isArray(resList) ? resList : [];
+    } catch (tgErr: any) {
+      const rawErr = String(tgErr?.errorMessage || tgErr?.message || '');
+      if (rawErr.includes('MESSAGE_ID_INVALID') || rawErr.includes('MSG_ID_INVALID')) {
+        return res.json({
+          ok: true,
+          chatId,
+          telegramMessageId: tgMsgId,
+          participants: [],
+          hint: 'Telegram 仅支持查看 7 天内且人数不超过约 100 人的群组中自己所发消息的已读名单',
+        });
+      }
+      if (rawErr.includes('CHAT_ID_INVALID') || rawErr.includes('PEER_ID_INVALID')) {
+        return res.status(400).json({ ok: false, error: '当前会话类型不支持查看群组消息已读成员' });
+      }
+      throw tgErr;
+    }
+
+    const selfUid = String(connected.userId || '');
+    const scopedAccId = accountId || `acc_tg_${connected.userId}`;
+    const participants: Array<{
+      id: string;
+      name: string;
+      username?: string;
+      avatarUrl?: string;
+      readAt?: number;
+      isOnline?: boolean;
+      statusText?: string;
+    }> = [];
+
+    const readerUids = rawReaders
+      .map((item) => String(item?.userId ?? ''))
+      .filter((uid) => Boolean(uid) && uid !== selfUid);
+    const entityMap = new Map<string, any>();
+    const missingUids: string[] = [];
+
+    for (const uid of readerUids) {
+      try {
+        const ent = await connected.client.getEntity(returnBigInt(uid));
+        if (ent) entityMap.set(uid, ent);
+        else missingUids.push(uid);
+      } catch {
+        missingUids.push(uid);
+      }
+    }
+
+    if (missingUids.length > 0) {
+      try {
+        if (inputPeer instanceof Api.InputPeerChannel) {
+          const partRes: any = await connected.client.invoke(
+            new Api.channels.GetParticipants({
+              channel: inputPeer,
+              filter: new Api.ChannelParticipantsRecent(),
+              offset: 0,
+              limit: 200,
+              hash: returnBigInt(0),
+            })
+          );
+          for (const u of Array.isArray(partRes?.users) ? partRes.users : []) {
+            if (u?.id !== undefined) entityMap.set(String(u.id), u);
+          }
+        } else if (inputPeer instanceof Api.InputPeerChat) {
+          const fullRes: any = await connected.client.invoke(
+            new Api.messages.GetFullChat({ chatId: inputPeer.chatId })
+          );
+          for (const u of Array.isArray(fullRes?.users) ? fullRes.users : []) {
+            if (u?.id !== undefined) entityMap.set(String(u.id), u);
+          }
+        }
+      } catch {}
+    }
+
+    for (const item of rawReaders) {
+      const uid = String(item?.userId ?? '');
+      if (!uid || uid === selfUid) continue;
+      const userEntity = entityMap.get(uid) || null;
+      const uStatus = userEntity ? formatTelegramUserStatus(userEntity) : { isOnline: false, statusText: undefined };
+      const displayName = userEntity
+        ? [userEntity.firstName, userEntity.lastName].filter(Boolean).join(' ').trim() ||
+          (userEntity.username ? `@${userEntity.username}` : `用户 ${uid}`)
+        : `用户 ${uid}`;
+      const rawDate = Number(item?.date || 0);
+      participants.push({
+        id: `tg_${uid}`,
+        name: displayName,
+        username: userEntity?.username ? `@${userEntity.username}` : undefined,
+        avatarUrl: signTelegramResourceUrl(`/api/telegram/user/avatar/${encodeURIComponent(uid)}`, scopedAccId),
+        readAt: Number.isFinite(rawDate) && rawDate > 0 ? rawDate : undefined,
+        isOnline: uStatus.isOnline,
+        statusText: uStatus.statusText,
+      });
+    }
+
+    participants.sort((a, b) => (b.readAt || 0) - (a.readAt || 0));
+    return res.json({ ok: true, chatId, telegramMessageId: tgMsgId, participants });
+  } catch (err: any) {
+    return await handleMtprotoRouteError(res, err, {
+      accountId: (req.query.accountId as string) || (req.headers['x-account-id'] as string) || '',
+    }, 400);
+  }
+});
+
 // 20.3.1n Toggle Dialog Pin in Telegram Cloud (messages.ToggleDialogPin)
 app.post('/api/telegram/user/dialogs/pin', requireTenantAuth, async (req: Request, res: Response) => {
   try {

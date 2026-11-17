@@ -615,6 +615,20 @@ export default function App() {
     return INITIAL_CHATS;
   });
 
+  const [chatOrderByAccount, setChatOrderByAccount] = useState<Record<string, string[]>>(() => {
+    const saved = secureGetItemSync<Record<string, string[]>>('tg_pro_chat_order_map');
+    if (saved && typeof saved === 'object' && !Array.isArray(saved)) {
+      const normalized: Record<string, string[]> = {};
+      for (const [accId, list] of Object.entries(saved)) {
+        if (accId && Array.isArray(list)) {
+          normalized[accId] = list.filter((id) => typeof id === 'string' && id.length > 0);
+        }
+      }
+      return normalized;
+    }
+    return {};
+  });
+
   const [activeChatId, setActiveChatId] = useState<string | null>(null);
 
   const [messagesMap, setMessagesMap] = useState<Record<string, Message[]>>(() => {
@@ -908,10 +922,11 @@ export default function App() {
 
   const rehydrateFromLocalStorage = async (isRestore = false) => {
     try {
-      const [savedAccs, savedGroups, savedChats, savedMsgs, savedLegacyTrans, savedLLM] = await Promise.all([
+      const [savedAccs, savedGroups, savedChats, savedChatOrder, savedMsgs, savedLegacyTrans, savedLLM] = await Promise.all([
         secureGetItemAsync<Account[]>('tg_pro_accounts'),
         secureGetItemAsync<AccountGroup[]>('tg_pro_account_groups'),
         secureGetItemAsync<Chat[]>('tg_pro_chats'),
+        secureGetItemAsync<Record<string, string[]>>('tg_pro_chat_order_map'),
         secureGetItemAsync<Record<string, Message[]>>('tg_pro_messages'),
         secureGetItemAsync<TranslationSettings>('tg_pro_trans_settings'),
         secureGetItemAsync<CustomLLMConfig>('tg_pro_llm_config'),
@@ -919,6 +934,15 @@ export default function App() {
 
       if (savedGroups && Array.isArray(savedGroups)) {
         setAccountGroups(savedGroups.filter((g) => g && typeof g.id === 'string' && typeof g.name === 'string'));
+      }
+      if (savedChatOrder && typeof savedChatOrder === 'object' && !Array.isArray(savedChatOrder)) {
+        const normalizedOrder: Record<string, string[]> = {};
+        for (const [accId, list] of Object.entries(savedChatOrder)) {
+          if (accId && Array.isArray(list)) {
+            normalizedOrder[accId] = list.filter((id) => typeof id === 'string' && id.length > 0);
+          }
+        }
+        setChatOrderByAccount(normalizedOrder);
       }
 
       let nextAccounts: Account[] | null = null;
@@ -1211,6 +1235,11 @@ export default function App() {
     secureSetItemSync('tg_pro_chats', chats);
   }, [chats, isHydrated]);
 
+  useEffect(() => {
+    if (!isHydrated) return;
+    secureSetItemSync('tg_pro_chat_order_map', chatOrderByAccount);
+  }, [chatOrderByAccount, isHydrated]);
+
   // Post-commit message bucket persistence & unified cleanup (eliminates StrictMode double-writes & updater side-effects)
   useEffect(() => {
     if (!isHydrated) return;
@@ -1424,10 +1453,12 @@ export default function App() {
     restoredBlobUrlsRef.current.clear();
     purgeAllLocalChatData();
     secureRemoveItem('tg_pro_account_groups');
+    secureRemoveItem('tg_pro_chat_order_map');
     notifiedExpiredRef.current.clear();
     setAccounts([]);
     setAccountGroups([]);
     setChats([]);
+    setChatOrderByAccount({});
     setMessagesMap({});
     setContacts([]);
     callRecordsScopeRef.current = '';
@@ -3973,8 +4004,10 @@ export default function App() {
         remark: newAccountData.remark ?? existing?.remark,
         groupId: newAccountData.groupId ?? existing?.groupId,
       };
-      const filtered = prev.filter((a) => a.id !== id);
-      return [...filtered, newAcc];
+      if (existing) {
+        return prev.map((a) => (a.id === id ? newAcc : a));
+      }
+      return [...prev, newAcc];
     });
     handleSelectAccount(id);
   };
@@ -4028,6 +4061,12 @@ export default function App() {
 
     setAccounts(remaining);
     setChats(remainingChats);
+    setChatOrderByAccount((prev) => {
+      if (!(id in prev)) return prev;
+      const next = { ...prev };
+      delete next[id];
+      return next;
+    });
     setMessagesMap(nextMessagesMap);
     if (isHydrated) {
       secureSetItemSync('tg_pro_accounts', remaining);
@@ -5301,6 +5340,107 @@ export default function App() {
     );
   };
 
+  const handleReorderAccountGroups = (
+    sourceGroupId: string,
+    targetGroupId: string,
+    position: 'before' | 'after'
+  ) => {
+    if (!sourceGroupId || !targetGroupId || sourceGroupId === targetGroupId) return;
+    setAccountGroups((prev) => {
+      const sourceIdx = prev.findIndex((g) => g.id === sourceGroupId);
+      const targetIdx = prev.findIndex((g) => g.id === targetGroupId);
+      if (sourceIdx === -1 || targetIdx === -1) return prev;
+      const next = [...prev];
+      const [moved] = next.splice(sourceIdx, 1);
+      const insertBase = next.findIndex((g) => g.id === targetGroupId);
+      if (insertBase === -1) return prev;
+      next.splice(position === 'before' ? insertBase : insertBase + 1, 0, moved);
+      return next;
+    });
+  };
+
+  const handleReorderAccounts = (
+    sourceAccountId: string,
+    targetAccountId: string,
+    position: 'before' | 'after'
+  ) => {
+    if (!sourceAccountId || !targetAccountId || sourceAccountId === targetAccountId) return;
+    setAccounts((prev) => {
+      const sourceAcc = prev.find((a) => a.id === sourceAccountId);
+      const targetAcc = prev.find((a) => a.id === targetAccountId);
+      if (!sourceAcc || !targetAcc) return prev;
+      const nextAcc: Account =
+        accountGroups.length > 0
+          ? { ...sourceAcc, groupId: targetAcc.groupId || undefined }
+          : sourceAcc;
+      const next = prev.filter((a) => a.id !== sourceAccountId);
+      const insertBase = next.findIndex((a) => a.id === targetAccountId);
+      if (insertBase === -1) return prev;
+      next.splice(position === 'before' ? insertBase : insertBase + 1, 0, nextAcc);
+      return next;
+    });
+  };
+
+  const handleMoveAccountToGroup = (accountId: string, targetGroupId?: string) => {
+    if (!accountId) return;
+    const normalizedGroupId = targetGroupId || undefined;
+    setAccounts((prev) =>
+      prev.map((a) => (a.id === accountId ? { ...a, groupId: normalizedGroupId } : a))
+    );
+  };
+
+  const handleReorderChats = (
+    visibleOrderedIds: string[],
+    sourceChatId: string,
+    targetChatId: string,
+    position: 'before' | 'after'
+  ) => {
+    const accId = activeAccountIdRef.current;
+    if (!accId || !sourceChatId || !targetChatId || sourceChatId === targetChatId) return;
+    setChatOrderByAccount((prev) => {
+      const existing = Array.isArray(prev[accId]) ? prev[accId] : [];
+      let base: string[];
+      if (existing.length > 0) {
+        const existingSet = new Set(existing);
+        const newVisible = visibleOrderedIds.filter((id) => !existingSet.has(id));
+        base = [...newVisible, ...existing];
+      } else {
+        const defaultAllIds = [...chatsRef.current]
+          .filter((c) => c.accountId === accId)
+          .sort((a, b) => {
+            const aPin = Boolean(a.isPinned);
+            const bPin = Boolean(b.isPinned);
+            if (aPin !== bPin) return aPin ? -1 : 1;
+            if (aPin && bPin) {
+              const aOrd = typeof a.pinOrder === 'number' ? a.pinOrder : Number.MAX_SAFE_INTEGER;
+              const bOrd = typeof b.pinOrder === 'number' ? b.pinOrder : Number.MAX_SAFE_INTEGER;
+              if (aOrd !== bOrd) return aOrd - bOrd;
+            }
+            return (typeof b.lastDate === 'number' ? b.lastDate : 0) - (typeof a.lastDate === 'number' ? a.lastDate : 0);
+          })
+          .map((c) => c.id);
+        const seen = new Set(defaultAllIds);
+        base = [...defaultAllIds, ...visibleOrderedIds.filter((id) => !seen.has(id))];
+      }
+      const withoutSource = base.filter((id) => id !== sourceChatId);
+      const targetIdx = withoutSource.indexOf(targetChatId);
+      if (targetIdx === -1) return prev;
+      withoutSource.splice(position === 'before' ? targetIdx : targetIdx + 1, 0, sourceChatId);
+      return { ...prev, [accId]: withoutSource };
+    });
+  };
+
+  const handleResetChatOrder = () => {
+    const accId = activeAccountIdRef.current;
+    if (!accId) return;
+    setChatOrderByAccount((prev) => {
+      if (!(accId in prev)) return prev;
+      const next = { ...prev };
+      delete next[accId];
+      return next;
+    });
+  };
+
   const currentAccount = accounts.find((a) => a.id === activeAccountId) || accounts[0];
 
   return (
@@ -5328,6 +5468,9 @@ export default function App() {
         onRenameAccountGroup={handleRenameAccountGroup}
         onDeleteAccountGroup={handleDeleteAccountGroup}
         onToggleAccountGroupCollapse={handleToggleAccountGroupCollapse}
+        onReorderAccountGroups={handleReorderAccountGroups}
+        onReorderAccounts={handleReorderAccounts}
+        onMoveAccountToGroup={handleMoveAccountToGroup}
         onOpenMenuDrawer={() => setIsTelegramMenuOpen(true)}
         onOpenTranslation={() => toggleRightPanel('translation')}
         onOpenAddAccount={() => {
@@ -5435,6 +5578,9 @@ export default function App() {
           onRefreshMediaUrls={handleRefreshMediaUrls}
           customFolders={activeAccountId ? (foldersByAccount[activeAccountId] || []) : []}
           contactChatIds={new Set(contacts.filter((ct) => ct.isContact !== false).map((ct) => ct.id))}
+          customChatOrder={activeAccountId ? (chatOrderByAccount[activeAccountId] || []) : []}
+          onReorderChats={handleReorderChats}
+          onResetChatOrder={handleResetChatOrder}
         />
 
         {/* 3. Official Telegram Center Main Chat Workbench Pane (flex-1) */}
