@@ -8,6 +8,7 @@ on:
       - master
     tags:
       - 'v*'
+      - '[0-9]*.*.*'
 
 permissions:
   contents: write
@@ -38,7 +39,7 @@ jobs:
           FFMPEG_STatic_Skip_Download: "1"
 
       - name: Sync Version From Git Tag
-        if: startsWith(github.ref, 'refs/tags/v')
+        if: startsWith(github.ref, 'refs/tags/')
         run: |
           node -e "const fs=require('fs');const tag=(process.env.GITHUB_REF_NAME||'').replace(/^v/i,'').trim();if(/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(tag)){const p=JSON.parse(fs.readFileSync('package.json','utf8'));if(p.version!==tag){p.version=tag;fs.writeFileSync('package.json',JSON.stringify(p,null,2)+'\n','utf8');console.log('Synced package.json version ->',tag);}}"
 
