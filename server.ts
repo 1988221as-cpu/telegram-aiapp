@@ -4,6 +4,7 @@ import http from 'http';
 import https from 'https';
 import net from 'net';
 import tls from 'tls';
+import { Readable } from 'stream';
 import os from 'os';
 import path from 'path';
 import fs from 'fs';
@@ -343,6 +344,84 @@ export function createGeminiClient(customApiKey?: string): GoogleGenAI {
       headers: {
         'User-Agent': 'aistudio-build',
       },
+    },
+  });
+}
+
+export const safeSsrfFetchForSdk = async (
+  input: RequestInfo | URL,
+  init?: RequestInit,
+  _hooks?: SafeSsrfFetchHooks
+): Promise<globalThis.Response> => {
+  let targetUrl = '';
+  let mergedInit: RequestInit = init ? { ...init } : {};
+
+  if (typeof input === 'string') {
+    targetUrl = input;
+  } else if (input instanceof URL) {
+    targetUrl = input.toString();
+  } else if (input && typeof input === 'object' && 'url' in input) {
+    const reqObj = input as globalThis.Request;
+    targetUrl = reqObj.url;
+    const mergedHeaders = new Headers(reqObj.headers);
+    if (init?.headers) {
+      new Headers(init.headers).forEach((v, k) => mergedHeaders.set(k, v));
+    }
+    let body = init?.body;
+    if (body === undefined && reqObj.method !== 'GET' && reqObj.method !== 'HEAD' && reqObj.body) {
+      body = await reqObj.arrayBuffer();
+    }
+    mergedInit = {
+      ...mergedInit,
+      method: init?.method || reqObj.method,
+      headers: mergedHeaders,
+      ...(body !== undefined ? { body } : {}),
+      signal: init?.signal ?? reqObj.signal,
+    };
+  } else {
+    throw new Error('SSRF 安全拦截：无效的 SDK 请求目标');
+  }
+
+  return await safeSsrfFetch(targetUrl, mergedInit, _hooks);
+};
+
+export async function createCustomGeminiClient(params: {
+  baseUrl: string;
+  apiKey?: string;
+  headers?: Record<string, string>;
+  timeoutMs?: number;
+  _hooks?: SafeSsrfFetchHooks;
+}): Promise<GoogleGenAI> {
+  const sdkBaseUrl = String(params.baseUrl || '')
+    .trim()
+    .replace(/\/+$/, '')
+    .replace(/\/v1beta.*$/i, '')
+    .replace(/\/v1$/i, '');
+
+  if (!sdkBaseUrl) {
+    throw new Error('SSRF 安全拦截：自定义 Gemini Base URL 不能为空');
+  }
+
+  // Pre-validate baseUrl (protocol, credentials, port, IPv4/IPv6, DNS A/AAAA, production HTTPS) before SDK instantiation
+  await validateSafeSsrfTargetUrl(sdkBaseUrl, {
+    dnsLookup: params._hooks?.dnsLookup,
+    isProductionOverride: params._hooks?.isProductionOverride,
+  });
+
+  const customSdkFetch = params._hooks
+    ? (input: RequestInfo | URL, init?: RequestInit) => safeSsrfFetchForSdk(input, init, params._hooks)
+    : safeSsrfFetchForSdk;
+
+  return new GoogleGenAI({
+    apiKey: params.apiKey || 'local-key',
+    httpOptions: {
+      baseUrl: sdkBaseUrl,
+      ...(params.timeoutMs ? { timeout: params.timeoutMs } : {}),
+      headers: {
+        ...(params.headers || {}),
+        'User-Agent': 'aistudio-build',
+      },
+      fetch: customSdkFetch,
     },
   });
 }
@@ -1773,24 +1852,27 @@ export function resolveFfmpegBinaryPath(): string {
 
 export async function convertAudioToOggOpus(input: Buffer | string): Promise<Buffer> {
   const isFilePath = typeof input === 'string';
+  let safeInputPath = '';
   if (isFilePath) {
-    if (!input || !fs.existsSync(input)) {
-      throw new Error('音频文件不存在，无法转码为 OGG Opus');
+    const allowedPath = resolveAllowedOutboundDiskPath(input);
+    if (!allowedPath) {
+      throw new Error('安全拦截：音频转码路径不在受控媒体目录内，禁止读取任意本地文件');
     }
-    const stat = fs.statSync(input);
+    safeInputPath = allowedPath;
+    const stat = fs.statSync(safeInputPath);
     if (stat.size === 0) {
       throw new Error('音频数据为空，无法转码为 OGG Opus');
     }
     try {
       const head = Buffer.alloc(4);
-      const fd = fs.openSync(input, 'r');
+      const fd = fs.openSync(safeInputPath, 'r');
       try {
         fs.readSync(fd, head, 0, 4, 0);
       } finally {
         fs.closeSync(fd);
       }
       if (head.toString() === 'OggS') {
-        return await fs.promises.readFile(input);
+        return await fs.promises.readFile(safeInputPath);
       }
     } catch {}
   } else {
@@ -1808,7 +1890,7 @@ export async function convertAudioToOggOpus(input: Buffer | string): Promise<Buf
       const ffmpegArgs = isFilePath
         ? [
             '-loglevel', 'error',
-            '-i', input,
+            '-i', safeInputPath,
             '-c:a', 'libopus',
             '-b:a', '32k',
             '-vbr', 'on',
@@ -3248,10 +3330,42 @@ export function buildOutboundLocalMediaUrl(diskFileName: string, accountScope = 
   return signTelegramResourceUrl(`/api/messages/local-media/${encodeURIComponent(safeKey)}`, accountScope);
 }
 
+export function resolveAllowedOutboundDiskPath(candidatePath?: string): string | null {
+  if (!candidatePath || typeof candidatePath !== 'string') return null;
+  const trimmed = candidatePath.trim();
+  if (!trimmed || trimmed.includes('\0')) return null;
+
+  try {
+    const rootResolved = path.resolve(OUTBOUND_MEDIA_DIR);
+    if (!fs.existsSync(rootResolved)) return null;
+    const rootReal = fs.realpathSync(rootResolved);
+    const resolved = path.resolve(trimmed);
+    if (resolved !== rootResolved && !resolved.startsWith(rootResolved + path.sep)) {
+      return null;
+    }
+    if (!fs.existsSync(resolved)) return null;
+    const lstat = fs.lstatSync(resolved);
+    if (lstat.isSymbolicLink() || !lstat.isFile()) {
+      return null;
+    }
+    const realResolved = fs.realpathSync(resolved);
+    if (!realResolved.startsWith(rootReal + path.sep)) {
+      return null;
+    }
+    const realStat = fs.statSync(realResolved);
+    if (!realStat.isFile()) {
+      return null;
+    }
+    return realResolved;
+  } catch {
+    return null;
+  }
+}
+
 export function resolveLocalMediaDiskPath(mediaUrl: string): string | null {
   if (!mediaUrl || typeof mediaUrl !== 'string') return null;
   let pathname = mediaUrl.trim();
-  if (pathname.startsWith('http://') || pathname.startsWith('https://')) {
+  if (/^https?:\/\//i.test(pathname)) {
     try {
       pathname = new URL(pathname).pathname;
     } catch {
@@ -3272,16 +3386,7 @@ export function resolveLocalMediaDiskPath(mediaUrl: string): string | null {
     return null;
   }
   const resolved = path.resolve(OUTBOUND_MEDIA_DIR, fileKey);
-  const rootResolved = path.resolve(OUTBOUND_MEDIA_DIR);
-  if (!resolved.startsWith(rootResolved + path.sep)) {
-    return null;
-  }
-  try {
-    if (fs.existsSync(resolved) && fs.statSync(resolved).isFile()) {
-      return resolved;
-    }
-  } catch {}
-  return null;
+  return resolveAllowedOutboundDiskPath(resolved);
 }
 
 let lastOutboundMediaPruneAt = 0;
@@ -3596,131 +3701,577 @@ export function verifyPasswordScrypt(password: string, storedHash: string): bool
 // 3. SSRF Defense: Check and validate target URLs before sending server-side requests
 // Strictly denies: non-HTTPS, localhost/loopback, private subnets (10.x, 172.16-31.x, 192.168.x),
 // link-local (169.254.x, especially cloud metadata 169.254.169.254), and prevents redirects.
-export function isPrivateOrReservedIp(ip: string): boolean {
-  if (!ip) return true;
-  // IPv4 mapping check (e.g. ::ffff:127.0.0.1)
-  const cleanIp = ip.replace(/^::ffff:/i, '');
-  if (cleanIp === '127.0.0.1' || cleanIp === 'localhost' || cleanIp === '::1' || cleanIp === '0.0.0.0' || cleanIp === '::') {
+function isNonPublicIpv4Octets(parts: number[]): boolean {
+  if (parts.length !== 4 || parts.some((p) => !Number.isInteger(p) || p < 0 || p > 255)) {
     return true;
   }
-  // IPv6 private & reserved ranges (ULA fc00::/7, Link-Local fe80::/10, Multicast ff00::/8)
+  const [a, b, c] = parts;
+  // 0.0.0.0/8 (Current network)
+  if (a === 0) return true;
+  // 10.0.0.0/8 (RFC1918 Private)
+  if (a === 10) return true;
+  // 100.64.0.0/10 (Carrier-grade NAT RFC6598)
+  if (a === 100 && b >= 64 && b <= 127) return true;
+  // 127.0.0.0/8 (Loopback)
+  if (a === 127) return true;
+  // 169.254.0.0/16 (Link-Local & Cloud Metadata 169.254.169.254)
+  if (a === 169 && b === 254) return true;
+  // 172.16.0.0/12 (RFC1918 Private)
+  if (a === 172 && b >= 16 && b <= 31) return true;
+  // 192.0.0.0/24 (IETF Protocol Assignments)
+  if (a === 192 && b === 0 && c === 0) return true;
+  // 192.0.2.0/24 (TEST-NET-1)
+  if (a === 192 && b === 0 && c === 2) return true;
+  // 192.88.99.0/24 (Deprecated 6to4 Relay Anycast)
+  if (a === 192 && b === 88 && c === 99) return true;
+  // 192.168.0.0/16 (RFC1918 Private)
+  if (a === 192 && b === 168) return true;
+  // 198.18.0.0/15 (Benchmarking)
+  if (a === 198 && (b === 18 || b === 19)) return true;
+  // 198.51.100.0/24 (TEST-NET-2)
+  if (a === 198 && b === 51 && c === 100) return true;
+  // 203.0.113.0/24 (TEST-NET-3)
+  if (a === 203 && b === 0 && c === 113) return true;
+  // 224.0.0.0/4 (Multicast) & 240.0.0.0/4 (Reserved / Broadcast)
+  if (a >= 224) return true;
+  return false;
+}
+
+function parseIpv6Hextets(rawIp: string): number[] | null {
+  const ip = rawIp.trim().toLowerCase();
+  if (!ip || !ip.includes(':')) return null;
+
+  let working = ip;
+  let embeddedIpv4Hextets: number[] | null = null;
+  const lastColonIdx = working.lastIndexOf(':');
+  const tail = working.slice(lastColonIdx + 1);
+  if (tail.includes('.')) {
+    const ipv4Parts = tail.split('.').map((seg) => (/^\d{1,3}$/.test(seg) ? Number(seg) : NaN));
+    if (ipv4Parts.length !== 4 || ipv4Parts.some((n) => Number.isNaN(n) || n < 0 || n > 255)) {
+      return null;
+    }
+    embeddedIpv4Hextets = [
+      (ipv4Parts[0] << 8) | ipv4Parts[1],
+      (ipv4Parts[2] << 8) | ipv4Parts[3],
+    ];
+    working = working.slice(0, lastColonIdx) + (lastColonIdx > 0 && working[lastColonIdx - 1] === ':' ? '' : '');
+    if (ip.slice(0, lastColonIdx + 1).endsWith('::')) {
+      working = ip.slice(0, lastColonIdx + 1);
+    }
+  }
+
+  const doubleColonParts = working.split('::');
+  if (doubleColonParts.length > 2) return null;
+
+  const parseSide = (side: string): number[] | null => {
+    if (!side) return [];
+    const tokens = side.split(':');
+    const out: number[] = [];
+    for (const tok of tokens) {
+      if (!/^[0-9a-f]{1,4}$/i.test(tok)) return null;
+      out.push(parseInt(tok, 16));
+    }
+    return out;
+  };
+
+  let hextets: number[];
+  const extraCount = embeddedIpv4Hextets ? 2 : 0;
+  if (doubleColonParts.length === 2) {
+    const left = parseSide(doubleColonParts[0]);
+    const right = parseSide(doubleColonParts[1]);
+    if (!left || !right) return null;
+    const missing = 8 - (left.length + right.length + extraCount);
+    if (missing < 1) return null;
+    hextets = [...left, ...new Array(missing).fill(0), ...right, ...(embeddedIpv4Hextets || [])];
+  } else {
+    const all = parseSide(working);
+    if (!all || all.length + extraCount !== 8) return null;
+    hextets = [...all, ...(embeddedIpv4Hextets || [])];
+  }
+  return hextets.length === 8 ? hextets : null;
+}
+
+export function isPrivateOrReservedIp(ip: string): boolean {
+  if (!ip || typeof ip !== 'string') return true;
+  let cleanIp = ip.trim().toLowerCase();
+  if (cleanIp.startsWith('[') && cleanIp.endsWith(']')) {
+    cleanIp = cleanIp.slice(1, -1);
+  }
+  // Strip IPv6 zone identifier (e.g. fe80::1%eth0)
+  const zoneIdx = cleanIp.indexOf('%');
+  if (zoneIdx >= 0) {
+    cleanIp = cleanIp.slice(0, zoneIdx);
+  }
+  if (!cleanIp) return true;
+  if (
+    cleanIp === 'localhost' ||
+    cleanIp === 'localhost.' ||
+    cleanIp.endsWith('.localhost') ||
+    cleanIp === '::1' ||
+    cleanIp === '::' ||
+    cleanIp === '0.0.0.0'
+  ) {
+    return true;
+  }
+
   if (cleanIp.includes(':')) {
-    const lowered = cleanIp.toLowerCase();
-    if (
-      lowered.startsWith('fc') ||
-      lowered.startsWith('fd') ||
-      lowered.startsWith('fe8') ||
-      lowered.startsWith('fe9') ||
-      lowered.startsWith('fea') ||
-      lowered.startsWith('feb') ||
-      lowered.startsWith('ff')
-    ) {
+    const h = parseIpv6Hextets(cleanIp);
+    if (!h) return true;
+    const [h0, h1, h2, h3, h4, h5, h6, h7] = h;
+    // Unspecified (::) and Loopback (::1)
+    if (h0 === 0 && h1 === 0 && h2 === 0 && h3 === 0 && h4 === 0 && h5 === 0 && h6 === 0 && (h7 === 0 || h7 === 1)) {
       return true;
     }
+    // IPv4-mapped IPv6 (::ffff:0:0/96) and IPv4-compatible IPv6 (::/96)
+    if (h0 === 0 && h1 === 0 && h2 === 0 && h3 === 0 && h4 === 0 && (h5 === 0xffff || h5 === 0)) {
+      if (h5 === 0) return true; // Deprecated IPv4-compatible IPv6 (non-public)
+      return isNonPublicIpv4Octets([(h6 >> 8) & 0xff, h6 & 0xff, (h7 >> 8) & 0xff, h7 & 0xff]);
+    }
+    // IPv4-translated (::ffff:0:0:0/96) & NAT64 (64:ff9b::/96, 64:ff9b:1::/48)
+    if (h0 === 0 && h1 === 0 && h2 === 0 && h3 === 0 && h4 === 0xffff && h5 === 0) {
+      return true;
+    }
+    if (h0 === 0x0064 && h1 === 0xff9b && ((h2 === 0 && h3 === 0 && h4 === 0 && h5 === 0) || h2 === 0x0001)) {
+      return true;
+    }
+    // Discard-Only (100::/64)
+    if (h0 === 0x0100 && h1 === 0 && h2 === 0 && h3 === 0) return true;
+    // Unique Local Address (fc00::/7)
+    if ((h0 & 0xfe00) === 0xfc00) return true;
+    // Link-Local (fe80::/10) & Deprecated Site-Local (fec0::/10)
+    if ((h0 & 0xffc0) === 0xfe80 || (h0 & 0xffc0) === 0xfec0) return true;
+    // Multicast (ff00::/8)
+    if ((h0 & 0xff00) === 0xff00) return true;
+    // Teredo (2001::/32), Benchmarking (2001:2::/48), ORCHID (2001:10::/28), Documentation (2001:db8::/32)
+    if (h0 === 0x2001 && h1 === 0x0000) return true;
+    if (h0 === 0x2001 && h1 === 0x0002 && h2 === 0x0000) return true;
+    if (h0 === 0x2001 && (h1 & 0xfff0) === 0x0010) return true;
+    if (h0 === 0x2001 && h1 === 0x0db8) return true;
+    // 6to4 (2002::/16) — inspect embedded IPv4
+    if (h0 === 0x2002) {
+      return isNonPublicIpv4Octets([(h1 >> 8) & 0xff, h1 & 0xff, (h2 >> 8) & 0xff, h2 & 0xff]);
+    }
+    // Allow only Global Unicast (2000::/3)
+    if ((h0 & 0xe000) !== 0x2000) return true;
     return false;
   }
-  const parts = cleanIp.split('.').map(Number);
-  if (parts.length === 4 && parts.every((p) => !isNaN(p) && p >= 0 && p <= 255)) {
-    // 10.0.0.0/8
-    if (parts[0] === 10) return true;
-    // 172.16.0.0/12
-    if (parts[0] === 172 && parts[1] >= 16 && parts[1] <= 31) return true;
-    // 192.168.0.0/16
-    if (parts[0] === 192 && parts[1] === 168) return true;
-    // 169.254.0.0/16 (Link-Local & Cloud Metadata 169.254.169.254)
-    if (parts[0] === 169 && parts[1] === 254) return true;
-    // 127.0.0.0/8 (Loopback)
-    if (parts[0] === 127) return true;
-    // 0.0.0.0/8 (Current network)
-    if (parts[0] === 0) return true;
-    // 100.64.0.0/10 (Carrier-grade NAT)
-    if (parts[0] === 100 && parts[1] >= 64 && parts[1] <= 127) return true;
-    // 224.0.0.0/4 (Multicast) & 240.0.0.0/4 (Reserved)
-    if (parts[0] >= 224) return true;
+
+  // Strictly reject non-standard IPv4 notations (including leading-zero octal octets like 012.0.0.1) unless canonical dotted-quad
+  if (!/^(0|[1-9]\d{0,2})(\.(0|[1-9]\d{0,2})){3}$/.test(cleanIp)) {
+    return true;
   }
-  return false;
+  const parts = cleanIp.split('.').map(Number);
+  return isNonPublicIpv4Octets(parts);
 }
 
 export function isAllowedLocalhostEndpoint(hostname: string): boolean {
   if (!hostname) return false;
-  const clean = hostname.toLowerCase().trim();
+  const clean = hostname.toLowerCase().trim().replace(/\.+$/, '');
   return clean === 'localhost' || clean === '127.0.0.1' || clean === '::1' || clean === '[::1]';
+}
+
+const BLOCKED_SSRF_NON_HTTP_PORTS = new Set<number>([
+  21, 22, 23, 25, 110, 135, 137, 138, 139, 143, 445, 1433, 1521, 3306, 3389, 5432, 6379, 11211, 27017,
+]);
+const SAFE_SSRF_MAX_REDIRECTS = 5;
+
+export type SafeSsrfFetchHooks = {
+  dnsLookup?: (hostname: string) => Promise<Array<{ address: string; family: number }>>;
+  requestImpl?: typeof http.request;
+  socksConnectImpl?: typeof SocksClient.createConnection;
+  isProductionOverride?: boolean;
+};
+
+export type ValidatedSsrfTarget = {
+  parsedUrl: URL;
+  cleanHost: string;
+  isLocalAiEndpoint: boolean;
+  targetPort: number;
+  pinnedAddress: { address: string; family: 4 | 6 } | null;
+};
+
+export async function validateSafeSsrfTargetUrl(
+  rawUrl: string,
+  options?: {
+    dnsLookup?: (hostname: string) => Promise<Array<{ address: string; family: number }>>;
+    disallowLocalhost?: boolean;
+    isProductionOverride?: boolean;
+  }
+): Promise<ValidatedSsrfTarget> {
+  const rawStr = String(rawUrl || '').trim();
+  const authorityMatch = rawStr.match(
+    /^[a-z][a-z0-9+.-]*:\/\/(?:[^@/?#]*@)?(\[[^\]]+\]|[^:/?#]+)/i
+  );
+  const rawAuthorityHost = authorityMatch
+    ? authorityMatch[1].toLowerCase().replace(/\.+$/, '')
+    : '';
+  if (
+    rawAuthorityHost &&
+    !rawAuthorityHost.startsWith('[') &&
+    /^(?:0x[0-9a-f]+|0[0-7]+|\d+)(?:\.(?:0x[0-9a-f]+|0[0-7]+|\d+)){0,3}$/i.test(
+      rawAuthorityHost
+    ) &&
+    !/^(0|[1-9]\d{0,2})(\.(0|[1-9]\d{0,2})){3}$/.test(rawAuthorityHost)
+  ) {
+    throw new Error(`SSRF 安全拦截：禁止非常规数字编码 IP 主机名 (${rawAuthorityHost})`);
+  }
+
+  let parsedUrl: URL;
+  try {
+    parsedUrl = new URL(rawStr);
+  } catch {
+    throw new Error('SSRF 安全拦截：无效的 URL 地址');
+  }
+
+  if (parsedUrl.protocol !== 'http:' && parsedUrl.protocol !== 'https:') {
+    throw new Error(`SSRF 安全拦截：仅允许 http/https 协议 (拒绝 ${parsedUrl.protocol})`);
+  }
+  if (parsedUrl.username || parsedUrl.password) {
+    throw new Error('SSRF 安全拦截：禁止在 URL 中携带用户名或密码凭据');
+  }
+
+  const targetPort = parsedUrl.port
+    ? Number(parsedUrl.port)
+    : parsedUrl.protocol === 'https:'
+      ? 443
+      : 80;
+  if (
+    !Number.isInteger(targetPort) ||
+    targetPort < 1 ||
+    targetPort > 65535 ||
+    BLOCKED_SSRF_NON_HTTP_PORTS.has(targetPort)
+  ) {
+    throw new Error(`SSRF 安全拦截：禁止访问非法或高危端口 (${parsedUrl.port || targetPort})`);
+  }
+
+  const rawHost = parsedUrl.hostname.trim().toLowerCase().replace(/\.+$/, '');
+  const cleanHost = rawHost.startsWith('[') && rawHost.endsWith(']') ? rawHost.slice(1, -1) : rawHost;
+  if (!cleanHost) {
+    throw new Error('SSRF 安全拦截：无效的主机名');
+  }
+
+  const isLocalAiEndpoint = !options?.disallowLocalhost && isAllowedLocalhostEndpoint(cleanHost);
+  const effectiveIsProduction =
+    options?.isProductionOverride !== undefined
+      ? options.isProductionOverride
+      : isProduction || process.env.NODE_ENV === 'production';
+
+  // Allow HTTP for local desktop models (e.g. Ollama http://127.0.0.1:11434, LM Studio http://localhost:1234)
+  // For remote public endpoints, strictly enforce HTTPS in production
+  if (effectiveIsProduction && parsedUrl.protocol !== 'https:' && !isLocalAiEndpoint) {
+    throw new Error(
+      `SSRF 安全拦截：出于安全防护，远端大模型服务仅允许使用安全的 https:// 协议端点 (拒绝 ${parsedUrl.protocol})`
+    );
+  }
+
+  if (isLocalAiEndpoint) {
+    return {
+      parsedUrl,
+      cleanHost,
+      isLocalAiEndpoint: true,
+      targetPort,
+      pinnedAddress: null,
+    };
+  }
+
+  if (
+    cleanHost === 'localhost' ||
+    cleanHost.endsWith('.localhost') ||
+    cleanHost === '127.0.0.1' ||
+    cleanHost === '::1'
+  ) {
+    throw new Error(`SSRF 安全拦截：禁止访问本机回环地址 (${cleanHost})`);
+  }
+
+  const ipFamily = net.isIP(cleanHost);
+  if (ipFamily) {
+    if (isPrivateOrReservedIp(cleanHost)) {
+      throw new Error(`SSRF 安全拦截：禁止访问内网或保留 IP 地址 (${cleanHost})`);
+    }
+    return {
+      parsedUrl,
+      cleanHost,
+      isLocalAiEndpoint: false,
+      targetPort,
+      pinnedAddress: { address: cleanHost, family: ipFamily === 6 ? 6 : 4 },
+    };
+  }
+
+  // Reject non-canonical integer / hex / octal / shorthand numeric hostnames (e.g. 0x7f000001, 2130706433, 0177.0.0.1, 127.1)
+  if (/^(0x[0-9a-f]+|0[0-7]+|\d+|\d+(?:\.\d+){1,3})$/i.test(cleanHost)) {
+    throw new Error(`SSRF 安全拦截：禁止非常规数字编码 IP 主机名 (${cleanHost})`);
+  }
+
+  const resolver =
+    options?.dnsLookup || ((h: string) => dns.lookup(h, { all: true, verbatim: true }));
+  let lookupResult: Array<{ address: string; family: number }>;
+  try {
+    lookupResult = await resolver(cleanHost);
+  } catch (err: any) {
+    throw new Error(`SSRF 安全拦截：域名无法解析 (${cleanHost}): ${err?.message || err}`);
+  }
+
+  if (!Array.isArray(lookupResult) || lookupResult.length === 0) {
+    throw new Error(`SSRF 安全拦截：域名未返回有效解析记录 (${cleanHost})`);
+  }
+
+  for (const address of lookupResult) {
+    if (!address?.address || isPrivateOrReservedIp(address.address)) {
+      throw new Error(
+        `SSRF 安全拦截：禁止访问内网或保留 IP 地址 (${cleanHost} -> ${address?.address || 'unknown'})，保护内部云元数据与内网资产`
+      );
+    }
+  }
+
+  const primary = lookupResult[0];
+  const fam = net.isIP(primary.address) || (primary.family === 6 ? 6 : 4);
+  return {
+    parsedUrl,
+    cleanHost,
+    isLocalAiEndpoint: false,
+    targetPort,
+    pinnedAddress: { address: primary.address, family: fam === 6 ? 6 : 4 },
+  };
+}
+
+async function normalizeSsrfRequestBody(body: RequestInit['body']): Promise<Buffer | undefined> {
+  if (body === undefined || body === null) return undefined;
+  if (typeof body === 'string') return Buffer.from(body, 'utf8');
+  if (Buffer.isBuffer(body)) return body;
+  if (body instanceof Uint8Array) return Buffer.from(body);
+  if (body instanceof ArrayBuffer) return Buffer.from(body);
+  if (ArrayBuffer.isView(body)) {
+    return Buffer.from(body.buffer, body.byteOffset, body.byteLength);
+  }
+  if (body instanceof URLSearchParams) return Buffer.from(body.toString(), 'utf8');
+  const ab = await new globalThis.Response(body as any).arrayBuffer();
+  return Buffer.from(ab);
+}
+
+async function performPinnedHttpFetch(
+  validated: ValidatedSsrfTarget,
+  options: RequestInit,
+  requestImpl?: typeof http.request
+): Promise<globalThis.Response> {
+  const { parsedUrl, cleanHost, targetPort, pinnedAddress } = validated;
+  if (!pinnedAddress) {
+    throw new Error('SSRF 安全拦截：缺少已校验的连接 IP');
+  }
+
+  const isHttps = parsedUrl.protocol === 'https:';
+  const reqFn = requestImpl || (isHttps ? https.request : http.request);
+  const method = String(options.method || 'GET').toUpperCase();
+
+  const reqHeaders: Record<string, string> = {};
+  if (options.headers) {
+    new Headers(options.headers).forEach((v, k) => {
+      reqHeaders[k] = v;
+    });
+  }
+  if (!Object.keys(reqHeaders).some((k) => k.toLowerCase() === 'host')) {
+    reqHeaders['Host'] = parsedUrl.host;
+  }
+  reqHeaders['Connection'] = 'close';
+
+  const bodyBuf = await normalizeSsrfRequestBody(options.body);
+  if (bodyBuf && !Object.keys(reqHeaders).some((k) => k.toLowerCase() === 'content-length')) {
+    reqHeaders['Content-Length'] = String(bodyBuf.length);
+  }
+
+  const tlsServername = net.isIP(cleanHost) ? undefined : cleanHost;
+  const pinnedLookup = (
+    _hostname: string,
+    opts: any,
+    callback: (...args: any[]) => void
+  ) => {
+    if (typeof opts === 'function') {
+      return opts(null, pinnedAddress.address, pinnedAddress.family);
+    }
+    if (opts && opts.all) {
+      return callback(null, [{ address: pinnedAddress.address, family: pinnedAddress.family }]);
+    }
+    return callback(null, pinnedAddress.address, pinnedAddress.family);
+  };
+
+  return await new Promise<globalThis.Response>((resolve, reject) => {
+    let settled = false;
+    let reqRef: http.ClientRequest | null = null;
+    const signal = options.signal;
+
+    const cleanupSignal = () => {
+      if (signal) {
+        signal.removeEventListener('abort', onAbort);
+      }
+    };
+    const finishError = (err: Error) => {
+      if (settled) return;
+      settled = true;
+      cleanupSignal();
+      try {
+        reqRef?.destroy();
+      } catch {}
+      reject(err);
+    };
+    const onAbort = () => {
+      const abortErr: any = new Error('The operation was aborted');
+      abortErr.name = 'AbortError';
+      finishError(abortErr);
+    };
+
+    if (signal) {
+      if (signal.aborted) {
+        onAbort();
+        return;
+      }
+      signal.addEventListener('abort', onAbort, { once: true });
+    }
+
+    reqRef = reqFn(
+      {
+        hostname: cleanHost,
+        port: targetPort,
+        path: `${parsedUrl.pathname}${parsedUrl.search}`,
+        method,
+        headers: reqHeaders,
+        lookup: pinnedLookup as any,
+        ...(isHttps && tlsServername ? { servername: tlsServername } : {}),
+        agent: false,
+      } as any,
+      (res) => {
+        if (settled) {
+          res.resume();
+          return;
+        }
+        settled = true;
+        cleanupSignal();
+
+        const status = Number(res.statusCode || 502);
+        const respHeaders = new Headers();
+        for (const [k, v] of Object.entries(res.headers)) {
+          if (Array.isArray(v)) {
+            for (const item of v) respHeaders.append(k, item);
+          } else if (typeof v === 'string') {
+            respHeaders.set(k, v);
+          }
+        }
+
+        const isNullBodyStatus =
+          status === 204 || status === 205 || status === 304 || method === 'HEAD';
+        if (isNullBodyStatus) {
+          res.resume();
+          resolve(
+            new globalThis.Response(null, {
+              status,
+              statusText: res.statusMessage || '',
+              headers: respHeaders,
+            })
+          );
+          return;
+        }
+
+        const webBody = Readable.toWeb(res) as any;
+        resolve(
+          new globalThis.Response(webBody, {
+            status,
+            statusText: res.statusMessage || '',
+            headers: respHeaders,
+          })
+        );
+      }
+    );
+
+    reqRef.on('error', (err) => finishError(err));
+    if (bodyBuf && bodyBuf.length > 0) {
+      reqRef.write(bodyBuf);
+    }
+    reqRef.end();
+  });
 }
 
 /**
  * SSRF-Safe Fetch Wrapper
- * Validates protocol, resolves DNS and checks IP against blacklists,
- * permits desktop workstation local AI endpoints (Ollama at http://127.0.0.1:11434, LM Studio at http://localhost:1234),
- * while strictly blocking cloud metadata (169.254.169.254) and unauthorized private subnets.
+ * Strictly enforces http/https protocols, rejects credentials and unsafe ports,
+ * normalizes IPv4/IPv6, checks ALL DNS A/AAAA records, pins the verified IP against DNS Rebinding,
+ * prevents SOCKS5 proxy bypasses, and re-validates every HTTP redirect hop,
+ * while preserving desktop workstation local AI endpoints (Ollama / LM Studio).
  */
-export async function safeSsrfFetch(url: string, options: RequestInit = {}): Promise<globalThis.Response> {
-  const parsedUrl = new URL(url);
-  const hostname = parsedUrl.hostname.toLowerCase();
-  if (!hostname) {
-    throw new Error('SSRF 安全拦截：无效的主机名');
-  }
+export async function safeSsrfFetch(
+  url: string,
+  options: RequestInit = {},
+  _hooks?: SafeSsrfFetchHooks
+): Promise<globalThis.Response> {
+  let currentUrl = url;
+  let currentOptions: RequestInit = { ...options };
+  const rejectAllRedirects = options.redirect === 'error';
 
-  const isLocalAiEndpoint = isAllowedLocalhostEndpoint(hostname);
-
-  // Allow HTTP for local desktop models (e.g. Ollama http://127.0.0.1:11434, LM Studio http://localhost:1234)
-  // For remote public endpoints, strictly enforce HTTPS in production
-  if (isProduction && parsedUrl.protocol !== 'https:' && !isLocalAiEndpoint) {
-    throw new Error(`SSRF 安全拦截：出于安全防护，远端大模型服务仅允许使用安全的 https:// 协议端点 (拒绝 ${parsedUrl.protocol})`);
-  }
-
-  // If destination is local loopback for personal AI (Ollama / LocalAI / LM Studio), safely permit it
-  if (isLocalAiEndpoint) {
-    return await fetch(url, {
-      ...options,
-      redirect: 'error',
+  for (let hop = 0; hop <= SAFE_SSRF_MAX_REDIRECTS; hop++) {
+    const validated = await validateSafeSsrfTargetUrl(currentUrl, {
+      dnsLookup: _hooks?.dnsLookup,
+      disallowLocalhost: hop > 0,
+      isProductionOverride: _hooks?.isProductionOverride,
     });
+
+    let res: globalThis.Response;
+    if (validated.isLocalAiEndpoint) {
+      res = await fetch(validated.parsedUrl.toString(), {
+        ...currentOptions,
+        redirect: 'manual',
+      });
+    } else {
+      const proxy = getConfiguredTelegramProxy();
+      if (proxy) {
+        res = await fetchWithSystemProxySupport(
+          validated.parsedUrl.toString(),
+          { ...currentOptions, redirect: 'manual' },
+          20000,
+          validated.pinnedAddress || undefined,
+          _hooks?.socksConnectImpl
+        );
+      } else {
+        res = await performPinnedHttpFetch(validated, currentOptions, _hooks?.requestImpl);
+      }
+    }
+
+    if (res.status >= 300 && res.status < 400) {
+      const location = res.headers.get('location');
+      try {
+        await res.body?.cancel();
+      } catch {}
+      if (rejectAllRedirects || !location) {
+        throw new Error(`SSRF 安全拦截：禁止未经校验的 HTTP 重定向 (HTTP ${res.status})`);
+      }
+      if (hop >= SAFE_SSRF_MAX_REDIRECTS) {
+        throw new Error('SSRF 安全拦截：HTTP 重定向次数超过安全上限');
+      }
+      const nextUrl = new URL(location, validated.parsedUrl).toString();
+      const nextOrigin = new URL(nextUrl).origin;
+      const nextHeaders = new Headers(currentOptions.headers);
+      if (nextOrigin !== validated.parsedUrl.origin) {
+        nextHeaders.delete('authorization');
+        nextHeaders.delete('x-api-key');
+        nextHeaders.delete('x-goog-api-key');
+        nextHeaders.delete('cookie');
+      }
+      const keepBody = res.status === 307 || res.status === 308;
+      const curMethod = String(currentOptions.method || 'GET').toUpperCase();
+      currentOptions = {
+        ...currentOptions,
+        method: keepBody
+          ? curMethod
+          : res.status === 303 || (curMethod !== 'GET' && curMethod !== 'HEAD')
+            ? 'GET'
+            : curMethod,
+        headers: nextHeaders,
+        ...(keepBody ? {} : { body: undefined }),
+      };
+      currentUrl = nextUrl;
+      continue;
+    }
+
+    return res;
   }
 
-  // If a local SOCKS4/SOCKS5 proxy is enabled, allow proxy-tunneled HTTPS/HTTP while still blocking private/reserved targets
-  const proxy = getConfiguredTelegramProxy();
-  if (proxy) {
-    if (net.isIP(hostname) && isPrivateOrReservedIp(hostname)) {
-      throw new Error(`SSRF 安全拦截：禁止访问内网或保留 IP 地址 (${hostname})`);
-    }
-    try {
-      const lookupResult = await dns.lookup(hostname, { all: true });
-      for (const address of lookupResult) {
-        if (isPrivateOrReservedIp(address.address)) {
-          throw new Error(`SSRF 安全拦截：禁止访问内网或保留 IP 地址 (${hostname} -> ${address.address})，保护内部云元数据与内网资产`);
-        }
-      }
-    } catch (err: any) {
-      if (err.message.includes('SSRF 安全拦截')) {
-        throw err;
-      }
-      if (proxy.socksType !== 5) {
-        throw new Error(`SSRF 安全拦截：域名无法解析 (${hostname}): ${err.message}`);
-      }
-    }
-    return await fetchWithSystemProxySupport(url, { ...options, redirect: 'error' }, 20000);
-  }
-
-  // Resolve DNS to verify the destination IP address for remote hosts
-  try {
-    const lookupResult = await dns.lookup(hostname, { all: true });
-    for (const address of lookupResult) {
-      if (isPrivateOrReservedIp(address.address)) {
-        throw new Error(`SSRF 安全拦截：禁止访问内网或保留 IP 地址 (${hostname} -> ${address.address})，保护内部云元数据与内网资产`);
-      }
-    }
-  } catch (err: any) {
-    if (err.message.includes('SSRF 安全拦截')) {
-      throw err;
-    }
-    // DNS resolution failure
-    throw new Error(`SSRF 安全拦截：域名无法解析 (${hostname}): ${err.message}`);
-  }
-
-  // Enforce redirect: 'error' (do not follow redirects)
-  return await fetch(url, {
-    ...options,
-    redirect: 'error',
-  });
+  throw new Error('SSRF 安全拦截：HTTP 重定向异常终止');
 }
 
 // 4. Server-Authoritative Active Sessions Store
@@ -6439,15 +6990,356 @@ app.get('/api/messages/local-media/:fileKey', async (req: Request, res: Response
   }
 });
 
-async function resolveOutboundMediaSource(
+const OUTBOUND_MEDIA_MAX_FETCH_BYTES = Math.min(TELEGRAM_MAX_MEDIA, 64 * 1024 * 1024);
+const OUTBOUND_MEDIA_FETCH_TIMEOUT_MS = 15000;
+const OUTBOUND_MEDIA_MAX_CONCURRENT_FETCHES = 4;
+
+let activeOutboundMediaFetches = 0;
+const outboundMediaFetchWaiters: Array<() => void> = [];
+
+async function acquireOutboundMediaFetchSlot(): Promise<() => void> {
+  if (activeOutboundMediaFetches >= OUTBOUND_MEDIA_MAX_CONCURRENT_FETCHES) {
+    await new Promise<void>((resolve) => {
+      outboundMediaFetchWaiters.push(resolve);
+    });
+  }
+  activeOutboundMediaFetches += 1;
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    activeOutboundMediaFetches = Math.max(0, activeOutboundMediaFetches - 1);
+    const next = outboundMediaFetchWaiters.shift();
+    if (next) next();
+  };
+}
+
+export interface OutboundMediaDnsAddress {
+  address: string;
+  family: number;
+}
+
+export interface OutboundMediaFetchOptions {
+  timeoutMs?: number;
+  maxBytes?: number;
+  dnsLookup?: (hostname: string) => Promise<OutboundMediaDnsAddress[]>;
+  allowHttpInProduction?: boolean;
+  requestImpl?: (
+    options: http.RequestOptions,
+    callback?: (res: http.IncomingMessage) => void
+  ) => http.ClientRequest;
+}
+
+function defaultOutboundDnsLookup(hostname: string): Promise<OutboundMediaDnsAddress[]> {
+  return dns.lookup(hostname, { all: true }).then((results) =>
+    results.map((r) => ({ address: r.address, family: r.family }))
+  );
+}
+
+export async function validateOutboundMediaRemoteUrl(
+  rawUrl: string,
+  options?: {
+    dnsLookup?: (hostname: string) => Promise<OutboundMediaDnsAddress[]>;
+    allowHttpInProduction?: boolean;
+  }
+): Promise<{ parsedUrl: URL; pinnedAddress: OutboundMediaDnsAddress }> {
+  let parsedUrl: URL;
+  try {
+    parsedUrl = new URL(rawUrl.trim());
+  } catch {
+    throw new Error('SSRF 安全拦截：无效的媒体 URL');
+  }
+
+  if (parsedUrl.protocol !== 'http:' && parsedUrl.protocol !== 'https:') {
+    throw new Error(`SSRF 安全拦截：出站媒体仅允许 http/https 协议 (拒绝 ${parsedUrl.protocol})`);
+  }
+  if (isProduction && !options?.allowHttpInProduction && parsedUrl.protocol !== 'https:') {
+    throw new Error(`SSRF 安全拦截：生产环境下出站媒体仅允许安全的 https:// 地址 (拒绝 ${parsedUrl.protocol})`);
+  }
+  if (parsedUrl.username || parsedUrl.password) {
+    throw new Error('SSRF 安全拦截：禁止在媒体 URL 中携带认证凭据');
+  }
+
+  let hostname = parsedUrl.hostname.trim().toLowerCase().replace(/\.+$/, '');
+  if (hostname.startsWith('[') && hostname.endsWith(']')) {
+    hostname = hostname.slice(1, -1);
+  }
+  if (!hostname) {
+    throw new Error('SSRF 安全拦截：媒体 URL 缺少有效主机名');
+  }
+  if (isAllowedLocalhostEndpoint(hostname) || hostname.endsWith('.localhost')) {
+    throw new Error(`SSRF 安全拦截：禁止出站媒体请求访问本机回环地址 (${hostname})`);
+  }
+
+  const ipLiteralFamily = net.isIP(hostname);
+  if (ipLiteralFamily) {
+    if (isPrivateOrReservedIp(hostname)) {
+      throw new Error(`SSRF 安全拦截：禁止出站媒体访问内网、回环或保留 IP 地址 (${hostname})`);
+    }
+    return {
+      parsedUrl,
+      pinnedAddress: { address: hostname, family: ipLiteralFamily },
+    };
+  }
+
+  // Also guard non-canonical integer/hex/octal host strings that net.isIP doesn't recognize as standard dotted-quad
+  if (/^(0x[0-9a-f]+|0[0-7]+|\d+)$/i.test(hostname)) {
+    throw new Error(`SSRF 安全拦截：禁止非常规数字编码 IP 主机名 (${hostname})`);
+  }
+
+  const resolver = options?.dnsLookup || defaultOutboundDnsLookup;
+  let resolvedAddrs: OutboundMediaDnsAddress[];
+  try {
+    resolvedAddrs = await resolver(hostname);
+  } catch (err: any) {
+    throw new Error(`SSRF 安全拦截：媒体域名解析失败 (${hostname}): ${err?.message || err}`);
+  }
+
+  if (!Array.isArray(resolvedAddrs) || resolvedAddrs.length === 0) {
+    throw new Error(`SSRF 安全拦截：媒体域名未返回有效 IP (${hostname})`);
+  }
+
+  for (const addr of resolvedAddrs) {
+    if (!addr?.address || isPrivateOrReservedIp(addr.address)) {
+      throw new Error(`SSRF 安全拦截：禁止访问内网或非公网 IP 地址 (${hostname} -> ${addr?.address || 'unknown'})`);
+    }
+  }
+
+  const primary = resolvedAddrs[0];
+  const detectedFamily = net.isIP(primary.address) || (primary.family === 6 ? 6 : 4);
+  return {
+    parsedUrl,
+    pinnedAddress: {
+      address: primary.address,
+      family: detectedFamily === 6 ? 6 : 4,
+    },
+  };
+}
+
+export async function safeOutboundMediaFetch(
+  mediaUrl: string,
+  options?: OutboundMediaFetchOptions
+): Promise<Buffer> {
+  const timeoutMs = Math.max(500, options?.timeoutMs ?? OUTBOUND_MEDIA_FETCH_TIMEOUT_MS);
+  const maxBytes = Math.max(1, options?.maxBytes ?? OUTBOUND_MEDIA_MAX_FETCH_BYTES);
+
+  const { parsedUrl, pinnedAddress } = await validateOutboundMediaRemoteUrl(mediaUrl, {
+    dnsLookup: options?.dnsLookup,
+    allowHttpInProduction: options?.allowHttpInProduction,
+  });
+
+  const releaseSlot = await acquireOutboundMediaFetchSlot();
+  try {
+    const rawHost = parsedUrl.hostname.trim();
+    const cleanConnectHost =
+      rawHost.startsWith('[') && rawHost.endsWith(']') ? rawHost.slice(1, -1) : rawHost;
+    const tlsServername = net.isIP(cleanConnectHost) ? undefined : cleanConnectHost;
+
+    const proxy = getConfiguredTelegramProxy();
+    if (proxy) {
+      // Tunnel through SOCKS using the already-validated pinned IP (prevents proxy-side DNS rebinding)
+      const targetPort = parsedUrl.port
+        ? Number(parsedUrl.port)
+        : parsedUrl.protocol === 'https:'
+          ? 443
+          : 80;
+      const isHttps = parsedUrl.protocol === 'https:';
+      const { socket: rawSocket } = await SocksClient.createConnection({
+        proxy: {
+          host: proxy.ip,
+          port: proxy.port,
+          type: proxy.socksType,
+          ...(proxy.username ? { userId: proxy.username } : {}),
+          ...(proxy.password ? { password: proxy.password } : {}),
+        },
+        command: 'connect',
+        destination: {
+          host: pinnedAddress.address,
+          port: targetPort,
+        },
+        timeout: timeoutMs,
+      });
+
+      return await new Promise<Buffer>((resolve, reject) => {
+        let settled = false;
+        let activeSocket: net.Socket | tls.TLSSocket = rawSocket;
+        const finishError = (err: Error) => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          try { activeSocket.destroy(); } catch {}
+          try { rawSocket.destroy(); } catch {}
+          reject(err);
+        };
+        const timer = setTimeout(() => {
+          finishError(new Error(`拉取媒体资源超时 (${timeoutMs}ms)`));
+        }, timeoutMs);
+
+        const mod = isHttps ? https : http;
+        const proxyAgent = new (isHttps ? https.Agent : http.Agent)({ keepAlive: false });
+        (proxyAgent as any).createConnection = () => {
+          activeSocket = isHttps
+            ? tls.connect({
+                socket: rawSocket,
+                ...(tlsServername ? { servername: tlsServername } : {}),
+              })
+            : rawSocket;
+          return activeSocket;
+        };
+        const req = mod.request(
+          {
+            hostname: cleanConnectHost,
+            port: targetPort,
+            path: `${parsedUrl.pathname}${parsedUrl.search}`,
+            method: 'GET',
+            headers: {
+              Host: parsedUrl.host,
+              Connection: 'close',
+            },
+            agent: proxyAgent,
+          },
+          (res) => {
+            const status = Number(res.statusCode || 0);
+            if (status >= 300 && status < 400) {
+              res.resume();
+              return finishError(new Error(`SSRF 安全拦截：禁止未经校验的 HTTP 重定向 (HTTP ${status})`));
+            }
+            if (status < 200 || status >= 300) {
+              res.resume();
+              return finishError(new Error(`拉取媒体资源失败 (HTTP ${status})`));
+            }
+            const contentLength = Number(res.headers['content-length'] || 0);
+            if (Number.isFinite(contentLength) && contentLength > maxBytes) {
+              res.destroy();
+              return finishError(new Error(`媒体资源体积超过最大限制 (${maxBytes} bytes)`));
+            }
+            const chunks: Buffer[] = [];
+            let total = 0;
+            res.on('data', (chunk: Buffer) => {
+              const bufChunk = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+              total += bufChunk.length;
+              if (total > maxBytes) {
+                res.destroy();
+                finishError(new Error(`媒体资源体积超过最大限制 (${maxBytes} bytes)`));
+                return;
+              }
+              chunks.push(bufChunk);
+            });
+            res.on('end', () => {
+              if (settled) return;
+              settled = true;
+              clearTimeout(timer);
+              resolve(Buffer.concat(chunks, total));
+            });
+            res.on('error', (err) => finishError(err));
+          }
+        );
+        req.on('error', (err) => finishError(err));
+        req.end();
+      });
+    }
+
+    // Direct pinned-IP HTTP/HTTPS request (immune to DNS Rebinding; lookup never queries DNS again)
+    const isHttps = parsedUrl.protocol === 'https:';
+    const targetPort = parsedUrl.port ? Number(parsedUrl.port) : isHttps ? 443 : 80;
+    const pinnedLookup = (
+      _hostname: string,
+      opts: any,
+      callback: (...args: any[]) => void
+    ) => {
+      if (typeof opts === 'function') {
+        return opts(null, pinnedAddress.address, pinnedAddress.family);
+      }
+      if (opts && opts.all) {
+        return callback(null, [{ address: pinnedAddress.address, family: pinnedAddress.family }]);
+      }
+      return callback(null, pinnedAddress.address, pinnedAddress.family);
+    };
+
+    return await new Promise<Buffer>((resolve, reject) => {
+      let settled = false;
+      const reqFn = options?.requestImpl || (isHttps ? https.request : http.request);
+      let reqRef: http.ClientRequest | null = null;
+      const finishError = (err: Error) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        try { reqRef?.destroy(); } catch {}
+        reject(err);
+      };
+      const timer = setTimeout(() => {
+        finishError(new Error(`拉取媒体资源超时 (${timeoutMs}ms)`));
+      }, timeoutMs);
+
+      reqRef = reqFn(
+        {
+          hostname: cleanConnectHost,
+          port: targetPort,
+          path: `${parsedUrl.pathname}${parsedUrl.search}`,
+          method: 'GET',
+          headers: {
+            Host: parsedUrl.host,
+            Connection: 'close',
+          },
+          lookup: pinnedLookup as any,
+          ...(isHttps && tlsServername ? { servername: tlsServername } : {}),
+          agent: false,
+        } as any,
+        (res) => {
+          const status = Number(res.statusCode || 0);
+          if (status >= 300 && status < 400) {
+            res.resume();
+            return finishError(new Error(`SSRF 安全拦截：禁止未经校验的 HTTP 重定向 (HTTP ${status})`));
+          }
+          if (status < 200 || status >= 300) {
+            res.resume();
+            return finishError(new Error(`拉取媒体资源失败 (HTTP ${status})`));
+          }
+          const contentLength = Number(res.headers['content-length'] || 0);
+          if (Number.isFinite(contentLength) && contentLength > maxBytes) {
+            res.destroy();
+            return finishError(new Error(`媒体资源体积超过最大限制 (${maxBytes} bytes)`));
+          }
+
+          const chunks: Buffer[] = [];
+          let total = 0;
+          res.on('data', (chunk: Buffer) => {
+            const bufChunk = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+            total += bufChunk.length;
+            if (total > maxBytes) {
+              res.destroy();
+              finishError(new Error(`媒体资源体积超过最大限制 (${maxBytes} bytes)`));
+              return;
+            }
+            chunks.push(bufChunk);
+          });
+          res.on('end', () => {
+            if (settled) return;
+            settled = true;
+            clearTimeout(timer);
+            resolve(Buffer.concat(chunks, total));
+          });
+          res.on('error', (err) => finishError(err));
+        }
+      );
+      reqRef.on('error', (err) => finishError(err));
+      reqRef.end();
+    });
+  } finally {
+    releaseSlot();
+  }
+}
+
+export async function resolveOutboundMediaSource(
   mediaUrl: string,
   localDiskPath?: string,
   label = '媒体'
 ): Promise<{ diskPath?: string; buffer?: Buffer; size: number }> {
-  if (localDiskPath && fs.existsSync(localDiskPath)) {
-    const stat = await fs.promises.stat(localDiskPath);
+  const safeLocalPath = resolveAllowedOutboundDiskPath(localDiskPath);
+  if (safeLocalPath) {
+    const stat = await fs.promises.stat(safeLocalPath);
     if (stat.size > 0) {
-      return { diskPath: localDiskPath, size: stat.size };
+      return { diskPath: safeLocalPath, size: stat.size };
     }
   }
   const resolvedFromUrl = resolveLocalMediaDiskPath(mediaUrl);
@@ -6461,32 +7353,34 @@ async function resolveOutboundMediaSource(
   return { buffer, size: buffer.length };
 }
 
-async function readMediaBufferStrict(mediaUrl: string, label: string): Promise<Buffer> {
+export async function readMediaBufferStrict(
+  mediaUrl: string,
+  label: string,
+  fetchOptions?: OutboundMediaFetchOptions
+): Promise<Buffer> {
   if (!mediaUrl || typeof mediaUrl !== 'string') {
     throw new Error(`${label}地址为空`);
   }
-  const resolvedLocal = resolveLocalMediaDiskPath(mediaUrl);
+  const trimmed = mediaUrl.trim();
+  const resolvedLocal = resolveLocalMediaDiskPath(trimmed);
   if (resolvedLocal) {
     const buf = await fs.promises.readFile(resolvedLocal);
     if (!buf || buf.length === 0) throw new Error(`${label}数据为空`);
     return buf;
   }
   let buf: Buffer | null = null;
-  if (mediaUrl.startsWith('data:')) {
-    const commaIdx = mediaUrl.indexOf(',');
-    const base64Data = commaIdx >= 0 ? mediaUrl.slice(commaIdx + 1) : '';
-    buf = Buffer.from(base64Data, 'base64');
-  } else if (mediaUrl.startsWith('http://') || mediaUrl.startsWith('https://')) {
-    const resp = await fetch(mediaUrl);
-    if (!resp.ok) {
-      throw new Error(`拉取${label}资源失败 (HTTP ${resp.status})`);
+  if (/^data:/i.test(trimmed)) {
+    const commaIdx = trimmed.indexOf(',');
+    const base64Data = commaIdx >= 0 ? trimmed.slice(commaIdx + 1) : '';
+    const maxBytes = fetchOptions?.maxBytes ?? OUTBOUND_MEDIA_MAX_FETCH_BYTES;
+    if (Math.floor((base64Data.length * 3) / 4) > maxBytes) {
+      throw new Error(`${label}数据体积超过最大限制`);
     }
-    const arrayBuf = await resp.arrayBuffer();
-    buf = Buffer.from(arrayBuf);
-  } else if (fs.existsSync(mediaUrl)) {
-    buf = fs.readFileSync(mediaUrl);
+    buf = Buffer.from(base64Data, 'base64');
+  } else if (/^https?:\/\//i.test(trimmed)) {
+    buf = await safeOutboundMediaFetch(trimmed, fetchOptions);
   } else {
-    throw new Error(`不支持或不存在的${label}资源路径`);
+    throw new Error(`不支持或非法的${label}资源路径，已拦截本地任意路径读取`);
   }
   if (!buf || buf.length === 0) {
     throw new Error(`${label}数据为空`);
@@ -6612,7 +7506,56 @@ async function syncOutboundTelegramDialogState(params: {
     : undefined;
 }
 
-async function deliverOutboundTelegramMessage(
+const TRUSTED_OUTBOUND_DISK_PATH = Symbol('trustedOutboundDiskPath');
+
+function isSuspiciousLocalFilePathString(raw: string): boolean {
+  const s = raw.trim();
+  if (!s) return false;
+  if (s.includes('\0')) return true;
+  if (/^file:/i.test(s)) return true;
+  if (s.startsWith('/') || s.startsWith('.') || s.startsWith('~/') || s.startsWith('\\\\') || s.includes('\\')) {
+    return true;
+  }
+  if (/^[a-zA-Z]:[\\/]/.test(s)) {
+    return true;
+  }
+  if ((s.includes('/') || s.includes('.')) && !/^[A-Za-z0-9+/=\s]+$/.test(s)) {
+    return true;
+  }
+  return false;
+}
+
+async function validateOutboundMediaInputForBot(
+  mediaInput: string,
+  resolvedTrustedDiskPath: string | null,
+  label: string
+): Promise<{ ok: true; value: string } | { ok: false; error: string }> {
+  if (resolvedTrustedDiskPath) {
+    return { ok: true, value: resolvedTrustedDiskPath };
+  }
+  const trimmed = String(mediaInput || '').trim();
+  if (!trimmed) {
+    return { ok: false, error: `${label}缺少有效的媒体地址` };
+  }
+  const safeLocalUrlPath = resolveLocalMediaDiskPath(trimmed);
+  if (safeLocalUrlPath) {
+    return { ok: true, value: safeLocalUrlPath };
+  }
+  if (/^data:/i.test(trimmed)) {
+    return { ok: true, value: trimmed };
+  }
+  if (/^https?:\/\//i.test(trimmed)) {
+    try {
+      await validateOutboundMediaRemoteUrl(trimmed);
+      return { ok: true, value: trimmed };
+    } catch (err: any) {
+      return { ok: false, error: err?.message || `SSRF 安全拦截：非法的${label}远程地址` };
+    }
+  }
+  return { ok: false, error: `安全拦截：不支持或非法的${label}媒体路径，已禁止访问本地文件系统` };
+}
+
+export async function deliverOutboundTelegramMessage(
   payload: any,
   effectiveAccountId: string,
   msgId: string
@@ -6647,8 +7590,14 @@ async function deliverOutboundTelegramMessage(
     fileUrl = '',
     replyTo,
     replyToMsgId,
-    _localDiskPath,
   } = payload || {};
+
+  // Only trust _localDiskPath when stamped by server multipart upload via unforgeable Symbol AND inside OUTBOUND_MEDIA_DIR
+  const trustedDiskPath =
+    payload && typeof payload === 'object' && typeof payload[TRUSTED_OUTBOUND_DISK_PATH] === 'string'
+      ? resolveAllowedOutboundDiskPath(payload[TRUSTED_OUTBOUND_DISK_PATH])
+      : null;
+  const _localDiskPath = trustedDiskPath || undefined;
 
   const resolvedReplyToTgId =
     resolveTelegramMessageNumericId(replyTo?.id, replyTo?.telegramMessageId ?? replyToMsgId) || undefined;
@@ -6676,7 +7625,7 @@ async function deliverOutboundTelegramMessage(
       };
       const BOT_MAX_UPLOAD_BYTES = 50 * 1024 * 1024;
       const diskPathForBot =
-        (_localDiskPath && fs.existsSync(_localDiskPath) ? _localDiskPath : null) ||
+        trustedDiskPath ||
         resolveLocalMediaDiskPath(audioUrl || imageUrl || videoUrl || fileUrl);
       if (diskPathForBot) {
         const st = await fs.promises.stat(diskPathForBot).catch(() => null);
@@ -6690,36 +7639,48 @@ async function deliverOutboundTelegramMessage(
       }
 
       if (isAudio) {
-        const mediaInput = diskPathForBot || audioUrl;
-        if (!mediaInput) {
+        if (!audioUrl && !diskPathForBot) {
           return { delivered: false, channel: 'bot', error: '语音消息缺少音频地址，无法通过 Bot 发送' };
         }
+        const validated = await validateOutboundMediaInputForBot(audioUrl, diskPathForBot, '语音');
+        if (!validated.ok) {
+          return { delivered: false, channel: 'bot', error: validated.error };
+        }
         console.log(`[Telegram Outbound] Bot sending voice message to ${chatId} (${audioDuration}s)...`);
-        botResult = await sendTelegramVoice(chatId, mediaInput, sttText || text || translatedText, audioDuration, botOpts);
+        botResult = await sendTelegramVoice(chatId, validated.value, sttText || text || translatedText, audioDuration, botOpts);
         failDetail = 'Telegram Bot API 语音发送失败（请检查音频转码或 Bot 权限）';
       } else if (isImage) {
-        const mediaInput = diskPathForBot || imageUrl;
-        if (!mediaInput) {
+        if (!imageUrl && !diskPathForBot) {
           return { delivered: false, channel: 'bot', error: '图片消息缺少图片地址，无法通过 Bot 发送' };
         }
+        const validated = await validateOutboundMediaInputForBot(imageUrl, diskPathForBot, '图片');
+        if (!validated.ok) {
+          return { delivered: false, channel: 'bot', error: validated.error };
+        }
         console.log(`[Telegram Outbound] Bot sending photo to ${chatId}...`);
-        botResult = await sendTelegramPhoto(chatId, mediaInput, text || imageCaption || translatedText, botOpts);
+        botResult = await sendTelegramPhoto(chatId, validated.value, text || imageCaption || translatedText, botOpts);
         failDetail = 'Telegram Bot API 图片发送失败';
       } else if (isVideo) {
-        const mediaInput = diskPathForBot || videoUrl;
-        if (!mediaInput) {
+        if (!videoUrl && !diskPathForBot) {
           return { delivered: false, channel: 'bot', error: '视频消息缺少视频地址，无法通过 Bot 发送' };
         }
+        const validated = await validateOutboundMediaInputForBot(videoUrl, diskPathForBot, '视频');
+        if (!validated.ok) {
+          return { delivered: false, channel: 'bot', error: validated.error };
+        }
         console.log(`[Telegram Outbound] Bot sending video to ${chatId} (${videoDuration}s)...`);
-        botResult = await sendTelegramVideo(chatId, mediaInput, text || translatedText, videoDuration, botOpts);
+        botResult = await sendTelegramVideo(chatId, validated.value, text || translatedText, videoDuration, botOpts);
         failDetail = 'Telegram Bot API 视频发送失败';
       } else if (isFile) {
-        const mediaInput = diskPathForBot || fileUrl;
-        if (!mediaInput) {
+        if (!fileUrl && !diskPathForBot) {
           return { delivered: false, channel: 'bot', error: '文件消息缺少文件地址，无法通过 Bot 发送' };
         }
+        const validated = await validateOutboundMediaInputForBot(fileUrl, diskPathForBot, '文件');
+        if (!validated.ok) {
+          return { delivered: false, channel: 'bot', error: validated.error };
+        }
         console.log(`[Telegram Outbound] Bot sending document to ${chatId}: ${fileName}...`);
-        botResult = await sendTelegramDocument(chatId, mediaInput, fileName, text !== `[文件] ${fileName}` ? text : undefined, botOpts);
+        botResult = await sendTelegramDocument(chatId, validated.value, fileName, text !== `[文件] ${fileName}` ? text : undefined, botOpts);
         failDetail = 'Telegram Bot API 文件发送失败';
       } else {
         if (!outText) {
@@ -7111,19 +8072,82 @@ async function deliverOutboundTelegramMessage(
   }
 }
 
-function applyUploadedMediaToMessagePayload(
+const OUTBOUND_MESSAGE_WHITELIST_KEYS = [
+  'id',
+  'chatId',
+  'accountId',
+  'sender',
+  'senderName',
+  'senderId',
+  'senderAvatarUrl',
+  'text',
+  'translatedText',
+  'timestamp',
+  'createdAt',
+  'replyTo',
+  'replyToMsgId',
+  'telegramMessageId',
+  'deliveryStatus',
+  'isAudio',
+  'audioDuration',
+  'audioUrl',
+  'sttText',
+  'voiceName',
+  'voiceTone',
+  'isMasterVoice',
+  'isImage',
+  'imageUrl',
+  'imageCaption',
+  'isVideo',
+  'videoDuration',
+  'videoUrl',
+  'isFile',
+  'fileName',
+  'fileSize',
+  'fileUrl',
+  'isEdited',
+  'isPinned',
+  'forwardFrom',
+  'reactions',
+  'myReactions',
+] as const;
+
+export function sanitizeOutboundMessageClientPayload(rawPayload: Record<string, any>): Record<string, any> {
+  const clean: Record<string, any> = {};
+  if (!rawPayload || typeof rawPayload !== 'object') {
+    return clean;
+  }
+  for (const key of OUTBOUND_MESSAGE_WHITELIST_KEYS) {
+    if (Object.prototype.hasOwnProperty.call(rawPayload, key) && rawPayload[key] !== undefined) {
+      clean[key] = rawPayload[key];
+    }
+  }
+  return clean;
+}
+
+export function applyUploadedMediaToMessagePayload(
   rawPayload: Record<string, any>,
   uploadedMedia: { diskPath: string; diskFileName: string; originalName: string; mimeType: string; size: number } | undefined,
   effectiveAccountId: string
 ): { payload: Record<string, any>; mediaUrl?: string } {
-  if (!uploadedMedia) {
-    return { payload: rawPayload };
+  const safePayload = sanitizeOutboundMessageClientPayload(rawPayload);
+  const verifiedDiskPath = uploadedMedia?.diskPath
+    ? resolveAllowedOutboundDiskPath(uploadedMedia.diskPath)
+    : null;
+  if (!uploadedMedia || !verifiedDiskPath) {
+    return { payload: safePayload };
   }
   const mediaUrl = buildOutboundLocalMediaUrl(uploadedMedia.diskFileName, effectiveAccountId);
   const next: Record<string, any> = {
-    ...rawPayload,
-    _localDiskPath: uploadedMedia.diskPath,
+    ...safePayload,
+    _localDiskPath: verifiedDiskPath,
   };
+  Object.defineProperty(next, TRUSTED_OUTBOUND_DISK_PATH, {
+    value: verifiedDiskPath,
+    enumerable: false,
+    configurable: false,
+    writable: false,
+  });
   if (next.isVideo) {
     next.videoUrl = mediaUrl;
   } else if (next.isImage) {
@@ -11997,13 +13021,9 @@ app.post('/api/audio/transcribe', aiGenerationLimiter, requireTenantAuth, async 
           (effectiveCustomConfig?.modelName && effectiveCustomConfig.modelName.trim()) ||
           resolveGeminiModel(undefined, 'transcribe');
         try {
-          const sdkBaseUrl = cleanBaseUrl.replace(/\/v1beta.*$/i, '').replace(/\/v1$/i, '');
-          const ai = new GoogleGenAI({
+          const ai = await createCustomGeminiClient({
+            baseUrl: cleanBaseUrl,
             apiKey: cleanApiKey || 'local-key',
-            httpOptions: {
-              baseUrl: sdkBaseUrl,
-              headers: { 'User-Agent': 'aistudio-build' },
-            },
           });
           const response = await ai.models.generateContent({
             model: customSttModel,
@@ -13046,13 +14066,9 @@ app.post('/api/audio/tts-clone', aiGenerationLimiter, requireTenantAuth, async (
 
     const invokeGeminiNativeTts = async (): Promise<Response | { audioUrl: string; format: string; modelUsed: string } | { status: number; message: string }> => {
       try {
-        const sdkBaseUrl = cleanBaseUrl.replace(/\/v1beta.*$/i, '').replace(/\/v1$/i, '');
-        const ai = new GoogleGenAI({
+        const ai = await createCustomGeminiClient({
+          baseUrl: cleanBaseUrl,
           apiKey: cleanApiKey || 'local-key',
-          httpOptions: {
-            baseUrl: sdkBaseUrl,
-            headers: { 'User-Agent': 'aistudio-build' },
-          },
         });
         const response = await ai.models.generateContent({
           model: selectedTtsModel,
@@ -15637,7 +16653,7 @@ export async function sendTelegramPhoto(chatId: string | number, photoUrl: strin
 
   try {
     const resolvedDiskPhoto =
-      (typeof photoUrl === 'string' && fs.existsSync(photoUrl) ? photoUrl : null) ||
+      (typeof photoUrl === 'string' ? resolveAllowedOutboundDiskPath(photoUrl) : null) ||
       resolveLocalMediaDiskPath(photoUrl);
 
     if (resolvedDiskPhoto) {
@@ -15664,10 +16680,11 @@ export async function sendTelegramPhoto(chatId: string | number, photoUrl: strin
       return uploadResult.data;
     }
 
-    if (typeof photoUrl === 'string' && photoUrl.startsWith('data:')) {
-      const match = photoUrl.match(/^data:([^;]+);base64,(.+)$/);
+    if (typeof photoUrl === 'string' && /^data:/i.test(photoUrl.trim())) {
+      const cleanDataPhoto = photoUrl.trim();
+      const match = cleanDataPhoto.match(/^data:([^;]+);base64,(.+)$/i);
       const mimeType = match ? match[1] : 'image/jpeg';
-      const base64Data = match ? match[2] : photoUrl.replace(/^data:[^;]+;base64,/, '');
+      const base64Data = match ? match[2] : cleanDataPhoto.replace(/^data:[^;]+;base64,/i, '');
       const buffer = Buffer.from(base64Data, 'base64');
       if (buffer.length === 0) {
         await markMessageDeliveryFailed(options?.messageId);
@@ -15690,6 +16707,13 @@ export async function sendTelegramPhoto(chatId: string | number, photoUrl: strin
         return null;
       }
       return uploadResult.data;
+    }
+
+    if (typeof photoUrl === 'string' && /^https?:\/\//i.test(photoUrl.trim())) {
+      await validateOutboundMediaRemoteUrl(photoUrl.trim());
+    } else if (typeof photoUrl === 'string' && (isSuspiciousLocalFilePathString(photoUrl) || photoUrl.startsWith('/api/') || !/^[A-Za-z0-9_-]{8,256}$/.test(photoUrl.trim()))) {
+      await markMessageDeliveryFailed(options?.messageId);
+      return null;
     }
 
     const result = await executeTelegramApiWithRetry(
@@ -15739,33 +16763,37 @@ export async function sendTelegramVideo(
   const targetChatId = Number.isSafeInteger(numericId) && !cleanChatId.startsWith('0') ? numericId : cleanChatId;
 
   try {
-    if (typeof videoData === 'string' && (videoData.startsWith('http://') || videoData.startsWith('https://'))) {
-      const payload: any = {
-        chat_id: targetChatId,
-        video: videoData,
-        caption: caption || '',
-        ...(options?.replyToMessageId ? { reply_to_message_id: options.replyToMessageId } : {}),
-      };
-      if (duration && duration > 0) payload.duration = Math.round(duration);
+    if (typeof videoData === 'string' && /^https?:\/\//i.test(videoData.trim())) {
+      const safeLocalUrlVideo = resolveLocalMediaDiskPath(videoData);
+      if (!safeLocalUrlVideo) {
+        await validateOutboundMediaRemoteUrl(videoData.trim());
+        const payload: any = {
+          chat_id: targetChatId,
+          video: videoData,
+          caption: caption || '',
+          ...(options?.replyToMessageId ? { reply_to_message_id: options.replyToMessageId } : {}),
+        };
+        if (duration && duration > 0) payload.duration = Math.round(duration);
 
-      const result = await executeTelegramApiWithRetry(
-        `https://api.telegram.org/bot${botToken}/sendVideo`,
-        {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(payload),
-        },
-        options
-      );
-      if (!result.ok) {
-        console.warn(`[Telegram API Error] Telegram sendVideo (URL) failed for ${targetChatId}:`, result.error);
-        return null;
+        const result = await executeTelegramApiWithRetry(
+          `https://api.telegram.org/bot${botToken}/sendVideo`,
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+          },
+          options
+        );
+        if (!result.ok) {
+          console.warn(`[Telegram API Error] Telegram sendVideo (URL) failed for ${targetChatId}:`, result.error);
+          return null;
+        }
+        return result.data;
       }
-      return result.data;
     }
 
     const resolvedDiskVideo =
-      (typeof videoData === 'string' && fs.existsSync(videoData) ? videoData : null) ||
+      (typeof videoData === 'string' ? resolveAllowedOutboundDiskPath(videoData) : null) ||
       (typeof videoData === 'string' ? resolveLocalMediaDiskPath(videoData) : null);
 
     if (resolvedDiskVideo) {
@@ -15796,10 +16824,10 @@ export async function sendTelegramVideo(
     let buffer: Buffer;
     if (Buffer.isBuffer(videoData)) {
       buffer = videoData;
-    } else if (typeof videoData === 'string' && videoData.startsWith('data:')) {
+    } else if (typeof videoData === 'string' && /^data:/i.test(videoData.trim())) {
       const base64Data = videoData.split(',')[1] || '';
       buffer = Buffer.from(base64Data, 'base64');
-    } else if (typeof videoData === 'string') {
+    } else if (typeof videoData === 'string' && !isSuspiciousLocalFilePathString(videoData) && !videoData.startsWith('/api/')) {
       buffer = Buffer.from(videoData, 'base64');
     } else {
       buffer = Buffer.from([]);
@@ -15856,30 +16884,34 @@ export async function sendTelegramDocument(
   const targetChatId = Number.isSafeInteger(numericId) && !cleanChatId.startsWith('0') ? numericId : cleanChatId;
 
   try {
-    if (typeof fileData === 'string' && (fileData.startsWith('http://') || fileData.startsWith('https://'))) {
-      const result = await executeTelegramApiWithRetry(
-        `https://api.telegram.org/bot${botToken}/sendDocument`,
-        {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            chat_id: targetChatId,
-            document: fileData,
-            caption: caption || '',
-            ...(options?.replyToMessageId ? { reply_to_message_id: options.replyToMessageId } : {}),
-          }),
-        },
-        options
-      );
-      if (!result.ok) {
-        console.warn(`[Telegram API Error] Telegram sendDocument (URL) failed for ${targetChatId}:`, result.error);
-        return null;
+    if (typeof fileData === 'string' && /^https?:\/\//i.test(fileData.trim())) {
+      const safeLocalUrlDoc = resolveLocalMediaDiskPath(fileData);
+      if (!safeLocalUrlDoc) {
+        await validateOutboundMediaRemoteUrl(fileData.trim());
+        const result = await executeTelegramApiWithRetry(
+          `https://api.telegram.org/bot${botToken}/sendDocument`,
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              chat_id: targetChatId,
+              document: fileData,
+              caption: caption || '',
+              ...(options?.replyToMessageId ? { reply_to_message_id: options.replyToMessageId } : {}),
+            }),
+          },
+          options
+        );
+        if (!result.ok) {
+          console.warn(`[Telegram API Error] Telegram sendDocument (URL) failed for ${targetChatId}:`, result.error);
+          return null;
+        }
+        return result.data;
       }
-      return result.data;
     }
 
     const resolvedDiskFile =
-      (typeof fileData === 'string' && fs.existsSync(fileData) ? fileData : null) ||
+      (typeof fileData === 'string' ? resolveAllowedOutboundDiskPath(fileData) : null) ||
       (typeof fileData === 'string' ? resolveLocalMediaDiskPath(fileData) : null);
 
     if (resolvedDiskFile) {
@@ -15909,10 +16941,10 @@ export async function sendTelegramDocument(
     let buffer: Buffer;
     if (Buffer.isBuffer(fileData)) {
       buffer = fileData;
-    } else if (typeof fileData === 'string' && fileData.startsWith('data:')) {
+    } else if (typeof fileData === 'string' && /^data:/i.test(fileData.trim())) {
       const base64Data = fileData.split(',')[1] || '';
       buffer = Buffer.from(base64Data, 'base64');
-    } else if (typeof fileData === 'string') {
+    } else if (typeof fileData === 'string' && !isSuspiciousLocalFilePathString(fileData) && !fileData.startsWith('/api/')) {
       buffer = Buffer.from(fileData, 'base64');
     } else {
       buffer = Buffer.from([]);
@@ -15969,32 +17001,36 @@ export async function sendTelegramVoice(
 
   try {
     // 1. Remote HTTP/HTTPS URL or direct file_id
-    if (typeof audioData === 'string' && (audioData.startsWith('http://') || audioData.startsWith('https://'))) {
-      const result = await executeTelegramApiWithRetry(
-        `https://api.telegram.org/bot${botToken}/sendVoice`,
-        {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            chat_id: targetChatId,
-            voice: audioData,
-            caption: caption || '',
-            duration: duration && duration > 0 ? Math.round(duration) : undefined,
-            ...(options?.replyToMessageId ? { reply_to_message_id: options.replyToMessageId } : {}),
-          }),
-        },
-        options
-      );
+    if (typeof audioData === 'string' && /^https?:\/\//i.test(audioData.trim())) {
+      const safeLocalUrlVoice = resolveLocalMediaDiskPath(audioData);
+      if (!safeLocalUrlVoice) {
+        await validateOutboundMediaRemoteUrl(audioData.trim());
+        const result = await executeTelegramApiWithRetry(
+          `https://api.telegram.org/bot${botToken}/sendVoice`,
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              chat_id: targetChatId,
+              voice: audioData,
+              caption: caption || '',
+              duration: duration && duration > 0 ? Math.round(duration) : undefined,
+              ...(options?.replyToMessageId ? { reply_to_message_id: options.replyToMessageId } : {}),
+            }),
+          },
+          options
+        );
 
-      if (!result.ok) {
-        console.warn(`[Telegram API Error] sendVoice (URL) failed for chat_id ${targetChatId}:`, result.error);
-        return null;
+        if (!result.ok) {
+          console.warn(`[Telegram API Error] sendVoice (URL) failed for chat_id ${targetChatId}:`, result.error);
+          return null;
+        }
+        return result.data;
       }
-      return result.data;
     }
 
     const resolvedDiskAudio =
-      (typeof audioData === 'string' && fs.existsSync(audioData) ? audioData : null) ||
+      (typeof audioData === 'string' ? resolveAllowedOutboundDiskPath(audioData) : null) ||
       (typeof audioData === 'string' ? resolveLocalMediaDiskPath(audioData) : null);
 
     let oggBuffer: Buffer;
@@ -16006,14 +17042,15 @@ export async function sendTelegramVoice(
 
       if (Buffer.isBuffer(audioData)) {
         buffer = audioData;
-      } else if (typeof audioData === 'string' && audioData.startsWith('data:')) {
-        const match = audioData.match(/^data:([^;]+);base64,(.+)$/);
+      } else if (typeof audioData === 'string' && /^data:/i.test(audioData.trim())) {
+        const cleanDataAudio = audioData.trim();
+        const match = cleanDataAudio.match(/^data:([^;]+);base64,(.+)$/i);
         if (match) {
           buffer = Buffer.from(match[2], 'base64');
         } else {
-          buffer = Buffer.from(audioData.replace(/^data:[^;]+;base64,/, ''), 'base64');
+          buffer = Buffer.from(cleanDataAudio.replace(/^data:[^;]+;base64,/i, ''), 'base64');
         }
-      } else if (typeof audioData === 'string') {
+      } else if (typeof audioData === 'string' && !isSuspiciousLocalFilePathString(audioData) && !audioData.startsWith('/api/')) {
         buffer = Buffer.from(audioData, 'base64');
       } else {
         buffer = Buffer.from([]);
@@ -16122,13 +17159,9 @@ export async function generateTtsAudio(
 
     const tryGeminiNativeCustomTts = async (): Promise<{ audioUrl: string; duration: number }> => {
       const ttsModel = customModel.toLowerCase().includes('tts') ? customModel : 'gemini-3.8-flash-tts';
-      const sdkBaseUrl = cleanBaseUrl.replace(/\/v1beta.*$/i, '').replace(/\/v1$/i, '');
-      const ai = new GoogleGenAI({
+      const ai = await createCustomGeminiClient({
+        baseUrl: cleanBaseUrl,
         apiKey: cleanApiKey || 'local-key',
-        httpOptions: {
-          baseUrl: sdkBaseUrl,
-          headers: { 'User-Agent': 'aistudio-build' },
-        },
       });
       const response = await ai.models.generateContent({
         model: ttsModel,
@@ -16373,13 +17406,9 @@ export async function transcribeAudioBufferStrictly(
         (serverCustomConfig?.modelName && serverCustomConfig.modelName.trim()) ||
         resolveGeminiModel(undefined, 'transcribe');
       try {
-        const sdkBaseUrl = cleanBaseUrl.replace(/\/v1beta.*$/i, '').replace(/\/v1$/i, '');
-        const ai = new GoogleGenAI({
+        const ai = await createCustomGeminiClient({
+          baseUrl: cleanBaseUrl,
           apiKey: cleanApiKey || 'local-key',
-          httpOptions: {
-            baseUrl: sdkBaseUrl,
-            headers: { 'User-Agent': 'aistudio-build' },
-          },
         });
         const response = await ai.models.generateContent({
           model: customSttModel,
@@ -17745,12 +18774,26 @@ app.post('/api/telegram/webhook/delete', requireTenantAuth, async (req: Request,
 // 17. Send Voice Message directly to Telegram User (Protected with requireTenantAuth)
 app.post('/api/telegram/send-voice', requireTenantAuth, async (req: Request, res: Response) => {
   try {
-    const { chatId, audioUrl, text, caption, duration, messageId } = req.body;
-    if (!chatId || !audioUrl) {
+    const { chatId, audioUrl, text, caption, duration, messageId } = req.body || {};
+    if (!chatId || !audioUrl || typeof audioUrl !== 'string') {
       return res.status(400).json({ ok: false, error: 'chatId and audioUrl are required' });
     }
 
-    const result = await sendTelegramVoice(chatId, audioUrl, caption || text, duration, { messageId });
+    const trimmedAudioUrl = audioUrl.trim();
+    const allowedLocal = resolveLocalMediaDiskPath(trimmedAudioUrl);
+    if (!allowedLocal && !/^data:/i.test(trimmedAudioUrl)) {
+      if (/^https?:\/\//i.test(trimmedAudioUrl)) {
+        try {
+          await validateOutboundMediaRemoteUrl(trimmedAudioUrl);
+        } catch (ssrfErr: any) {
+          return res.status(400).json({ ok: false, error: ssrfErr?.message || 'SSRF 安全拦截：非法的音频远程地址' });
+        }
+      } else {
+        return res.status(400).json({ ok: false, error: '安全拦截：非法的音频资源路径，禁止读取服务器本地任意文件' });
+      }
+    }
+
+    const result = await sendTelegramVoice(chatId, trimmedAudioUrl, caption || text, duration, { messageId });
     if (!result || !result.ok) {
       return res.status(502).json({ ok: false, error: result?.description || 'Failed to send voice to Telegram', result });
     }
@@ -18168,14 +19211,17 @@ export async function purgePersistedTelegramApiCredentialsFromDb(): Promise<void
 export async function fetchWithSystemProxySupport(
   urlStr: string,
   options: RequestInit = {},
-  timeoutMs = 12000
+  timeoutMs = 12000,
+  pinnedOverride?: { address: string; family: 4 | 6 },
+  socksConnectImpl: typeof SocksClient.createConnection = SocksClient.createConnection
 ): Promise<globalThis.Response> {
   const parsedUrl = new URL(urlStr);
-  const hostname = parsedUrl.hostname;
+  const rawHost = parsedUrl.hostname.trim();
+  const cleanHost = rawHost.startsWith('[') && rawHost.endsWith(']') ? rawHost.slice(1, -1) : rawHost;
   const proxy = getConfiguredTelegramProxy();
 
   // Never route local loopback traffic through external SOCKS proxy
-  if (!proxy || isAllowedLocalhostEndpoint(hostname)) {
+  if (!proxy || isAllowedLocalhostEndpoint(cleanHost)) {
     return await fetch(urlStr, {
       ...options,
       signal: options.signal || AbortSignal.timeout(timeoutMs),
@@ -18189,7 +19235,7 @@ export async function fetchWithSystemProxySupport(
       : 80;
   const isHttps = parsedUrl.protocol === 'https:';
 
-  const { socket: rawSocket } = await SocksClient.createConnection({
+  const { socket: rawSocket } = await socksConnectImpl({
     proxy: {
       host: proxy.ip,
       port: proxy.port,
@@ -18199,7 +19245,7 @@ export async function fetchWithSystemProxySupport(
     },
     command: 'connect',
     destination: {
-      host: hostname,
+      host: pinnedOverride?.address || cleanHost,
       port: targetPort,
     },
     timeout: timeoutMs,
@@ -18219,9 +19265,14 @@ export async function fetchWithSystemProxySupport(
         ? options.body
         : options.body instanceof Uint8Array
           ? Buffer.from(options.body)
-          : undefined;
+          : options.body instanceof ArrayBuffer
+            ? Buffer.from(options.body)
+            : undefined;
   if (bodyRaw && !Object.keys(reqHeaders).some((k) => k.toLowerCase() === 'content-length')) {
     reqHeaders['Content-Length'] = String(bodyRaw.length);
+  }
+  if (!Object.keys(reqHeaders).some((k) => k.toLowerCase() === 'host')) {
+    reqHeaders['Host'] = parsedUrl.host;
   }
   reqHeaders['Connection'] = 'close';
 
@@ -18261,20 +19312,25 @@ export async function fetchWithSystemProxySupport(
     }, timeoutMs);
 
     const mod = isHttps ? https : http;
+    const tlsServername = net.isIP(cleanHost) ? undefined : cleanHost;
+    const proxyAgent = new (isHttps ? https.Agent : http.Agent)({ keepAlive: false });
+    (proxyAgent as any).createConnection = () => {
+      activeSocket = isHttps
+        ? tls.connect({
+            socket: rawSocket,
+            ...(tlsServername ? { servername: tlsServername } : {}),
+          })
+        : rawSocket;
+      return activeSocket;
+    };
     const req = mod.request(
       {
-        hostname,
+        hostname: cleanHost,
         port: targetPort,
         path: `${parsedUrl.pathname}${parsedUrl.search}`,
         method: options.method || 'GET',
         headers: reqHeaders,
-        agent: false,
-        createConnection: () => {
-          activeSocket = isHttps
-            ? tls.connect({ socket: rawSocket, servername: hostname })
-            : rawSocket;
-          return activeSocket;
-        },
+        agent: proxyAgent,
       },
       (res) => {
         const chunks: Buffer[] = [];
