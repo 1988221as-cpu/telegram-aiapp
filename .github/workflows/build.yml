@@ -28,8 +28,14 @@ jobs:
       - name: Install Dependencies
         run: |
           if (Test-Path package-lock.json) { Remove-Item package-lock.json -Force }
+          # 设置重试次数与超时，避免 GitHub 下载 ffmpeg 偶发 502
+          npm config set fetch-retries 5
+          npm config set fetch-retry-mintimeout 20000
+          npm config set fetch-retry-maxtimeout 120000
           npm install --legacy-peer-deps
           npm install @rolldown/binding-win32-x64-msvc @libsql/win32-x64-msvc --save-optional --legacy-peer-deps
+        env:
+          FFMPEG_STatic_Skip_Download: "1"
 
       - name: Build Web Frontend & Server
         run: npm run build
@@ -60,7 +66,6 @@ jobs:
           $proc = Start-Process -FilePath $exePath -ArgumentList @("--smoke-test", "--no-sandbox") -PassThru -NoNewWindow
           $finished = $proc.WaitForExit(35000)
           
-          # Find log file dynamically under APPDATA
           $logFiles = Get-ChildItem -Path "$env:APPDATA" -Filter "main.log" -Recurse -ErrorAction SilentlyContinue
           $logText = ""
           foreach ($f in $logFiles) {
