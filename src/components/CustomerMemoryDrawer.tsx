@@ -30,7 +30,10 @@ interface CustomerMemoryDrawerProps {
   profile: CustomerProfile | null;
   chatId?: string;
   currentAccountId?: string;
-  onUpdateProfile: (updated: CustomerProfile, options?: { skipRemoteSave?: boolean }) => void;
+  onUpdateProfile: (
+    updated: CustomerProfile,
+    options?: { skipRemoteSave?: boolean }
+  ) => void | boolean | Promise<boolean>;
   customConfig: CustomLLMConfig;
   chatTitle: string;
   messages?: any[];
@@ -52,6 +55,7 @@ export const CustomerMemoryDrawer: React.FC<CustomerMemoryDrawerProps> = ({
   sideDocked = false,
 }) => {
   const [isAnalyzing, setIsAnalyzing] = useState(false);
+  const [isSavingProfile, setIsSavingProfile] = useState(false);
   const [newLikeInput, setNewLikeInput] = useState('');
   const [newTabooInput, setNewTabooInput] = useState('');
   const [isAddingMemory, setIsAddingMemory] = useState(false);
@@ -59,7 +63,7 @@ export const CustomerMemoryDrawer: React.FC<CustomerMemoryDrawerProps> = ({
   const [memTopic, setMemTopic] = useState('');
   const [memSummary, setMemSummary] = useState('');
   const [memEmotion, setMemEmotion] = useState('日常交流');
-  const [saveSuccessMsg, setSaveSuccessMsg] = useState(false);
+  const [saveSuccessMsg, setSaveSuccessMsg] = useState<string | null>(null);
   const [infoNotice, setInfoNotice] = useState<string | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
@@ -97,10 +101,10 @@ export const CustomerMemoryDrawer: React.FC<CustomerMemoryDrawerProps> = ({
     }, durationMs);
   };
 
-  const showTransientSuccess = (noticeText: string | null, durationMs = 3000) => {
+  const showTransientSuccess = (noticeText: string | null, durationMs = 3000, successBannerText?: string) => {
     if (feedbackTimerRef.current) clearTimeout(feedbackTimerRef.current);
     if (noticeText) {
-      setSaveSuccessMsg(false);
+      setSaveSuccessMsg(null);
       setInfoNotice(noticeText);
       feedbackTimerRef.current = setTimeout(() => {
         setInfoNotice(null);
@@ -108,9 +112,9 @@ export const CustomerMemoryDrawer: React.FC<CustomerMemoryDrawerProps> = ({
       }, durationMs);
     } else {
       setInfoNotice(null);
-      setSaveSuccessMsg(true);
+      setSaveSuccessMsg(successBannerText || '已成功从历史记录更新客户全息画像与记忆！');
       feedbackTimerRef.current = setTimeout(() => {
-        setSaveSuccessMsg(false);
+        setSaveSuccessMsg(null);
         feedbackTimerRef.current = null;
       }, durationMs);
     }
@@ -138,7 +142,7 @@ export const CustomerMemoryDrawer: React.FC<CustomerMemoryDrawerProps> = ({
     setNewTabooInput('');
     setErrorMessage(null);
     setInfoNotice(null);
-    setSaveSuccessMsg(false);
+    setSaveSuccessMsg(null);
     return () => {
       if (feedbackTimerRef.current) clearTimeout(feedbackTimerRef.current);
       if (errorTimerRef.current) clearTimeout(errorTimerRef.current);
@@ -192,7 +196,10 @@ export const CustomerMemoryDrawer: React.FC<CustomerMemoryDrawerProps> = ({
     updatedAt: Date.now(),
   };
 
-  const commitProfileUpdate = (updated: CustomerProfile, options?: { skipRemoteSave?: boolean }) => {
+  const commitProfileUpdate = async (
+    updated: CustomerProfile,
+    options?: { skipRemoteSave?: boolean }
+  ): Promise<boolean> => {
     const targetAccId = currentAccountId || updated.accountId || effectiveAccountId;
     const targetChatId = chatId || updated.chatId || currentProfile.chatId;
     const scopedUpdated: CustomerProfile = {
@@ -200,13 +207,14 @@ export const CustomerMemoryDrawer: React.FC<CustomerMemoryDrawerProps> = ({
       chatId: targetChatId,
       accountId: targetAccId,
     };
-    onUpdateProfile(scopedUpdated, options);
+    const parentResult = await onUpdateProfile(scopedUpdated, options);
     if (!embedded && targetChatId && targetChatId !== 'current') {
       saveLocalCustomerProfile(targetChatId, scopedUpdated, targetAccId);
       if (!options?.skipRemoteSave) {
-        void saveCustomerProfile(targetChatId, scopedUpdated, targetAccId);
+        return await saveCustomerProfile(targetChatId, scopedUpdated, targetAccId);
       }
     }
+    return parentResult !== false;
   };
 
   // Run AI Deep Analysis over unified cloud + local conversation history
@@ -222,6 +230,8 @@ export const CustomerMemoryDrawer: React.FC<CustomerMemoryDrawerProps> = ({
     const requestSeq = ++analyzeSeqRef.current;
 
     setIsAnalyzing(true);
+    setIsEditingAttributes(false);
+    setIsEditingStrategy(false);
     setErrorMessage(null);
     setInfoNotice(null);
     try {
@@ -246,8 +256,8 @@ export const CustomerMemoryDrawer: React.FC<CustomerMemoryDrawerProps> = ({
           saveLocalCustomerProfile(requestChatId, scopedFresh, requestAccountId);
           return;
         }
-        commitProfileUpdate(scopedFresh, { skipRemoteSave: true });
-        showTransientSuccess(sparseNotice, sparseNotice ? 4500 : 3000);
+        await commitProfileUpdate(scopedFresh, { skipRemoteSave: true });
+        showTransientSuccess(sparseNotice, sparseNotice ? 4500 : 3000, '已成功从历史记录更新客户全息画像与记忆！');
       } else if (activeScopeRef.current === requestScope) {
         setErrorMessage('AI 记忆提炼未返回有效画像数据，请稍后重试');
       }
@@ -267,47 +277,67 @@ export const CustomerMemoryDrawer: React.FC<CustomerMemoryDrawerProps> = ({
   };
 
   // Add like
-  const handleAddLike = () => {
+  const handleAddLike = async () => {
     if (!newLikeInput.trim()) return;
     const updated = {
       ...currentProfile,
       likesInterests: [...currentProfile.likesInterests, newLikeInput.trim()],
+      updatedAt: Date.now(),
     };
-    commitProfileUpdate(updated);
     setNewLikeInput('');
+    const synced = await commitProfileUpdate(updated);
+    if (!synced) {
+      setSaveSuccessMsg(null);
+      showTransientError('偏好标签已暂存界面，但写入本地电脑数据库失败（请检查登录状态或本地服务状态）', 5000);
+    }
   };
 
   // Remove like
-  const handleRemoveLike = (idx: number) => {
+  const handleRemoveLike = async (idx: number) => {
     const updated = {
       ...currentProfile,
       likesInterests: currentProfile.likesInterests.filter((_, i) => i !== idx),
+      updatedAt: Date.now(),
     };
-    commitProfileUpdate(updated);
+    const synced = await commitProfileUpdate(updated);
+    if (!synced) {
+      setSaveSuccessMsg(null);
+      showTransientError('偏好标签已从界面移除，但写入本地电脑数据库失败（请检查登录状态或本地服务状态）', 5000);
+    }
   };
 
   // Add taboo
-  const handleAddTaboo = () => {
+  const handleAddTaboo = async () => {
     if (!newTabooInput.trim()) return;
     const updated = {
       ...currentProfile,
       dislikesTaboos: [...currentProfile.dislikesTaboos, newTabooInput.trim()],
+      updatedAt: Date.now(),
     };
-    commitProfileUpdate(updated);
     setNewTabooInput('');
+    const synced = await commitProfileUpdate(updated);
+    if (!synced) {
+      setSaveSuccessMsg(null);
+      showTransientError('避讳要点已暂存界面，但写入本地电脑数据库失败（请检查登录状态或本地服务状态）', 5000);
+    }
   };
 
   // Remove taboo
-  const handleRemoveTaboo = (idx: number) => {
+  const handleRemoveTaboo = async (idx: number) => {
     const updated = {
       ...currentProfile,
       dislikesTaboos: currentProfile.dislikesTaboos.filter((_, i) => i !== idx),
+      updatedAt: Date.now(),
     };
-    commitProfileUpdate(updated);
+    const synced = await commitProfileUpdate(updated);
+    if (!synced) {
+      setSaveSuccessMsg(null);
+      showTransientError('避讳要点已从界面移除，但写入本地电脑数据库失败（请检查登录状态或本地服务状态）', 5000);
+    }
   };
 
   // Add memory
-  const handleSaveNewMemory = () => {
+  const handleSaveNewMemory = async () => {
     if (!memTopic.trim() || !memSummary.trim()) {
       showTransientError('请填写记忆主题与摘要', 3000);
       return;
@@ -324,37 +354,73 @@ export const CustomerMemoryDrawer: React.FC<CustomerMemoryDrawerProps> = ({
     const updated = {
       ...currentProfile,
       keyMemories: [newMemItem, ...currentProfile.keyMemories],
+      updatedAt: Date.now(),
     };
-    commitProfileUpdate(updated);
-
     setMemTopic('');
     setMemSummary('');
     setIsAddingMemory(false);
+    const synced = await commitProfileUpdate(updated);
+    if (!synced) {
+      setSaveSuccessMsg(null);
+      showTransientError('关键记忆已暂存界面，但写入本地电脑数据库失败（请检查登录状态或本地服务状态）', 5000);
+    }
   };
 
   // Remove memory
-  const handleRemoveMemory = (id: string) => {
+  const handleRemoveMemory = async (id: string) => {
     const updated = {
       ...currentProfile,
       keyMemories: currentProfile.keyMemories.filter((m) => m.id !== id),
+      updatedAt: Date.now(),
     };
-    commitProfileUpdate(updated);
+    const synced = await commitProfileUpdate(updated);
+    if (!synced) {
+      setSaveSuccessMsg(null);
+      showTransientError('关键记忆已从界面移除，但写入本地电脑数据库失败（请检查登录状态或本地服务状态）', 5000);
+    }
+  };
+
+  const cleanEditableValue = (val?: string | null) => {
+    const s = String(val ?? '').trim();
+    if (
+      !s ||
+      [
+        '-',
+        '未知',
+        '未提及',
+        '待分析',
+        '待确认',
+        '待沟通分析',
+        '待观察',
+        '待进一步了解',
+        '待进一步沟通交流',
+        '暂无对话数据',
+        '暂无足够对话记录',
+        '暂无记录（待真实沟通后提炼）',
+        '尚未分析',
+        '尚未沟通',
+      ].includes(s)
+    ) {
+      return '';
+    }
+    return s;
   };
 
   // Manual attributes editing
   const handleStartEdit = () => {
-    setEditAge(currentProfile.ageEstimate || '');
-    setEditLocation(currentProfile.locationTimezone || '');
-    setEditOccupation(currentProfile.occupation || '');
-    setEditTone(currentProfile.toneStyle || '');
-    setEditStage(currentProfile.relationshipStage || '');
-    setEditFamilyMarital(currentProfile.familyMaritalStatus || '');
-    setEditActiveSchedule(currentProfile.activeSchedule || '');
-    setEditEmotionalNeeds(currentProfile.emotionalNeeds || '');
+    setEditAge(cleanEditableValue(currentProfile.ageEstimate));
+    setEditLocation(cleanEditableValue(currentProfile.locationTimezone));
+    setEditOccupation(cleanEditableValue(currentProfile.occupation));
+    setEditTone(cleanEditableValue(currentProfile.toneStyle));
+    setEditStage(cleanEditableValue(currentProfile.relationshipStage));
+    setEditFamilyMarital(cleanEditableValue(currentProfile.familyMaritalStatus));
+    setEditActiveSchedule(cleanEditableValue(currentProfile.activeSchedule));
+    setEditEmotionalNeeds(cleanEditableValue(currentProfile.emotionalNeeds));
     setIsEditingAttributes(true);
   };
 
-  const handleSaveAttributes = () => {
+  const handleSaveAttributes = async () => {
+    if (isSavingProfile) return;
     const updated = {
       ...currentProfile,
       ageEstimate: editAge.trim(),
@@ -367,21 +433,33 @@ export const CustomerMemoryDrawer: React.FC<CustomerMemoryDrawerProps> = ({
       emotionalNeeds: editEmotionalNeeds.trim(),
       updatedAt: Date.now(),
     };
-    commitProfileUpdate(updated);
-    setIsEditingAttributes(false);
-    showTransientSuccess(null, 2500);
+    setIsSavingProfile(true);
+    try {
+      const synced = await commitProfileUpdate(updated);
+      setIsEditingAttributes(false);
+      if (synced) {
+        setErrorMessage(null);
+        showTransientSuccess(null, 2500, '已保存客情特征并同步至全链路 AI 档案');
+      } else {
+        setSaveSuccessMsg(null);
+        showTransientError('已暂存界面缓存，但写入本地电脑数据库失败（请检查登录状态或本地服务状态）', 5000);
+      }
+    } finally {
+      setIsSavingProfile(false);
+    }
   };
 
   // Manual investment & strategy editing
   const handleStartEditStrategy = () => {
-    setEditFinancialProfile(currentProfile.financialProfile || '');
-    setEditInvestmentAttitude(currentProfile.investmentAttitude || '');
-    setEditTrustLevel(currentProfile.trustLevel || '');
-    setEditNextStepStrategy(currentProfile.nextStepStrategy || '');
+    setEditFinancialProfile(cleanEditableValue(currentProfile.financialProfile));
+    setEditInvestmentAttitude(cleanEditableValue(currentProfile.investmentAttitude));
+    setEditTrustLevel(cleanEditableValue(currentProfile.trustLevel));
+    setEditNextStepStrategy(cleanEditableValue(currentProfile.nextStepStrategy));
     setIsEditingStrategy(true);
   };
 
-  const handleSaveStrategy = () => {
+  const handleSaveStrategy = async () => {
+    if (isSavingProfile) return;
     const updated = {
       ...currentProfile,
       financialProfile: editFinancialProfile.trim(),
@@ -390,9 +468,20 @@ export const CustomerMemoryDrawer: React.FC<CustomerMemoryDrawerProps> = ({
       nextStepStrategy: editNextStepStrategy.trim(),
       updatedAt: Date.now(),
     };
-    commitProfileUpdate(updated);
-    setIsEditingStrategy(false);
-    showTransientSuccess(null, 2500);
+    setIsSavingProfile(true);
+    try {
+      const synced = await commitProfileUpdate(updated);
+      setIsEditingStrategy(false);
+      if (synced) {
+        setErrorMessage(null);
+        showTransientSuccess(null, 2500, '已保存经济投资画像与推进策略');
+      } else {
+        setSaveSuccessMsg(null);
+        showTransientError('已暂存界面缓存，但写入本地电脑数据库失败（请检查登录状态或本地服务状态）', 5000);
+      }
+    } finally {
+      setIsSavingProfile(false);
+    }
   };
 
   // Export customer chat data
@@ -463,7 +552,7 @@ export const CustomerMemoryDrawer: React.FC<CustomerMemoryDrawerProps> = ({
         {saveSuccessMsg && (
           <div className="px-5 py-2 bg-emerald-500/10 border-b border-emerald-500/25 text-emerald-700 dark:text-emerald-300 text-xs flex items-center gap-2">
             <CheckCircle2 className="w-4 h-4 text-emerald-600 dark:text-emerald-400 shrink-0" />
-            <span>已成功从历史记录更新客户全息画像与记忆！</span>
+            <span>{saveSuccessMsg}</span>
           </div>
         )}
 
@@ -623,9 +712,10 @@ export const CustomerMemoryDrawer: React.FC<CustomerMemoryDrawerProps> = ({
                 <div className="flex justify-end pt-1">
                   <button
                     onClick={handleSaveAttributes}
-                    className="px-3 py-1.5 bg-[#2481cc] hover:bg-[#1d6fb3] dark:bg-[#2ba0ff] dark:hover:bg-[#1e8ee8] aurora:bg-[#0d9488] aurora:hover:bg-[#0f766e] text-white rounded-lg text-xs font-medium cursor-pointer transition-colors"
+                    disabled={isSavingProfile}
+                    className="px-3 py-1.5 bg-[#2481cc] hover:bg-[#1d6fb3] dark:bg-[#2ba0ff] dark:hover:bg-[#1e8ee8] aurora:bg-[#0d9488] aurora:hover:bg-[#0f766e] text-white rounded-lg text-xs font-medium cursor-pointer transition-colors disabled:opacity-50"
                   >
-                    保存客情特征
+                    {isSavingProfile ? '保存中...' : '保存客情特征'}
                   </button>
                 </div>
               </div>
@@ -634,37 +724,37 @@ export const CustomerMemoryDrawer: React.FC<CustomerMemoryDrawerProps> = ({
                 <div className="grid grid-cols-2 gap-3">
                   <div>
                     <span className="text-[10px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] block">当前关系阶段</span>
-                    <span className="font-medium text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf] text-xs mt-0.5 block truncate">
+                    <span className="font-medium text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf] text-xs mt-0.5 block break-words">
                       {currentProfile.relationshipStage || '待分析'}
                     </span>
                   </div>
                   <div>
                     <span className="text-[10px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] block">年龄 / 生日</span>
-                    <span className="font-medium text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] text-xs mt-0.5 block truncate">
+                    <span className="font-medium text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] text-xs mt-0.5 block break-words">
                       {currentProfile.ageEstimate || '待确认'}
                     </span>
                   </div>
                   <div>
                     <span className="text-[10px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] block">所在地 / 时区</span>
-                    <span className="font-medium text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] text-xs mt-0.5 block truncate">
+                    <span className="font-medium text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] text-xs mt-0.5 block break-words">
                       {currentProfile.locationTimezone || '待确认'}
                     </span>
                   </div>
                   <div>
                     <span className="text-[10px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] block">婚恋与家庭状态</span>
-                    <span className="font-medium text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] text-xs mt-0.5 block truncate">
+                    <span className="font-medium text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] text-xs mt-0.5 block break-words">
                       {currentProfile.familyMaritalStatus || '待确认'}
                     </span>
                   </div>
                   <div>
                     <span className="text-[10px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] block">职业 / 身份</span>
-                    <span className="font-medium text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] text-xs mt-0.5 block truncate">
+                    <span className="font-medium text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] text-xs mt-0.5 block break-words">
                       {currentProfile.occupation || '待确认'}
                     </span>
                   </div>
                   <div>
                     <span className="text-[10px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] block">活跃作息窗口</span>
-                    <span className="font-medium text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] text-xs mt-0.5 block truncate">
+                    <span className="font-medium text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] text-xs mt-0.5 block break-words">
                       {currentProfile.activeSchedule || '待观察'}
                     </span>
                   </div>
@@ -871,9 +961,10 @@ export const CustomerMemoryDrawer: React.FC<CustomerMemoryDrawerProps> = ({
                 <div className="flex justify-end pt-1">
                   <button
                     onClick={handleSaveStrategy}
-                    className="px-3 py-1.5 bg-[#2481cc] hover:bg-[#1d6fb3] dark:bg-[#2ba0ff] dark:hover:bg-[#1e8ee8] aurora:bg-[#0d9488] aurora:hover:bg-[#0f766e] text-white rounded-lg text-xs font-medium cursor-pointer transition-colors"
+                    disabled={isSavingProfile}
+                    className="px-3 py-1.5 bg-[#2481cc] hover:bg-[#1d6fb3] dark:bg-[#2ba0ff] dark:hover:bg-[#1e8ee8] aurora:bg-[#0d9488] aurora:hover:bg-[#0f766e] text-white rounded-lg text-xs font-medium cursor-pointer transition-colors disabled:opacity-50"
                   >
-                    保存推进策略
+                    {isSavingProfile ? '保存中...' : '保存推进策略'}
                   </button>
                 </div>
               </div>

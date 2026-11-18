@@ -11458,4 +11458,464 @@ test('/api/customer/profile/:chatId and /api/llm/chat persist extended dimension
   }
 });
 
+test('Audit fixes: cold-start stage resolution, newest-first memory merge, snapshot restore 6 extended columns, and prompt guideline preservation', async () => {
+  const {
+    resolveCustomerPersonaStageKey,
+    isCustomerColdStartProfile,
+    buildCustomerProfilePromptSection,
+    applyPromptCharacterBudget,
+  } = await import('../server.ts');
+  const { mergeCustomerProfileWithManualData } = await import('./knowledgeUtils.ts');
+  const { db, initDatabase, exportDatabaseSnapshot, restoreDatabaseSnapshot } = await import('./db.ts');
+
+  await initDatabase();
+
+  // 1. Cold-start & custom stage labels map to exact stagedPrompt keys without false dailyFriend hits
+  assert.equal(resolveCustomerPersonaStageKey('尚未沟通'), 'icebreaker');
+  assert.equal(resolveCustomerPersonaStageKey('初次沟通'), 'icebreaker');
+  assert.equal(resolveCustomerPersonaStageKey('初次结识'), 'icebreaker');
+  assert.equal(resolveCustomerPersonaStageKey('尚未分析'), 'icebreaker');
+  assert.equal(resolveCustomerPersonaStageKey('朋友日常'), 'dailyFriend');
+  assert.equal(resolveCustomerPersonaStageKey('价值探讨'), 'wealthDiscussion');
+  assert.equal(resolveCustomerPersonaStageKey('疑虑化解'), 'trustDefense');
+
+  assert.equal(isCustomerColdStartProfile({ relationship_stage: '初次结识' }, ['咖啡'], []), true);
+  assert.equal(
+    isCustomerColdStartProfile(
+      { relationship_stage: '情感升温', family_marital_status: '已婚有娃', emotional_needs: '倾听解压' },
+      [],
+      []
+    ),
+    false
+  );
+
+  // 2. Newly extracted memories prepend before 5+ older memories so slice(0, 5) retains newest insights
+  const existingSix = Array.from({ length: 6 }, (_, idx) => ({
+    id: `old_${idx + 1}`,
+    date: `2026-10-0${idx + 1}`,
+    topic: `旧记忆_${idx + 1}`,
+    summary: `历史事件_${idx + 1}`,
+    emotion: '平和',
+  }));
+  const mergedMemories = mergeCustomerProfileWithManualData({
+    existingProfile: {
+      client_name: 'Mehmet',
+      key_memories: JSON.stringify(existingSix),
+    },
+    aiData: {
+      clientName: 'Mehmet',
+      keyMemories: [
+        { id: 'old_1', date: '2026-10-01', topic: '旧记忆_1', summary: '历史事件_1', emotion: '平和' },
+        { id: 'fresh_new_1', date: '2026-11-18', topic: '最新约定', summary: '周六晚聊副业与家庭规划', emotion: '期待' },
+      ],
+    },
+  });
+  assert.equal(mergedMemories.keyMemories[0]?.id, 'fresh_new_1');
+  const renderedPrompt = buildCustomerProfilePromptSection(
+    { chat_id: 'tg_mem_order', client_name: 'Mehmet', relationship_stage: '情感升温' },
+    [],
+    [],
+    mergedMemories.keyMemories
+  );
+  assert.match(renderedPrompt, /最新约定/);
+
+  // 3. applyPromptCharacterBudget keeps AI usage guidelines intact even when profile head is trimmed
+  const longProfile = buildCustomerProfilePromptSection(
+    {
+      chat_id: 'tg_budget_test',
+      client_name: 'Mehmet',
+      relationship_stage: '情感升温',
+      next_step_strategy: 'LONG_DETAIL_'.repeat(300),
+    },
+    ['茶道'],
+    ['催单'],
+    [{ date: '2026-11-18', topic: '近况', summary: '工作较忙' }]
+  );
+  const budgeted = applyPromptCharacterBudget(
+    {
+      persona: 'PERSONA_HEAD',
+      antiAi: 'ANTI_AI_HEAD',
+      coldStartGuideline: 'COLD_START_HEAD',
+      profile: longProfile,
+    },
+    1800
+  );
+  assert.ok(budgeted.totalChars <= 1800);
+  assert.match(budgeted.prompt, /【AI 使用上述客户资料的回复准则】/);
+
+  // 4. Snapshot export & restore preserves all 6 new columns in both profile tables
+  const testAcc = `acc_snap_ext_${Date.now()}`;
+  const testChat = `tg_snap_ext_${Date.now()}`;
+  const legacyChat = `tg_legacy_ext_${Date.now()}`;
+  const now = Date.now();
+  try {
+    await db
+      .prepare(
+        `INSERT OR REPLACE INTO account_customer_profiles (
+          account_id, chat_id, client_name, relationship_stage, age_estimate, occupation,
+          location_timezone, family_marital_status, active_schedule, tone_style,
+          likes_interests, dislikes_taboos, emotional_needs,
+          financial_profile, investment_attitude, trust_level, next_step_strategy,
+          key_memories, total_messages_count, last_analyzed_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      )
+      .run(
+        testAcc, testChat, 'Mehmet', '信任深化', '40岁', '医院职员', '马尔丁',
+        '已婚有两娃', '晚21:30后活跃', '真诚稳重', '["足球"]', '["催单"]', '希望改善家庭收入',
+        '月薪中等、有积蓄习惯', '关注本金安全与稳健收益', '高（深度信任）', '分享稳健副业案例并回应顾虑',
+        '[]', 12, now, now
+      );
+    await db
+      .prepare(
+        `INSERT OR REPLACE INTO customer_profiles (
+          chat_id, account_id, client_name, relationship_stage, age_estimate, occupation,
+          location_timezone, family_marital_status, active_schedule, tone_style,
+          likes_interests, dislikes_taboos, emotional_needs,
+          financial_profile, investment_attitude, trust_level, next_step_strategy,
+          key_memories, total_messages_count, last_analyzed_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      )
+      .run(
+        legacyChat, 'acc_1', 'LegacyUser', '情感升温', '35岁', '工程师', 'UTC+8',
+        '未婚', '周末全天', '直爽', '[]', '[]', '重视真诚',
+        '收入稳定', '谨慎观望', '中（建立好感）', '保持周末日常问候',
+        '[]', 5, now, now
+      );
+
+    const snapshot = await exportDatabaseSnapshot();
+    await db.prepare('DELETE FROM account_customer_profiles WHERE account_id = ? AND chat_id = ?').run(testAcc, testChat);
+    await db.prepare('DELETE FROM customer_profiles WHERE chat_id = ?').run(legacyChat);
+
+    const restoreRes = await restoreDatabaseSnapshot(snapshot);
+    assert.equal(restoreRes.success, true);
+
+    const restoredScoped = (await db
+      .prepare('SELECT * FROM account_customer_profiles WHERE account_id = ? AND chat_id = ?')
+      .get(testAcc, testChat)) as any;
+    assert.equal(restoredScoped?.family_marital_status, '已婚有两娃');
+    assert.equal(restoredScoped?.active_schedule, '晚21:30后活跃');
+    assert.equal(restoredScoped?.financial_profile, '月薪中等、有积蓄习惯');
+    assert.equal(restoredScoped?.investment_attitude, '关注本金安全与稳健收益');
+    assert.equal(restoredScoped?.trust_level, '高（深度信任）');
+    assert.equal(restoredScoped?.next_step_strategy, '分享稳健副业案例并回应顾虑');
+
+    const restoredLegacy = (await db
+      .prepare('SELECT * FROM customer_profiles WHERE chat_id = ?')
+      .get(legacyChat)) as any;
+    assert.equal(restoredLegacy?.family_marital_status, '未婚');
+    assert.equal(restoredLegacy?.active_schedule, '周末全天');
+    assert.equal(restoredLegacy?.financial_profile, '收入稳定');
+    assert.equal(restoredLegacy?.investment_attitude, '谨慎观望');
+    assert.equal(restoredLegacy?.trust_level, '中（建立好感）');
+    assert.equal(restoredLegacy?.next_step_strategy, '保持周末日常问候');
+  } finally {
+    await db.prepare('DELETE FROM account_customer_profiles WHERE account_id = ?').run(testAcc);
+    await db.prepare('DELETE FROM customer_profiles WHERE chat_id = ?').run(legacyChat);
+  }
+});
+
+test('Audit follow-up fixes: manual scalar fields preserved on AI analyze, /api/database/status counts personal account profiles, and UI awaits remote save', async () => {
+  const { readFileSync } = await import('node:fs');
+  const { resolve } = await import('node:path');
+  const http = await import('node:http');
+  const { createHmac } = await import('node:crypto');
+  const { db, initDatabase } = await import('./db.ts');
+  const { app, getServerCustomLlmConfig, syncServerCustomLlmConfig } = await import('../server.ts');
+
+  await initDatabase();
+
+  // 1. UI components must await saveCustomerProfile (no fire-and-forget void saveCustomerProfile)
+  const drawerSrc = readFileSync(resolve(process.cwd(), 'src/components/CustomerMemoryDrawer.tsx'), 'utf8');
+  const dockSrc = readFileSync(resolve(process.cwd(), 'src/components/UnifiedRightDock.tsx'), 'utf8');
+  assert.doesNotMatch(drawerSrc, /void\s+saveCustomerProfile\(/);
+  assert.doesNotMatch(dockSrc, /void\s+saveCustomerProfile\(/);
+  assert.match(drawerSrc, /return await saveCustomerProfile\(/);
+  assert.match(dockSrc, /return await saveCustomerProfile\(/);
+  assert.match(drawerSrc, /写入本地电脑数据库失败/);
+
+  // 2. End-to-end HTTP check: manual scalar edits survive full AI analyze, and /api/database/status counts personal account profiles
+  const prevJwtSecret = process.env.JWT_SECRET;
+  const prevCustomCfg = await getServerCustomLlmConfig().catch(() => null);
+  process.env.JWT_SECRET = 'audit_followup_secret';
+
+  const mockLlmSrv = http.createServer(async (req, res) => {
+    for await (const _ of req) {}
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(
+      JSON.stringify({
+        choices: [
+          {
+            message: {
+              content: JSON.stringify({
+                clientName: '普通客户',
+                relationshipStage: '朋友熟络',
+                ageEstimate: '25岁',
+                occupation: '未知',
+                locationTimezone: '未提及',
+                familyMaritalStatus: '单身',
+                activeSchedule: '晚21点后活跃',
+                toneStyle: '热情直接',
+                likesInterests: ['喝茶'],
+                dislikesTaboos: [],
+                emotionalNeeds: '普通交流',
+                financialProfile: '资金状况未知',
+                investmentAttitude: '无明显意愿',
+                trustLevel: '低（初识）',
+                nextStepStrategy: '继续随便聊聊',
+                keyMemories: [
+                  { id: 'ai_new_mem', date: '近期', topic: '周末喝茶', summary: '周日晚上常有空喝茶聊天', emotion: '轻松' },
+                ],
+              }),
+            },
+          },
+        ],
+      })
+    );
+  });
+  await new Promise<void>((r) => mockLlmSrv.listen(0, '127.0.0.1', r));
+  const llmPort = (mockLlmSrv.address() as any).port;
+
+  const appSrv = http.createServer(app);
+  await new Promise<void>((r) => appSrv.listen(0, '127.0.0.1', r));
+  const appPort = (appSrv.address() as any).port;
+
+  const personalAcc = `acc_tg_${Date.now()}`;
+  const personalChat = `tg_audit_f_${Date.now()}`;
+
+  try {
+    await syncServerCustomLlmConfig({
+      enabled: true,
+      explicitlyDisabled: false,
+      engineMode: 'custom',
+      protocol: 'openai',
+      baseUrl: `http://127.0.0.1:${llmPort}/v1`,
+      apiKey: 'sk-followup-test',
+      modelName: 'gpt-4o-mini',
+    });
+
+    const headerB64 = Buffer.from(JSON.stringify({ alg: 'HS256', typ: 'JWT' })).toString('base64url');
+    const payloadB64 = Buffer.from(
+      JSON.stringify({ sub: 'followup_tester', username: 'followup_tester', role: 'member', exp: Math.floor(Date.now() / 1000) + 3600 })
+    ).toString('base64url');
+    const sigB64 = createHmac('sha256', process.env.JWT_SECRET).update(`${headerB64}.${payloadB64}`).digest('base64url');
+    const token = `${headerB64}.${payloadB64}.${sigB64}`;
+
+    const dbStatusBeforeRes = await fetch(`http://127.0.0.1:${appPort}/api/database/status`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    assert.equal(dbStatusBeforeRes.status, 200);
+    const dbStatusBefore = (await dbStatusBeforeRes.json()) as any;
+
+    const manualSaveRes = await fetch(`http://127.0.0.1:${appPort}/api/customer/profile/${personalChat}`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({
+        accountId: personalAcc,
+        clientName: '陈老板',
+        relationshipStage: '信任深化',
+        familyMaritalStatus: '已婚有两娃',
+        financialProfile: '自有外贸工厂',
+        trustLevel: '高（深度信任）',
+        nextStepStrategy: '下周二晚21点后聊稳健副业方案',
+      }),
+    });
+    assert.equal(manualSaveRes.status, 200);
+
+    const dbStatusAfterRes = await fetch(`http://127.0.0.1:${appPort}/api/database/status`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    assert.equal(dbStatusAfterRes.status, 200);
+    const dbStatusAfter = (await dbStatusAfterRes.json()) as any;
+    assert.equal(
+      Number(dbStatusAfter.totalProfiles),
+      Number(dbStatusBefore.totalProfiles) + 1,
+      '/api/database/status must include personal-account rows in account_customer_profiles'
+    );
+
+    const analyzeRes = await fetch(`http://127.0.0.1:${appPort}/api/customer/analyze/${personalChat}`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({
+        accountId: personalAcc,
+        chatTitle: '陈老板',
+        messages: [
+          { sender: 'peer', text: '晚上九点多才下班，周末常喝茶放松一下。' },
+          { sender: 'me', text: '辛苦了，忙完可以好好休息喝杯茶。' },
+        ],
+        customConfig: {
+          enabled: true,
+          explicitlyDisabled: false,
+          engineMode: 'custom',
+          protocol: 'openai',
+          baseUrl: `http://127.0.0.1:${llmPort}/v1`,
+          apiKey: 'sk-followup-test',
+          modelName: 'gpt-4o-mini',
+        },
+      }),
+    });
+    assert.equal(analyzeRes.status, 200);
+    const analyzeJson = (await analyzeRes.json()) as any;
+
+    // Manually curated scalar fields must NOT be overwritten by AI guesses
+    assert.equal(analyzeJson.profile.relationshipStage, '信任深化');
+    assert.equal(analyzeJson.profile.familyMaritalStatus, '已婚有两娃');
+    assert.equal(analyzeJson.profile.financialProfile, '自有外贸工厂');
+    assert.equal(analyzeJson.profile.trustLevel, '高（深度信任）');
+    assert.equal(analyzeJson.profile.nextStepStrategy, '下周二晚21点后聊稳健副业方案');
+
+    // Blank/placeholder fields & new tags/memories are still incrementally enriched by AI
+    assert.equal(analyzeJson.profile.activeSchedule, '晚21点后活跃');
+    assert.ok(analyzeJson.profile.likesInterests.includes('喝茶'));
+    assert.ok(analyzeJson.profile.keyMemories.some((m: any) => m.id === 'ai_new_mem'));
+  } finally {
+    await db.prepare('DELETE FROM account_customer_profiles WHERE account_id = ?').run(personalAcc);
+    await new Promise<void>((r) => appSrv.close(() => r()));
+    await new Promise<void>((r) => mockLlmSrv.close(() => r()));
+    if (prevCustomCfg) {
+      await syncServerCustomLlmConfig(prevCustomCfg).catch(() => {});
+    }
+    if (prevJwtSecret !== undefined) process.env.JWT_SECRET = prevJwtSecret;
+    else delete process.env.JWT_SECRET;
+  }
+});
+
+test('Persona & extraction audit fixes: Cloud extraction purpose/temperature, query-scoped persona fetch, and tabooInput/unsaved-draft guards', async () => {
+  const { readFileSync } = await import('node:fs');
+  const { resolve } = await import('node:path');
+  const http = await import('node:http');
+  const { createHmac } = await import('node:crypto');
+  const {
+    app,
+    invokeEvolutionOrAnalysisLlm,
+    getServerCustomLlmConfig,
+    syncServerCustomLlmConfig,
+  } = await import('../server.ts');
+  const { db } = await import('../server/db.ts');
+
+  const prevRailwayUrl = process.env.RAILWAY_BRAIN_URL;
+  const prevJwtSecret = process.env.JWT_SECRET;
+  const prevCustomCfg = await getServerCustomLlmConfig().catch(() => null);
+  process.env.JWT_SECRET = 'persona_audit_fix_secret_test';
+
+  let capturedCloudBody: any = null;
+  const mockCloudSrv = http.createServer(async (req, res) => {
+    let raw = '';
+    for await (const ch of req) raw += ch;
+    if (req.url?.includes('/v1/chat/completions')) {
+      capturedCloudBody = JSON.parse(raw || '{}');
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(
+        JSON.stringify({
+          choices: [
+            {
+              message: {
+                content: JSON.stringify([
+                  {
+                    type: 'oral_slang',
+                    title: '自然接话习惯',
+                    description: '先共情再轻量反问',
+                    examplePattern: '刚忙完呀，喝口水歇会儿',
+                    confidenceScore: 0.9,
+                  },
+                ]),
+              },
+            },
+          ],
+        })
+      );
+      return;
+    }
+    res.writeHead(404);
+    res.end();
+  });
+
+  await new Promise<void>((r) => mockCloudSrv.listen(0, '127.0.0.1', r));
+  const cloudPort = (mockCloudSrv.address() as any).port;
+  process.env.RAILWAY_BRAIN_URL = `http://127.0.0.1:${cloudPort}`;
+
+  const appSrv = await new Promise<any>((resolveSrv) => {
+    const srv = app.listen(0, '127.0.0.1', () => resolveSrv(srv));
+  });
+  const appPort = (appSrv.address() as any).port;
+  const scopedAcc = `acc_tg_persona_audit_${Date.now()}`;
+
+  try {
+    // 1. invokeEvolutionOrAnalysisLlm in Cloud mode must send purpose: 'memory_extraction' & temperature: 0.2
+    const extractRes = await invokeEvolutionOrAnalysisLlm({
+      prompt: '请输出JSON数组',
+      customConfig: {
+        enabled: true,
+        explicitlyDisabled: false,
+        engineMode: 'cloud',
+        temperature: 0.85,
+        modelName: 'gemini-4-hydrogen',
+        engineLicenseKey: 'lx-sk-test-audit',
+      },
+      timeoutMs: 5000,
+    });
+    assert.equal(extractRes.source, 'lingxi_cloud_brain');
+    assert.equal(capturedCloudBody?.purpose, 'memory_extraction');
+    assert.equal(capturedCloudBody?.temperature, 0.2);
+
+    // 2. Scoped persona save & query fetch
+    const headerB64 = Buffer.from(JSON.stringify({ alg: 'HS256', typ: 'JWT' })).toString('base64url');
+    const payloadB64 = Buffer.from(
+      JSON.stringify({ sub: 'persona_tester', username: 'persona_tester', role: 'member', exp: Math.floor(Date.now() / 1000) + 3600 })
+    ).toString('base64url');
+    const sigB64 = createHmac('sha256', process.env.JWT_SECRET).update(`${headerB64}.${payloadB64}`).digest('base64url');
+    const token = `${headerB64}.${payloadB64}.${sigB64}`;
+    const saveRes = await fetch(`http://127.0.0.1:${appPort}/api/persona/config`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({
+        accountId: scopedAcc,
+        personaName: '测试顾问',
+        tabooKeywords: ['guaranteed profit', '包赚不赔'],
+      }),
+    });
+    assert.equal(saveRes.status, 200);
+
+    const getRes = await fetch(
+      `http://127.0.0.1:${appPort}/api/persona/config?accountId=${encodeURIComponent(scopedAcc)}`,
+      {
+        headers: { Authorization: `Bearer ${token}` },
+      }
+    );
+    assert.equal(getRes.status, 200);
+    const getJson = (await getRes.json()) as any;
+    assert.equal(getJson.persona?.personaName, '测试顾问');
+    assert.deepEqual(getJson.persona?.tabooKeywords, ['guaranteed profit', '包赚不赔']);
+
+    // 3. Frontend source contract checks
+    const modalSrc = readFileSync(resolve(process.cwd(), 'src/components/KnowledgeEvolutionModal.tsx'), 'utf8');
+    const apiSrc = readFileSync(resolve(process.cwd(), 'src/services/apiService.ts'), 'utf8');
+    assert.ok(modalSrc.includes('const [tabooInput, setTabooInput] = useState<string>'));
+    assert.ok(modalSrc.includes('hasUnsavedPersonaChanges'));
+    assert.ok(!modalSrc.includes('tabooKeywords: e.target.value.split(/[,，\\s]+/)'));
+    assert.ok(apiSrc.includes('/api/persona/config${query}'));
+  } finally {
+    await db.prepare('DELETE FROM system_config WHERE key = ?').run(`global_persona_config::${scopedAcc}`).catch(() => {});
+    await new Promise<void>((r) => appSrv.close(() => r()));
+    await new Promise<void>((r) => mockCloudSrv.close(() => r()));
+    if (prevCustomCfg) {
+      await syncServerCustomLlmConfig(prevCustomCfg).catch(() => {});
+    }
+    if (prevRailwayUrl !== undefined) process.env.RAILWAY_BRAIN_URL = prevRailwayUrl;
+    else delete process.env.RAILWAY_BRAIN_URL;
+    if (prevJwtSecret !== undefined) process.env.JWT_SECRET = prevJwtSecret;
+    else delete process.env.JWT_SECRET;
+  }
+});
+
+
+
 

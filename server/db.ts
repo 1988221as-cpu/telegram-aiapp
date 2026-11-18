@@ -1354,6 +1354,12 @@ export function validateDatabaseSnapshot(snapshot: any): { skippedUserSessions: 
         assertRequiredNonEmptyString(row.chat_id, `customer_profiles[${i}].chat_id`, 256);
         assertStringField(row.account_id, `customer_profiles[${i}].account_id`, 'acc_1', 256);
         assertStringField(row.client_name, `customer_profiles[${i}].client_name`, '', 512);
+        assertStringField(row.family_marital_status, `customer_profiles[${i}].family_marital_status`, '', 1024);
+        assertStringField(row.active_schedule, `customer_profiles[${i}].active_schedule`, '', 1024);
+        assertStringField(row.financial_profile, `customer_profiles[${i}].financial_profile`, '');
+        assertStringField(row.investment_attitude, `customer_profiles[${i}].investment_attitude`, '');
+        assertStringField(row.trust_level, `customer_profiles[${i}].trust_level`, '', 512);
+        assertStringField(row.next_step_strategy, `customer_profiles[${i}].next_step_strategy`, '');
         assertNonNegFiniteNumber(row.total_messages_count, `customer_profiles[${i}].total_messages_count`, false, 0);
         assertNonNegFiniteNumber(row.last_analyzed_at, `customer_profiles[${i}].last_analyzed_at`, false, 0);
         assertNonNegFiniteNumber(row.updated_at, `customer_profiles[${i}].updated_at`, false, 0);
@@ -1361,6 +1367,12 @@ export function validateDatabaseSnapshot(snapshot: any): { skippedUserSessions: 
         assertRequiredNonEmptyString(row.account_id, `account_customer_profiles[${i}].account_id`, 256);
         assertRequiredNonEmptyString(row.chat_id, `account_customer_profiles[${i}].chat_id`, 256);
         assertStringField(row.client_name, `account_customer_profiles[${i}].client_name`, '', 512);
+        assertStringField(row.family_marital_status, `account_customer_profiles[${i}].family_marital_status`, '', 1024);
+        assertStringField(row.active_schedule, `account_customer_profiles[${i}].active_schedule`, '', 1024);
+        assertStringField(row.financial_profile, `account_customer_profiles[${i}].financial_profile`, '');
+        assertStringField(row.investment_attitude, `account_customer_profiles[${i}].investment_attitude`, '');
+        assertStringField(row.trust_level, `account_customer_profiles[${i}].trust_level`, '', 512);
+        assertStringField(row.next_step_strategy, `account_customer_profiles[${i}].next_step_strategy`, '');
         assertNonNegFiniteNumber(row.total_messages_count, `account_customer_profiles[${i}].total_messages_count`, false, 0);
         assertNonNegFiniteNumber(row.last_analyzed_at, `account_customer_profiles[${i}].last_analyzed_at`, false, 0);
         assertNonNegFiniteNumber(row.updated_at, `account_customer_profiles[${i}].updated_at`, false, 0);
@@ -1565,9 +1577,11 @@ export async function restoreDatabaseSnapshot(snapshot: any): Promise<{ success:
         await db.prepare(`
           INSERT OR REPLACE INTO customer_profiles (
             chat_id, account_id, client_name, relationship_stage, age_estimate, occupation,
-            location_timezone, tone_style, likes_interests, dislikes_taboos, emotional_needs,
+            location_timezone, family_marital_status, active_schedule, tone_style,
+            likes_interests, dislikes_taboos, emotional_needs,
+            financial_profile, investment_attitude, trust_level, next_step_strategy,
             key_memories, total_messages_count, last_analyzed_at, updated_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         `).run(
           p.chat_id,
           p.account_id || 'acc_1',
@@ -1576,10 +1590,16 @@ export async function restoreDatabaseSnapshot(snapshot: any): Promise<{ success:
           p.age_estimate ?? '-',
           p.occupation ?? '',
           p.location_timezone ?? 'UTC+8',
+          p.family_marital_status ?? '',
+          p.active_schedule ?? '',
           p.tone_style ?? '',
           p.likes_interests ?? '[]',
           p.dislikes_taboos ?? '[]',
           p.emotional_needs ?? '',
+          p.financial_profile ?? '',
+          p.investment_attitude ?? '',
+          p.trust_level ?? '',
+          p.next_step_strategy ?? '',
           p.key_memories ?? '[]',
           Number(p.total_messages_count) || 0,
           Number(p.last_analyzed_at) || 0,
@@ -1593,9 +1613,11 @@ export async function restoreDatabaseSnapshot(snapshot: any): Promise<{ success:
         await db.prepare(`
           INSERT OR REPLACE INTO account_customer_profiles (
             account_id, chat_id, client_name, relationship_stage, age_estimate, occupation,
-            location_timezone, tone_style, likes_interests, dislikes_taboos, emotional_needs,
+            location_timezone, family_marital_status, active_schedule, tone_style,
+            likes_interests, dislikes_taboos, emotional_needs,
+            financial_profile, investment_attitude, trust_level, next_step_strategy,
             key_memories, total_messages_count, last_analyzed_at, updated_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         `).run(
           p.account_id,
           p.chat_id,
@@ -1604,10 +1626,16 @@ export async function restoreDatabaseSnapshot(snapshot: any): Promise<{ success:
           p.age_estimate ?? '-',
           p.occupation ?? '',
           p.location_timezone ?? 'UTC+8',
+          p.family_marital_status ?? '',
+          p.active_schedule ?? '',
           p.tone_style ?? '',
           p.likes_interests ?? '[]',
           p.dislikes_taboos ?? '[]',
           p.emotional_needs ?? '',
+          p.financial_profile ?? '',
+          p.investment_attitude ?? '',
+          p.trust_level ?? '',
+          p.next_step_strategy ?? '',
           p.key_memories ?? '[]',
           Number(p.total_messages_count) || 0,
           Number(p.last_analyzed_at) || 0,

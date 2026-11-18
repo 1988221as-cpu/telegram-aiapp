@@ -710,9 +710,13 @@ const CUSTOMER_PLACEHOLDER_VALUES = new Set([
   '待观察',
   '低（初识）',
   '自然破冰与日常共情，暂不提及投资',
+  '尚未分析',
+  '沟通中',
+  '初次结识',
+  '初次沟通',
 ]);
 
-function isPlaceholderProfileValue(val?: string | null): boolean {
+export function isPlaceholderProfileValue(val?: string | null): boolean {
   const s = String(val ?? '').trim();
   return !s || CUSTOMER_PLACEHOLDER_VALUES.has(s);
 }
@@ -734,19 +738,18 @@ function mergeUniqueStringTags(existingList: any[], incomingList: any[]): string
 function mergeKeyMemories(existingMemories: any[], incomingMemories: any[]): any[] {
   const byId = new Map<string, any>();
   const seenSignatures = new Set<string>();
-  const result: any[] = [];
+  const existingItems: any[] = [];
+  const newIncomingItems: any[] = [];
 
-  const pushItem = (raw: any) => {
-    if (!raw || typeof raw !== 'object') return;
+  const normalizeEntry = (raw: any) => {
+    if (!raw || typeof raw !== 'object') return null;
     const topic = String(raw.topic || '').trim();
     const summary = String(raw.summary || '').trim();
-    if (!topic && !summary) return;
+    if (!topic && !summary) return null;
     const id = String(raw.id || '').trim();
     const sig = `${topic.toLocaleLowerCase()}::${summary.toLocaleLowerCase()}`;
-
-    if (id && byId.has(id)) return;
-    if (seenSignatures.has(sig)) return;
-
+    if (id && byId.has(id)) return null;
+    if (seenSignatures.has(sig)) return null;
     const normalized = {
       id: id || `mem_${sha256Hex(sig).slice(0, 12)}`,
       date: String(raw.date || '近期').trim(),
@@ -756,18 +759,20 @@ function mergeKeyMemories(existingMemories: any[], incomingMemories: any[]): any
     };
     if (normalized.id) byId.set(normalized.id, normalized);
     seenSignatures.add(sig);
-    result.push(normalized);
+    return normalized;
   };
 
-  // Put existing manual/saved memories first so user-curated entries are always preserved
   for (const m of Array.isArray(existingMemories) ? existingMemories : []) {
-    pushItem(m);
+    const norm = normalizeEntry(m);
+    if (norm) existingItems.push(norm);
   }
+  // Place newly discovered incoming memories before existing items so newest-first slices(0, 5) never truncate fresh extractions
   for (const m of Array.isArray(incomingMemories) ? incomingMemories : []) {
-    pushItem(m);
+    const norm = normalizeEntry(m);
+    if (norm) newIncomingItems.push(norm);
   }
 
-  return result;
+  return [...newIncomingItems, ...existingItems];
 }
 
 export function mergeCustomerProfileWithManualData(params: {
@@ -775,6 +780,7 @@ export function mergeCustomerProfileWithManualData(params: {
   aiData?: Record<string, any> | null;
   fallbackName?: string;
   preserveOnSparse?: boolean;
+  preserveManualScalars?: boolean;
 }): {
   clientName: string;
   relationshipStage: string;
@@ -796,6 +802,13 @@ export function mergeCustomerProfileWithManualData(params: {
   const existing = params.existingProfile || null;
   const ai = params.aiData || {};
   const preserveOnSparse = Boolean(params.preserveOnSparse);
+  const existingUpdatedAt = Number(existing?.updated_at ?? existing?.updatedAt ?? 0);
+  const existingLastAnalyzedAt = Number(existing?.last_analyzed_at ?? existing?.lastAnalyzedAt ?? 0);
+  const hasManualTimestampOverride =
+    Boolean(existing) &&
+    (existingUpdatedAt > existingLastAnalyzedAt || existingLastAnalyzedAt === 0);
+  const protectManualScalars =
+    preserveOnSparse || params.preserveManualScalars === true || hasManualTimestampOverride;
 
   const safeParseArr = (raw: any): any[] => {
     if (Array.isArray(raw)) return raw;
@@ -808,14 +821,24 @@ export function mergeCustomerProfileWithManualData(params: {
     }
   };
 
-  const pickScalar = (existingVal: any, aiVal: any, defaultVal: string): string => {
+  const pickScalar = (
+    existingVal: any,
+    aiVal: any,
+    defaultVal: string,
+    preferExistingFactual = false
+  ): string => {
     const ext = String(existingVal ?? '').trim();
     const next = String(aiVal ?? '').trim();
     if (preserveOnSparse) {
       if (!isPlaceholderProfileValue(ext)) return ext;
       return next || ext || defaultVal;
     }
-    // In full AI extraction: prefer AI if informative, otherwise keep existing informative value
+    if (protectManualScalars || preferExistingFactual) {
+      if (!isPlaceholderProfileValue(ext)) return ext;
+      if (!isPlaceholderProfileValue(next)) return next;
+      return next || ext || defaultVal;
+    }
+    // In full AI extraction without manual override: prefer AI if informative, otherwise keep existing informative value
     if (!isPlaceholderProfileValue(next)) return next;
     if (!isPlaceholderProfileValue(ext)) return ext;
     return next || ext || defaultVal;
@@ -840,17 +863,19 @@ export function mergeCustomerProfileWithManualData(params: {
       ai.relationshipStage,
       '初次接触'
     ),
-    ageEstimate: pickScalar(existing?.age_estimate ?? existing?.ageEstimate, ai.ageEstimate, '未知'),
-    occupation: pickScalar(existing?.occupation, ai.occupation, '未知'),
+    ageEstimate: pickScalar(existing?.age_estimate ?? existing?.ageEstimate, ai.ageEstimate, '未知', true),
+    occupation: pickScalar(existing?.occupation, ai.occupation, '未知', true),
     locationTimezone: pickScalar(
       existing?.location_timezone ?? existing?.locationTimezone,
       ai.locationTimezone,
-      '未提及'
+      '未提及',
+      true
     ),
     familyMaritalStatus: pickScalar(
       existing?.family_marital_status ?? existing?.familyMaritalStatus,
       ai.familyMaritalStatus,
-      '未知'
+      '未知',
+      true
     ),
     activeSchedule: pickScalar(
       existing?.active_schedule ?? existing?.activeSchedule,

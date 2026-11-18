@@ -4888,8 +4888,10 @@ export async function toggleAutopilot(
 
 export async function fetchGlobalPersonaApi(accountId?: string): Promise<{ success: boolean; persona?: GlobalPersonaConfig; error?: string }> {
   try {
-    const res = await fetchWithTimeout('/api/persona/config', {
-      headers: getAuthHeaders(accountId),
+    const acc = accountId || currentActiveAccountId;
+    const query = acc ? `?accountId=${encodeURIComponent(acc)}` : '';
+    const res = await fetchWithTimeout(`/api/persona/config${query}`, {
+      headers: getAuthHeaders(acc),
       credentials: 'include',
     }, 12000);
     const data = await res.json().catch(() => ({}));

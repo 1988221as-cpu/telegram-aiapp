@@ -147,6 +147,8 @@ export const KnowledgeEvolutionModal: React.FC<KnowledgeEvolutionModalProps> = (
   const [pendingConfirmAction, setPendingConfirmAction] = useState<'reset' | 'import' | null>(null);
   const [personaActionError, setPersonaActionError] = useState<string>('');
   const [traitInput, setTraitInput] = useState<string>('');
+  const [tabooInput, setTabooInput] = useState<string>('');
+  const [savedPersonaSnapshot, setSavedPersonaSnapshot] = useState<string>('');
 
   // 2. Local Knowledge Base State
   const [kbItems, setKbItems] = useState<KnowledgeBaseItem[]>([]);
@@ -239,17 +241,58 @@ export const KnowledgeEvolutionModal: React.FC<KnowledgeEvolutionModalProps> = (
     loadEvolutionData();
   }, [isOpen, embedded, activeAccountId]);
 
+  const buildNormalizedPersonaPayload = (
+    p: GlobalPersonaConfig,
+    traitsDraft: string,
+    taboosDraft: string
+  ): GlobalPersonaConfig => ({
+    ...p,
+    personalityTraits: traitsDraft
+      .split(/[,，\n]+/)
+      .map((t) => t.trim())
+      .filter(Boolean),
+    tabooKeywords: taboosDraft
+      .split(/[,，\n]+/)
+      .map((t) => t.trim())
+      .filter(Boolean),
+  });
+
+  const serializePersonaSnapshot = (p: GlobalPersonaConfig) =>
+    JSON.stringify({
+      personaName: p.personaName || '',
+      personaRole: p.personaRole || '',
+      age: p.age || '',
+      location: p.location || '',
+      personalityTraits: p.personalityTraits || [],
+      lifeStyleDetails: p.lifeStyleDetails || '',
+      investmentPhilosophy: p.investmentPhilosophy || '',
+      tabooKeywords: p.tabooKeywords || [],
+      activeStage: p.activeStage || 'icebreaker',
+      stagedPrompts: p.stagedPrompts || {},
+      customSystemInstruction: p.customSystemInstruction || '',
+    });
+
+  const syncLoadedPersonaState = (loaded: GlobalPersonaConfig) => {
+    const traitsStr = (loaded.personalityTraits || []).join(', ');
+    const taboosStr = (loaded.tabooKeywords || []).join(', ');
+    setPersona(loaded);
+    setTraitInput(traitsStr);
+    setTabooInput(taboosStr);
+    setSavedPersonaSnapshot(
+      serializePersonaSnapshot(buildNormalizedPersonaPayload(loaded, traitsStr, taboosStr))
+    );
+    if (loaded.activeStage) {
+      setActiveStageEdit(loaded.activeStage);
+      setSandboxStage(loaded.activeStage);
+    }
+  };
+
   const loadPersonaData = async () => {
     setIsLoadingPersona(true);
     try {
       const pRes = await fetchGlobalPersonaApi(activeAccountId);
       if (pRes.success && pRes.persona) {
-        setPersona(pRes.persona);
-        setTraitInput((pRes.persona.personalityTraits || []).join(', '));
-        if (pRes.persona.activeStage) {
-          setActiveStageEdit(pRes.persona.activeStage);
-          setSandboxStage(pRes.persona.activeStage);
-        }
+        syncLoadedPersonaState(pRes.persona);
       }
     } catch (err) {
       console.error('Failed to load persona data:', err);
@@ -311,29 +354,34 @@ export const KnowledgeEvolutionModal: React.FC<KnowledgeEvolutionModalProps> = (
   };
 
   // ==================== PERSONA HANDLERS ====================
-  const handleSavePersona = async () => {
-    if (!persona) return;
+  const handleSavePersona = async (): Promise<boolean> => {
+    if (!persona) return false;
     setIsSavingPersona(true);
     setPersonaActionError('');
     try {
-      const normalizedPersona: GlobalPersonaConfig = {
-        ...persona,
-        personalityTraits: traitInput
-          .split(/[,，\n]+/)
-          .map((t) => t.trim())
-          .filter(Boolean),
-      };
+      const normalizedPersona = buildNormalizedPersonaPayload(persona, traitInput, tabooInput);
       const res = await saveGlobalPersonaApi(normalizedPersona, activeAccountId);
       if (res.success) {
-        setPersona(res.persona || normalizedPersona);
+        const finalPersona = res.persona || normalizedPersona;
+        const nextTraitsStr = (finalPersona.personalityTraits || []).join(', ');
+        const nextTaboosStr = (finalPersona.tabooKeywords || []).join(', ');
+        setPersona(finalPersona);
+        setTraitInput(nextTraitsStr);
+        setTabooInput(nextTaboosStr);
+        setSavedPersonaSnapshot(
+          serializePersonaSnapshot(buildNormalizedPersonaPayload(finalPersona, nextTraitsStr, nextTaboosStr))
+        );
         setPersonaSaveSuccess(true);
         setTimeout(() => setPersonaSaveSuccess(false), 3000);
+        return true;
       } else {
         setPersonaActionError((res as any)?.error || '保存人设配置失败，请重试');
+        return false;
       }
     } catch (err: any) {
       console.error(err);
       setPersonaActionError(err?.message || '保存人设配置异常');
+      return false;
     } finally {
       setIsSavingPersona(false);
     }
@@ -350,12 +398,7 @@ export const KnowledgeEvolutionModal: React.FC<KnowledgeEvolutionModalProps> = (
     try {
       const res = await resetGlobalPersonaApi(activeAccountId);
       if (res.success && res.persona) {
-        setPersona(res.persona);
-        setTraitInput((res.persona.personalityTraits || []).join(', '));
-        if (res.persona.activeStage) {
-          setActiveStageEdit(res.persona.activeStage);
-          setSandboxStage(res.persona.activeStage);
-        }
+        syncLoadedPersonaState(res.persona);
         setPendingConfirmAction(null);
         setPersonaSaveSuccess(true);
         setTimeout(() => setPersonaSaveSuccess(false), 3000);
@@ -381,12 +424,7 @@ export const KnowledgeEvolutionModal: React.FC<KnowledgeEvolutionModalProps> = (
     try {
       const res = await importPersonaTemplateApi(activeAccountId);
       if (res.success && res.persona) {
-        setPersona(res.persona);
-        setTraitInput((res.persona.personalityTraits || []).join(', '));
-        if (res.persona.activeStage) {
-          setActiveStageEdit(res.persona.activeStage);
-          setSandboxStage(res.persona.activeStage);
-        }
+        syncLoadedPersonaState(res.persona);
         setPendingConfirmAction(null);
         setPersonaSaveSuccess(true);
         setTimeout(() => setPersonaSaveSuccess(false), 3000);
@@ -576,6 +614,11 @@ export const KnowledgeEvolutionModal: React.FC<KnowledgeEvolutionModalProps> = (
         text: `已导入《${res.title}》（${res.roundCount || 0} 轮 / ${res.characterCount || 0} 字），并提炼风格：${res.learnedStyle || '已生成'}`,
       });
       await loadTranscriptsData();
+    } catch (err: any) {
+      setTranscriptFeedback({
+        type: 'error',
+        text: err?.message || '从当前客户导入整文异常',
+      });
     } finally {
       setIsImportingChatTranscript(false);
     }
@@ -613,6 +656,11 @@ export const KnowledgeEvolutionModal: React.FC<KnowledgeEvolutionModalProps> = (
         text: `已新增整文范本《${title}》，提炼风格：${res.learnedStyle || '已保存'}`,
       });
       await loadTranscriptsData();
+    } catch (err: any) {
+      setTranscriptFeedback({
+        type: 'error',
+        text: err?.message || '保存整文范本异常',
+      });
     } finally {
       setIsCreatingTranscript(false);
     }
@@ -670,6 +718,11 @@ export const KnowledgeEvolutionModal: React.FC<KnowledgeEvolutionModalProps> = (
         text: `学习完成：分析 ${res.analyzedConversationsCount || 0} 组会话语料，新增 ${res.newHabitsLearned || 0} 项实战习惯${skippedMsg}${syncMsg}`,
       });
       await loadEvolutionData();
+    } catch (err: any) {
+      setEvolutionFeedback({
+        type: 'error',
+        text: err?.message || '自进化学习请求异常',
+      });
     } finally {
       setIsRunningEvolution(false);
     }
@@ -725,6 +778,13 @@ export const KnowledgeEvolutionModal: React.FC<KnowledgeEvolutionModalProps> = (
   };
 
   if (!isOpen && !embedded) return null;
+
+  const hasUnsavedPersonaChanges = Boolean(
+    persona &&
+      savedPersonaSnapshot &&
+      serializePersonaSnapshot(buildNormalizedPersonaPayload(persona, traitInput, tabooInput)) !==
+        savedPersonaSnapshot
+  );
 
   const filteredKbItems = kbItems.filter((item) => {
     if (kbFilterCategory !== 'all' && item.category !== kbFilterCategory) return false;
@@ -836,13 +896,20 @@ export const KnowledgeEvolutionModal: React.FC<KnowledgeEvolutionModalProps> = (
         {activeTab === 'persona' && persona && (
           <div className="space-y-4">
             <div className="flex flex-wrap items-center justify-between gap-2 pb-3 border-b border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34]">
-              <h3 className="text-xs font-bold text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] flex items-center gap-1.5">
-                <Users className="w-4 h-4 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf]" />
-                <span>角色档案：{persona.personaName || '未命名'}</span>
-              </h3>
+              <div className="flex items-center gap-2 flex-wrap">
+                <h3 className="text-xs font-bold text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] flex items-center gap-1.5">
+                  <Users className="w-4 h-4 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf]" />
+                  <span>角色档案：{persona.personaName || '未命名'}</span>
+                </h3>
+                {hasUnsavedPersonaChanges && (
+                  <span className="px-1.5 py-0.5 rounded text-[10px] font-medium bg-amber-500/15 text-amber-700 dark:text-amber-300 border border-amber-500/30">
+                    有未保存修改
+                  </span>
+                )}
+              </div>
 
               <div className="flex items-center gap-1.5 flex-wrap">
-                {personaSaveSuccess && (
+                {personaSaveSuccess && !hasUnsavedPersonaChanges && (
                   <span className="text-[11px] text-emerald-700 dark:text-[#2ba0ff] aurora:text-[#2dd4bf] flex items-center gap-1 font-medium">
                     <Check className="w-3.5 h-3.5" /> 已生效
                   </span>
@@ -1036,14 +1103,10 @@ export const KnowledgeEvolutionModal: React.FC<KnowledgeEvolutionModalProps> = (
                   </label>
                   <input
                     type="text"
-                    value={(persona.tabooKeywords || []).join(', ')}
-                    onChange={(e) =>
-                      setPersona({
-                        ...persona,
-                        tabooKeywords: e.target.value.split(/[,，\s]+/).filter(Boolean),
-                      })
-                    }
-                    className="w-full bg-white dark:bg-[#08101a] aurora:bg-[#081014] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] rounded-lg px-2.5 py-1.5 text-xs text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] focus:outline-none focus:border-[#2481cc] dark:focus:border-[#2ba0ff] aurora:focus:border-[#2dd4bf]"
+                    value={tabooInput}
+                    onChange={(e) => setTabooInput(e.target.value)}
+                    placeholder="例如：包赚不赔, 稳赚, guaranteed profit"
+                    className="w-full bg-white dark:bg-[#08101a] aurora:bg-[#081014] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] rounded-lg px-2.5 py-1.5 text-xs text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] placeholder-[#94a3b8] dark:placeholder-[#4e657e] aurora:placeholder-[#5a7782] focus:outline-none focus:border-[#2481cc] dark:focus:border-[#2ba0ff] aurora:focus:border-[#2dd4bf]"
                   />
                 </div>
               </div>
@@ -1920,6 +1983,22 @@ export const KnowledgeEvolutionModal: React.FC<KnowledgeEvolutionModalProps> = (
         {/* ==================== TAB 5: PERSONA SANDBOX ==================== */}
         {activeTab === 'sandbox' && (
           <div className="space-y-4">
+            {hasUnsavedPersonaChanges && (
+              <div className="px-3.5 py-2.5 rounded-xl border border-amber-500/35 bg-amber-500/10 text-amber-800 dark:text-amber-300 text-xs flex flex-wrap items-center justify-between gap-2">
+                <div className="flex items-center gap-2">
+                  <AlertCircle className="w-4 h-4 shrink-0 text-amber-600 dark:text-amber-400" />
+                  <span>您在「人设」页有尚未保存的修改，试聊将读取本地数据库已保存配置。</span>
+                </div>
+                <button
+                  type="button"
+                  disabled={isSavingPersona}
+                  onClick={() => void handleSavePersona()}
+                  className="px-2.5 py-1 rounded-lg bg-amber-600 hover:bg-amber-500 text-white text-[11px] font-semibold cursor-pointer disabled:opacity-50"
+                >
+                  {isSavingPersona ? '保存中...' : '立即保存当前人设'}
+                </button>
+              </div>
+            )}
             <div className={embedded ? 'space-y-4' : 'grid grid-cols-1 md:grid-cols-12 gap-5'}>
               {/* Input Panel */}
               <div

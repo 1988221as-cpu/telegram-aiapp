@@ -91,6 +91,7 @@ import {
   extractMultilingualRagTokens,
   canonicalizeCustomerChatId,
   mergeCustomerProfileWithManualData,
+  isPlaceholderProfileValue,
 } from './server/knowledgeUtils.ts';
 
 dotenv.config();
@@ -5872,7 +5873,15 @@ app.get('/api/database/status', requireTenantAuth, async (req: Request, res: Res
   try {
     const pingResult = await db.ping();
     const msgRes = (await db.prepare('SELECT count(*) as count FROM messages').get()) as any;
-    const profileRes = (await db.prepare('SELECT count(*) as count FROM customer_profiles').get()) as any;
+    const profileRes = (await db
+      .prepare(
+        `SELECT count(*) as count FROM (
+          SELECT account_id, chat_id FROM account_customer_profiles
+          UNION
+          SELECT COALESCE(NULLIF(TRIM(account_id), ''), 'acc_1') AS account_id, chat_id FROM customer_profiles
+        )`
+      )
+      .get()) as any;
     const msgCount = msgRes?.count || 0;
     const profileCount = profileRes?.count || 0;
     let sizeBytes = 0;
@@ -9761,15 +9770,24 @@ app.post('/api/customer/analyze/:chatId', requireTenantAuth, async (req: Request
       return `${sender}: ${content}`;
     }).join('\n');
 
+    const existingLikes = existingProfile ? safeJsonParse<string[]>(existingProfile.likes_interests, []) : [];
+    const existingTaboos = existingProfile ? safeJsonParse<string[]>(existingProfile.dislikes_taboos, []) : [];
     const existingSummaryParts = existingProfile
       ? [
-          existingProfile.relationship_stage ? `关系阶段:${existingProfile.relationship_stage}` : '',
-          existingProfile.family_marital_status ? `婚恋家庭:${existingProfile.family_marital_status}` : '',
-          existingProfile.active_schedule ? `作息:${existingProfile.active_schedule}` : '',
-          existingProfile.financial_profile ? `经济背景:${existingProfile.financial_profile}` : '',
-          existingProfile.investment_attitude ? `投资态度:${existingProfile.investment_attitude}` : '',
-          existingProfile.trust_level ? `信任度:${existingProfile.trust_level}` : '',
-          existingProfile.next_step_strategy ? `既有策略:${existingProfile.next_step_strategy}` : '',
+          !isPlaceholderProfileValue(existingProfile.relationship_stage) ? `关系阶段:${existingProfile.relationship_stage}` : '',
+          !isPlaceholderProfileValue(existingProfile.age_estimate) ? `年龄:${existingProfile.age_estimate}` : '',
+          !isPlaceholderProfileValue(existingProfile.occupation) ? `职业:${existingProfile.occupation}` : '',
+          !isPlaceholderProfileValue(existingProfile.location_timezone) ? `地区/时区:${existingProfile.location_timezone}` : '',
+          !isPlaceholderProfileValue(existingProfile.family_marital_status) ? `婚恋家庭:${existingProfile.family_marital_status}` : '',
+          !isPlaceholderProfileValue(existingProfile.active_schedule) ? `作息:${existingProfile.active_schedule}` : '',
+          !isPlaceholderProfileValue(existingProfile.tone_style) ? `性格语气:${existingProfile.tone_style}` : '',
+          Array.isArray(existingLikes) && existingLikes.length > 0 ? `喜好话题:${existingLikes.join('、')}` : '',
+          Array.isArray(existingTaboos) && existingTaboos.length > 0 ? `敏感雷区:${existingTaboos.join('、')}` : '',
+          !isPlaceholderProfileValue(existingProfile.emotional_needs) ? `情感诉求:${existingProfile.emotional_needs}` : '',
+          !isPlaceholderProfileValue(existingProfile.financial_profile) ? `经济背景:${existingProfile.financial_profile}` : '',
+          !isPlaceholderProfileValue(existingProfile.investment_attitude) ? `投资态度:${existingProfile.investment_attitude}` : '',
+          !isPlaceholderProfileValue(existingProfile.trust_level) ? `信任度:${existingProfile.trust_level}` : '',
+          !isPlaceholderProfileValue(existingProfile.next_step_strategy) ? `既有策略:${existingProfile.next_step_strategy}` : '',
         ].filter(Boolean)
       : [];
     const existingProfileSummary = existingSummaryParts.join('；');
@@ -9961,11 +9979,16 @@ ${conversationTranscript}`;
     }
 
     // Merge AI-extracted insights with manually curated memories, tags, and attributes
+    const hasManualOverride =
+      Boolean(existingProfile) &&
+      (Number(existingProfile?.updated_at ?? 0) > Number(existingProfile?.last_analyzed_at ?? 0) ||
+        Number(existingProfile?.last_analyzed_at ?? 0) === 0);
     const mergedProfile = mergeCustomerProfileWithManualData({
       existingProfile,
       aiData: extractedData,
       fallbackName: chatTitle || '客户',
       preserveOnSparse: false,
+      preserveManualScalars: hasManualOverride,
     });
 
     await upsertScopedCustomerProfile({
@@ -10711,7 +10734,10 @@ export function buildActivePersonaAndEvolutionContext(
   const lifeStyleDetails = String(persona?.lifeStyleDetails || '').trim();
   const investmentPhilosophy = String(persona?.investmentPhilosophy || '').trim();
   const customSystemInstruction = String(persona?.customSystemInstruction || '').trim();
-  const stagePrompt = String(persona?.stagedPrompts?.[activeStage] || persona?.stagedPrompts?.icebreaker || '').trim();
+  const rawStagePrompt = String(persona?.stagedPrompts?.[activeStage] || '').trim();
+  const fallbackIcebreakerPrompt = String(persona?.stagedPrompts?.icebreaker || '').trim();
+  const usingFallbackStagePrompt = !rawStagePrompt && Boolean(fallbackIcebreakerPrompt) && activeStage !== 'icebreaker';
+  const stagePrompt = rawStagePrompt || fallbackIcebreakerPrompt;
   const tabooKeywords = Array.isArray(persona?.tabooKeywords)
     ? persona.tabooKeywords.map((k: any) => String(k || '').trim()).filter(Boolean)
     : [];
@@ -10754,7 +10780,10 @@ export function buildActivePersonaAndEvolutionContext(
     sections.push(`【自定义全局系统指令】：\n${customSystemInstruction}`);
   }
   if (stagePrompt) {
-    sections.push(`【当前沟通阶段（${activeStage}）指导原则】：\n${stagePrompt}`);
+    const stageHeader = usingFallbackStagePrompt
+      ? `【当前沟通阶段（${activeStage}，该阶段未单独配置话术，暂沿用初识破冰基线）指导原则】`
+      : `【当前沟通阶段（${activeStage}）指导原则】`;
+    sections.push(`${stageHeader}：\n${stagePrompt}`);
   }
   if (habitList) {
     sections.push(`【自进化引擎萃取的活跃沟通习惯】：\n${habitList}`);
@@ -11080,12 +11109,16 @@ export async function invokeEvolutionOrAnalysisLlm({
   if (effectiveCustomConfig?.enabled) {
     const isPriorityCustom = effectiveCustomConfig.engineMode === 'custom';
     const normalizedEffectiveConfig = isPriorityCustom
-      ? effectiveCustomConfig
+      ? {
+          ...effectiveCustomConfig,
+          temperature: 0.2,
+        }
       : {
           ...effectiveCustomConfig,
           engineMode: 'cloud',
           baseUrl: '',
           apiKey: '',
+          temperature: 0.2,
           modelName:
             effectiveCustomConfig.modelName && /^(gemini|gemma)/i.test(String(effectiveCustomConfig.modelName).trim())
               ? String(effectiveCustomConfig.modelName).trim()
@@ -11100,6 +11133,7 @@ export async function invokeEvolutionOrAnalysisLlm({
       userJwt: userJwt || lastActiveUserJwt || undefined,
       throwOnError: true,
       skipSync: true,
+      extraPayload: { purpose: 'memory_extraction' },
     });
     if (!reply || !reply.trim()) {
       throw new Error('后台/自定义大模型未返回有效分析内容');
@@ -15517,11 +15551,11 @@ export function resolveCustomerPersonaStageKey(
 ): string | undefined {
   const s = String(relationshipStage || '').trim();
   if (!s) return fallbackStage;
-  if (/投资|理财|财富|资产|项目|合作/.test(s)) return 'wealthDiscussion';
-  if (/信任|防线|深度|稳定/.test(s)) return 'trustDefense';
+  if (/投资|理财|财富|资产|项目|合作|价值/.test(s)) return 'wealthDiscussion';
+  if (/信任|防线|深度|稳定|疑虑|安全感/.test(s)) return 'trustDefense';
   if (/恋爱|情感|暧昧|升温/.test(s)) return 'emotionalLove';
-  if (/朋友|熟络|日常|沟通/.test(s)) return 'dailyFriend';
-  if (/初识|破冰|初次|尚未/.test(s)) return 'icebreaker';
+  if (/初识|破冰|初次|尚未|新联系人|待分析/.test(s)) return 'icebreaker';
+  if (/朋友|熟络|日常|熟人/.test(s)) return 'dailyFriend';
   return fallbackStage;
 }
 
@@ -15712,9 +15746,31 @@ export function isCustomerColdStartProfile(
 ): boolean {
   if (!profile) return true;
   const stage = String(profile.relationship_stage || '').trim();
-  if (!stage || stage === '尚未沟通' || stage === '初次接触' || stage === '初次沟通') {
+  if (
+    !stage ||
+    stage === '尚未沟通' ||
+    stage === '初次接触' ||
+    stage === '初次沟通' ||
+    stage === '初次结识' ||
+    stage === '尚未分析'
+  ) {
     return true;
   }
+  const mappedStage = resolveCustomerPersonaStageKey(stage);
+  if (mappedStage && mappedStage !== 'icebreaker') {
+    return false;
+  }
+  const hasInformativeFields = [
+    profile.family_marital_status,
+    profile.active_schedule,
+    profile.occupation,
+    profile.tone_style,
+    profile.emotional_needs,
+    profile.financial_profile,
+    profile.investment_attitude,
+    profile.next_step_strategy,
+  ].some((v) => !isPlaceholderProfileValue(v));
+  if (hasInformativeFields) return false;
   return likes.length === 0 && memories.length === 0;
 }
 
@@ -15929,7 +15985,24 @@ export function applyPromptCharacterBudget(
     const excess = joinCurrent().length - maxChars;
     if (excess <= 0 || !currentVal) return currentVal;
     const nextMax = Math.max(0, currentVal.length - excess);
-    const nextVal = truncateSectionCleanly(currentVal, nextMax);
+    let nextVal = '';
+    if (key === 'profile') {
+      const guidelineMarker = '\n【AI 使用上述客户资料的回复准则】';
+      const markerIdx = currentVal.indexOf(guidelineMarker);
+      if (markerIdx !== -1) {
+        const profileHead = currentVal.slice(0, markerIdx);
+        const guidelineTail = currentVal.slice(markerIdx);
+        if (nextMax > guidelineTail.length + 120) {
+          nextVal = `${truncateSectionCleanly(profileHead, nextMax - guidelineTail.length)}${guidelineTail}`;
+        } else {
+          nextVal = truncateSectionCleanly(currentVal, nextMax);
+        }
+      } else {
+        nextVal = truncateSectionCleanly(currentVal, nextMax);
+      }
+    } else {
+      nextVal = truncateSectionCleanly(currentVal, nextMax);
+    }
     if (nextVal !== currentVal) {
       trimmedSections.push(key);
     }

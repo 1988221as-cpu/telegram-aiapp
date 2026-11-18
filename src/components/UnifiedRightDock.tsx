@@ -143,7 +143,7 @@ export const UnifiedRightDock: React.FC<UnifiedRightDockProps> = ({
                 </h2>
                 <p className="text-[11px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] truncate leading-tight mt-0.5">
                   {activePanel === 'memory'
-                    ? `${customerProfile?.relationshipStage || '沟通中'} · 独立配置页`
+                    ? `${customerProfile?.relationshipStage || '尚未分析'} · 独立配置页`
                     : activePanel === 'llm'
                     ? customLLMConfig.enabled === false || customLLMConfig.explicitlyDisabled
                       ? '双关状态 · 仅支持谷歌机翻'
@@ -220,7 +220,7 @@ export const UnifiedRightDock: React.FC<UnifiedRightDockProps> = ({
               profile={customerProfile}
               chatId={activeChatId || ''}
               currentAccountId={activeAccountId}
-              onUpdateProfile={(updated, options) => {
+              onUpdateProfile={async (updated, options) => {
                 const targetChatId = updated.chatId && updated.chatId !== 'current' ? updated.chatId : activeChatId;
                 const targetAccountId = updated.accountId || activeAccountId;
                 const normalizedUpdated: CustomerProfile = {
@@ -232,9 +232,10 @@ export const UnifiedRightDock: React.FC<UnifiedRightDockProps> = ({
                 if (targetChatId && targetChatId !== 'current') {
                   saveLocalCustomerProfile(targetChatId, normalizedUpdated, targetAccountId);
                   if (!options?.skipRemoteSave) {
-                    void saveCustomerProfile(targetChatId, normalizedUpdated, targetAccountId);
+                    return await saveCustomerProfile(targetChatId, normalizedUpdated, targetAccountId);
                   }
                 }
+                return true;
               }}
               customConfig={customLLMConfig}
               chatTitle={currentChat?.title || '当前联系人'}
