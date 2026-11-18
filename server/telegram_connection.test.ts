@@ -85,11 +85,18 @@ function makeFakeGramJsClient(opts?: {
     isReconnecting: false,
     _reconnecting: false,
     _disconnected: !opts?.initiallyConnected,
+    _autoReconnect: true,
+    _retries: 3,
+    _reconnectRetries: 3,
     _connection: senderConn,
     reconnectCalled: 0,
     reconnect() {
       this.reconnectCalled += 1;
       opts?.onReconnect?.();
+    },
+    async _reconnect() {
+      this.userDisconnected = false;
+      senderConn._connected = true;
     },
   };
   const client: any = {
@@ -926,4 +933,181 @@ test('Frontend UI connection phase evaluator: transient 9s grace period hides br
   assert.equal(backOnline.uiStatus, 'online');
   assert.equal(backOnline.shouldShowBanner, false);
   assert.equal(getTelegramProxyFingerprint(undefined), 'direct');
+});
+
+test('Regression: queued _reconnect() stays silenced after destroy/Step 2a, /api/internal/system-resume blocks x-real-ip & coalesces concurrent wake, and user_id=NULL row reconnects via acc_tg_<uid> + phone', async () => {
+  resetInMemoryTelegramState();
+  const suffix = Date.now().toString().slice(-6);
+  const phone = `+86139333${suffix}`;
+  const uid = `940003${suffix}`;
+  const legacyPhone = `+86139444${suffix}`;
+  const staleUid = `940004${suffix}`;
+
+  const prevSecret = process.env.JWT_SECRET;
+  const prevEnvId = process.env.TELEGRAM_API_ID;
+  const prevEnvHash = process.env.TELEGRAM_API_HASH;
+  const testSecret = 'test_secret_tg_regression_123456';
+  process.env.JWT_SECRET = testSecret;
+  process.env.TELEGRAM_API_ID = '123456';
+  process.env.TELEGRAM_API_HASH = '0123456789abcdef0123456789abcdef';
+  const jwt = createTestJwt(testSecret);
+
+  const server = http.createServer(app);
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const port = (server.address() as AddressInfo).port;
+  const baseUrl = `http://127.0.0.1:${port}`;
+
+  try {
+    // 1) Queued _reconnect() must NOT revive socket after destroyTelegramClientSafely
+    const clientDestroyTest = makeFakeGramJsClient({ initiallyConnected: true });
+    await destroyTelegramClientSafely(clientDestroyTest);
+    await clientDestroyTest._sender._reconnect();
+    clientDestroyTest._sender.reconnect();
+    assert.equal(clientDestroyTest._sender.userDisconnected, true);
+    assert.equal(clientDestroyTest._sender._autoReconnect, false);
+    assert.equal(clientDestroyTest._sender._retries, 0);
+    assert.equal(clientDestroyTest._sender._reconnectRetries, 0);
+    assert.equal(clientDestroyTest._sender._connection._connected, false);
+    assert.equal(clientDestroyTest._sender.reconnectCalled, 0);
+
+    // 2) Queued _reconnect() on oldClient must NOT revive socket during Step 2a replacement
+    await db
+      .prepare(
+        `INSERT OR REPLACE INTO telegram_user_sessions (phone, session_string, user_id, username, first_name, is_active, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, 1, ?, ?)`
+      )
+      .run(phone, encryptSensitiveData('1BQANOTEuTEST_REG_1'), uid, 'regUser', 'Reg', Date.now(), Date.now());
+
+    const oldStep2aClient = makeFakeGramJsClient({ initiallyConnected: true });
+    oldStep2aClient._sender.isReconnecting = true;
+    const oldConn: ConnectedTelegramUser = {
+      client: oldStep2aClient,
+      phone,
+      userId: uid,
+      username: '@regUser',
+      firstName: 'Reg',
+      avatarInitial: 'RG',
+      avatarBg: '#2481cc',
+      apiId: 123456,
+      apiHash: 'abc',
+      connectedAt: Date.now(),
+      proxyFingerprint: 'direct',
+      dialogs: [],
+    };
+    connectedUserClients.set(uid, oldConn);
+    connectedUserClients.set(`acc_tg_${uid}`, oldConn);
+    connectedUserClients.set(phone, oldConn);
+
+    const newCandidateClient = makeFakeGramJsClient({
+      connectImpl: async () => {
+        await oldStep2aClient._sender._reconnect();
+        oldStep2aClient._sender.reconnect();
+        return true;
+      },
+    });
+    const step2aRestored = await restoreTelegramUserSessionsOnStartup(undefined, {
+      forceReconnect: true,
+      targetAccountKeys: [`uid:${uid}`],
+      reason: 'manual_reconnect',
+      deps: {
+        getProxyConfig: () => undefined,
+        resolveCredentials: async () => ({
+          ok: true,
+          apiId: 123456,
+          apiHash: '0123456789abcdef0123456789abcdef',
+          source: 'env',
+        }),
+        attachListener: () => {},
+        createClient: () => newCandidateClient,
+      },
+    });
+    assert.equal(step2aRestored, 1);
+    assert.equal(oldStep2aClient._sender.userDisconnected, true);
+    assert.equal(oldStep2aClient._sender._autoReconnect, false);
+    assert.equal(oldStep2aClient._sender._connection._connected, false);
+    assert.equal(oldStep2aClient._sender.reconnectCalled, 0);
+
+    // 3) /api/internal/system-resume MUST reject x-real-ip forwarding header with 403
+    const forwardedResumeRes = await fetch(`${baseUrl}/api/internal/system-resume`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-real-ip': '203.0.113.10',
+      },
+      body: JSON.stringify({ source: 'proxy_header_test' }),
+    });
+    assert.equal(forwardedResumeRes.status, 403);
+
+    // 4) Concurrent handleSystemResumeWakeup calls MUST coalesce via single-flight lock (only 1 getMe probe)
+    let getMeCalls = 0;
+    newCandidateClient.getMe = async () => {
+      getMeCalls += 1;
+      await new Promise((r) => setTimeout(r, 40));
+      return { id: Number(uid) };
+    };
+    await Promise.all([
+      handleSystemResumeWakeup('concurrent_wake_1'),
+      handleSystemResumeWakeup('concurrent_wake_2'),
+    ]);
+    assert.equal(getMeCalls, 1, 'Concurrent wake calls must coalesce into a single getMe() probe');
+
+    // 5) Legacy DB row with user_id=NULL MUST match when POST /api/telegram/user/reconnect receives acc_tg_<uid> + phone
+    await db
+      .prepare(
+        `INSERT OR REPLACE INTO telegram_user_sessions (phone, session_string, user_id, username, first_name, is_active, created_at, updated_at)
+         VALUES (?, ?, NULL, ?, ?, 1, ?, ?)`
+      )
+      .run(legacyPhone, encryptSensitiveData('1BQANOTEuTEST_REG_LEGACY'), 'legacyNullUid', 'Legacy', Date.now() - 2000, Date.now() - 2000);
+
+    const legacyRt = getOrCreateTelegramAccountRuntimeState({ phone: legacyPhone });
+    legacyRt.nextRetryAt = Date.now() + 60_000;
+    const legacyReconRes = await fetch(`${baseUrl}/api/telegram/user/reconnect`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${jwt}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        accountId: `acc_tg_${staleUid}`,
+        phone: legacyPhone,
+      }),
+    });
+    assert.equal(legacyReconRes.status, 502);
+    const legacyReconJson: any = await legacyReconRes.json();
+    assert.equal(legacyReconJson.ok, false);
+    assert.ok(
+      Boolean(legacyReconJson.error) && (legacyRt.lastError !== null || legacyRt.offlineReason !== null),
+      'Legacy user_id=NULL row must be matched by phone targetAccountKey and enter restore flow instead of being skipped by filteredRows'
+    );
+
+    legacyRt.nextRetryAt = 0;
+    const legacyFakeClient = makeFakeGramJsClient();
+    const legacyDirectRestored = await restoreTelegramUserSessionsOnStartup(undefined, {
+      targetAccountKeys: [`uid:${staleUid}`, `phone:${legacyPhone}`],
+      reason: 'manual_reconnect',
+      deps: {
+        getProxyConfig: () => undefined,
+        resolveCredentials: async () => ({
+          ok: true,
+          apiId: 123456,
+          apiHash: '0123456789abcdef0123456789abcdef',
+          source: 'env',
+        }),
+        attachListener: () => {},
+        createClient: () => legacyFakeClient,
+      },
+    });
+    assert.equal(legacyDirectRestored, 1, 'Legacy user_id=NULL DB row must restore when targeted with uid + phone keys');
+  } finally {
+    await db.prepare('DELETE FROM telegram_user_sessions WHERE phone IN (?, ?)').run(phone, legacyPhone);
+    resetInMemoryTelegramState();
+    server.closeAllConnections?.();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    if (prevSecret === undefined) delete process.env.JWT_SECRET;
+    else process.env.JWT_SECRET = prevSecret;
+    if (prevEnvId === undefined) delete process.env.TELEGRAM_API_ID;
+    else process.env.TELEGRAM_API_ID = prevEnvId;
+    if (prevEnvHash === undefined) delete process.env.TELEGRAM_API_HASH;
+    else process.env.TELEGRAM_API_HASH = prevEnvHash;
+  }
 });
