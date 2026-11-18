@@ -273,9 +273,13 @@ export const aiGenerationLimiter = rateLimit({
 export const translationLimiter = rateLimit({
   windowMs: 60 * 1000,
   max: 600,
-  skip: (req) =>
-    req.body?.purpose === 'history' &&
-    String(req.body?.engine || '').trim().toLowerCase() === 'google',
+  skip: (req) => {
+    const eng = String(req.body?.engine || '').trim().toLowerCase();
+    return (
+      req.body?.purpose === 'history' &&
+      (eng === 'google' || eng === 'bing' || eng === 'free_dual')
+    );
+  },
   standardHeaders: true,
   legacyHeaders: false,
   message: {
@@ -1072,8 +1076,16 @@ export function buildOrderedCloudTranslateQueue(preferredModel?: string): CloudT
   return ordered;
 }
 
-export function normalizeStrictTranslationEngine(engine?: string): 'google' | 'gemini' | 'custom_llm' | null {
-  if (engine === 'google' || engine === 'gemini' || engine === 'custom_llm') {
+export function normalizeStrictTranslationEngine(
+  engine?: string
+): 'google' | 'bing' | 'free_dual' | 'gemini' | 'custom_llm' | null {
+  if (
+    engine === 'google' ||
+    engine === 'bing' ||
+    engine === 'free_dual' ||
+    engine === 'gemini' ||
+    engine === 'custom_llm'
+  ) {
     return engine;
   }
   return null;
@@ -1094,7 +1106,9 @@ function parseCleanedTranslationSettingsRow(rawValue: string): any | null {
       hasGoogleApiKey: _hgk,
       ...cleanParsed
     } = parsed || {};
-    const normalizedEngine = normalizeStrictTranslationEngine(cleanParsed?.preferredEngine) || 'gemini';
+    const rawPref = normalizeStrictTranslationEngine(cleanParsed?.preferredEngine);
+    const normalizedEngine =
+      rawPref === 'google' || rawPref === 'gemini' || rawPref === 'custom_llm' ? rawPref : 'gemini';
     return {
       ...cleanParsed,
       autoTranslateGroups: cleanParsed?.autoTranslateGroups === true,
@@ -1113,7 +1127,9 @@ export async function syncServerTranslationSettings(settings: any, accountId?: s
     settings.settings && typeof settings.settings === 'object' && 'success' in settings
       ? settings.settings
       : settings;
-  const normalizedEngine = normalizeStrictTranslationEngine(raw.preferredEngine) || 'gemini';
+  const rawPref = normalizeStrictTranslationEngine(raw.preferredEngine);
+  const normalizedEngine =
+    rawPref === 'google' || rawPref === 'gemini' || rawPref === 'custom_llm' ? rawPref : 'gemini';
   const clean = {
     defaultSourceLang: typeof raw.defaultSourceLang === 'string' ? raw.defaultSourceLang : 'Auto',
     defaultTargetLang: typeof raw.defaultTargetLang === 'string' ? raw.defaultTargetLang : 'Chinese',
@@ -12445,6 +12461,210 @@ function setGoogleTranslateCache(key: string, value: string): void {
   googleTranslateLruCache.set(key, { value, expiresAt: Date.now() + GOOGLE_TRANSLATE_CACHE_TTL_MS });
 }
 
+// Independent health tracking for free dual engines (Microsoft Bing + Google)
+type FreeEngineId = 'bing' | 'google';
+const freeEngineHealth: Record<
+  FreeEngineId,
+  { consecutiveFailures: number; cooldownUntil: number; avgLatencyMs: number | null; lastError: string }
+> = {
+  bing: { consecutiveFailures: 0, cooldownUntil: 0, avgLatencyMs: null, lastError: '' },
+  google: { consecutiveFailures: 0, cooldownUntil: 0, avgLatencyMs: null, lastError: '' },
+};
+const googleEndpointCooldownUntil = new Map<number, number>();
+
+function recordFreeEngineSuccess(engineId: FreeEngineId, elapsedMs: number): void {
+  const h = freeEngineHealth[engineId];
+  h.consecutiveFailures = 0;
+  h.cooldownUntil = 0;
+  h.lastError = '';
+  h.avgLatencyMs = h.avgLatencyMs === null ? elapsedMs : Math.round(h.avgLatencyMs * 0.6 + elapsedMs * 0.4);
+}
+
+function recordFreeEngineFailure(engineId: FreeEngineId, err: any): void {
+  const h = freeEngineHealth[engineId];
+  h.consecutiveFailures += 1;
+  h.lastError = String(err?.message || '请求失败');
+  const status = Number(err?.statusCode || 0);
+  const baseMs = status === 429 ? 20000 : 12000;
+  h.cooldownUntil = Date.now() + Math.min(120000, baseMs * Math.pow(2, Math.min(3, h.consecutiveFailures - 1)));
+}
+
+function pickPreferredFreeEngines(): FreeEngineId[] {
+  const now = Date.now();
+  const bingReady = now >= freeEngineHealth.bing.cooldownUntil;
+  const googleReady = now >= freeEngineHealth.google.cooldownUntil;
+  if (bingReady && googleReady) {
+    if (
+      freeEngineHealth.bing.avgLatencyMs !== null &&
+      freeEngineHealth.google.avgLatencyMs !== null &&
+      freeEngineHealth.google.avgLatencyMs + 150 < freeEngineHealth.bing.avgLatencyMs
+    ) {
+      return ['google', 'bing'];
+    }
+    return ['bing', 'google'];
+  }
+  if (bingReady) return ['bing', 'google'];
+  if (googleReady) return ['google', 'bing'];
+  return freeEngineHealth.bing.cooldownUntil <= freeEngineHealth.google.cooldownUntil
+    ? ['bing', 'google']
+    : ['google', 'bing'];
+}
+
+export function mapBingLanguageCode(lang: string): string {
+  const gCode = mapLanguageCode(lang);
+  const bingOverrides: Record<string, string> = {
+    'zh-CN': 'zh-Hans',
+    'zh-TW': 'zh-Hant',
+    tl: 'fil',
+    no: 'nb',
+    jw: 'jv',
+    iw: 'he',
+    mn: 'mn-Cyrl',
+  };
+  return bingOverrides[gCode] || gCode;
+}
+
+const EDGE_BING_UA =
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36 Edg/131.0.0.0';
+
+export async function performBingBatchTranslate(
+  texts: string[],
+  sourceLang: string = 'Auto',
+  targetLang: string = 'Chinese'
+): Promise<string[]> {
+  if (!Array.isArray(texts) || texts.length === 0) return [];
+  const targetBingCode = mapBingLanguageCode(targetLang);
+  const targetCommonCode = mapLanguageCode(targetLang);
+  const isAutoSource = !sourceLang || sourceLang === 'Auto';
+  const srcBingCode = isAutoSource ? '' : mapBingLanguageCode(sourceLang);
+  const srcCommonCode = isAutoSource ? 'auto' : mapLanguageCode(sourceLang);
+
+  const results: string[] = new Array(texts.length).fill('');
+  const pendingIndices: number[] = [];
+  const pendingTexts: string[] = [];
+
+  for (let i = 0; i < texts.length; i++) {
+    const raw = typeof texts[i] === 'string' ? texts[i] : '';
+    if (!raw.trim()) {
+      results[i] = raw;
+      continue;
+    }
+    const itemSrc = isAutoSource ? detectSourceLangCode(raw) : srcCommonCode;
+    if (isSameTranslationLanguage(itemSrc, targetCommonCode)) {
+      results[i] = raw;
+      continue;
+    }
+    const cacheKey = `bing:${isAutoSource ? 'auto' : srcBingCode}:${itemSrc}:${targetBingCode}:${raw}`;
+    const cached = getGoogleTranslateCache(cacheKey);
+    if (cached !== null) {
+      results[i] = cached;
+      continue;
+    }
+    pendingIndices.push(i);
+    pendingTexts.push(raw);
+  }
+
+  if (pendingTexts.length === 0) return results;
+
+  if (pendingTexts.some((t) => t.length > 45000)) {
+    const err: any = new Error('单条文本超出微软必应单次字符上限');
+    err.statusCode = 400;
+    throw err;
+  }
+
+  const BING_BATCH_MAX_CHARS = 10000;
+  const chunks: Array<{ indices: number[]; texts: string[] }> = [];
+  let curIndices: number[] = [];
+  let curTexts: string[] = [];
+  let curChars = 0;
+  for (let k = 0; k < pendingIndices.length; k++) {
+    const t = pendingTexts[k];
+    if (curTexts.length > 0 && curChars + t.length > BING_BATCH_MAX_CHARS) {
+      chunks.push({ indices: curIndices, texts: curTexts });
+      curIndices = [];
+      curTexts = [];
+      curChars = 0;
+    }
+    curIndices.push(pendingIndices[k]);
+    curTexts.push(t);
+    curChars += t.length;
+  }
+  if (curTexts.length > 0) {
+    chunks.push({ indices: curIndices, texts: curTexts });
+  }
+
+  const startedAt = Date.now();
+  const url = `https://edge.microsoft.com/translate/translatetext?from=${encodeURIComponent(srcBingCode)}&to=${encodeURIComponent(targetBingCode)}`;
+  for (const chunk of chunks) {
+    let res: globalThis.Response;
+    try {
+      res = await fetch(url, {
+        method: 'POST',
+        headers: {
+          'User-Agent': EDGE_BING_UA,
+          'Content-Type': 'application/json',
+          Accept: 'application/json',
+        },
+        body: JSON.stringify(chunk.texts),
+        signal: AbortSignal.timeout(8000),
+      });
+    } catch (networkErr: any) {
+      recordFreeEngineFailure('bing', networkErr);
+      throw networkErr;
+    }
+
+    if (!res.ok) {
+      const err: any = new Error(`微软必应翻译请求失败: HTTP ${res.status}`);
+      err.statusCode = res.status >= 400 && res.status < 500 ? res.status : 502;
+      recordFreeEngineFailure('bing', err);
+      throw err;
+    }
+
+    const json = await res.json().catch(() => null);
+    if (!Array.isArray(json) || json.length !== chunk.texts.length) {
+      const err: any = new Error('微软必应翻译返回格式或条数不匹配');
+      err.statusCode = 502;
+      recordFreeEngineFailure('bing', err);
+      throw err;
+    }
+
+    let emptyCount = 0;
+    for (let k = 0; k < chunk.indices.length; k++) {
+      const origIdx = chunk.indices[k];
+      const raw = chunk.texts[k];
+      const translated = json[k]?.translations?.[0]?.text;
+      if (typeof translated !== 'string' || !translated.trim()) {
+        emptyCount += 1;
+        results[origIdx] = raw;
+        continue;
+      }
+      const decoded = decodeHtmlEntities(translated);
+      const itemSrc = isAutoSource ? detectSourceLangCode(raw) : srcCommonCode;
+      const cacheKey = `bing:${isAutoSource ? 'auto' : srcBingCode}:${itemSrc}:${targetBingCode}:${raw}`;
+      setGoogleTranslateCache(cacheKey, decoded);
+      results[origIdx] = decoded;
+    }
+    if (emptyCount === chunk.indices.length) {
+      const err: any = new Error('微软必应翻译存在空译文条目');
+      err.statusCode = 502;
+      recordFreeEngineFailure('bing', err);
+      throw err;
+    }
+  }
+
+  recordFreeEngineSuccess('bing', Math.max(1, Date.now() - startedAt));
+  return results;
+}
+
+export async function performBingTranslate(
+  text: string,
+  sourceLang: string = 'Auto',
+  targetLang: string = 'Chinese'
+): Promise<string> {
+  const out = await performBingBatchTranslate([text], sourceLang, targetLang);
+  return out[0] ?? text;
+}
+
 function parseGoogleTranslateJson(json: any): string {
   if (Array.isArray(json?.[0])) {
     return json[0]
@@ -12502,9 +12722,13 @@ export async function performGoogleTranslate(
     ];
 
     let lastError: any = null;
+    const startedAt = Date.now();
+    const now = Date.now();
     for (let i = 0; i < endpoints.length; i++) {
+      const epCooldown = googleEndpointCooldownUntil.get(i) || 0;
+      if (now < epCooldown && i < endpoints.length - 1) continue;
       if (i > 0) {
-        const backoffMs = 200 * i + Math.floor(Math.random() * 120);
+        const backoffMs = 120 * i + Math.floor(Math.random() * 80);
         await new Promise((r) => setTimeout(r, backoffMs));
       }
       try {
@@ -12514,13 +12738,16 @@ export async function performGoogleTranslate(
             'User-Agent':
               'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
           },
-          signal: AbortSignal.timeout(10000),
+          signal: AbortSignal.timeout(5500),
         });
 
         if (!res.ok) {
           const err: any = new Error(`谷歌机器翻译请求失败: HTTP ${res.status}`);
           err.statusCode = res.status >= 400 && res.status < 500 ? res.status : 502;
           lastError = err;
+          if (res.status === 429 || res.status >= 500) {
+            googleEndpointCooldownUntil.set(i, Date.now() + 20000);
+          }
           if (res.status === 429 || res.status >= 500) continue;
           throw err;
         }
@@ -12537,15 +12764,18 @@ export async function performGoogleTranslate(
 
         const decoded = decodeHtmlEntities(trans);
         setGoogleTranslateCache(cacheKey, decoded);
+        recordFreeEngineSuccess('google', Math.max(1, Date.now() - startedAt));
         return decoded;
       } catch (e: any) {
         if (typeof e?.statusCode === 'number' && e.statusCode >= 400 && e.statusCode < 500 && e.statusCode !== 429) {
           throw e;
         }
+        googleEndpointCooldownUntil.set(i, Date.now() + 15000);
         lastError = e;
       }
     }
 
+    recordFreeEngineFailure('google', lastError);
     throw lastError || new Error('谷歌机器翻译请求失败');
   }
 
@@ -12579,6 +12809,150 @@ export async function performGoogleTranslate(
   }
 
   return decodeHtmlEntities(trans);
+}
+
+export async function performGoogleBatchTranslate(
+  texts: string[],
+  sourceLang: string = 'Auto',
+  targetLang: string = 'Chinese',
+  googleApiKey?: string
+): Promise<string[]> {
+  if (!Array.isArray(texts) || texts.length === 0) return [];
+  const targetCode = mapLanguageCode(targetLang);
+  const isAutoSource = !sourceLang || sourceLang === 'Auto';
+  const sl = isAutoSource ? 'auto' : mapLanguageCode(sourceLang);
+  const results: string[] = new Array(texts.length).fill('');
+  const pendingIndices: number[] = [];
+
+  for (let i = 0; i < texts.length; i++) {
+    const raw = typeof texts[i] === 'string' ? texts[i] : '';
+    if (!raw.trim()) {
+      results[i] = raw;
+      continue;
+    }
+    const itemSrc = isAutoSource ? detectSourceLangCode(raw) : sl;
+    if (isSameTranslationLanguage(itemSrc, targetCode)) {
+      results[i] = raw;
+      continue;
+    }
+    if (!googleApiKey && !process.env.GOOGLE_TRANSLATE_API_KEY) {
+      const cacheKey = `${sl}:${itemSrc}:${targetCode}:${raw}`;
+      const cached = getGoogleTranslateCache(cacheKey);
+      if (cached !== null) {
+        results[i] = cached;
+        continue;
+      }
+    }
+    pendingIndices.push(i);
+  }
+  if (pendingIndices.length === 0) return results;
+
+  const hasKey = Boolean(
+    (typeof googleApiKey === 'string' && googleApiKey.trim()) || (process.env.GOOGLE_TRANSLATE_API_KEY || '').trim()
+  );
+  const canTryPacked =
+    !hasKey &&
+    pendingIndices.length > 1 &&
+    pendingIndices.length <= 12 &&
+    pendingIndices.every((idx) => !texts[idx].includes('⟦M_')) &&
+    pendingIndices.reduce((acc, idx) => acc + texts[idx].length, 0) <= 3500;
+
+  if (canTryPacked) {
+    try {
+      const startedAt = Date.now();
+      const parts: string[] = [];
+      for (let k = 0; k < pendingIndices.length; k++) {
+        parts.push(texts[pendingIndices[k]]);
+        if (k < pendingIndices.length - 1) parts.push(`\n⟦M_${k}⟧\n`);
+      }
+      const res = await fetch(
+        `https://translate.googleapis.com/translate_a/single?client=gtx&sl=${encodeURIComponent(sl)}&tl=${encodeURIComponent(targetCode)}&dt=t`,
+        {
+          method: 'POST',
+          headers: { 'User-Agent': EDGE_BING_UA, 'Content-Type': 'application/x-www-form-urlencoded' },
+          body: new URLSearchParams({ q: parts.join('') }).toString(),
+          signal: AbortSignal.timeout(7000),
+        }
+      );
+      if (res.ok) {
+        const json = await res.json();
+        const combined = decodeHtmlEntities(parseGoogleTranslateJson(json));
+        const splitRegex = new RegExp(`\\s*⟦\\s*M_\\d+\\s*⟧\\s*`, 'g');
+        const chunks = combined.split(splitRegex);
+        if (chunks.length === pendingIndices.length && chunks.every((c) => c.trim().length > 0)) {
+          for (let k = 0; k < pendingIndices.length; k++) {
+            const origIdx = pendingIndices[k];
+            const clean = chunks[k].trim();
+            const itemSrc = isAutoSource ? detectSourceLangCode(texts[origIdx]) : sl;
+            setGoogleTranslateCache(`${sl}:${itemSrc}:${targetCode}:${texts[origIdx]}`, clean);
+            results[origIdx] = clean;
+          }
+          recordFreeEngineSuccess('google', Math.max(1, Date.now() - startedAt));
+          return results;
+        }
+      }
+    } catch {
+      // Fallback to bounded parallel single requests below
+    }
+  }
+
+  const CONCURRENCY = 3;
+  for (let start = 0; start < pendingIndices.length; start += CONCURRENCY) {
+    const slice = pendingIndices.slice(start, start + CONCURRENCY);
+    const settled = await Promise.all(
+      slice.map((idx) => performGoogleTranslate(texts[idx], sourceLang, targetLang, googleApiKey))
+    );
+    slice.forEach((idx, j) => {
+      results[idx] = settled[j];
+    });
+  }
+  return results;
+}
+
+export async function performFreeDualTranslate(
+  text: string,
+  sourceLang: string = 'Auto',
+  targetLang: string = 'Chinese',
+  googleApiKey?: string
+): Promise<{ translatedText: string; engine: string }> {
+  const order = googleApiKey?.trim() ? (['google', 'bing'] as FreeEngineId[]) : pickPreferredFreeEngines();
+  let lastErr: any = null;
+  for (const engineId of order) {
+    try {
+      if (engineId === 'bing') {
+        const translatedText = await performBingTranslate(text, sourceLang, targetLang);
+        return { translatedText, engine: 'bing_translate' };
+      }
+      const translatedText = await performGoogleTranslate(text, sourceLang, targetLang, googleApiKey);
+      return { translatedText, engine: 'google_translate' };
+    } catch (e) {
+      lastErr = e;
+    }
+  }
+  throw lastErr || new Error('谷歌与微软必应免费翻译通道均暂不可用');
+}
+
+export async function performFreeDualBatchTranslate(
+  texts: string[],
+  sourceLang: string = 'Auto',
+  targetLang: string = 'Chinese',
+  googleApiKey?: string
+): Promise<{ translatedTexts: string[]; engine: string }> {
+  const order = googleApiKey?.trim() ? (['google', 'bing'] as FreeEngineId[]) : pickPreferredFreeEngines();
+  let lastErr: any = null;
+  for (const engineId of order) {
+    try {
+      if (engineId === 'bing') {
+        const translatedTexts = await performBingBatchTranslate(texts, sourceLang, targetLang);
+        return { translatedTexts, engine: 'bing_translate' };
+      }
+      const translatedTexts = await performGoogleBatchTranslate(texts, sourceLang, targetLang, googleApiKey);
+      return { translatedTexts, engine: 'google_translate' };
+    } catch (e) {
+      lastErr = e;
+    }
+  }
+  throw lastErr || new Error('谷歌与微软必应批量翻译通道均暂不可用');
 }
 
 /**
@@ -12615,7 +12989,7 @@ export async function performStrictTranslation({
 }): Promise<{ translatedText: string; engine: string }> {
   const strictEngine = normalizeStrictTranslationEngine(engine);
   if (!strictEngine) {
-    const err: any = new Error('请明确指定唯一翻译引擎（google / gemini / custom_llm），系统已禁用 auto 级联降级');
+    const err: any = new Error('请明确指定唯一翻译引擎（google / bing / free_dual / gemini / custom_llm），系统已禁用 auto 级联降级');
     err.statusCode = 400;
     throw err;
   }
@@ -12625,10 +12999,17 @@ export async function performStrictTranslation({
   const effectiveSourceCode = isAutoSource ? detectSourceLangCode(text) : mapLanguageCode(sourceLang);
   const detectedTextCode = detectSourceLangCode(text);
 
-  // 1. Google Machine Translation (keyless gtx by default, or official Cloud Translation v2 if key configured)
+  // 1. Free Translation Engines (Google / Bing / Dual-Engine Failover)
   if (strictEngine === 'google') {
     const translatedText = await performGoogleTranslate(text, sourceLang, targetLang, googleApiKey);
     return { translatedText, engine: 'google_translate' };
+  }
+  if (strictEngine === 'bing') {
+    const translatedText = await performBingTranslate(text, sourceLang, targetLang);
+    return { translatedText, engine: 'bing_translate' };
+  }
+  if (strictEngine === 'free_dual') {
+    return await performFreeDualTranslate(text, sourceLang, targetLang, googleApiKey);
   }
 
   // 2. Local Custom LLM Gateway (Strictly uses Tab 3 Base URL + Key and Tab 1 model, never Railway Cloud Brain)
@@ -12868,7 +13249,7 @@ app.post('/api/translate', translationLimiter, requireTenantAuth, async (req: Re
     const strictEngine = normalizeStrictTranslationEngine(engine);
     if (!strictEngine) {
       return res.status(400).json({
-        error: '请明确指定唯一翻译引擎（google / gemini / custom_llm），系统已禁用 auto 级联降级',
+        error: '请明确指定唯一翻译引擎（google / bing / free_dual / gemini / custom_llm），系统已禁用 auto 级联降级',
       });
     }
 
@@ -12939,14 +13320,16 @@ app.post('/api/translate', translationLimiter, requireTenantAuth, async (req: Re
       !isDualOff && effectiveCustomConfig?.enabled && effectiveCustomConfig?.engineMode === 'custom'
     );
 
+    const isFreeEngine = strictEngine === 'google' || strictEngine === 'bing' || strictEngine === 'free_dual';
+
     if (isGoogleOnlyTranslation) {
-      if (strictEngine !== 'google') {
+      if (!isFreeEngine) {
         return res.status(400).json({
-          error: '接收消息、历史记录与群消息仅允许使用「谷歌机翻」，禁止使用 AI 翻译。',
+          error: '接收消息、历史记录与群消息仅允许使用「谷歌机翻 / 微软必应双引擎」，禁止使用 AI 翻译。',
         });
       }
     } else if (isDualOff) {
-      if (strictEngine !== 'google') {
+      if (!isFreeEngine) {
         return res.status(400).json({
           error:
             strictEngine === 'gemini'
@@ -12970,7 +13353,7 @@ app.post('/api/translate', translationLimiter, requireTenantAuth, async (req: Re
       }
     }
 
-    const resolvedTranslateEngine: 'google' | 'gemini' | 'custom_llm' = strictEngine;
+    const resolvedTranslateEngine: 'google' | 'bing' | 'free_dual' | 'gemini' | 'custom_llm' = strictEngine;
     const resolvedCustomModelName = effectiveCustomModelName;
 
     const effectiveLicenseKey =
@@ -12998,6 +13381,128 @@ app.post('/api/translate', translationLimiter, requireTenantAuth, async (req: Re
   } catch (error: any) {
     const status = typeof error?.statusCode === 'number' ? error.statusCode : 503;
     return res.status(status).json({ error: error?.message || '翻译请求失败' });
+  }
+});
+
+// 7b. Batch Free-Engine Translation Endpoint (strict id <-> translatedText mapping, Bing + Google dual failover)
+app.post('/api/translate/batch', translationLimiter, requireTenantAuth, async (req: Request, res: Response) => {
+  try {
+    const {
+      items,
+      sourceLang = 'Auto',
+      targetLang = 'Chinese',
+      engine = 'free_dual',
+      purpose,
+      googleApiKey,
+    } = req.body || {};
+
+    if (!Array.isArray(items) || items.length === 0) {
+      return res.status(400).json({ error: '批量翻译列表不能为空' });
+    }
+    if (items.length > 25) {
+      return res.status(400).json({ error: '单次批量翻译最多支持 25 条消息' });
+    }
+
+    const strictEngine = normalizeStrictTranslationEngine(engine);
+    if (strictEngine !== 'free_dual' && strictEngine !== 'bing' && strictEngine !== 'google') {
+      return res.status(400).json({ error: '批量翻译接口仅支持免费引擎（free_dual / bing / google）' });
+    }
+
+    const transScope = resolveScopedAccountFromRequest(req, { allowBot: true });
+    const scopedTransAccId = transScope.ok && transScope.isExplicit ? transScope.accountId : undefined;
+    const savedTransSettings = await getServerTranslationSettings(scopedTransAccId);
+    const effectiveGoogleKey =
+      resolveSecretUpdate(googleApiKey, savedTransSettings?.googleApiKey, true) || undefined;
+
+    const normalizedItems = items.map((it: any, idx: number) => ({
+      id: typeof it?.id === 'string' && it.id ? it.id : String(idx),
+      text: typeof it?.text === 'string' ? it.text : '',
+    }));
+    const validIndices: number[] = [];
+    const validTexts: string[] = [];
+    normalizedItems.forEach((it, idx) => {
+      if (it.text.trim()) {
+        validIndices.push(idx);
+        validTexts.push(it.text);
+      }
+    });
+
+    const results: Array<{ id: string; translatedText?: string; error?: string }> = normalizedItems.map((it) => ({
+      id: it.id,
+      ...(it.text.trim() ? {} : { translatedText: it.text }),
+    }));
+
+    if (validTexts.length === 0) {
+      return res.json({ results, engine: strictEngine, purpose: purpose || 'history' });
+    }
+
+    let translatedList: string[] = [];
+    let usedEngine: string = strictEngine;
+    try {
+      if (strictEngine === 'bing') {
+        translatedList = await performBingBatchTranslate(validTexts, sourceLang, targetLang);
+        usedEngine = 'bing_translate';
+      } else if (strictEngine === 'google') {
+        translatedList = await performGoogleBatchTranslate(validTexts, sourceLang, targetLang, effectiveGoogleKey);
+        usedEngine = 'google_translate';
+      } else {
+        const dual = await performFreeDualBatchTranslate(validTexts, sourceLang, targetLang, effectiveGoogleKey);
+        translatedList = dual.translatedTexts;
+        usedEngine = dual.engine;
+      }
+      validIndices.forEach((origIdx, k) => {
+        results[origIdx] = { id: normalizedItems[origIdx].id, translatedText: translatedList[k] };
+      });
+      return res.json({ results, engine: usedEngine });
+    } catch (batchErr: any) {
+      if (Number(batchErr?.statusCode) === 429) {
+        return res.status(429).json({ error: batchErr?.message || '翻译通道请求频率过高，请稍后重试' });
+      }
+      const perItemSettled = await Promise.allSettled(
+        validTexts.map((t) =>
+          strictEngine === 'bing'
+            ? performBingTranslate(t, sourceLang, targetLang).then((translatedText) => ({
+                translatedText,
+                engine: 'bing_translate',
+              }))
+            : strictEngine === 'google'
+            ? performGoogleTranslate(t, sourceLang, targetLang, effectiveGoogleKey).then((translatedText) => ({
+                translatedText,
+                engine: 'google_translate',
+              }))
+            : performFreeDualTranslate(t, sourceLang, targetLang, effectiveGoogleKey)
+        )
+      );
+      let successCount = 0;
+      let saw429Reason: any = null;
+      perItemSettled.forEach((s, k) => {
+        const origIdx = validIndices[k];
+        if (s.status === 'fulfilled') {
+          successCount += 1;
+          results[origIdx] = { id: normalizedItems[origIdx].id, translatedText: s.value.translatedText };
+        } else {
+          if (Number((s.reason as any)?.statusCode) === 429 && !saw429Reason) {
+            saw429Reason = s.reason;
+          }
+          results[origIdx] = { id: normalizedItems[origIdx].id, error: s.reason?.message || '翻译失败' };
+        }
+      });
+      if (successCount === 0) {
+        const status = saw429Reason
+          ? 429
+          : typeof batchErr?.statusCode === 'number'
+          ? batchErr.statusCode
+          : 503;
+        return res.status(status).json({
+          error: saw429Reason?.message || batchErr?.message || '批量翻译失败',
+          results,
+        });
+      }
+      return res.json({ results, engine: usedEngine, partial: true });
+    }
+  } catch (error: any) {
+    const status = typeof error?.statusCode === 'number' ? error.statusCode : 503;
+    return res.status(status).json({ error: error?.message || '批量翻译请求失败' });
   }
 });
 

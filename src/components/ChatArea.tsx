@@ -1765,7 +1765,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
               'Auto',
               refTargetLang,
               customLLMConfig,
-              'google',
+              'free_dual',
               translationSettings?.googleApiKey,
               undefined,
               undefined,
@@ -2350,7 +2350,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                 'Auto',
                 inboundTargetLang,
                 customLLMConfig,
-                'google',
+                'free_dual',
                 translationSettings?.googleApiKey,
                 undefined,
                 undefined,
@@ -3040,7 +3040,9 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
       const isInboundPeerAudio = msg.sender === 'peer';
       const effectiveEngine =
         isInboundPeerAudio || isGroupOrChannelChat || isDualOffMode
-          ? 'google'
+          ? isInboundPeerAudio || isGroupOrChannelChat
+            ? 'free_dual'
+            : 'google'
           : isCustomMode
           ? 'custom_llm'
           : translationSettings?.preferredEngine === 'google'
@@ -3071,7 +3073,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
         const errChannel: Message['translationErrorChannel'] =
           effectiveEngine === 'custom_llm'
             ? 'live_custom_llm'
-            : effectiveEngine === 'google'
+            : effectiveEngine === 'google' || effectiveEngine === 'free_dual'
             ? 'live_google'
             : 'live_gemini';
         const transErrMsg = '翻译失败，请检查翻译通道';
@@ -5405,7 +5407,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                             'Auto',
                             refTargetLang,
                             customLLMConfig,
-                            'google',
+                            'free_dual',
                             translationSettings?.googleApiKey,
                             undefined,
                             undefined,
@@ -5421,7 +5423,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                       }}
                       className="px-2 py-0.5 rounded bg-[#2481cc]/10 hover:bg-[#2481cc]/20 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#5eead4] font-semibold cursor-pointer transition-colors"
                     >
-                      重试谷歌对照
+                      重试对照翻译
                     </button>
                   </div>
                 );
@@ -5468,7 +5470,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                           outboundTargetLang,
                           resolvedInbound,
                           customLLMConfig,
-                          'google',
+                          'free_dual',
                           translationSettings?.googleApiKey,
                           undefined,
                           undefined,

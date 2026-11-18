@@ -31,7 +31,7 @@ import {
 
 declare const __APP_VERSION__: string | undefined;
 export const APP_VERSION =
-  typeof __APP_VERSION__ !== 'undefined' && __APP_VERSION__ ? __APP_VERSION__ : '1.1.5';
+  typeof __APP_VERSION__ !== 'undefined' && __APP_VERSION__ ? __APP_VERSION__ : '1.1.7';
 
 // ==================== SESSION TOKEN & TENANT AUTHENTICATION HELPERS ====================
 
@@ -850,9 +850,9 @@ export function normalizeCustomModelIdInput(
 
 const MAX_TRANSLATE_CACHE = 300;
 const TRANSLATE_CACHE_TTL_MS = 10 * 60 * 1000;
-const MAX_TRANSLATE_CONCURRENCY = 3;
-const MAX_HISTORY_TRANSLATE_CONCURRENCY = 1;
-const HISTORY_TRANSLATE_MIN_INTERVAL_MS = 450;
+const MAX_TRANSLATE_CONCURRENCY = 4;
+const MAX_HISTORY_TRANSLATE_CONCURRENCY = 2;
+const HISTORY_TRANSLATE_MIN_INTERVAL_MS = 120;
 
 const translateCache = new Map<string, { value: string; expiresAt: number }>();
 const inFlightTranslations = new Map<string, Promise<string>>();
@@ -903,7 +903,8 @@ export function stripTranslationThinkingTags(raw: string): string {
 async function runQueuedTranslation<T>(
   fn: () => Promise<T>,
   signal?: AbortSignal,
-  purpose: 'realtime' | 'history' = 'realtime'
+  purpose: 'realtime' | 'history' = 'realtime',
+  priority: 'manual' | 'realtime' | 'backfill' = 'realtime'
 ): Promise<T> {
   if (signal?.aborted) {
     const abortErr = new Error('请求已取消');
@@ -934,7 +935,11 @@ async function runQueuedTranslation<T>(
       if (signal) {
         signal.addEventListener('abort', onAbort, { once: true });
       }
-      waitQueue.push(release);
+      if (priority === 'manual' && !isHistory) {
+        waitQueue.unshift(release);
+      } else {
+        waitQueue.push(release);
+      }
     });
   }
 
@@ -988,12 +993,18 @@ export async function translateText(
   sourceLang: string = 'Auto',
   targetLang: string = 'Chinese',
   customConfig?: CustomLLMConfig,
-  engine: 'gemini' | 'google' | 'custom_llm' = 'gemini',
+  engine: 'gemini' | 'google' | 'custom_llm' | 'bing' | 'free_dual' = 'gemini',
   googleApiKey?: string,
   geminiModel?: string,
   geminiApiKey?: string,
   customModelName?: string,
-  options?: { signal?: AbortSignal; bypassCache?: boolean; purpose?: 'realtime' | 'history' | 'group' | 'inbound'; isGroup?: boolean }
+  options?: {
+    signal?: AbortSignal;
+    bypassCache?: boolean;
+    purpose?: 'realtime' | 'history' | 'group' | 'inbound';
+    isGroup?: boolean;
+    priority?: 'manual' | 'realtime' | 'backfill';
+  }
 ): Promise<string> {
   const trimmedText = typeof text === 'string' ? text.trim() : '';
   if (!trimmedText) return '';
@@ -1016,13 +1027,20 @@ export async function translateText(
   const isPriorityCustom = Boolean(
     !isDualOff && customConfig?.enabled && customConfig?.engineMode === 'custom'
   );
-  const strictEngine: 'gemini' | 'google' | 'custom_llm' = isForceGoogleOnly
-    ? 'google'
-    : engine === 'google' || engine === 'custom_llm' || engine === 'gemini'
+  const strictEngine: 'gemini' | 'google' | 'custom_llm' | 'bing' | 'free_dual' = isForceGoogleOnly
+    ? engine === 'bing' || engine === 'free_dual'
+      ? engine
+      : 'free_dual'
+    : engine === 'google' ||
+      engine === 'custom_llm' ||
+      engine === 'gemini' ||
+      engine === 'bing' ||
+      engine === 'free_dual'
     ? engine
     : 'gemini';
 
-  if (!isForceGoogleOnly) {
+  const isBingOrDualFree = strictEngine === 'bing' || strictEngine === 'free_dual';
+  if (!isForceGoogleOnly && !isBingOrDualFree) {
     if (isDualOff && strictEngine !== 'google') {
       throw new Error('当前处于双关状态（云端与自有大模型均已关闭），仅支持「谷歌机翻」；如需使用大模型翻译，请前往「模型」开启对应引擎');
     }
@@ -1161,19 +1179,131 @@ export async function translateText(
     return cleanedText;
   };
 
-  const queuePurpose: 'realtime' | 'history' = isHistoryTranslation ? 'history' : 'realtime';
+  const isManualPriority = options?.priority === 'manual' || Boolean(options?.bypassCache);
+  const queuePurpose: 'realtime' | 'history' =
+    isHistoryTranslation && !isManualPriority ? 'history' : 'realtime';
+  const queuePriority: 'manual' | 'realtime' | 'backfill' = isManualPriority
+    ? 'manual'
+    : isHistoryTranslation
+    ? 'backfill'
+    : 'realtime';
 
   if (!options?.signal && !options?.bypassCache) {
     const inFlight = inFlightTranslations.get(cacheKey);
     if (inFlight) return inFlight;
-    const promise = runQueuedTranslation(executeRequest, undefined, queuePurpose).finally(() => {
+    const promise = runQueuedTranslation(executeRequest, undefined, queuePurpose, queuePriority).finally(() => {
       inFlightTranslations.delete(cacheKey);
     });
     inFlightTranslations.set(cacheKey, promise);
     return promise;
   }
 
-  return await runQueuedTranslation(executeRequest, options?.signal, queuePurpose);
+  return await runQueuedTranslation(executeRequest, options?.signal, queuePurpose, queuePriority);
+}
+
+export async function translateBatchTexts(
+  items: Array<{ id: string; text: string }>,
+  sourceLang: string = 'Auto',
+  targetLang: string = 'Chinese',
+  engine: 'free_dual' | 'bing' | 'google' = 'free_dual',
+  googleApiKey?: string,
+  options?: { signal?: AbortSignal; purpose?: 'history' | 'group' | 'inbound'; isGroup?: boolean }
+): Promise<Array<{ id: string; translatedText?: string; error?: string }>> {
+  if (!Array.isArray(items) || items.length === 0) return [];
+  if (options?.signal?.aborted) {
+    const abortErr = new Error('请求已取消');
+    abortErr.name = 'AbortError';
+    throw abortErr;
+  }
+
+  const normSrc = normalizeClientLangCode(sourceLang);
+  const normTarget = normalizeClientLangCode(targetLang);
+  const resolvedEngine: 'free_dual' | 'bing' | 'google' =
+    engine === 'bing' || engine === 'google' || engine === 'free_dual' ? engine : 'free_dual';
+
+  const resultMap = new Map<string, { id: string; translatedText?: string; error?: string }>();
+  const pendingItems: Array<{ id: string; text: string; cacheKey: string }> = [];
+
+  for (const item of items) {
+    const trimmed = typeof item.text === 'string' ? item.text.trim() : '';
+    if (!trimmed) {
+      resultMap.set(item.id, { id: item.id, translatedText: item.text || '' });
+      continue;
+    }
+    if (normSrc !== 'auto' && normTarget !== 'auto' && normSrc === normTarget) {
+      resultMap.set(item.id, { id: item.id, translatedText: item.text });
+      continue;
+    }
+    const cacheKey = `${resolvedEngine}|${normSrc}|${normTarget}||${trimmed}`;
+    const cached = getTranslateCache(cacheKey);
+    if (cached !== null) {
+      resultMap.set(item.id, { id: item.id, translatedText: cached });
+      continue;
+    }
+    pendingItems.push({ id: item.id, text: item.text, cacheKey });
+  }
+
+  if (pendingItems.length > 0) {
+    const res = await fetchWithTimeout(
+      '/api/translate/batch',
+      {
+        method: 'POST',
+        headers: getAuthHeaders(),
+        signal: options?.signal,
+        body: JSON.stringify({
+          items: pendingItems.map(({ id, text }) => ({ id, text })),
+          sourceLang,
+          targetLang,
+          engine: resolvedEngine,
+          purpose: options?.purpose || 'history',
+          isGroup: Boolean(options?.isGroup),
+          googleApiKey,
+        }),
+      },
+      20000
+    );
+
+    const data = await res.json().catch(() => null);
+    if (!res.ok) {
+      if (Array.isArray(data?.results)) {
+        data.results.forEach((r: any) => {
+          if (r && typeof r.id === 'string' && typeof r.translatedText === 'string' && r.translatedText.trim()) {
+            const cleaned = stripTranslationThinkingTags(decodeHtmlEntities(r.translatedText));
+            const matchPending = pendingItems.find((p) => p.id === r.id);
+            if (matchPending && cleaned) {
+              setTranslateCache(matchPending.cacheKey, cleaned);
+            }
+            resultMap.set(r.id, { id: r.id, translatedText: cleaned });
+          }
+        });
+      }
+      throw new Error(data?.error || `批量翻译通道暂不可用 (${res.status})`);
+    }
+
+    const resList: Array<{ id: string; translatedText?: string; error?: string }> = Array.isArray(data?.results)
+      ? data.results
+      : [];
+    const byId = new Map<string, { id: string; translatedText?: string; error?: string }>();
+    resList.forEach((r) => {
+      if (r && typeof r.id === 'string') byId.set(r.id, r);
+    });
+
+    for (const pending of pendingItems) {
+      const hit = byId.get(pending.id);
+      const cleaned =
+        typeof hit?.translatedText === 'string'
+          ? stripTranslationThinkingTags(decodeHtmlEntities(hit.translatedText))
+          : '';
+      if (cleaned) {
+        setTranslateCache(pending.cacheKey, cleaned);
+        resultMap.set(pending.id, { id: pending.id, translatedText: cleaned });
+      } else {
+        resultMap.set(pending.id, { id: pending.id, error: hit?.error || '翻译失败' });
+      }
+    }
+  }
+
+  return items.map((it) => resultMap.get(it.id) || { id: it.id, error: '翻译失败' });
 }
 
 function normalizeAudioMime(mime?: string | null): string | undefined {
@@ -3154,7 +3284,10 @@ export function normalizeStalePendingMessages(list: Message[]): Message[] {
       (m.deliveryStatus === 'pending' || m.deliveryStatus === 'retrying') &&
       (!m.createdAt || m.createdAt < APP_BOOT_TIMESTAMP || now - m.createdAt > 120000)
     ) {
-      return { ...m, deliveryStatus: 'failed' as const };
+      return { ...m, deliveryStatus: 'failed' as const, isTranslating: false };
+    }
+    if (m.isTranslating) {
+      return { ...m, isTranslating: false };
     }
     return m;
   });

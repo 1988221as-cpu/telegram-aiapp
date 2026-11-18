@@ -78,6 +78,7 @@ import {
   clearLocalCustomerProfile,
   normalizeProfileChatId,
   translateText,
+  translateBatchTexts,
   syncCustomLLMConfigApi,
   fetchCustomLLMConfigApi,
   syncTranslationSettingsApi,
@@ -236,7 +237,7 @@ function enforceTranslationEngineForLlm(
 
 function engineToLiveErrorChannel(engine?: string): Message['translationErrorChannel'] {
   if (engine === 'custom_llm') return 'live_custom_llm';
-  if (engine === 'google') return 'live_google';
+  if (engine === 'google' || engine === 'bing' || engine === 'free_dual') return 'live_google';
   return 'live_gemini';
 }
 
@@ -2296,6 +2297,8 @@ export default function App() {
   const [backfillRetryNonce, setBackfillRetryNonce] = useState(0);
   const backfillAbortRef = useRef<AbortController | null>(null);
   const backfillScopeKeyRef = useRef<string>('');
+  const backfillRunningTokenRef = useRef<number>(0);
+  const backfillPendingRescanRef = useRef<boolean>(false);
 
   const activeChatForBackfill = chats.find(
     (c) => c.id === activeChatId && (!activeAccountId || c.accountId === activeAccountId)
@@ -2312,7 +2315,7 @@ export default function App() {
     activeChatForBackfill?.sourceLang && activeChatForBackfill.sourceLang !== 'Auto'
       ? activeChatForBackfill.sourceLang
       : 'Auto';
-  const backfillHistoryEngine = 'google' as const;
+  const backfillHistoryEngine = 'free_dual' as const;
   const activeChatIsGroup = Boolean(activeChatForBackfill?.isGroup || activeChatForBackfill?.isChannel);
   const isActiveChatTranslationEnabled =
     typeof activeChatForBackfill?.translationEnabled === 'boolean'
@@ -2332,6 +2335,8 @@ export default function App() {
         backfillAbortRef.current.abort();
         backfillAbortRef.current = null;
       }
+      backfillRunningTokenRef.current = 0;
+      backfillPendingRescanRef.current = false;
     };
   }, [backfillScopeKey]);
 
@@ -2355,6 +2360,8 @@ export default function App() {
       if (backfillAbortRef.current) {
         backfillAbortRef.current.abort();
       }
+      backfillRunningTokenRef.current = 0;
+      backfillPendingRescanRef.current = false;
       backfillScopeKeyRef.current = backfillScopeKey;
       backfillAbortRef.current = new AbortController();
     }
@@ -2412,6 +2419,13 @@ export default function App() {
 
     if (candidates.length === 0) return;
 
+    if (backfillRunningTokenRef.current !== 0) {
+      backfillPendingRescanRef.current = true;
+      return;
+    }
+    const runToken = Date.now() + Math.random();
+    backfillRunningTokenRef.current = runToken;
+
     if (attemptedInboundBackfillRef.current.size > 10000) {
       const keysIter = attemptedInboundBackfillRef.current.values();
       for (let k = 0; k < 2000; k++) {
@@ -2431,14 +2445,7 @@ export default function App() {
         translationErrorChannel?: Message['translationErrorChannel'];
       }
     >();
-    let flushTimer: ReturnType<typeof setTimeout> | null = null;
-    let remaining = candidates.length;
-
     const flushBatchUpdates = () => {
-      if (flushTimer) {
-        clearTimeout(flushTimer);
-        flushTimer = null;
-      }
       if (controller.signal.aborted || pendingUpdates.size === 0) return;
       const batch = new Map(pendingUpdates);
       pendingUpdates.clear();
@@ -2479,62 +2486,91 @@ export default function App() {
       });
     };
 
-    const scheduleFlush = () => {
-      remaining = Math.max(0, remaining - 1);
-      if (remaining === 0 || pendingUpdates.size >= 5) {
-        flushBatchUpdates();
-      } else if (!flushTimer) {
-        flushTimer = setTimeout(flushBatchUpdates, 120);
+    const scheduleBackfillRetryWakeup = (delayMs: number, forceForCooldown = false) => {
+      if (forceForCooldown) {
+        if (backfillRetryTimerRef.current) {
+          clearTimeout(backfillRetryTimerRef.current);
+          backfillRetryTimerRef.current = null;
+        }
+      } else if (controller.signal.aborted || backfillRetryTimerRef.current) {
+        return;
       }
-    };
-
-    const scheduleBackfillRetryWakeup = (delayMs: number) => {
-      if (controller.signal.aborted || backfillRetryTimerRef.current) return;
+      const scheduledScope = backfillScopeKey;
       backfillRetryTimerRef.current = setTimeout(() => {
         backfillRetryTimerRef.current = null;
-        if (!controller.signal.aborted) {
+        if (forceForCooldown ? backfillScopeKeyRef.current === scheduledScope : !controller.signal.aborted) {
           setBackfillRetryNonce((n) => n + 1);
         }
       }, delayMs);
     };
 
     const onAbort = () => {
-      if (flushTimer) {
-        clearTimeout(flushTimer);
-        flushTimer = null;
-      }
       pendingUpdates.clear();
     };
     controller.signal.addEventListener('abort', onAbort, { once: true });
 
-    candidates.forEach(({ msg, rawText, dedupeKey }) => {
-      translateText(
-        rawText,
-        backfillSourceLang,
-        backfillTargetLang,
-        customLLMConfigRef.current,
-        backfillHistoryEngine,
-        translationSettings.googleApiKey,
-        undefined,
-        undefined,
-        undefined,
-        { signal: controller.signal, purpose: 'history' }
-      )
-        .then((trans) => {
-          if (controller.signal.aborted) return;
-          backfillRetryCountRef.current.delete(dedupeKey);
-          backfillCooldownUntilRef.current.delete(dedupeKey);
-          const cleanTrans = (trans || '').trim();
-          if (cleanTrans && cleanTrans.toLowerCase() !== rawText.toLowerCase()) {
-            pendingUpdates.set(msg.id, { msg, translatedText: trans });
+    const BACKFILL_BATCH_SIZE = 10;
+    (async () => {
+      try {
+      for (let offset = 0; offset < candidates.length; offset += BACKFILL_BATCH_SIZE) {
+        if (controller.signal.aborted) {
+          for (let j = offset; j < candidates.length; j++) {
+            attemptedInboundBackfillRef.current.delete(candidates[j].dedupeKey);
           }
-          scheduleFlush();
-        })
-        .catch((err: any) => {
+          break;
+        }
+        const chunk = candidates.slice(offset, offset + BACKFILL_BATCH_SIZE);
+        try {
+          const batchResults = await translateBatchTexts(
+            chunk.map((c) => ({ id: c.msg.id, text: c.rawText })),
+            backfillSourceLang,
+            backfillTargetLang,
+            backfillHistoryEngine,
+            translationSettings.googleApiKey,
+            { signal: controller.signal, purpose: 'history' }
+          );
+          if (controller.signal.aborted) {
+            for (let j = offset; j < candidates.length; j++) {
+              attemptedInboundBackfillRef.current.delete(candidates[j].dedupeKey);
+            }
+            break;
+          }
+          const byId = new Map(batchResults.map((r) => [r.id, r]));
+          chunk.forEach(({ msg, rawText, dedupeKey }) => {
+            const resItem = byId.get(msg.id);
+            const cleanTrans = (resItem?.translatedText || '').trim();
+            if (cleanTrans && !resItem?.error) {
+              backfillRetryCountRef.current.delete(dedupeKey);
+              backfillCooldownUntilRef.current.delete(dedupeKey);
+              if (cleanTrans.toLowerCase() !== rawText.toLowerCase()) {
+                pendingUpdates.set(msg.id, { msg, translatedText: resItem!.translatedText });
+              } else if (msg.translationError) {
+                pendingUpdates.set(msg.id, { msg, translatedText: '' });
+              }
+            } else if (resItem?.error) {
+              const retries = backfillRetryCountRef.current.get(dedupeKey) || 0;
+              if (retries < 2) {
+                const backoffMs = retries === 0 ? 4000 : 12000;
+                backfillRetryCountRef.current.set(dedupeKey, retries + 1);
+                backfillCooldownUntilRef.current.set(dedupeKey, Date.now() + backoffMs);
+                attemptedInboundBackfillRef.current.delete(dedupeKey);
+                scheduleBackfillRetryWakeup(backoffMs + 150);
+              }
+              const errMsg = '翻译失败，请检查翻译通道';
+              pendingUpdates.set(msg.id, {
+                msg,
+                translationError: errMsg,
+                translationErrorChannel: 'history_google',
+              });
+            }
+          });
+          flushBatchUpdates();
+        } catch (err: any) {
           if (err?.name === 'AbortError' || controller.signal.aborted) {
-            attemptedInboundBackfillRef.current.delete(dedupeKey);
-            remaining = Math.max(0, remaining - 1);
-            return;
+            for (let j = offset; j < candidates.length; j++) {
+              attemptedInboundBackfillRef.current.delete(candidates[j].dedupeKey);
+            }
+            break;
           }
           const rawErrMsg = String(err?.message || '');
           const isRateLimited429 = /\b429\b|Too Many Requests|频率过高/i.test(rawErrMsg);
@@ -2544,32 +2580,49 @@ export default function App() {
               backfillGlobalGoogleCooldownUntilRef.current,
               Date.now() + cooldownMs
             );
-            backfillCooldownUntilRef.current.set(dedupeKey, Date.now() + cooldownMs);
-            attemptedInboundBackfillRef.current.delete(dedupeKey);
+            for (let j = offset; j < candidates.length; j++) {
+              backfillCooldownUntilRef.current.set(candidates[j].dedupeKey, Date.now() + cooldownMs);
+              attemptedInboundBackfillRef.current.delete(candidates[j].dedupeKey);
+            }
             if (backfillAbortRef.current === controller) {
               backfillAbortRef.current = null;
             }
             controller.abort();
-            scheduleBackfillRetryWakeup(cooldownMs + 150);
-            return;
+            scheduleBackfillRetryWakeup(cooldownMs + 150, true);
+            break;
           }
-          const retries = backfillRetryCountRef.current.get(dedupeKey) || 0;
-          if (retries < 2) {
-            const backoffMs = retries === 0 ? 4000 : 12000;
-            backfillRetryCountRef.current.set(dedupeKey, retries + 1);
-            backfillCooldownUntilRef.current.set(dedupeKey, Date.now() + backoffMs);
-            attemptedInboundBackfillRef.current.delete(dedupeKey);
-            scheduleBackfillRetryWakeup(backoffMs + 150);
-          }
-          const errMsg = '翻译失败，请检查翻译通道';
-          pendingUpdates.set(msg.id, {
-            msg,
-            translationError: errMsg,
-            translationErrorChannel: 'history_google',
+          chunk.forEach(({ msg, dedupeKey }) => {
+            const retries = backfillRetryCountRef.current.get(dedupeKey) || 0;
+            if (retries < 2) {
+              const backoffMs = retries === 0 ? 4000 : 12000;
+              backfillRetryCountRef.current.set(dedupeKey, retries + 1);
+              backfillCooldownUntilRef.current.set(dedupeKey, Date.now() + backoffMs);
+              attemptedInboundBackfillRef.current.delete(dedupeKey);
+              scheduleBackfillRetryWakeup(backoffMs + 150);
+            }
+            const errMsg = '翻译失败，请检查翻译通道';
+            pendingUpdates.set(msg.id, {
+              msg,
+              translationError: errMsg,
+              translationErrorChannel: 'history_google',
+            });
           });
-          scheduleFlush();
-        });
-    });
+          flushBatchUpdates();
+        }
+      }
+      if (pendingUpdates.size > 0 && !controller.signal.aborted) {
+        flushBatchUpdates();
+      }
+      } finally {
+        if (backfillRunningTokenRef.current === runToken) {
+          backfillRunningTokenRef.current = 0;
+          if (backfillPendingRescanRef.current && !controller.signal.aborted) {
+            backfillPendingRescanRef.current = false;
+            setBackfillRetryNonce((n) => n + 1);
+          }
+        }
+      }
+    })();
   }, [
     isMemberAuthenticated,
     activeChatId,
@@ -3355,11 +3408,13 @@ export default function App() {
               !incomingMsg.translatedText &&
               !isIncomingAlreadyTargetLang
             ) {
-              const effectiveInboundEngine = 'google' as const;
+              const effectiveInboundEngine = 'free_dual' as const;
               const inboundSourceLang =
                 matchedChatForLang?.sourceLang && matchedChatForLang.sourceLang !== 'Auto'
                   ? matchedChatForLang.sourceLang
                   : 'Auto';
+              const inboundDedupeKey = `${targetAccountId}::${targetChatId}::${incomingMsg.id}::${inboundTargetLang}::${effectiveInboundEngine}`;
+              attemptedInboundBackfillRef.current.add(inboundDedupeKey);
 
               translateText(
                 incomingMsg.text,
@@ -4672,9 +4727,9 @@ export default function App() {
     const currentLlm = customLLMConfigRef.current;
     const currentTrans = translationSettingsRef.current;
     const effectiveEngine = isHistoricalTarget
-      ? 'google'
+      ? 'free_dual'
       : isGroupTarget || isInboundPeerTarget
-      ? 'google'
+      ? 'free_dual'
       : enforceTranslationEngineForLlm(currentLlm, currentTrans).preferredEngine;
     const resolvedGlobalTargetLang =
       currentTrans.defaultTargetLang && currentTrans.defaultTargetLang !== 'Auto'
@@ -4746,6 +4801,7 @@ export default function App() {
         forceGoogleOnly ? undefined : currentTrans.customModelName,
         {
           bypassCache: true,
+          priority: 'manual' as const,
           ...(isHistoricalTarget
             ? { purpose: 'history' as const }
             : isGroupTarget

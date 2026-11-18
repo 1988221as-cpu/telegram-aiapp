@@ -407,7 +407,7 @@ export const TranslationDrawer: React.FC<TranslationDrawerProps> = ({
               : '当前主引擎：官方大模型优先（支持「谷歌机翻」或「云端大模型」，多通道智能测速排队、最快优先）'}
           </div>
           <p className="text-[10.5px] leading-snug text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5]">
-            说明：对方发来的消息（私聊与群聊）及历史消息统一使用「谷歌机翻」不占密钥；选中大模型通道时，仅用于我方输入与发出的聊天消息。
+            说明：对方发来的消息（私聊与群聊）及历史消息统一使用「谷歌 + 微软必应双引擎免密钥直译」（自动互备加速）；选中大模型通道时，仅用于我方输入与发出的聊天消息。
           </p>
 
           <div className="grid grid-cols-3 gap-2">
@@ -433,7 +433,7 @@ export const TranslationDrawer: React.FC<TranslationDrawerProps> = ({
                     <span className="truncate">谷歌机翻</span>
                   </div>
                   <p className="text-[10px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] mt-1 leading-tight">
-                    全模式通用免密钥直译
+                    全模式通用（谷歌+必应双引擎）
                   </p>
                 </button>
               );
