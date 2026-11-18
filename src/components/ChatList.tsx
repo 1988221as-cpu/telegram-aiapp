@@ -590,7 +590,8 @@ export const ChatList: React.FC<ChatListProps> = ({
           <div className="flex items-center gap-2 min-w-0" title={currentAccountOfflineReason || undefined}>
             <WifiOff className="w-3.5 h-3.5 text-amber-500 shrink-0" />
             <span className="text-[11px] font-medium text-amber-700 dark:text-amber-300 aurora:text-amber-200 truncate">
-              连接中
+              {currentAccountOfflineReason ||
+                (currentAccountStatus === 'away' ? '连接重连中...' : 'MTProto 未连接')}
             </span>
           </div>
           {onReconnectAccount && (

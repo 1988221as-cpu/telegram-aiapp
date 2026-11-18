@@ -2866,7 +2866,13 @@ export async function fetchTelegramUserStatusApi(): Promise<{
     firstName?: string;
     isInMemoryConnected?: boolean;
     isConnected?: boolean;
-    status?: 'online' | 'away' | 'offline' | 'expired';
+    isConnecting?: boolean;
+    isReconnecting?: boolean;
+    status?: 'online' | 'away' | 'connecting' | 'reconnecting' | 'restoring' | 'offline' | 'expired';
+    retryCount?: number;
+    nextRetryAt?: number;
+    lastConnectedAt?: number | null;
+    lastError?: string | null;
     offlineReason?: string;
   }>;
   expiredAccounts: Array<{
@@ -2905,7 +2911,9 @@ export async function fetchTelegramUserStatusApi(): Promise<{
 
 export async function reconnectTelegramSessionsApi(
   forceCredsRefresh = false,
-  forceReconnect = false
+  forceReconnect = false,
+  accountId?: string,
+  identity?: { userId?: string; phone?: string }
 ): Promise<{
   ok: boolean;
   restoredCount?: number;
@@ -2918,7 +2926,13 @@ export async function reconnectTelegramSessionsApi(
     const res = await fetchWithTimeout('/api/telegram/user/reconnect', {
       method: 'POST',
       headers: getAuthHeaders(),
-      body: JSON.stringify({ forceCredsRefresh, forceReconnect }),
+      body: JSON.stringify({
+        forceCredsRefresh,
+        forceReconnect,
+        ...(accountId ? { accountId } : {}),
+        ...(identity?.userId ? { userId: identity.userId } : {}),
+        ...(identity?.phone ? { phone: identity.phone } : {}),
+      }),
     }, 25000);
     const data = await res.json().catch(() => ({}));
     if (!res.ok || !data?.ok) {

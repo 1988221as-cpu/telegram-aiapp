@@ -116,6 +116,12 @@ import {
   type DesktopUpdaterInfo,
   type DesktopUpdaterState,
 } from './services/apiService';
+import {
+  evaluateTelegramAccountUiState,
+  getTelegramConnectionPhaseLabel,
+  resolveTelegramAccountIdentity,
+  type TelegramConnectionPhase,
+} from './services/telegramConnectionStatus';
 
 
 import { secureGetItemSync, secureSetItemSync, secureGetItemAsync, secureRemoveItem } from './services/cryptoStorage';
@@ -834,7 +840,26 @@ export default function App() {
     }
   };
   const [offlineReasonByAccount, setOfflineReasonByAccount] = useState<Record<string, string>>({});
+  const [bannerVisibleByAccount, setBannerVisibleByAccount] = useState<Record<string, boolean>>({});
+  const transientDisconnectSinceRef = useRef<Record<string, number>>({});
+  const graceSyncTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const isMountedRef = useRef(true);
+  const isMemberAuthenticatedRef = useRef(isMemberAuthenticated);
+  isMemberAuthenticatedRef.current = isMemberAuthenticated;
+  const accountsRef = useRef<Account[]>(accounts);
+  accountsRef.current = accounts;
   const [isReconnectingAccount, setIsReconnectingAccount] = useState(false);
+
+  useEffect(() => {
+    isMountedRef.current = true;
+    return () => {
+      isMountedRef.current = false;
+      if (graceSyncTimerRef.current) {
+        clearTimeout(graceSyncTimerRef.current);
+        graceSyncTimerRef.current = null;
+      }
+    };
+  }, []);
 
   // Telegram contacts (strictly scoped by account & AES-encrypted, zero mock defaults) and real call history state
   const [contacts, setContacts] = useState<TelegramContact[]>(() => {
@@ -1307,7 +1332,9 @@ export default function App() {
         const reconRes = await reconnectTelegramSessionsApi(false, false);
         await syncTelegramAccountStatus();
         const curAcc = activeAccountIdRef.current;
-        if (reconRes.ok && (reconRes.restoredCount || 0) > 0 && curAcc && curAcc.startsWith('acc_tg_')) {
+        const curAccObj = curAcc ? accountsRef.current.find((a) => a.id === curAcc) : undefined;
+        const curIdentity = resolveTelegramAccountIdentity({ id: curAcc, phone: curAccObj?.phone });
+        if (reconRes.ok && (reconRes.restoredCount || 0) > 0 && curAcc && curIdentity.isPersonalTelegram) {
           void triggerAccountDialogRefreshRef.current?.(curAcc);
         }
       } catch {
@@ -1456,6 +1483,13 @@ export default function App() {
     secureRemoveItem('tg_pro_account_groups');
     secureRemoveItem('tg_pro_chat_order_map');
     notifiedExpiredRef.current.clear();
+    if (graceSyncTimerRef.current) {
+      clearTimeout(graceSyncTimerRef.current);
+      graceSyncTimerRef.current = null;
+    }
+    transientDisconnectSinceRef.current = {};
+    setBannerVisibleByAccount({});
+    setOfflineReasonByAccount({});
     setAccounts([]);
     setAccountGroups([]);
     setChats([]);
@@ -1516,45 +1550,200 @@ export default function App() {
       fetchTelegramActiveAccounts(),
       fetchTelegramUserStatusApi(),
     ]);
+    if (!isMountedRef.current || !isMemberAuthenticatedRef.current) {
+      return;
+    }
+
+    const now = Date.now();
+    let earliestGraceCheckMs: number | null = null;
+    const recordGraceDelay = (delayMs: number | null) => {
+      if (delayMs === null) return;
+      if (earliestGraceCheckMs === null || delayMs < earliestGraceCheckMs) {
+        earliestGraceCheckMs = delayMs;
+      }
+    };
+
+    const resolvePhase = (raw: {
+      status?: string;
+      isConnected?: boolean;
+      isConnecting?: boolean;
+      isReconnecting?: boolean;
+      isInMemoryConnected?: boolean;
+    }): TelegramConnectionPhase => {
+      if (raw.status === 'expired') return 'expired';
+      if (raw.status === 'online' || raw.isConnected) return 'online';
+      if (raw.status === 'restoring') return 'restoring';
+      if (raw.status === 'reconnecting' || raw.isReconnecting) return 'reconnecting';
+      if (raw.status === 'connecting' || raw.isConnecting) return 'connecting';
+      if (raw.status === 'offline') {
+        // Explicit per-account offline from backend must not be overwritten by another account's global restore
+        return 'offline';
+      }
+      if (statusRes.isRestoringSessions || startupReconnectInFlightRef.current) {
+        return 'restoring';
+      }
+      if (raw.isInMemoryConnected) return 'reconnecting';
+      return 'offline';
+    };
+
+    const evalWithGrace = (
+      trackKey: string,
+      phase: TelegramConnectionPhase,
+      lastError?: string | null,
+      offlineReason?: string | null
+    ) => {
+      if (phase === 'online' || phase === 'offline' || phase === 'expired') {
+        delete transientDisconnectSinceRef.current[trackKey];
+      } else if (transientDisconnectSinceRef.current[trackKey] === undefined) {
+        transientDisconnectSinceRef.current[trackKey] = now;
+      }
+      const res = evaluateTelegramAccountUiState({
+        phase,
+        lastError,
+        offlineReason,
+        transientSince: transientDisconnectSinceRef.current[trackKey] ?? null,
+        now,
+      });
+      recordGraceDelay(res.nextGraceCheckInMs);
+      return res;
+    };
 
     const statusById = new Map<string, 'online' | 'away' | 'offline' | 'expired'>();
+    const phaseById = new Map<string, TelegramConnectionPhase>();
+    const metaById = new Map<
+      string,
+      { lastError?: string | null; retryCount?: number; nextRetryAt?: number; lastConnectedAt?: number | null }
+    >();
     const reasonsMap: Record<string, string> = {};
+    const bannerVisibilityMap: Record<string, boolean> = {};
+
+    const runtimeKeyToStatus = new Map<string, 'online' | 'away' | 'offline' | 'expired'>();
+    const runtimeKeyToPhase = new Map<string, TelegramConnectionPhase>();
+    const runtimeKeyToReason = new Map<string, string>();
+    const runtimeKeyToBanner = new Map<string, boolean>();
+    const runtimeKeyToMeta = new Map<
+      string,
+      { lastError?: string | null; retryCount?: number; nextRetryAt?: number; lastConnectedAt?: number | null }
+    >();
+
     if (statusRes.ok) {
       statusRes.activeUsers.forEach((u) => {
-        const nextStatus: 'online' | 'away' | 'offline' = u.isConnected
-          ? 'online'
-          : u.isInMemoryConnected || statusRes.isRestoringSessions || startupReconnectInFlightRef.current
-            ? 'away'
-            : 'offline';
-        statusById.set(u.id, nextStatus);
-        if (nextStatus !== 'online' && u.offlineReason) {
-          reasonsMap[u.id] = u.offlineReason;
+        const uIdentity = resolveTelegramAccountIdentity({ id: u.id, userId: u.userId, phone: u.phone });
+        const uTrackKey = uIdentity.runtimeKey || u.id;
+        const phase = resolvePhase(u);
+        const evalRes = evalWithGrace(uTrackKey, phase, u.lastError, u.offlineReason);
+        statusById.set(u.id, evalRes.uiStatus);
+        phaseById.set(u.id, evalRes.connectionPhase);
+        const metaObj = {
+          lastError: u.lastError ?? null,
+          retryCount: u.retryCount,
+          nextRetryAt: u.nextRetryAt,
+          lastConnectedAt: u.lastConnectedAt ?? null,
+        };
+        metaById.set(u.id, metaObj);
+        bannerVisibilityMap[u.id] = evalRes.shouldShowBanner;
+        if (evalRes.uiStatus !== 'online' && evalRes.displayReason) {
+          reasonsMap[u.id] = evalRes.displayReason;
+        }
+        const uKeys = [
+          uIdentity.runtimeKey,
+          uIdentity.phone ? `phone:${uIdentity.phone}` : '',
+        ].filter(Boolean);
+        for (const rk of uKeys) {
+          runtimeKeyToStatus.set(rk, evalRes.uiStatus);
+          runtimeKeyToPhase.set(rk, evalRes.connectionPhase);
+          runtimeKeyToMeta.set(rk, metaObj);
+          runtimeKeyToBanner.set(rk, evalRes.shouldShowBanner);
+          if (evalRes.uiStatus !== 'online' && evalRes.displayReason) {
+            runtimeKeyToReason.set(rk, evalRes.displayReason);
+          }
         }
       });
+
       statusRes.expiredAccounts.forEach((exp) => {
-        const expId = exp.accountId || (exp.userId ? `acc_tg_${exp.userId}` : '');
-        if (expId) {
-          statusById.set(expId, 'expired');
-          reasonsMap[expId] = exp.reason;
-          if (!notifiedExpiredRef.current.has(expId)) {
-            notifiedExpiredRef.current.add(expId);
-            showCloudError(exp.reason || `账号 ${expId} 登录会话已失效，请重新扫码或验证码登录`);
-          }
+        const expId = exp.accountId || (exp.userId ? `acc_tg_${exp.userId}` : exp.phone || '');
+        if (!expId) return;
+        const expIdentity = resolveTelegramAccountIdentity({ id: expId, userId: exp.userId, phone: exp.phone });
+        delete transientDisconnectSinceRef.current[expId];
+        if (expIdentity.runtimeKey) delete transientDisconnectSinceRef.current[expIdentity.runtimeKey];
+        statusById.set(expId, 'expired');
+        phaseById.set(expId, 'expired');
+        bannerVisibilityMap[expId] = true;
+        reasonsMap[expId] = exp.reason;
+        const expKeys = [
+          expIdentity.runtimeKey,
+          expIdentity.phone ? `phone:${expIdentity.phone}` : '',
+        ].filter(Boolean);
+        for (const rk of expKeys) {
+          runtimeKeyToStatus.set(rk, 'expired');
+          runtimeKeyToPhase.set(rk, 'expired');
+          runtimeKeyToBanner.set(rk, true);
+          runtimeKeyToReason.set(rk, exp.reason);
+        }
+        if (!notifiedExpiredRef.current.has(expId)) {
+          notifiedExpiredRef.current.add(expId);
+          showCloudError(exp.reason || `账号 ${expId} 登录会话已失效，请重新扫码或验证码登录`);
         }
       });
     }
 
     const activeById = new Map<string, any>();
+    const activeByRuntimeKey = new Map<string, any>();
     if (activeAccs && activeAccs.length > 0) {
       activeAccs.forEach((acc: any) => {
+        const accIdMeta = resolveTelegramAccountIdentity({ id: acc?.id, userId: acc?.userId, phone: acc?.phone });
         if (acc?.id) {
           activeById.set(acc.id, acc);
         }
-        if (!statusById.has(acc.id)) {
-          statusById.set(acc.id, acc.isConnected ? 'online' : 'away');
+        if (accIdMeta.runtimeKey) activeByRuntimeKey.set(accIdMeta.runtimeKey, acc);
+        if (accIdMeta.phone) activeByRuntimeKey.set(`phone:${accIdMeta.phone}`, acc);
+        if (acc?.id && !statusById.has(acc.id)) {
+          const accPhase = resolvePhase({ status: acc.status, isConnected: acc.isConnected, isInMemoryConnected: true });
+          const evalRes = evalWithGrace(accIdMeta.runtimeKey || acc.id, accPhase);
+          statusById.set(acc.id, evalRes.uiStatus);
+          phaseById.set(acc.id, evalRes.connectionPhase);
+          bannerVisibilityMap[acc.id] = evalRes.shouldShowBanner;
+          if (evalRes.uiStatus !== 'online' && evalRes.displayReason) {
+            reasonsMap[acc.id] = evalRes.displayReason;
+          }
         }
       });
     }
+
+    // Evaluate fallback UI state for any previously known personal Telegram account (including phone-keyed & internal+phone accounts)
+    accountsRef.current.forEach((a) => {
+      const identity = resolveTelegramAccountIdentity({ id: a.id, phone: a.phone });
+      if (!identity.isPersonalTelegram || statusById.has(a.id)) return;
+      const matchedRuntimeKey =
+        (identity.runtimeKey && runtimeKeyToStatus.has(identity.runtimeKey) ? identity.runtimeKey : '') ||
+        (identity.phone && runtimeKeyToStatus.has(`phone:${identity.phone}`) ? `phone:${identity.phone}` : '');
+      if (matchedRuntimeKey) {
+        statusById.set(a.id, runtimeKeyToStatus.get(matchedRuntimeKey)!);
+        phaseById.set(a.id, runtimeKeyToPhase.get(matchedRuntimeKey)!);
+        const m = runtimeKeyToMeta.get(matchedRuntimeKey);
+        if (m) metaById.set(a.id, m);
+        bannerVisibilityMap[a.id] = Boolean(runtimeKeyToBanner.get(matchedRuntimeKey));
+        const r = runtimeKeyToReason.get(matchedRuntimeKey);
+        if (r) reasonsMap[a.id] = r;
+        return;
+      }
+      const hasExplicitOffline =
+        a.status === 'offline' ||
+        Boolean(a.lastError) ||
+        (a.retryCount || 0) > 0 ||
+        a.lastConnectedAt != null;
+      const fallbackPhase: TelegramConnectionPhase =
+        !hasExplicitOffline && (statusRes.isRestoringSessions || startupReconnectInFlightRef.current)
+          ? 'restoring'
+          : 'offline';
+      const evalRes = evalWithGrace(identity.runtimeKey || a.id, fallbackPhase, a.lastError, reasonsMap[a.id]);
+      statusById.set(a.id, evalRes.uiStatus);
+      phaseById.set(a.id, evalRes.connectionPhase);
+      bannerVisibilityMap[a.id] = evalRes.shouldShowBanner;
+      if (evalRes.displayReason) {
+        reasonsMap[a.id] = evalRes.displayReason;
+      }
+    });
 
     const shouldRefreshAvatarUrl = (url?: string): boolean => {
       if (!url) return true;
@@ -1563,37 +1752,79 @@ export default function App() {
       return !exp || exp <= Date.now() + 5 * 60 * 1000;
     };
 
+    setBannerVisibleByAccount(bannerVisibilityMap);
     setOfflineReasonByAccount(reasonsMap);
 
     setAccounts((prev) => {
       const map = new Map<string, Account>();
       prev.forEach((a) => {
-        if (a.id.startsWith('acc_tg_')) {
+        const identity = resolveTelegramAccountIdentity({ id: a.id, phone: a.phone });
+        if (identity.isPersonalTelegram) {
+          const matchedRk =
+            (identity.runtimeKey && runtimeKeyToStatus.has(identity.runtimeKey) ? identity.runtimeKey : '') ||
+            (identity.phone && runtimeKeyToStatus.has(`phone:${identity.phone}`) ? `phone:${identity.phone}` : '');
           const realStatus =
             statusById.get(a.id) ||
+            (matchedRk ? runtimeKeyToStatus.get(matchedRk) : undefined) ||
             (statusRes.isRestoringSessions || startupReconnectInFlightRef.current ? 'away' : 'offline');
+          const nextPhase =
+            phaseById.get(a.id) ||
+            (matchedRk ? runtimeKeyToPhase.get(matchedRk) : undefined) ||
+            (realStatus === 'online'
+              ? 'online'
+              : realStatus === 'expired'
+                ? 'expired'
+                : realStatus === 'away'
+                  ? 'reconnecting'
+                  : 'offline');
+          const meta =
+            metaById.get(a.id) ||
+            (matchedRk ? runtimeKeyToMeta.get(matchedRk) : undefined);
           const nextBio =
             realStatus === 'expired'
               ? '会话已失效，请重新登录'
               : realStatus === 'online'
                 ? 'Telegram 账号 (已直连)'
                 : realStatus === 'away'
-                  ? 'Telegram 账号 (重连中)'
+                  ? `Telegram 账号 (${getTelegramConnectionPhaseLabel(nextPhase)})`
                   : 'Telegram 账号 (未连接)';
-          const activeMeta = activeById.get(a.id);
+          const activeMeta =
+            activeById.get(a.id) ||
+            (identity.canonicalAccountId ? activeById.get(identity.canonicalAccountId) : undefined) ||
+            (identity.runtimeKey ? activeByRuntimeKey.get(identity.runtimeKey) : undefined) ||
+            (identity.phone ? activeByRuntimeKey.get(`phone:${identity.phone}`) : undefined);
           const nextAvatarUrl =
             activeMeta?.avatarUrl && shouldRefreshAvatarUrl(a.avatarUrl)
               ? activeMeta.avatarUrl
               : a.avatarUrl;
-          map.set(a.id, { ...a, status: realStatus, bio: nextBio, avatarUrl: nextAvatarUrl });
+          map.set(a.id, {
+            ...a,
+            status: realStatus,
+            connectionPhase: nextPhase,
+            bio: nextBio,
+            avatarUrl: nextAvatarUrl,
+            ...(meta ? meta : {}),
+          });
         } else {
           map.set(a.id, a);
         }
       });
       if (activeAccs && activeAccs.length > 0) {
         activeAccs.forEach((acc: any) => {
-          if (!map.has(acc.id)) {
+          const accIdentity = resolveTelegramAccountIdentity({ id: acc.id, userId: acc.userId, phone: acc.phone });
+          const alreadyHasRuntime = Boolean(
+            (accIdentity.runtimeKey || accIdentity.phone) &&
+              Array.from(map.values()).some((existing) => {
+                const exId = resolveTelegramAccountIdentity({ id: existing.id, phone: existing.phone });
+                return (
+                  (accIdentity.runtimeKey && exId.runtimeKey === accIdentity.runtimeKey) ||
+                  Boolean(accIdentity.phone && exId.phone && exId.phone === accIdentity.phone)
+                );
+              })
+          );
+          if (!map.has(acc.id) && !alreadyHasRuntime) {
             const realStatus = statusById.get(acc.id) || (acc.isConnected ? 'online' : 'away');
+            const nextPhase = phaseById.get(acc.id) || (realStatus === 'online' ? 'online' : 'offline');
             map.set(acc.id, {
               id: acc.id,
               name: acc.name,
@@ -1605,6 +1836,7 @@ export default function App() {
               unreadTotal: 0,
               isActive: false,
               status: realStatus,
+              connectionPhase: nextPhase,
               bio: realStatus === 'online' ? 'Telegram 账号 (已直连)' : 'Telegram 账号 (未连接)',
             });
           }
@@ -1612,6 +1844,18 @@ export default function App() {
       }
       return Array.from(map.values());
     });
+
+    if (graceSyncTimerRef.current) {
+      clearTimeout(graceSyncTimerRef.current);
+      graceSyncTimerRef.current = null;
+    }
+    if (earliestGraceCheckMs !== null && isMountedRef.current && isMemberAuthenticatedRef.current) {
+      graceSyncTimerRef.current = setTimeout(() => {
+        graceSyncTimerRef.current = null;
+        if (!isMountedRef.current || !isMemberAuthenticatedRef.current) return;
+        void syncTelegramAccountStatus().catch(() => {});
+      }, earliestGraceCheckMs);
+    }
   };
 
   const lastDialogsSyncAtRef = useRef<Record<string, number>>({});
@@ -1763,23 +2007,49 @@ export default function App() {
     if (isReconnectingAccount) return;
     setIsReconnectingAccount(true);
     try {
-      const res = await reconnectTelegramSessionsApi(true);
-      await syncTelegramAccountStatus();
+      const curId = activeAccountIdRef.current;
+      const curAcc = curId ? accountsRef.current.find((a) => a.id === curId) : undefined;
+      const identity = resolveTelegramAccountIdentity({
+        id: curId,
+        phone: curAcc?.phone,
+      });
+      // Use resolved canonical scopedAccountId (never let opaque internal ID overwrite real phone)
+      const scopedAccountId =
+        identity.isPersonalTelegram && (!curAcc || curAcc.status !== 'online')
+          ? identity.scopedAccountId
+          : undefined;
+      const res = await reconnectTelegramSessionsApi(
+        true,
+        false,
+        scopedAccountId,
+        scopedAccountId ? { userId: identity.userId, phone: identity.phone } : undefined
+      );
+      await syncTelegramAccountStatus().catch(() => {});
       if (!res.ok) {
         showCloudError(res.error || '重连 Telegram 会话失败');
       } else {
-        const curAcc = activeAccountIdRef.current;
-        if (curAcc && curAcc.startsWith('acc_tg_')) {
-          const reqMutationVersion = dialogsMutationVersionRef.current[curAcc] || 0;
-          const dlgRes = await fetchTelegramUserDialogsDetailedApi(curAcc, undefined, { force: true });
+        const afterAccId = activeAccountIdRef.current;
+        const afterAcc = afterAccId ? accountsRef.current.find((a) => a.id === afterAccId) : undefined;
+        const afterIdentity = resolveTelegramAccountIdentity({
+          id: afterAccId,
+          phone: afterAcc?.phone,
+        });
+        const refreshApiAccountId =
+          afterAccId === curId && afterIdentity.isPersonalTelegram
+            ? afterIdentity.canonicalAccountId || afterAccId
+            : '';
+        const localBucketAccId = afterAccId === curId ? afterAccId : refreshApiAccountId;
+        if (refreshApiAccountId && localBucketAccId) {
+          const reqMutationVersion = dialogsMutationVersionRef.current[localBucketAccId] || 0;
+          const dlgRes = await fetchTelegramUserDialogsDetailedApi(refreshApiAccountId, undefined, { force: true });
           if (dlgRes.code === 'TELEGRAM_FLOOD_WAIT') {
-            notifyTelegramFloodCooldown(curAcc, dlgRes.error, dlgRes.retryAfterSeconds);
+            notifyTelegramFloodCooldown(localBucketAccId, dlgRes.error, dlgRes.retryAfterSeconds);
           }
           if ((dlgRes.ok || dlgRes.dialogs.length > 0) && dlgRes.dialogs.length > 0) {
             if (dlgRes.ok) {
-              lastDialogsSyncAtRef.current[curAcc] = Date.now();
+              lastDialogsSyncAtRef.current[localBucketAccId] = Date.now();
             }
-            mergeCloudDialogsForAccount(curAcc, dlgRes.dialogs, {
+            mergeCloudDialogsForAccount(localBucketAccId, dlgRes.dialogs, {
               isCached: Boolean(dlgRes.cached),
               reqMutationVersion,
             });
@@ -5581,9 +5851,9 @@ export default function App() {
       <div className="flex-1 flex flex-col min-w-0 min-h-0 overflow-hidden">
         {isMemberAuthenticated &&
           currentAccount &&
-          (currentAccount.status === 'offline' ||
-            currentAccount.status === 'away' ||
-            currentAccount.status === 'expired') && (
+          (currentAccount.status === 'expired' ||
+            currentAccount.status === 'offline' ||
+            (currentAccount.status === 'away' && bannerVisibleByAccount[currentAccount.id])) && (
             <div
               className={`shrink-0 px-4 py-2 border-b flex items-center justify-between gap-3 text-xs ${
                 currentAccount.status === 'expired'
@@ -5608,7 +5878,11 @@ export default function App() {
                           ? `：${offlineReasonByAccount[currentAccount.id]}`
                           : ''
                       }`
-                    : '连接中'}
+                    : offlineReasonByAccount[currentAccount.id] ||
+                      getTelegramConnectionPhaseLabel(
+                        currentAccount.connectionPhase ||
+                          (currentAccount.status === 'away' ? 'reconnecting' : 'offline')
+                      )}
                 </span>
               </div>
               <div className="flex items-center gap-2 shrink-0">

@@ -2295,6 +2295,7 @@ export interface ConnectedTelegramUser {
   apiId: number;
   apiHash: string;
   connectedAt: number;
+  proxyFingerprint?: string;
   dialogsFetchedAt?: number;
   dialogsInFlight?: Promise<any[]>;
   dialogs: Array<{
@@ -2314,6 +2315,409 @@ export interface ConnectedTelegramUser {
 
 // In-memory active connected Telegram personal user accounts (kept purely in local memory)
 export const connectedUserClients = new Map<string, ConnectedTelegramUser>();
+
+// ==================== TELEGRAM CONNECTION LIFECYCLE & RUNTIME STATE MACHINE ====================
+export type TelegramNetworkErrorCategory =
+  | 'proxy_timeout'
+  | 'proxy_handshake'
+  | 'telegram_unreachable'
+  | 'session_expired'
+  | 'credentials_missing'
+  | 'unknown';
+
+export type TelegramConnectionPhase =
+  | 'online'
+  | 'connecting'
+  | 'reconnecting'
+  | 'restoring'
+  | 'offline'
+  | 'expired';
+
+export class TelegramNetworkError extends Error {
+  category: TelegramNetworkErrorCategory;
+  causeError?: any;
+  constructor(category: TelegramNetworkErrorCategory, message: string, causeError?: any) {
+    super(message);
+    this.name = 'TelegramNetworkError';
+    this.category = category;
+    this.causeError = causeError;
+  }
+}
+
+export interface TelegramAccountRuntimeState {
+  accountKey: string;
+  accountId: string;
+  userId: string;
+  phone: string;
+  generationId: number;
+  isInitialConnecting: boolean;
+  isRestoring: boolean;
+  isAuthorized: boolean;
+  transportConnected: boolean;
+  senderIsReconnecting: boolean;
+  lastConnectedAt: number | null;
+  lastDisconnectedAt: number | null;
+  lastFailureAt: number | null;
+  nextRetryAt: number;
+  retryCount: number;
+  lastError: string | null;
+  lastErrorCategory: TelegramNetworkErrorCategory | null;
+  offlineReason: string | null;
+  proxyFingerprint: string;
+  activeRestoreTask: Promise<boolean> | null;
+}
+
+export const telegramAccountRuntimeStates = new Map<string, TelegramAccountRuntimeState>();
+export const TELEGRAM_RECONNECT_BACKOFF_DELAYS_MS = [15_000, 30_000, 60_000, 120_000, 300_000];
+
+export function computeTelegramReconnectBackoffMs(retryCount: number): number {
+  const idx = Math.min(
+    TELEGRAM_RECONNECT_BACKOFF_DELAYS_MS.length - 1,
+    Math.max(0, Math.floor(retryCount) - 1)
+  );
+  return TELEGRAM_RECONNECT_BACKOFF_DELAYS_MS[idx] || 15_000;
+}
+
+export function getTelegramProxyFingerprint(proxy?: {
+  ip: string;
+  port: number;
+  socksType: 4 | 5;
+  username?: string;
+  password?: string;
+}): string {
+  if (!proxy || !proxy.ip || !proxy.port) return 'direct';
+  return `${proxy.socksType}:${proxy.ip}:${proxy.port}:${proxy.username || ''}:${proxy.password ? '1' : '0'}`;
+}
+
+export function resolveTelegramAccountRuntimeKey(opts: {
+  userId?: string;
+  phone?: string;
+  accountId?: string;
+}): string {
+  const rawAccId = String(opts.accountId || '').trim();
+  if (rawAccId.startsWith('uid:')) {
+    const explicitUid = rawAccId.slice(4).trim();
+    if (explicitUid) return `uid:${explicitUid}`;
+  }
+  if (rawAccId.startsWith('phone:')) {
+    const rawP = rawAccId.slice(6).trim();
+    const explicitPhone = rawP ? normalizePhoneNumber(rawP) || rawP : '';
+    if (explicitPhone) return `phone:${explicitPhone}`;
+  }
+  const uid =
+    String(opts.userId || '').trim() ||
+    (rawAccId.startsWith('acc_tg_')
+      ? rawAccId.replace(/^acc_tg_/, '').trim()
+      : rawAccId.startsWith('tg_')
+        ? rawAccId.replace(/^tg_/, '').trim()
+        : !/^00\d+$/.test(rawAccId) && /^\d+$/.test(rawAccId)
+          ? rawAccId
+          : '');
+  if (uid) return `uid:${uid}`;
+  const rawPhoneCandidate =
+    String(opts.phone || '').trim() ||
+    (rawAccId.startsWith('+') || /^00\d+$/.test(rawAccId) ? rawAccId : '');
+  const cleanPhone = rawPhoneCandidate
+    ? normalizePhoneNumber(rawPhoneCandidate) || rawPhoneCandidate
+    : '';
+  if (cleanPhone) return `phone:${cleanPhone}`;
+  return rawAccId ? `acc:${rawAccId}` : '';
+}
+
+export function getOrCreateTelegramAccountRuntimeState(opts: {
+  userId?: string;
+  phone?: string;
+  accountId?: string;
+}): TelegramAccountRuntimeState {
+  const cleanUid = String(opts.userId || '').trim();
+  const rawPhone = String(opts.phone || '').trim();
+  const cleanPhone = rawPhone ? normalizePhoneNumber(rawPhone) || rawPhone : '';
+  const accountKey = resolveTelegramAccountRuntimeKey({
+    userId: cleanUid || undefined,
+    phone: cleanPhone || undefined,
+    accountId: opts.accountId,
+  });
+  const canonicalAccountId = cleanUid
+    ? `acc_tg_${cleanUid}`
+    : String(opts.accountId || '').trim() || cleanPhone || accountKey;
+
+  let existing = telegramAccountRuntimeStates.get(accountKey);
+  if (!existing && cleanUid && cleanPhone) {
+    const phoneKey = `phone:${cleanPhone}`;
+    const legacyPhoneState = telegramAccountRuntimeStates.get(phoneKey);
+    if (legacyPhoneState) {
+      legacyPhoneState.accountKey = accountKey;
+      legacyPhoneState.userId = cleanUid;
+      legacyPhoneState.accountId = canonicalAccountId;
+      telegramAccountRuntimeStates.delete(phoneKey);
+      telegramAccountRuntimeStates.set(accountKey, legacyPhoneState);
+      existing = legacyPhoneState;
+    }
+  }
+
+  if (existing) {
+    if (cleanUid && !existing.userId) existing.userId = cleanUid;
+    if (cleanPhone && !existing.phone) existing.phone = cleanPhone;
+    if (canonicalAccountId && (!existing.accountId || existing.accountId.startsWith('+'))) {
+      existing.accountId = canonicalAccountId;
+    }
+    return existing;
+  }
+
+  const created: TelegramAccountRuntimeState = {
+    accountKey,
+    accountId: canonicalAccountId,
+    userId: cleanUid,
+    phone: cleanPhone,
+    generationId: 0,
+    isInitialConnecting: false,
+    isRestoring: false,
+    isAuthorized: true,
+    transportConnected: false,
+    senderIsReconnecting: false,
+    lastConnectedAt: null,
+    lastDisconnectedAt: null,
+    lastFailureAt: null,
+    nextRetryAt: 0,
+    retryCount: 0,
+    lastError: null,
+    lastErrorCategory: null,
+    offlineReason: null,
+    proxyFingerprint: '',
+    activeRestoreTask: null,
+  };
+  if (accountKey) {
+    telegramAccountRuntimeStates.set(accountKey, created);
+  }
+  return created;
+}
+
+export function classifyTelegramNetworkError(
+  err: any,
+  hasProxy: boolean
+): { category: TelegramNetworkErrorCategory; message: string } {
+  if (err instanceof TelegramNetworkError) {
+    return { category: err.category, message: err.message };
+  }
+  if (isTelegramSessionExpiredError(err)) {
+    return {
+      category: 'session_expired',
+      message: formatTelegramError(err),
+    };
+  }
+  const msg = String(err?.errorMessage || err?.message || err || '');
+  const upper = msg.toUpperCase();
+  if (upper.includes('PROXY_TIMEOUT') || (msg.includes('代理') && upper.includes('TIMEOUT'))) {
+    return {
+      category: 'proxy_timeout',
+      message: msg || '代理服务器连接超时，请确认代理客户端运行正常',
+    };
+  }
+  if (
+    upper.includes('SOCKS') ||
+    upper.includes('HANDSHAKE') ||
+    upper.includes('AUTHENTICATION') ||
+    msg.includes('代理握手')
+  ) {
+    return {
+      category: 'proxy_handshake',
+      message: msg || 'SOCKS 代理握手或认证失败，请检查代理账号密码及协议版本',
+    };
+  }
+  if (
+    upper.includes('TIMEOUT') ||
+    upper.includes('ETIMEDOUT') ||
+    upper.includes('ECONNREFUSED') ||
+    upper.includes('ECONNRESET') ||
+    upper.includes('EHOSTUNREACH') ||
+    upper.includes('ENETUNREACH') ||
+    upper.includes('ENOTFOUND') ||
+    upper.includes('NOT CONNECTED') ||
+    msg.includes('超时')
+  ) {
+    return {
+      category: 'telegram_unreachable',
+      message: hasProxy
+        ? msg.includes('代理')
+          ? msg
+          : '无法通过当前代理连接到 Telegram 服务器，请检查代理节点状态'
+        : msg || '连接 Telegram 服务器失败或超时，请检查网络或代理设置后重试',
+    };
+  }
+  return {
+    category: 'unknown',
+    message: formatTelegramError(err),
+  };
+}
+
+export function inspectGramJsClientState(client?: TelegramClient | null): {
+  exists: boolean;
+  destroyed: boolean;
+  userConnected: boolean;
+  transportConnected: boolean;
+  senderIsReconnecting: boolean;
+  senderIsConnecting: boolean;
+} {
+  if (!client) {
+    return {
+      exists: false,
+      destroyed: false,
+      userConnected: false,
+      transportConnected: false,
+      senderIsReconnecting: false,
+      senderIsConnecting: false,
+    };
+  }
+  const anyClient = client as any;
+  const destroyed = Boolean(anyClient._destroyed || anyClient._tgProDestroyPromise);
+  const sender = anyClient._sender;
+  const userDisconnected = Boolean(sender?.userDisconnected);
+  const userConnected = !destroyed && !userDisconnected && Boolean(anyClient.connected);
+  const senderIsConnecting =
+    !destroyed && !userDisconnected && Boolean(sender?.isConnecting || sender?._connecting);
+  const senderIsReconnecting =
+    !destroyed &&
+    !userDisconnected &&
+    Boolean(sender?.isReconnecting || sender?._reconnecting);
+  let transportConnected = userConnected;
+  if (sender && !destroyed && !userDisconnected) {
+    const conn = sender._connection;
+    if (conn) {
+      if (typeof conn.isConnected === 'function') {
+        try {
+          transportConnected = Boolean(conn.isConnected());
+        } catch {}
+      } else if (typeof conn._connected === 'boolean') {
+        transportConnected = conn._connected;
+      }
+    }
+    if (sender._disconnected === true && !anyClient.connected) {
+      transportConnected = false;
+    }
+  }
+  return {
+    exists: true,
+    destroyed,
+    userConnected,
+    transportConnected,
+    senderIsReconnecting,
+    senderIsConnecting,
+  };
+}
+
+export function getTelegramAccountConnectionSnapshot(
+  conn: ConnectedTelegramUser | undefined,
+  runtime: TelegramAccountRuntimeState | undefined,
+  _opts?: { now?: number }
+): {
+  isConnected: boolean;
+  isAuthorized: boolean;
+  phase: TelegramConnectionPhase;
+  status: 'online' | 'away' | 'offline' | 'expired';
+  isConnecting: boolean;
+  isReconnecting: boolean;
+  offlineReason: string | null;
+} {
+  if (runtime?.lastErrorCategory === 'session_expired') {
+    return {
+      isConnected: false,
+      isAuthorized: false,
+      phase: 'expired',
+      status: 'expired',
+      isConnecting: false,
+      isReconnecting: false,
+      offlineReason: runtime.offlineReason || runtime.lastError || 'Telegram 会话已失效',
+    };
+  }
+
+  const inspected = inspectGramJsClientState(conn?.client);
+  const isAuthorized = runtime ? runtime.isAuthorized : true;
+  const isHealthyOnline = Boolean(
+    conn &&
+      inspected.exists &&
+      !inspected.destroyed &&
+      inspected.userConnected &&
+      inspected.transportConnected &&
+      !inspected.senderIsReconnecting &&
+      isAuthorized
+  );
+
+  if (isHealthyOnline) {
+    return {
+      isConnected: true,
+      isAuthorized: true,
+      phase: 'online',
+      status: 'online',
+      isConnecting: false,
+      isReconnecting: false,
+      offlineReason: null,
+    };
+  }
+
+  if (runtime?.isRestoring) {
+    return {
+      isConnected: false,
+      isAuthorized,
+      phase: 'restoring',
+      status: 'away',
+      isConnecting: true,
+      isReconnecting: false,
+      offlineReason: runtime.offlineReason || runtime.lastError || '正在恢复会话连接...',
+    };
+  }
+
+  if (runtime?.isInitialConnecting || inspected.senderIsConnecting) {
+    return {
+      isConnected: false,
+      isAuthorized,
+      phase: 'connecting',
+      status: 'away',
+      isConnecting: true,
+      isReconnecting: false,
+      offlineReason: runtime?.offlineReason || runtime?.lastError || '正在连接 Telegram...',
+    };
+  }
+
+  if (inspected.senderIsReconnecting || runtime?.senderIsReconnecting) {
+    return {
+      isConnected: false,
+      isAuthorized,
+      phase: 'reconnecting',
+      status: 'away',
+      isConnecting: false,
+      isReconnecting: true,
+      offlineReason: runtime?.offlineReason || runtime?.lastError || '连接波动，正在自动重连...',
+    };
+  }
+
+  return {
+    isConnected: false,
+    isAuthorized,
+    phase: 'offline',
+    status: 'offline',
+    isConnecting: false,
+    isReconnecting: false,
+    offlineReason: runtime?.offlineReason || runtime?.lastError || null,
+  };
+}
+
+export function attachTelegramConnectionStateTracker(
+  client: TelegramClient | null | undefined,
+  meta: { userId?: string; phone?: string; accountId?: string }
+): void {
+  if (!client) return;
+  const anyClient = client as any;
+  if (anyClient._tgProConnTrackerAttached) return;
+  anyClient._tgProConnTrackerAttached = true;
+
+  const runtime = getOrCreateTelegramAccountRuntimeState(meta);
+  const inspected = inspectGramJsClientState(client);
+  runtime.transportConnected = inspected.transportConnected;
+  runtime.senderIsReconnecting = inspected.senderIsReconnecting;
+  if (inspected.userConnected && inspected.transportConnected) {
+    runtime.lastConnectedAt = Date.now();
+  }
+}
 
 // ==================== TELEGRAM ACCOUNT-LEVEL FLOOD_WAIT CIRCUIT BREAKER ====================
 export const TELEGRAM_DIALOGS_CACHE_TTL_MS = 30_000;
@@ -4927,6 +5331,7 @@ app.use('/api', (req: Request, res: Response, next: NextFunction) => {
     '/auth/cloud-redeem',
     '/auth/proxy',
     '/telegram/webhook',
+    '/internal/system-resume',
     '/health',
   ];
 
@@ -5026,11 +5431,11 @@ app.post('/api/auth/proxy', async (req: Request, res: Response) => {
     await saveSystemProxyConfigToDb(validated.config);
 
     let reconnecting = false;
-    if (process.env.NODE_ENV !== 'test' && process.env.AIS_TEST_IMPORT !== 'true' && connectedUserClients.size > 0) {
-      reconnecting = true;
-      void restoreTelegramUserSessionsOnStartup(extractBearerToken(req) || lastActiveUserJwt || undefined, {
-        forceReconnect: true,
-      });
+    if (process.env.NODE_ENV !== 'test' && process.env.AIS_TEST_IMPORT !== 'true') {
+      const recoveryPlan = await triggerProxyChangeRecovery(
+        extractBearerToken(req) || lastActiveUserJwt || undefined
+      );
+      reconnecting = recoveryPlan.triggered;
     }
 
     return res.json({
@@ -5327,8 +5732,9 @@ app.post('/api/auth/logout', requireTenantAuth, async (req: Request, res: Respon
   // Stop all in-memory pending & connected MTProto clients on member logout so no unauthenticated background sync continues
   const uniqueClients = new Map<string, ConnectedTelegramUser>();
   for (const u of connectedUserClients.values()) {
-    if (u?.userId && !uniqueClients.has(u.userId)) {
-      uniqueClients.set(u.userId, u);
+    const dedupKey = u?.userId || u?.phone;
+    if (dedupKey && !uniqueClients.has(dedupKey)) {
+      uniqueClients.set(dedupKey, u);
     }
   }
   for (const u of uniqueClients.values()) {
@@ -5340,6 +5746,7 @@ app.post('/api/auth/logout', requireTenantAuth, async (req: Request, res: Respon
     await destroyTelegramClientSafely(u.client);
   }
   connectedUserClients.clear();
+  telegramAccountRuntimeStates.clear();
   telegramAccountFloodCooldowns.clear();
 
   for (const pending of activeUserClients.values()) {
@@ -19642,8 +20049,15 @@ export const telegramSessionRestoreState: TelegramSessionRestoreState = {
   restoredCount: 0,
   lastError: null,
 };
+interface ActiveRestoreBatchMeta {
+  hasBearerToken: boolean;
+  forceReconnect: boolean;
+  targetAccountKeys: Set<string> | null;
+  proxyFingerprint: string;
+}
+
 let activeRestorePromise: Promise<number> | null = null;
-let activeRestoreMeta: { hasBearerToken: boolean; forceReconnect: boolean } | null = null;
+let activeRestoreMeta: ActiveRestoreBatchMeta | null = null;
 
 export interface SystemProxyConfig {
   enabled: boolean;
@@ -20285,8 +20699,8 @@ app.post('/api/system/proxy', requireTenantAuth, async (req: Request, res: Respo
     let reconnecting = false;
     if (process.env.NODE_ENV !== 'test' && process.env.AIS_TEST_IMPORT !== 'true') {
       const bearerToken = extractBearerToken(req) || lastActiveUserJwt || undefined;
-      reconnecting = true;
-      void restoreTelegramUserSessionsOnStartup(bearerToken, { forceReconnect: true });
+      const recoveryPlan = await triggerProxyChangeRecovery(bearerToken);
+      reconnecting = recoveryPlan.triggered;
     }
     return res.json({
       ok: true,
@@ -20474,17 +20888,303 @@ export function isTelegramSessionExpiredError(err: any): boolean {
   );
 }
 
-export async function withTelegramTimeout<T>(promise: Promise<T>, timeoutMs = 15000, timeoutMessage = '连接 Telegram 服务器超时，请检查网络或代理设置后重试'): Promise<T> {
+export interface TelegramTimeoutOptions {
+  signal?: AbortSignal;
+  onTimeout?: () => void | Promise<void>;
+  onAbort?: () => void | Promise<void>;
+}
+
+const activeTimeoutCleanupCallbacks = new Set<() => void>();
+
+export async function withTelegramTimeout<T>(
+  promiseOrFactory: Promise<T> | ((ctx: { signal: AbortSignal }) => Promise<T>),
+  timeoutMs = 15000,
+  timeoutMessage = '连接 Telegram 服务器超时，请检查网络或代理设置后重试',
+  options?: TelegramTimeoutOptions
+): Promise<T> {
+  const controller = new AbortController();
   let timer: NodeJS.Timeout | null = null;
+  let settled = false;
+  let cleanupDone = false;
+
+  const runCleanupOnce = (reason: 'timeout' | 'abort' | 'shutdown') => {
+    if (cleanupDone) return;
+    cleanupDone = true;
+    try {
+      const fn =
+        reason === 'abort' && options?.onAbort
+          ? options.onAbort
+          : options?.onTimeout;
+      const res = fn?.();
+      if (res && typeof (res as Promise<void>).catch === 'function') {
+        (res as Promise<void>).catch(() => {});
+      }
+    } catch {}
+  };
+
+  let targetPromise: Promise<T>;
   try {
-    return await Promise.race([
-      promise,
-      new Promise<T>((_resolve, reject) => {
-        timer = setTimeout(() => reject(new Error(timeoutMessage)), timeoutMs);
-      }),
-    ]);
+    targetPromise =
+      typeof promiseOrFactory === 'function'
+        ? promiseOrFactory({ signal: controller.signal })
+        : promiseOrFactory;
+  } catch (syncErr) {
+    return Promise.reject(syncErr);
+  }
+
+  // Prevent UnhandledPromiseRejection if an underlying socket/connect rejects after timeout or abort
+  targetPromise.catch(() => {});
+
+  return await new Promise<T>((resolve, reject) => {
+    const detachListeners = () => {
+      if (timer) {
+        clearTimeout(timer);
+        timer = null;
+      }
+      activeTimeoutCleanupCallbacks.delete(forceAbortOnShutdown);
+      if (options?.signal) {
+        options.signal.removeEventListener('abort', abortCleanup);
+      }
+    };
+
+    const abortCleanup = () => {
+      if (settled) return;
+      settled = true;
+      detachListeners();
+      const abortErr = new Error('操作已取消');
+      controller.abort(abortErr);
+      runCleanupOnce('abort');
+      reject(abortErr);
+    };
+
+    const forceAbortOnShutdown = () => {
+      if (settled) return;
+      settled = true;
+      detachListeners();
+      const shutdownErr = new Error('服务正在关闭，连接任务已取消');
+      controller.abort(shutdownErr);
+      runCleanupOnce('shutdown');
+      reject(shutdownErr);
+    };
+
+    activeTimeoutCleanupCallbacks.add(forceAbortOnShutdown);
+
+    if (options?.signal) {
+      if (options.signal.aborted) {
+        abortCleanup();
+        return;
+      }
+      options.signal.addEventListener('abort', abortCleanup, { once: true });
+    }
+
+    timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      detachListeners();
+      const timeoutErr = new Error(timeoutMessage);
+      controller.abort(timeoutErr);
+      runCleanupOnce('timeout');
+      reject(timeoutErr);
+    }, timeoutMs);
+
+    targetPromise.then(
+      (val) => {
+        if (settled) return;
+        settled = true;
+        detachListeners();
+        resolve(val);
+      },
+      (err) => {
+        if (settled) return;
+        settled = true;
+        detachListeners();
+        reject(err);
+      }
+    );
+  });
+}
+
+export async function probeTelegramTransportEndpoint(options: {
+  proxy?: { ip: string; port: number; socksType: 4 | 5; username?: string; password?: string };
+  targetHost?: string;
+  targetPort?: number;
+  connectTimeoutMs?: number;
+  handshakeTimeoutMs?: number;
+  signal?: AbortSignal;
+}): Promise<void> {
+  const proxy = options.proxy;
+  if (!proxy) return;
+
+  const connectTimeoutMs = options.connectTimeoutMs ?? 5000;
+  const handshakeTimeoutMs = options.handshakeTimeoutMs ?? 7000;
+  const targetHost = options.targetHost || '149.154.167.91';
+  const targetPort = options.targetPort || 80;
+
+  // Step 1: Direct TCP reachability check to SOCKS proxy port (supports AbortSignal + immediate socket destruction)
+  const connectedTcpSocket = await new Promise<net.Socket>((resolve, reject) => {
+    let settled = false;
+    const sock = new net.Socket();
+    let timer: NodeJS.Timeout | null = null;
+
+    const detach = () => {
+      if (timer) {
+        clearTimeout(timer);
+        timer = null;
+      }
+      options.signal?.removeEventListener('abort', onAbort);
+      sock.removeAllListeners('connect');
+      sock.removeAllListeners('error');
+    };
+
+    const fail = (err: Error) => {
+      if (settled) return;
+      settled = true;
+      detach();
+      try {
+        sock.destroy();
+      } catch {}
+      reject(err);
+    };
+
+    const onAbort = () => fail(new TelegramNetworkError('proxy_timeout', '代理连接探测已取消'));
+    if (options.signal?.aborted) {
+      onAbort();
+      return;
+    }
+    options.signal?.addEventListener('abort', onAbort, { once: true });
+
+    timer = setTimeout(() => {
+      fail(
+        new TelegramNetworkError(
+          'proxy_timeout',
+          `代理连接超时（${proxy.ip}:${proxy.port} 在 ${Math.round(connectTimeoutMs / 1000)} 秒内无响应）`
+        )
+      );
+    }, connectTimeoutMs);
+
+    sock.once('connect', () => {
+      if (settled) return;
+      settled = true;
+      detach();
+      resolve(sock);
+    });
+
+    sock.once('error', (err: any) => {
+      const code = String(err?.code || '');
+      if (
+        code === 'ECONNREFUSED' ||
+        code === 'EHOSTUNREACH' ||
+        code === 'ENETUNREACH' ||
+        code === 'ENOTFOUND'
+      ) {
+        fail(
+          new TelegramNetworkError(
+            'proxy_timeout',
+            `无法连接到代理服务器 ${proxy.ip}:${proxy.port} (${code})，请确认代理服务已开启`,
+            err
+          )
+        );
+        return;
+      }
+      fail(
+        new TelegramNetworkError(
+          'proxy_timeout',
+          `代理 TCP 连接异常 (${err?.message || code || 'unknown'})`,
+          err
+        )
+      );
+    });
+
+    try {
+      sock.connect(proxy.port, proxy.ip);
+    } catch (syncErr: any) {
+      fail(
+        new TelegramNetworkError(
+          'proxy_timeout',
+          `代理地址无效: ${syncErr?.message || proxy.ip}`,
+          syncErr
+        )
+      );
+    }
+  });
+
+  // Step 2: Explicit SOCKS4/5 handshake check reusing connectedTcpSocket so abort/timeout destroys FD immediately
+  let socksSocket: net.Socket | null = connectedTcpSocket;
+  let handshakeAbortedOrTimedOut = false;
+  const destroySocksSocketSafely = () => {
+    handshakeAbortedOrTimedOut = true;
+    const s = socksSocket;
+    socksSocket = null;
+    try {
+      s?.destroy();
+    } catch {}
+  };
+
+  try {
+    const rawHandshakePromise = SocksClient.createConnection({
+      proxy: {
+        host: proxy.ip,
+        port: proxy.port,
+        type: proxy.socksType,
+        ...(proxy.username ? { userId: proxy.username } : {}),
+        ...(proxy.password ? { password: proxy.password } : {}),
+      },
+      command: 'connect',
+      timeout: handshakeTimeoutMs,
+      existing_socket: connectedTcpSocket,
+      destination: {
+        host: targetHost,
+        port: targetPort,
+      },
+    }).then((info) => {
+      if (handshakeAbortedOrTimedOut) {
+        try {
+          info?.socket?.destroy();
+        } catch {}
+      } else {
+        socksSocket = info?.socket || socksSocket;
+      }
+      return info;
+    });
+
+    const connInfo = await withTelegramTimeout(
+      rawHandshakePromise,
+      handshakeTimeoutMs + 500,
+      `代理握手或目标建连超时 (${proxy.ip}:${proxy.port})`,
+      {
+        signal: options.signal,
+        onTimeout: destroySocksSocketSafely,
+        onAbort: destroySocksSocketSafely,
+      }
+    );
+    socksSocket = connInfo?.socket || socksSocket;
+  } catch (socksErr: any) {
+    if (socksErr instanceof TelegramNetworkError) {
+      throw socksErr;
+    }
+    const rawMsg = String(socksErr?.message || socksErr || '');
+    const upper = rawMsg.toUpperCase();
+    if (
+      upper.includes('AUTHENTICATION') ||
+      upper.includes('SOCKS') ||
+      upper.includes('HANDSHAKE') ||
+      upper.includes('NOT ALLOWED') ||
+      upper.includes('UNSUPPORTED') ||
+      upper.includes('FAILURE')
+    ) {
+      throw new TelegramNetworkError(
+        'proxy_handshake',
+        `SOCKS${proxy.socksType} 代理握手或认证失败（${rawMsg}）`,
+        socksErr
+      );
+    }
+    throw new TelegramNetworkError(
+      'telegram_unreachable',
+      `代理服务已连接，但无法经由代理抵达 Telegram 服务器 ${targetHost}:${targetPort}（${rawMsg}）`,
+      socksErr
+    );
   } finally {
-    if (timer) clearTimeout(timer);
+    destroySocksSocketSafely();
   }
 }
 
@@ -20496,27 +21196,158 @@ export async function markTelegramSessionExpired(opts: {
 }) {
   const { accountId, userId, phone, reason } = opts;
   const connected = resolveConnectedTelegramUser(accountId, phone, userId);
-  const resolvedUserId = userId || connected?.userId || (accountId?.startsWith('acc_tg_') ? accountId.replace(/^acc_tg_/, '') : '');
-  const resolvedPhone = phone || connected?.phone || '';
-  const resolvedAccountId = accountId || (resolvedUserId ? `acc_tg_${resolvedUserId}` : resolvedPhone);
+  let resolvedUserId =
+    String(userId || '').trim() ||
+    String(connected?.userId || '').trim() ||
+    (accountId?.startsWith('acc_tg_')
+      ? accountId.replace(/^acc_tg_/, '').trim()
+      : accountId?.startsWith('tg_')
+        ? accountId.replace(/^tg_/, '').trim()
+        : accountId && !/^00\d+$/.test(accountId.trim()) && /^\d+$/.test(accountId.trim())
+          ? accountId.trim()
+          : '');
+  let resolvedPhone = String(phone || '').trim() || String(connected?.phone || '').trim();
+  if (
+    !resolvedPhone &&
+    accountId &&
+    (accountId.trim().startsWith('+') || /^00\d+$/.test(accountId.trim()))
+  ) {
+    resolvedPhone = accountId.trim();
+  }
+  const inputNormPhone = resolvedPhone ? normalizePhoneNumber(resolvedPhone) : '';
+
+  // 3-step uniqueness validation against telegram_user_sessions (PK: phone):
+  // 1) lookup by user_id -> 2) lookup by normalized phone -> 3) cross-verify same row before single-row UPDATE
+  let validatedDbRow: { phone: string; user_id: string | null } | null = null;
+  let dbIdentityConflict = false;
+  try {
+    let uidRow: { phone: string; user_id: string | null } | null = null;
+    let phoneRow: { phone: string; user_id: string | null } | null = null;
+
+    if (resolvedUserId) {
+      const uidMatches = (await db
+        .prepare('SELECT phone, user_id FROM telegram_user_sessions WHERE user_id = ?')
+        .all(resolvedUserId)) as Array<{ phone?: string; user_id?: string | null }>;
+      if (uidMatches.length > 1) {
+        dbIdentityConflict = true;
+        console.error(
+          `[Telegram Session Expire Error] Multiple DB rows found for user_id=${resolvedUserId}; aborting DB clear to protect accounts.`
+        );
+      } else if (uidMatches.length === 1 && uidMatches[0]?.phone) {
+        uidRow = {
+          phone: String(uidMatches[0].phone).trim(),
+          user_id: uidMatches[0].user_id ? String(uidMatches[0].user_id).trim() : null,
+        };
+      }
+    }
+
+    const phoneCandidates = Array.from(new Set([resolvedPhone, inputNormPhone].filter(Boolean)));
+    if (!dbIdentityConflict && phoneCandidates.length > 0) {
+      const placeholders = phoneCandidates.map(() => '?').join(', ');
+      const phoneMatches = (await db
+        .prepare(`SELECT phone, user_id FROM telegram_user_sessions WHERE phone IN (${placeholders})`)
+        .all(...phoneCandidates)) as Array<{ phone?: string; user_id?: string | null }>;
+      if (phoneMatches.length > 1) {
+        dbIdentityConflict = true;
+        console.error(
+          `[Telegram Session Expire Error] Multiple DB rows found for phone=[${phoneCandidates.join(', ')}]; aborting DB clear.`
+        );
+      } else if (phoneMatches.length === 1 && phoneMatches[0]?.phone) {
+        phoneRow = {
+          phone: String(phoneMatches[0].phone).trim(),
+          user_id: phoneMatches[0].user_id ? String(phoneMatches[0].user_id).trim() : null,
+        };
+      }
+    }
+
+    if (!dbIdentityConflict) {
+      if (uidRow && phoneRow) {
+        const samePrimaryPhone = uidRow.phone === phoneRow.phone;
+        const compatibleUid = !phoneRow.user_id || phoneRow.user_id === uidRow.user_id;
+        if (!samePrimaryPhone || !compatibleUid) {
+          dbIdentityConflict = true;
+          console.error(
+            `[Telegram Session Expire Error] Identity mismatch between user_id row (phone=${uidRow.phone}, uid=${uidRow.user_id}) and phone row (phone=${phoneRow.phone}, uid=${phoneRow.user_id}); aborting DB clear.`
+          );
+        } else {
+          validatedDbRow = uidRow;
+        }
+      } else {
+        validatedDbRow = uidRow || phoneRow;
+      }
+    }
+
+    if (validatedDbRow && !dbIdentityConflict) {
+      if (!resolvedUserId && validatedDbRow.user_id) resolvedUserId = validatedDbRow.user_id;
+      if (!resolvedPhone && validatedDbRow.phone) resolvedPhone = validatedDbRow.phone;
+    }
+  } catch (lookupErr: any) {
+    console.error('[Telegram Session Expire DB Lookup Error]:', lookupErr?.message || lookupErr);
+  }
+
+  const finalNormPhone = resolvedPhone ? normalizePhoneNumber(resolvedPhone) : inputNormPhone;
+  const resolvedAccountId =
+    resolvedUserId ? `acc_tg_${resolvedUserId}` : resolvedPhone || accountId || '';
 
   if (connected) {
-    connectedUserClients.delete(connected.userId);
-    connectedUserClients.delete(connected.phone);
-    connectedUserClients.delete(`acc_tg_${connected.userId}`);
+    if (connected.userId) {
+      connectedUserClients.delete(connected.userId);
+      connectedUserClients.delete(`acc_tg_${connected.userId}`);
+    }
+    if (connected.phone) {
+      connectedUserClients.delete(connected.phone);
+    }
     if (connected.client) {
       await destroyTelegramClientSafely(connected.client);
     }
   }
+  if (resolvedUserId) {
+    connectedUserClients.delete(resolvedUserId);
+    connectedUserClients.delete(`acc_tg_${resolvedUserId}`);
+  }
+  if (resolvedPhone) connectedUserClients.delete(resolvedPhone);
+  if (finalNormPhone) connectedUserClients.delete(finalNormPhone);
 
-  if (resolvedPhone || resolvedUserId) {
-    const normPhone = resolvedPhone ? normalizePhoneNumber(resolvedPhone) : '';
+  const runtimeKey = resolveTelegramAccountRuntimeKey({
+    userId: resolvedUserId || undefined,
+    phone: resolvedPhone || undefined,
+    accountId: resolvedAccountId || undefined,
+  });
+  if (runtimeKey) {
+    const rt = telegramAccountRuntimeStates.get(runtimeKey);
+    if (rt) {
+      rt.generationId += 1;
+      rt.isAuthorized = false;
+      rt.isRestoring = false;
+      rt.isInitialConnecting = false;
+      rt.lastErrorCategory = 'session_expired';
+      rt.lastError = reason || 'Telegram 会话已失效或在其他设备注销';
+      rt.offlineReason = rt.lastError;
+    }
+  }
+
+  if (validatedDbRow && !dbIdentityConflict) {
     const expiredReasonText = reason || 'Telegram 会话已失效或在其他设备注销';
     try {
-      await db
-        .prepare("UPDATE telegram_user_sessions SET is_active = 0, session_string = '', expired_reason = ?, updated_at = ? WHERE phone = ? OR phone = ? OR user_id = ?")
-        .run(expiredReasonText, Date.now(), resolvedPhone || '', normPhone || '', resolvedUserId || '');
-    } catch {}
+      if (validatedDbRow.user_id) {
+        await db
+          .prepare(
+            "UPDATE telegram_user_sessions SET is_active = 0, session_string = '', expired_reason = ?, updated_at = ? WHERE phone = ? AND user_id = ?"
+          )
+          .run(expiredReasonText, Date.now(), validatedDbRow.phone, validatedDbRow.user_id);
+      } else {
+        await db
+          .prepare(
+            "UPDATE telegram_user_sessions SET is_active = 0, session_string = '', expired_reason = ?, updated_at = ? WHERE phone = ? AND (user_id IS NULL OR user_id = '')"
+          )
+          .run(expiredReasonText, Date.now(), validatedDbRow.phone);
+      }
+    } catch (updateErr: any) {
+      console.error(
+        `[Telegram Session Expire DB Update Error] Failed to mark session expired for phone=${validatedDbRow.phone}:`,
+        updateErr?.message || updateErr
+      );
+    }
   }
 
   const key = resolvedUserId || resolvedPhone || resolvedAccountId;
@@ -20683,15 +21514,50 @@ function configureTelegramClientErrorGuard(
   } catch {}
 }
 
-async function destroyTelegramClientSafely(client?: TelegramClient | null) {
-  if (!client) return;
+function silenceGramJsSenderReconnect(client?: TelegramClient | null): void {
+  const senderAny = (client as any)?._sender;
+  if (!senderAny) return;
   try {
-    await client.destroy();
-  } catch {
-    try {
-      await client.disconnect();
-    } catch {}
+    senderAny.userDisconnected = true;
+    senderAny._autoReconnect = false;
+    senderAny._retries = 0;
+    senderAny._reconnectRetries = 0;
+    // Prevent already-queued GramJS sleep(1000).then(() => this._reconnect()) from resetting userDisconnected=false
+    if (typeof senderAny.reconnect === 'function') {
+      senderAny.reconnect = () => {};
+    }
+    if (typeof senderAny._reconnect === 'function') {
+      senderAny._reconnect = async () => {};
+    }
+    senderAny._connection?.disconnect?.();
+  } catch {}
+}
+
+export async function destroyTelegramClientSafely(
+  client?: TelegramClient | null
+): Promise<void> {
+  if (!client) return;
+  const anyClient = client as any;
+  if (anyClient._tgProDestroyPromise) {
+    return anyClient._tgProDestroyPromise;
   }
+  // Mark userDisconnected & halt transport/reconnect timers immediately before async destroy
+  silenceGramJsSenderReconnect(client);
+  const destroyTask = (async () => {
+    try {
+      await client.destroy();
+    } catch {
+      try {
+        await client.disconnect();
+      } catch {}
+    } finally {
+      try {
+        anyClient._destroyed = true;
+      } catch {}
+    }
+  })();
+  anyClient._tgProDestroyPromise = destroyTask;
+  return destroyTask;
 }
 
 // Helper to safely disconnect pending user client
@@ -21257,6 +22123,7 @@ async function finishQrLogin(sessionObj: QrSessionContext, user: any) {
   };
 
   // Register in-memory connected user client session
+  const qrProxyFingerprint = getTelegramProxyFingerprint(getConfiguredTelegramProxy());
   const userConnectedObj: ConnectedTelegramUser = {
     client: sessionObj.client,
     phone: cleanPhone,
@@ -21269,6 +22136,7 @@ async function finishQrLogin(sessionObj: QrSessionContext, user: any) {
     apiId: sessionObj.apiId,
     apiHash: sessionObj.apiHash,
     connectedAt: now,
+    proxyFingerprint: qrProxyFingerprint,
     dialogs: [],
   };
 
@@ -21277,7 +22145,31 @@ async function finishQrLogin(sessionObj: QrSessionContext, user: any) {
   connectedUserClients.set(`acc_tg_${user.id}`, userConnectedObj);
   clearExpiredAccountRecord(String(user.id), cleanPhone);
 
+  const qrRuntime = getOrCreateTelegramAccountRuntimeState({
+    userId: String(user.id),
+    phone: cleanPhone,
+    accountId: `acc_tg_${user.id}`,
+  });
+  qrRuntime.generationId += 1;
+  qrRuntime.isInitialConnecting = false;
+  qrRuntime.isRestoring = false;
+  qrRuntime.isAuthorized = true;
+  qrRuntime.transportConnected = true;
+  qrRuntime.senderIsReconnecting = false;
+  qrRuntime.lastConnectedAt = now;
+  qrRuntime.retryCount = 0;
+  qrRuntime.nextRetryAt = 0;
+  qrRuntime.lastError = null;
+  qrRuntime.lastErrorCategory = null;
+  qrRuntime.offlineReason = null;
+  qrRuntime.proxyFingerprint = qrProxyFingerprint;
+
   configureTelegramClientErrorGuard(sessionObj.client, cleanPhone, {
+    userId: String(user.id),
+    phone: cleanPhone,
+    accountId: `acc_tg_${user.id}`,
+  });
+  attachTelegramConnectionStateTracker(sessionObj.client, {
     userId: String(user.id),
     phone: cleanPhone,
     accountId: `acc_tg_${user.id}`,
@@ -21754,6 +22646,7 @@ app.post('/api/telegram/user/verify-code', requireTenantAuth, authAttemptLimiter
     );
 
     // Register in-memory connected user client session
+    const phoneLoginProxyFingerprint = getTelegramProxyFingerprint(getConfiguredTelegramProxy());
     const userConnectedObj: ConnectedTelegramUser = {
       client,
       phone: cleanPhone,
@@ -21766,6 +22659,7 @@ app.post('/api/telegram/user/verify-code', requireTenantAuth, authAttemptLimiter
       apiId: userSession.apiId,
       apiHash: userSession.apiHash,
       connectedAt: now,
+      proxyFingerprint: phoneLoginProxyFingerprint,
       dialogs: [],
     };
 
@@ -21774,7 +22668,31 @@ app.post('/api/telegram/user/verify-code', requireTenantAuth, authAttemptLimiter
     connectedUserClients.set(`acc_tg_${me.id}`, userConnectedObj);
     clearExpiredAccountRecord(String(me.id), cleanPhone);
 
+    const phoneRuntime = getOrCreateTelegramAccountRuntimeState({
+      userId: String(me.id),
+      phone: cleanPhone,
+      accountId: `acc_tg_${me.id}`,
+    });
+    phoneRuntime.generationId += 1;
+    phoneRuntime.isInitialConnecting = false;
+    phoneRuntime.isRestoring = false;
+    phoneRuntime.isAuthorized = true;
+    phoneRuntime.transportConnected = true;
+    phoneRuntime.senderIsReconnecting = false;
+    phoneRuntime.lastConnectedAt = now;
+    phoneRuntime.retryCount = 0;
+    phoneRuntime.nextRetryAt = 0;
+    phoneRuntime.lastError = null;
+    phoneRuntime.lastErrorCategory = null;
+    phoneRuntime.offlineReason = null;
+    phoneRuntime.proxyFingerprint = phoneLoginProxyFingerprint;
+
     configureTelegramClientErrorGuard(client, cleanPhone, {
+      userId: String(me.id),
+      phone: cleanPhone,
+      accountId: `acc_tg_${me.id}`,
+    });
+    attachTelegramConnectionStateTracker(client, {
       userId: String(me.id),
       phone: cleanPhone,
       accountId: `acc_tg_${me.id}`,
@@ -21842,27 +22760,50 @@ app.get('/api/telegram/user/status', requireTenantAuth, async (req: Request, res
       sessionRows = [];
     }
 
-    // Merge in-memory active clients with genuine MTProto socket connected state
+    // Merge in-memory active clients with genuine MTProto transport state & per-account runtime state
     const inMemoryActiveList: any[] = [];
+    const seenRuntimeKeys = new Set<string>();
     const seenUserIds = new Set<string>();
 
     for (const u of connectedUserClients.values()) {
-      if (!seenUserIds.has(u.userId)) {
-        seenUserIds.add(u.userId);
-        const realConnected = Boolean(u.client?.connected);
-        inMemoryActiveList.push({
-          id: `acc_tg_${u.userId}`,
-          phone: u.phone,
-          userId: u.userId,
-          username: u.username,
-          firstName: u.firstName,
-          updatedAt: u.connectedAt,
-          dialogsCount: u.dialogs.length,
-          isInMemoryConnected: true,
-          isConnected: realConnected,
-          status: realConnected ? 'online' : 'away',
-        });
-      }
+      const uid = u.userId ? String(u.userId).trim() : '';
+      const rawPhone = u.phone ? String(u.phone).trim() : '';
+      const normPhone = rawPhone ? normalizePhoneNumber(rawPhone) || rawPhone : '';
+      const canonicalId = uid ? `acc_tg_${uid}` : normPhone;
+      const runtimeKey = resolveTelegramAccountRuntimeKey({
+        userId: uid || undefined,
+        phone: normPhone || undefined,
+        accountId: canonicalId || undefined,
+      });
+      if (!runtimeKey || seenRuntimeKeys.has(runtimeKey)) continue;
+      seenRuntimeKeys.add(runtimeKey);
+      if (uid) seenUserIds.add(uid);
+
+      const runtime = getOrCreateTelegramAccountRuntimeState({
+        userId: uid || undefined,
+        phone: normPhone || undefined,
+        accountId: canonicalId,
+      });
+      const snap = getTelegramAccountConnectionSnapshot(u, runtime);
+      inMemoryActiveList.push({
+        id: canonicalId,
+        phone: u.phone,
+        userId: uid,
+        username: u.username,
+        firstName: u.firstName,
+        updatedAt: u.connectedAt,
+        dialogsCount: u.dialogs.length,
+        isInMemoryConnected: true,
+        isConnected: snap.isConnected,
+        isConnecting: snap.isConnecting,
+        isReconnecting: snap.isReconnecting,
+        status: snap.phase,
+        retryCount: runtime.retryCount,
+        nextRetryAt: runtime.nextRetryAt,
+        lastConnectedAt: runtime.lastConnectedAt,
+        lastError: runtime.lastError,
+        offlineReason: snap.offlineReason || undefined,
+      });
     }
 
     const defaultOfflineReason = !hasCredsInMemory
@@ -21872,22 +22813,47 @@ app.get('/api/telegram/user/status', requireTenantAuth, async (req: Request, res
         : telegramSessionRestoreState.lastError || 'MTProto 连接尚未建立，请点击重新连接';
 
     for (const r of sessionRows) {
-      if (!seenUserIds.has(r.user_id)) {
-        seenUserIds.add(r.user_id);
-        inMemoryActiveList.push({
-          id: `acc_tg_${r.user_id}`,
-          phone: r.phone,
-          userId: r.user_id,
-          username: r.username ? `@${r.username}` : '',
-          firstName: r.first_name,
-          updatedAt: r.updated_at,
-          dialogsCount: 0,
-          isInMemoryConnected: false,
-          isConnected: false,
-          status: 'offline',
-          offlineReason: defaultOfflineReason,
-        });
-      }
+      const uid = r.user_id ? String(r.user_id).trim() : '';
+      const rawPhone = r.phone ? String(r.phone).trim() : '';
+      const normPhone = rawPhone ? normalizePhoneNumber(rawPhone) || rawPhone : '';
+      const canonicalId = uid ? `acc_tg_${uid}` : normPhone;
+      const runtimeKey = resolveTelegramAccountRuntimeKey({
+        userId: uid || undefined,
+        phone: normPhone || undefined,
+        accountId: canonicalId || undefined,
+      });
+      if (!runtimeKey || seenRuntimeKeys.has(runtimeKey)) continue;
+      seenRuntimeKeys.add(runtimeKey);
+      if (uid) seenUserIds.add(uid);
+
+      const runtime = getOrCreateTelegramAccountRuntimeState({
+        userId: uid || undefined,
+        phone: normPhone || undefined,
+        accountId: canonicalId,
+      });
+      const snap = getTelegramAccountConnectionSnapshot(undefined, runtime);
+      inMemoryActiveList.push({
+        id: canonicalId,
+        phone: r.phone,
+        userId: uid,
+        username: r.username ? `@${r.username}` : '',
+        firstName: r.first_name,
+        updatedAt: r.updated_at,
+        dialogsCount: 0,
+        isInMemoryConnected: false,
+        isConnected: false,
+        isConnecting: snap.isConnecting,
+        isReconnecting: snap.isReconnecting,
+        status: snap.phase,
+        retryCount: runtime.retryCount,
+        nextRetryAt: runtime.nextRetryAt,
+        lastConnectedAt: runtime.lastConnectedAt,
+        lastError: runtime.lastError,
+        offlineReason:
+          snap.phase === 'offline'
+            ? snap.offlineReason || defaultOfflineReason
+            : snap.offlineReason || undefined,
+      });
     }
 
     let expiredRows: any[] = [];
@@ -21904,13 +22870,19 @@ app.get('/api/telegram/user/status', requireTenantAuth, async (req: Request, res
 
     const expiredMap = new Map<string, ExpiredTelegramAccountInfo>();
     for (const row of expiredRows) {
-      const uid = row.user_id ? String(row.user_id) : '';
-      const accId = uid ? `acc_tg_${uid}` : String(row.phone || '');
-      if (accId && !seenUserIds.has(uid)) {
+      const uid = row.user_id ? String(row.user_id).trim() : '';
+      const phone = row.phone ? String(row.phone).trim() : '';
+      const accId = uid ? `acc_tg_${uid}` : phone;
+      const rKey = resolveTelegramAccountRuntimeKey({
+        userId: uid || undefined,
+        phone: phone || undefined,
+        accountId: accId || undefined,
+      });
+      if (accId && !(uid && seenUserIds.has(uid)) && !(rKey && seenRuntimeKeys.has(rKey))) {
         expiredMap.set(accId, {
           accountId: accId,
           userId: uid || undefined,
-          phone: row.phone ? String(row.phone) : undefined,
+          phone: phone || undefined,
           reason: String(row.expired_reason || 'Telegram 登录会话已失效，请重新登录'),
           expiredAt: Number(row.updated_at) || Date.now(),
         });
@@ -21918,7 +22890,12 @@ app.get('/api/telegram/user/status', requireTenantAuth, async (req: Request, res
     }
     for (const exp of recentlyExpiredAccounts.values()) {
       const accId = exp.accountId || (exp.userId ? `acc_tg_${exp.userId}` : exp.phone || '');
-      if (accId && !seenUserIds.has(exp.userId || '')) {
+      const rKey = resolveTelegramAccountRuntimeKey({
+        userId: exp.userId,
+        phone: exp.phone,
+        accountId: accId || undefined,
+      });
+      if (accId && !(exp.userId && seenUserIds.has(exp.userId)) && !(rKey && seenRuntimeKeys.has(rKey))) {
         expiredMap.set(accId, exp);
       }
     }
@@ -21944,6 +22921,15 @@ app.post('/api/telegram/user/reconnect', requireTenantAuth, async (req: Request,
     const bearerToken = extractBearerToken(req);
     const forceCredsRefresh = Boolean(req.body?.forceCredsRefresh);
     const forceReconnect = Boolean(req.body?.forceReconnect);
+    const targetAccountId = typeof req.body?.accountId === 'string' ? req.body.accountId.trim() : '';
+    const targetUserId = typeof req.body?.userId === 'string' ? req.body.userId.trim() : '';
+    const targetPhoneRaw = typeof req.body?.phone === 'string' ? req.body.phone.trim() : '';
+    const targetPhone = targetPhoneRaw
+      ? normalizePhoneNumber(targetPhoneRaw) || targetPhoneRaw
+      : targetAccountId.startsWith('+') || /^00\d+$/.test(targetAccountId)
+        ? normalizePhoneNumber(targetAccountId) || targetAccountId
+        : '';
+
     const creds = await resolveTelegramApiCredentials({
       bearerToken,
       forceCloudRefresh: forceCredsRefresh,
@@ -21956,15 +22942,72 @@ app.post('/api/telegram/user/reconnect', requireTenantAuth, async (req: Request,
       });
     }
 
-    await loadSystemProxyConfigFromDb();
-    const restoredCount = await restoreTelegramUserSessionsOnStartup(bearerToken, { forceReconnect });
-    const activeOnlineCount = Array.from(connectedUserClients.values()).filter((u) => Boolean(u.client?.connected)).length;
+    const targetRuntimeKey =
+      targetAccountId || targetUserId || targetPhone
+        ? resolveTelegramAccountRuntimeKey({
+            accountId: targetAccountId || undefined,
+            userId: targetUserId || undefined,
+            phone: targetPhone || undefined,
+          })
+        : '';
+    const normTargetPhone = targetPhone ? normalizePhoneNumber(targetPhone) || targetPhone : '';
+    for (const rt of telegramAccountRuntimeStates.values()) {
+      const matchesTarget =
+        (!targetAccountId && !targetUserId && !normTargetPhone) ||
+        (targetAccountId && rt.accountId === targetAccountId) ||
+        (targetRuntimeKey && rt.accountKey === targetRuntimeKey) ||
+        (normTargetPhone && (rt.phone === normTargetPhone || rt.phone === targetPhone));
+      if (matchesTarget) {
+        rt.nextRetryAt = 0;
+      }
+    }
 
-    if (telegramSessionRestoreState.lastError && restoredCount === 0 && activeOnlineCount === 0) {
+    await loadSystemProxyConfigFromDb();
+    const reconnectTargetKeys = Array.from(
+      new Set([targetRuntimeKey, normTargetPhone ? `phone:${normTargetPhone}` : ''].filter(Boolean))
+    );
+    const restoredCount = await restoreTelegramUserSessionsOnStartup(bearerToken, {
+      forceReconnect,
+      ...(reconnectTargetKeys.length > 0 ? { targetAccountKeys: reconnectTargetKeys } : {}),
+      reason: 'manual_reconnect',
+    });
+    const activeOnlineCount = Array.from(connectedUserClients.values()).filter((u) => {
+      const rt = telegramAccountRuntimeStates.get(
+        resolveTelegramAccountRuntimeKey({ userId: u.userId, phone: u.phone })
+      );
+      return getTelegramAccountConnectionSnapshot(u, rt).isConnected;
+    }).length;
+
+    const hasTarget = Boolean(targetAccountId || targetUserId || normTargetPhone);
+    let targetRuntime: TelegramAccountRuntimeState | undefined = targetRuntimeKey
+      ? telegramAccountRuntimeStates.get(targetRuntimeKey)
+      : undefined;
+    if (!targetRuntime && hasTarget) {
+      for (const rt of telegramAccountRuntimeStates.values()) {
+        if (
+          (targetAccountId && rt.accountId === targetAccountId) ||
+          (targetRuntimeKey && rt.accountKey === targetRuntimeKey) ||
+          (normTargetPhone && (rt.phone === normTargetPhone || rt.phone === targetPhone))
+        ) {
+          targetRuntime = rt;
+          break;
+        }
+      }
+    }
+    const targetConn = hasTarget
+      ? resolveConnectedTelegramUser(targetAccountId || undefined, normTargetPhone || undefined, targetUserId || undefined)
+      : undefined;
+    const targetIsOnline = Boolean(
+      targetConn && getTelegramAccountConnectionSnapshot(targetConn, targetRuntime).isConnected
+    );
+    const targetError = hasTarget
+      ? targetRuntime?.lastError || null
+      : targetRuntime?.lastError || telegramSessionRestoreState.lastError;
+    if (!(hasTarget && targetIsOnline) && targetError && restoredCount === 0 && (hasTarget || activeOnlineCount === 0)) {
       return res.status(502).json({
         ok: false,
         restoredCount,
-        error: telegramSessionRestoreState.lastError,
+        error: targetError,
       });
     }
 
@@ -23016,23 +24059,30 @@ app.get('/api/telegram/user/active-accounts', requireTenantAuth, async (_req: Re
   try {
     const unique = new Map<string, any>();
     for (const u of connectedUserClients.values()) {
-      const realConnected = Boolean(u.client?.connected);
-      unique.set(u.userId, {
-        id: `acc_tg_${u.userId}`,
-        userId: u.userId,
+      const uid = u.userId ? String(u.userId).trim() : '';
+      const normPhone = u.phone ? normalizePhoneNumber(u.phone) || u.phone : '';
+      const canonicalId = uid ? `acc_tg_${uid}` : normPhone;
+      const dedupKey = uid || normPhone;
+      if (!dedupKey || unique.has(dedupKey)) continue;
+      const runtime = telegramAccountRuntimeStates.get(
+        resolveTelegramAccountRuntimeKey({ userId: uid || undefined, phone: normPhone || undefined })
+      );
+      const snap = getTelegramAccountConnectionSnapshot(u, runtime);
+      unique.set(dedupKey, {
+        id: canonicalId,
+        userId: uid,
         name: `${u.firstName || ''} ${u.lastName || ''}`.trim() || 'Telegram 账号',
-        username: u.username || `@user_${u.userId.slice(-4)}`,
+        username: u.username || (uid ? `@user_${uid.slice(-4)}` : normPhone),
         phone: u.phone,
         avatarBg: u.avatarBg,
         avatarInitial: u.avatarInitial,
-        avatarUrl: signTelegramResourceUrl(
-          `/api/telegram/user/avatar/${u.userId}`,
-          `acc_tg_${u.userId}`
-        ),
+        avatarUrl: uid
+          ? signTelegramResourceUrl(`/api/telegram/user/avatar/${uid}`, `acc_tg_${uid}`)
+          : undefined,
         connectedAt: u.connectedAt,
         dialogsCount: u.dialogs.length,
-        isConnected: realConnected,
-        status: realConnected ? 'online' : 'away',
+        isConnected: snap.isConnected,
+        status: snap.status,
       });
     }
     res.json({
@@ -26568,24 +27618,52 @@ app.post('/api/telegram/user/send-sticker', requireTenantAuth, async (req: Reque
 });
 
 // Helper to resolve connected MTProto client by accountId / phone / userId
-function resolveConnectedTelegramUser(accountId?: string, phone?: string, userId?: string): ConnectedTelegramUser | undefined {
-  let connected: ConnectedTelegramUser | undefined =
-    (accountId ? connectedUserClients.get(accountId) : undefined) ||
-    (phone ? connectedUserClients.get(phone) : undefined) ||
-    (userId ? connectedUserClients.get(String(userId)) : undefined);
+export function resolveConnectedTelegramUser(
+  accountId?: string,
+  phone?: string,
+  userId?: string
+): ConnectedTelegramUser | undefined {
+  const rawAcc = String(accountId || '').trim();
+  const rawPhone = String(phone || '').trim();
+  const normPhone = rawPhone ? normalizePhoneNumber(rawPhone) : '';
+  const accNormPhone =
+    rawAcc.startsWith('phone:')
+      ? normalizePhoneNumber(rawAcc.slice(6).trim())
+      : rawAcc.startsWith('+') || /^00\d+$/.test(rawAcc)
+        ? normalizePhoneNumber(rawAcc)
+        : '';
+  const rawUid =
+    String(userId || '').trim() ||
+    (rawAcc.startsWith('uid:')
+      ? rawAcc.slice(4).trim()
+      : rawAcc.startsWith('acc_tg_')
+        ? rawAcc.replace(/^acc_tg_/, '').trim()
+        : rawAcc.startsWith('tg_')
+          ? rawAcc.replace(/^tg_/, '').trim()
+          : !accNormPhone && /^\d+$/.test(rawAcc)
+            ? rawAcc
+            : '');
 
-  if (!connected && (accountId || phone || userId)) {
-    const normalizedAccId = accountId ? String(accountId).replace(/^acc_tg_/, '').replace(/^tg_/, '') : '';
+  let connected: ConnectedTelegramUser | undefined =
+    (rawAcc ? connectedUserClients.get(rawAcc) : undefined) ||
+    (rawPhone ? connectedUserClients.get(rawPhone) : undefined) ||
+    (normPhone ? connectedUserClients.get(normPhone) : undefined) ||
+    (accNormPhone ? connectedUserClients.get(accNormPhone) : undefined) ||
+    (rawUid ? connectedUserClients.get(rawUid) : undefined) ||
+    (rawUid ? connectedUserClients.get(`acc_tg_${rawUid}`) : undefined);
+
+  if (!connected && (rawAcc || rawPhone || rawUid)) {
     connected = Array.from(connectedUserClients.values()).find(
       (u) =>
-        (accountId &&
-          (u.userId === accountId ||
-            u.userId === normalizedAccId ||
-            u.phone === accountId ||
-            `acc_tg_${u.userId}` === accountId ||
-            `tg_${u.userId}` === accountId)) ||
-        (phone && u.phone === phone) ||
-        (userId && u.userId === String(userId))
+        (rawAcc &&
+          (u.userId === rawAcc ||
+            (rawUid && u.userId === rawUid) ||
+            u.phone === rawAcc ||
+            (accNormPhone && normalizePhoneNumber(u.phone) === accNormPhone) ||
+            `acc_tg_${u.userId}` === rawAcc ||
+            `tg_${u.userId}` === rawAcc)) ||
+        (rawPhone && (u.phone === rawPhone || (normPhone && normalizePhoneNumber(u.phone) === normPhone))) ||
+        (rawUid && u.userId === rawUid)
     );
   }
   return connected;
@@ -30363,18 +31441,55 @@ ${memories.slice(-3).map((m: any) => `  * [${m.date}] ${m.topic}: ${m.summary}`)
   }
 }
 
+export interface TelegramRestoreDeps {
+  createClient?: (
+    sessionStr: string,
+    apiId: number,
+    apiHash: string,
+    proxy?: { ip: string; port: number; socksType: 4 | 5; timeout?: number; username?: string; password?: string }
+  ) => TelegramClient;
+  probeProxy?: typeof probeTelegramTransportEndpoint;
+  destroyClient?: typeof destroyTelegramClientSafely;
+  attachListener?: typeof attachTelegramClientMessageListener;
+  getProxyConfig?: typeof getConfiguredTelegramProxy;
+  resolveCredentials?: typeof resolveTelegramApiCredentials;
+  connectTimeoutMs?: number;
+  authTimeoutMs?: number;
+  now?: () => number;
+}
+
 // On-demand/startup restoration of encrypted Telegram user sessions (uses RAM-only/grace credentials, deduplicated & token-upgrade safe)
 export async function restoreTelegramUserSessionsOnStartup(
   bearerToken?: string,
-  options?: { forceReconnect?: boolean }
+  options?: { forceReconnect?: boolean } & {
+    targetAccountKeys?: string[];
+    reason?: string;
+    deps?: TelegramRestoreDeps;
+  }
 ): Promise<number> {
   const effectiveBearer = (bearerToken && bearerToken.trim()) || lastActiveUserJwt || undefined;
   const forceReconnect = Boolean(options?.forceReconnect);
+  const currentProxyFingerprint = getTelegramProxyFingerprint(
+    (options?.deps?.getProxyConfig || getConfiguredTelegramProxy)()
+  );
+  const targetAccountSet =
+    Array.isArray(options?.targetAccountKeys) && options.targetAccountKeys.length > 0
+      ? new Set(options.targetAccountKeys.filter(Boolean))
+      : null;
 
   if (activeRestorePromise) {
     const needsTokenUpgrade = Boolean(effectiveBearer && !activeRestoreMeta?.hasBearerToken);
     const needsForceUpgrade = Boolean(forceReconnect && !activeRestoreMeta?.forceReconnect);
-    if (needsTokenUpgrade || needsForceUpgrade) {
+    const hasUncoveredTargets = Boolean(
+      activeRestoreMeta?.targetAccountKeys &&
+        (!targetAccountSet ||
+          Array.from(targetAccountSet).some((k) => !activeRestoreMeta!.targetAccountKeys!.has(k)))
+    );
+    const proxyChangedDuringFlight = Boolean(
+      activeRestoreMeta?.proxyFingerprint &&
+        activeRestoreMeta.proxyFingerprint !== currentProxyFingerprint
+    );
+    if (needsTokenUpgrade || needsForceUpgrade || hasUncoveredTargets || proxyChangedDuringFlight) {
       const inflight = activeRestorePromise;
       try {
         await inflight;
@@ -30387,6 +31502,8 @@ export async function restoreTelegramUserSessionsOnStartup(
   activeRestoreMeta = {
     hasBearerToken: Boolean(effectiveBearer),
     forceReconnect,
+    targetAccountKeys: targetAccountSet ? new Set(targetAccountSet) : null,
+    proxyFingerprint: currentProxyFingerprint,
   };
 
   activeRestorePromise = (async () => {
@@ -30394,9 +31511,21 @@ export async function restoreTelegramUserSessionsOnStartup(
     telegramSessionRestoreState.lastAttemptAt = Date.now();
     telegramSessionRestoreState.lastError = null;
 
+    const nowFn = options?.deps?.now || Date.now;
+    const probeFn = options?.deps?.probeProxy || probeTelegramTransportEndpoint;
+    const destroyFn = options?.deps?.destroyClient || destroyTelegramClientSafely;
+    const attachFn = options?.deps?.attachListener || attachTelegramClientMessageListener;
+    const resolveCredsFn = options?.deps?.resolveCredentials || resolveTelegramApiCredentials;
+    const getProxyFn = options?.deps?.getProxyConfig || getConfiguredTelegramProxy;
+    const connectTimeoutMs = options?.deps?.connectTimeoutMs ?? 15000;
+    const authTimeoutMs = options?.deps?.authTimeoutMs ?? 10000;
+    const reason = options?.reason || 'startup';
+
     try {
       await purgePersistedTelegramApiCredentialsFromDb();
-      await loadSystemProxyConfigFromDb();
+      if (!options?.deps?.getProxyConfig) {
+        await loadSystemProxyConfigFromDb();
+      }
 
       let rows: any[] = [];
       try {
@@ -30437,137 +31566,543 @@ export async function restoreTelegramUserSessionsOnStartup(
         if (dedupedRows.length >= MAX_TELEGRAM_ACCOUNTS) break;
       }
 
+      const filteredRows = targetAccountSet
+        ? dedupedRows.filter((r) => {
+            const rowUid = r.user_id ? String(r.user_id).trim() : '';
+            const rowPhoneRaw = r.phone ? String(r.phone).trim() : '';
+            const rowNormPhone = rowPhoneRaw ? normalizePhoneNumber(rowPhoneRaw) || rowPhoneRaw : '';
+            const canonicalKey = resolveTelegramAccountRuntimeKey({
+              userId: rowUid || undefined,
+              phone: rowNormPhone || undefined,
+            });
+            return Boolean(
+              (canonicalKey && targetAccountSet.has(canonicalKey)) ||
+                (rowNormPhone && targetAccountSet.has(`phone:${rowNormPhone}`)) ||
+                (rowPhoneRaw && targetAccountSet.has(`phone:${rowPhoneRaw}`)) ||
+                (rowUid && targetAccountSet.has(`uid:${rowUid}`))
+            );
+          })
+        : dedupedRows;
+
+      if (filteredRows.length === 0) {
+        return 0;
+      }
+
       const hasCredsPath = Boolean(
-        effectiveBearer || getEnvTelegramApiCredentials() || getInMemoryTelegramApiCredentials()
+        options?.deps?.resolveCredentials ||
+          effectiveBearer ||
+          getEnvTelegramApiCredentials() ||
+          getInMemoryTelegramApiCredentials()
       );
       if (!hasCredsPath) {
         telegramSessionRestoreState.lastError = null;
         return 0;
       }
 
-      const creds = await resolveTelegramApiCredentials({ bearerToken: effectiveBearer });
+      const creds = await resolveCredsFn({ bearerToken: effectiveBearer });
       if (!creds.ok || !creds.apiId || !creds.apiHash) {
-        telegramSessionRestoreState.lastError = creds.error || '云端 Telegram 接入凭据暂不可用，请检查会员登录或网络连接';
+        telegramSessionRestoreState.lastError =
+          creds.error || '云端 Telegram 接入凭据暂不可用，请检查会员登录或网络连接';
         return 0;
       }
 
       const useApiId = creds.apiId;
       const useApiHash = creds.apiHash;
-      const telegramProxy = getConfiguredTelegramProxy();
+      const telegramProxy = getProxyFn();
+      const proxyFingerprint = getTelegramProxyFingerprint(telegramProxy);
       let restoredCount = 0;
       let lastFailureMsg: string | null = null;
 
-      const restoreSingleRow = async (row: any) => {
-        const cleanPhone = row.phone;
-        const uidStr = row.user_id ? String(row.user_id) : '';
-        const existingConn =
-          connectedUserClients.get(cleanPhone) ||
-          (uidStr ? connectedUserClients.get(uidStr) : undefined) ||
-          (uidStr ? connectedUserClients.get(`acc_tg_${uidStr}`) : undefined);
+      const restoreSingleRow = async (row: any): Promise<boolean> => {
+        const rawDbPhone = String(row.phone || '').trim();
+        const cleanPhone = rawDbPhone ? normalizePhoneNumber(rawDbPhone) || rawDbPhone : '';
+        const uidStr = row.user_id ? String(row.user_id).trim() : '';
+        const accountId = uidStr ? `acc_tg_${uidStr}` : cleanPhone;
+        const runtime = getOrCreateTelegramAccountRuntimeState({
+          userId: uidStr || undefined,
+          phone: cleanPhone || undefined,
+          accountId,
+        });
 
-        if (existingConn) {
-          if (!forceReconnect && existingConn.client?.connected) {
-            return;
+        // Per-account single-flight coordination
+        if (runtime.activeRestoreTask) {
+          if (!forceReconnect) {
+            return await runtime.activeRestoreTask;
           }
-          // Tear down disconnected or proxy-stale client cleanly before reconnecting
-          if (existingConn.phone) connectedUserClients.delete(existingConn.phone);
-          if (existingConn.userId) {
-            connectedUserClients.delete(existingConn.userId);
-            connectedUserClients.delete(`acc_tg_${existingConn.userId}`);
-          }
-          connectedUserClients.delete(cleanPhone);
-          await destroyTelegramClientSafely(existingConn.client);
+          // Preempt older generation only when explicitly forcing reconnect
+          runtime.generationId += 1;
+          try {
+            await runtime.activeRestoreTask;
+          } catch {}
         }
 
+        const myGeneration = ++runtime.generationId;
         const rawEncryptedSession = row.session_string;
         const decryptedSession = decryptSensitiveData(rawEncryptedSession);
-        if (!decryptedSession) return;
+        if (!decryptedSession) return false;
 
-        let client: TelegramClient | null = null;
-        try {
-          client = new TelegramClient(
-            new StringSession(decryptedSession),
-            useApiId,
-            useApiHash,
-            {
-              connectionRetries: 5,
-              useWSS: false,
-              autoReconnect: true,
-              ...TELEGRAM_DESKTOP_CLIENT_PARAMS,
-              ...(telegramProxy ? { proxy: telegramProxy } : {}),
+        runtime.isRestoring = true;
+        if (runtime.lastConnectedAt === null) {
+          runtime.isInitialConnecting = true;
+        }
+        runtime.offlineReason = null;
+
+        let task: Promise<boolean> | null = null;
+        task = (async (): Promise<boolean> => {
+          let candidateClient: TelegramClient | null = null;
+          let candidateDisposePromise: Promise<void> | null = null;
+          let candidateCommitted = false;
+          let disconnectedOldClient: TelegramClient | null = null;
+          const restoreAbortController = new AbortController();
+
+          const disposeCandidate = (): Promise<void> => {
+            if (candidateCommitted) return Promise.resolve();
+            if (candidateDisposePromise) return candidateDisposePromise;
+            const orphan = candidateClient;
+            candidateClient = null;
+            if (!orphan) {
+              candidateDisposePromise = Promise.resolve();
+              return candidateDisposePromise;
             }
+            candidateDisposePromise = Promise.resolve(destroyFn(orphan)).catch(() => {});
+            return candidateDisposePromise;
+          };
+
+          const activeFlood = getTelegramFloodCooldown(
+            { accountId, userId: uidStr || undefined, phone: cleanPhone },
+            nowFn()
           );
-          configureTelegramClientErrorGuard(client, cleanPhone, {
-            userId: uidStr || undefined,
-            phone: cleanPhone,
-            accountId: uidStr ? `acc_tg_${uidStr}` : undefined,
-          });
-          await withTelegramTimeout(client.connect(), 15000, '启动恢复 Telegram 连接超时');
-          const isAuth = await withTelegramTimeout(client.isUserAuthorized(), 10000, '校验 Telegram 会话超时');
-          if (isAuth) {
+          if (activeFlood && reason !== 'manual_reconnect') {
+            runtime.nextRetryAt = Math.max(runtime.nextRetryAt, activeFlood.floodWaitUntil);
+            runtime.lastError = formatTelegramError({
+              errorMessage: `FLOOD_WAIT_${activeFlood.retryAfterSeconds}`,
+            });
+            runtime.lastErrorCategory = 'telegram_unreachable';
+            runtime.offlineReason = runtime.lastError;
+            lastFailureMsg = runtime.lastError;
+            return false;
+          }
+
+          try {
+            const existingConn = resolveConnectedTelegramUser(
+              accountId,
+              cleanPhone || rawDbPhone,
+              uidStr || undefined
+            );
+
+            const hasKnownProxy = Boolean(
+              existingConn?.proxyFingerprint && existingConn.proxyFingerprint !== ''
+            );
+            const proxyChanged = Boolean(
+              existingConn && (!hasKnownProxy || existingConn.proxyFingerprint !== proxyFingerprint)
+            );
+            const existingInspected = inspectGramJsClientState(existingConn?.client);
+
+            if (reason === 'proxy_changed' && existingConn && !existingInspected.destroyed && !proxyChanged) {
+              const existingSnap = getTelegramAccountConnectionSnapshot(existingConn, runtime, {
+                now: nowFn(),
+              });
+              if (existingSnap.isConnected) {
+                runtime.retryCount = 0;
+                runtime.nextRetryAt = 0;
+                runtime.lastError = null;
+                runtime.lastErrorCategory = null;
+                runtime.offlineReason = null;
+                return true;
+              }
+            }
+
+            // Step 1: Check existing client BEFORE creating any candidate client or touching connectedUserClients
+            if (
+              existingConn &&
+              existingConn.client &&
+              !existingInspected.destroyed &&
+              !proxyChanged &&
+              !forceReconnect
+            ) {
+              const snap = getTelegramAccountConnectionSnapshot(existingConn, runtime, {
+                now: nowFn(),
+              });
+              // 1a. Healthy and already online
+              if (snap.isConnected) {
+                runtime.retryCount = 0;
+                runtime.nextRetryAt = 0;
+                runtime.lastError = null;
+                runtime.lastErrorCategory = null;
+                runtime.offlineReason = null;
+                runtime.proxyFingerprint = proxyFingerprint;
+                return true;
+              }
+              // 1b. GramJS is actively reconnecting/connecting with the right proxy -> respect autoReconnect, do NOT create duplicate client!
+              if (existingInspected.senderIsReconnecting || existingInspected.senderIsConnecting) {
+                runtime.senderIsReconnecting = existingInspected.senderIsReconnecting;
+                return false;
+              }
+              // 1c. Existing client is idle/disconnected with matching proxy -> try in-place reconnect FIRST
+              try {
+                if (telegramProxy) {
+                  await probeFn({
+                    proxy: telegramProxy,
+                    connectTimeoutMs: Math.min(5000, connectTimeoutMs),
+                    handshakeTimeoutMs: Math.min(7000, connectTimeoutMs),
+                    signal: restoreAbortController.signal,
+                  });
+                }
+                if (runtime.generationId !== myGeneration) return false;
+                const inPlaceConnectRes = await withTelegramTimeout(
+                  existingConn.client.connect(),
+                  connectTimeoutMs,
+                  '恢复现有 Telegram 连接超时',
+                  {
+                    signal: restoreAbortController.signal,
+                    onTimeout: () => {
+                      if (runtime.generationId !== myGeneration) return;
+                      try {
+                        (existingConn.client as any)?._sender?._connection?.disconnect?.();
+                      } catch {}
+                    },
+                  }
+                );
+                if (inPlaceConnectRes === false || !existingConn.client.connected) {
+                  throw new TelegramNetworkError(
+                    'telegram_unreachable',
+                    telegramProxy
+                      ? '代理节点已连通，但连接 Telegram 服务器失败或超时，请尝试切换代理节点'
+                      : '连接 Telegram 服务器失败或超时，请检查本地网络或启用代理后重试'
+                  );
+                }
+                const inPlaceAuth = await withTelegramTimeout(
+                  existingConn.client.isUserAuthorized(),
+                  authTimeoutMs,
+                  '校验现有 Telegram 会话超时',
+                  {
+                    signal: restoreAbortController.signal,
+                    onTimeout: () => {
+                      if (runtime.generationId !== myGeneration) return;
+                      try {
+                        (existingConn.client as any)?._sender?._connection?.disconnect?.();
+                      } catch {}
+                    },
+                  }
+                );
+                if (runtime.generationId !== myGeneration) return false;
+                if (inPlaceAuth) {
+                  existingConn.connectedAt = nowFn();
+                  existingConn.proxyFingerprint = proxyFingerprint;
+                  runtime.isAuthorized = true;
+                  runtime.transportConnected = true;
+                  runtime.senderIsReconnecting = false;
+                  runtime.lastConnectedAt = nowFn();
+                  runtime.retryCount = 0;
+                  runtime.nextRetryAt = 0;
+                  runtime.lastError = null;
+                  runtime.lastErrorCategory = null;
+                  runtime.offlineReason = null;
+                  runtime.proxyFingerprint = proxyFingerprint;
+                  attachTelegramConnectionStateTracker(existingConn.client, {
+                    userId: uidStr || undefined,
+                    phone: cleanPhone,
+                    accountId,
+                  });
+                  restoredCount++;
+                  return true;
+                }
+              } catch (inPlaceErr: any) {
+                if (runtime.generationId !== myGeneration) return false;
+                if (
+                  isTelegramSessionExpiredError(inPlaceErr) ||
+                  extractFloodWaitSeconds(inPlaceErr) !== null
+                ) {
+                  throw inPlaceErr;
+                }
+                console.warn(
+                  `[Telegram Recovery] In-place reconnect failed for ${cleanPhone}, trying candidate client:`,
+                  inPlaceErr?.message || inPlaceErr
+                );
+              }
+            }
+
+            // Step 2: Build & authenticate candidateClient WITHOUT deleting existing connected client prematurely
+            if (telegramProxy) {
+              await probeFn({
+                proxy: telegramProxy,
+                connectTimeoutMs: Math.min(5000, connectTimeoutMs),
+                handshakeTimeoutMs: Math.min(7000, connectTimeoutMs),
+                signal: restoreAbortController.signal,
+              });
+            }
+
+            if (runtime.generationId !== myGeneration) return false;
+
+            // Step 2a: Prevent dual concurrent MTProto sockets for the same StringSession (406 AUTH_KEY_DUPLICATED):
+            // hush/disconnect any live or auto-reconnecting old transport BEFORE dialing candidateClient.
+            const currentOldInspected = inspectGramJsClientState(existingConn?.client);
+            if (
+              existingConn?.client &&
+              !currentOldInspected.destroyed &&
+              (currentOldInspected.userConnected ||
+                currentOldInspected.transportConnected ||
+                currentOldInspected.senderIsReconnecting ||
+                currentOldInspected.senderIsConnecting)
+            ) {
+              disconnectedOldClient = existingConn.client;
+              try {
+                silenceGramJsSenderReconnect(disconnectedOldClient);
+                await withTelegramTimeout(
+                  Promise.resolve(disconnectedOldClient.disconnect?.()).catch(() => {}),
+                  2000,
+                  '断开旧 Telegram 连接超时'
+                ).catch(() => {});
+              } catch {}
+            }
+
+            candidateClient = options?.deps?.createClient
+              ? options.deps.createClient(decryptedSession, useApiId, useApiHash, telegramProxy)
+              : new TelegramClient(new StringSession(decryptedSession), useApiId, useApiHash, {
+                  connectionRetries: 3,
+                  useWSS: false,
+                  autoReconnect: true,
+                  ...TELEGRAM_DESKTOP_CLIENT_PARAMS,
+                  ...(telegramProxy ? { proxy: telegramProxy } : {}),
+                });
+
+            configureTelegramClientErrorGuard(candidateClient, cleanPhone, {
+              userId: uidStr || undefined,
+              phone: cleanPhone,
+              accountId: uidStr ? `acc_tg_${uidStr}` : undefined,
+            });
+            attachTelegramConnectionStateTracker(candidateClient, {
+              userId: uidStr || undefined,
+              phone: cleanPhone,
+              accountId: uidStr ? `acc_tg_${uidStr}` : undefined,
+            });
+
+            const candidateConnectRes = await withTelegramTimeout(
+              candidateClient.connect(),
+              connectTimeoutMs,
+              runtime.lastConnectedAt === null
+                ? '初次连接 Telegram 服务器超时'
+                : '运行期重连 Telegram 服务器超时',
+              {
+                signal: restoreAbortController.signal,
+                onTimeout: () => {
+                  void disposeCandidate();
+                },
+              }
+            );
+            if (runtime.generationId !== myGeneration || candidateDisposePromise !== null) {
+              await disposeCandidate();
+              return false;
+            }
+            if (candidateConnectRes === false || !candidateClient?.connected) {
+              throw new TelegramNetworkError(
+                'telegram_unreachable',
+                telegramProxy
+                  ? '代理节点已连通，但无法连接到 Telegram 服务器，请尝试切换代理节点'
+                  : '无法连接到 Telegram 服务器，请检查本地网络或代理设置后重试'
+              );
+            }
+
+            const isAuth = await withTelegramTimeout(
+              candidateClient.isUserAuthorized(),
+              authTimeoutMs,
+              '校验 Telegram 会话授权超时',
+              {
+                signal: restoreAbortController.signal,
+                onTimeout: () => {
+                  void disposeCandidate();
+                },
+              }
+            );
+
+            // Generation guard: abort cleanly if a newer task took over while connecting/authorizing
+            if (runtime.generationId !== myGeneration || candidateDisposePromise !== null) {
+              await disposeCandidate();
+              return false;
+            }
+
+            if (!isAuth) {
+              await disposeCandidate();
+              runtime.isAuthorized = false;
+              await markTelegramSessionExpired({
+                accountId: uidStr ? `acc_tg_${uidStr}` : cleanPhone,
+                userId: uidStr || undefined,
+                phone: cleanPhone,
+                reason: '恢复会话时检测到 Telegram 授权已失效，请重新登录',
+              });
+              lastFailureMsg = `账号 ${cleanPhone} 会话已失效，请重新登录`;
+              return false;
+            }
+
             if (typeof rawEncryptedSession === 'string' && !rawEncryptedSession.startsWith('enc:gcm:')) {
               try {
                 await db
                   .prepare('UPDATE telegram_user_sessions SET session_string = ?, updated_at = ? WHERE phone = ?')
-                  .run(encryptSensitiveData(decryptedSession), Date.now(), cleanPhone);
+                  .run(encryptSensitiveData(decryptedSession), nowFn(), rawDbPhone || cleanPhone);
               } catch {}
             }
 
+            // Re-verify generation AFTER async DB write and BEFORE atomic client swap
+            if (runtime.generationId !== myGeneration || candidateDisposePromise !== null || !candidateClient) {
+              await disposeCandidate();
+              return false;
+            }
+
+            // Atomic switchover: commit candidateClient into connectedUserClients before destroying oldClient
+            const previousMapped = resolveConnectedTelegramUser(
+              accountId,
+              cleanPhone || rawDbPhone,
+              uidStr || undefined
+            );
+            const oldClient =
+              previousMapped?.client && previousMapped.client !== candidateClient
+                ? previousMapped.client
+                : disconnectedOldClient && disconnectedOldClient !== candidateClient
+                  ? disconnectedOldClient
+                  : null;
+            disconnectedOldClient = null;
+
             const userObj: ConnectedTelegramUser = {
-              client,
+              client: candidateClient,
               phone: cleanPhone,
               userId: uidStr,
-              username: row.username ? (row.username.startsWith('@') ? row.username : `@${row.username}`) : '',
+              username: row.username
+                ? row.username.startsWith('@')
+                  ? row.username
+                  : `@${row.username}`
+                : '',
               firstName: row.first_name || 'Telegram 用户',
               avatarInitial: (row.first_name || 'TG').slice(0, 2).toUpperCase(),
               avatarBg: '#2481cc',
               apiId: useApiId,
               apiHash: useApiHash,
-              connectedAt: Date.now(),
-              dialogs: [],
+              connectedAt: nowFn(),
+              proxyFingerprint,
+              dialogs: previousMapped?.dialogs || [],
+              dialogsFetchedAt: previousMapped?.dialogsFetchedAt,
             };
+
             if (uidStr) {
               connectedUserClients.set(uidStr, userObj);
               connectedUserClients.set(`acc_tg_${uidStr}`, userObj);
             }
-            connectedUserClients.set(cleanPhone, userObj);
+            if (cleanPhone) {
+              connectedUserClients.set(cleanPhone, userObj);
+            }
             clearExpiredAccountRecord(uidStr, cleanPhone);
+            attachFn(candidateClient, cleanPhone, uidStr);
 
-            attachTelegramClientMessageListener(client, cleanPhone, uidStr);
+            runtime.isAuthorized = true;
+            runtime.transportConnected = true;
+            runtime.senderIsReconnecting = false;
+            runtime.lastConnectedAt = nowFn();
+            runtime.retryCount = 0;
+            runtime.nextRetryAt = 0;
+            runtime.lastError = null;
+            runtime.lastErrorCategory = null;
+            runtime.offlineReason = null;
+            runtime.proxyFingerprint = proxyFingerprint;
 
-            getOrFetchConnectedAccountDialogs(userObj, { limit: 150 }).catch(() => {});
+            // Mark candidate committed BEFORE clearing local pointer so disposeCandidate can never destroy committed client
+            candidateCommitted = true;
+            candidateClient = null;
 
+            if (oldClient) {
+              await destroyFn(oldClient);
+            }
+
+            if (userObj.dialogs.length === 0) {
+              getOrFetchConnectedAccountDialogs(userObj, { limit: 150 }).catch(() => {});
+            }
             restoredCount++;
-          } else {
-            await destroyTelegramClientSafely(client);
-            await markTelegramSessionExpired({
-              accountId: uidStr ? `acc_tg_${uidStr}` : cleanPhone,
-              userId: uidStr || undefined,
-              phone: cleanPhone,
-              reason: '启动恢复时检测到 Telegram 会话已失效，请重新登录',
-            });
-            lastFailureMsg = `账号 ${cleanPhone} 会话已失效，请重新登录`;
+            return true;
+          } catch (clientErr: any) {
+            restoreAbortController.abort();
+            await disposeCandidate();
+
+            // Stale / timed-out / superseded generation must NEVER mutate newer task's runtime or connected map
+            if (runtime.generationId !== myGeneration) {
+              return false;
+            }
+
+            // If we proactively disconnected oldClient to prevent 406 AUTH_KEY_DUPLICATED and candidate failed,
+            // purge the disconnected zombie entry from connectedUserClients so it cannot stay stale/unrecoverable,
+            // while keeping SQLite session & runtime backoff intact for automatic Watchdog recovery.
+            if (disconnectedOldClient) {
+              for (const keyCandidate of [cleanPhone, rawDbPhone, uidStr, uidStr ? `acc_tg_${uidStr}` : '']) {
+                if (keyCandidate && connectedUserClients.get(keyCandidate)?.client === disconnectedOldClient) {
+                  connectedUserClients.delete(keyCandidate);
+                }
+              }
+              await destroyFn(disconnectedOldClient);
+              disconnectedOldClient = null;
+            }
+
+            if (isTelegramSessionExpiredError(clientErr)) {
+              const formattedExp = formatTelegramError(clientErr);
+              lastFailureMsg = formattedExp;
+              runtime.isAuthorized = false;
+              await markTelegramSessionExpired({
+                accountId: uidStr ? `acc_tg_${uidStr}` : cleanPhone,
+                userId: uidStr || undefined,
+                phone: cleanPhone,
+                reason: formattedExp,
+              });
+              return false;
+            }
+
+            const floodSeconds = extractFloodWaitSeconds(clientErr);
+            if (floodSeconds !== null) {
+              const floodEntry = recordTelegramFloodWait(
+                { accountId, userId: uidStr || undefined, phone: cleanPhone },
+                floodSeconds,
+                `restore.${reason}`,
+                nowFn()
+              );
+              const floodWaitUntil = floodEntry?.floodWaitUntil || nowFn() + floodSeconds * 1000;
+              const formattedFlood = formatTelegramError(clientErr);
+              // Do NOT increment runtime.retryCount on official FLOOD_WAIT to avoid double penalty
+              runtime.lastFailureAt = nowFn();
+              runtime.nextRetryAt = Math.max(runtime.nextRetryAt, floodWaitUntil);
+              runtime.lastError = formattedFlood;
+              runtime.lastErrorCategory = 'telegram_unreachable';
+              runtime.offlineReason = formattedFlood;
+              lastFailureMsg = formattedFlood;
+              return false;
+            }
+
+            const classified = classifyTelegramNetworkError(clientErr, Boolean(telegramProxy));
+            lastFailureMsg = classified.message || '连接 Telegram MTProto 超时';
+            runtime.lastFailureAt = nowFn();
+            runtime.retryCount += 1;
+            runtime.nextRetryAt = nowFn() + computeTelegramReconnectBackoffMs(runtime.retryCount);
+            runtime.lastError = lastFailureMsg;
+            runtime.lastErrorCategory = classified.category;
+            runtime.offlineReason = lastFailureMsg;
+            console.warn(
+              `[Telegram User Auth Recovery] Could not restore session for ${cleanPhone}:`,
+              clientErr?.message || clientErr
+            );
+            return false;
+          } finally {
+            if (runtime.generationId === myGeneration) {
+              runtime.isRestoring = false;
+              runtime.isInitialConnecting = false;
+            }
+            if (task && runtime.activeRestoreTask === task) {
+              runtime.activeRestoreTask = null;
+            }
           }
-        } catch (clientErr: any) {
-          await destroyTelegramClientSafely(client);
-          const formatted = formatTelegramError(clientErr);
-          lastFailureMsg = formatted || '连接 Telegram MTProto 超时';
-          console.warn(`[Telegram User Auth Recovery] Could not restore session for ${cleanPhone}:`, clientErr.message);
-          if (isTelegramSessionExpiredError(clientErr)) {
-            await markTelegramSessionExpired({
-              accountId: uidStr ? `acc_tg_${uidStr}` : cleanPhone,
-              userId: uidStr || undefined,
-              phone: cleanPhone,
-              reason: formatted,
-            });
-          }
-        }
+        })();
+
+        runtime.activeRestoreTask = task;
+        return await task;
       };
 
       // Restore accounts with bounded concurrency (3) so multiple accounts don't serialize startup
       const CONCURRENCY = 3;
-      for (let i = 0; i < dedupedRows.length; i += CONCURRENCY) {
-        const batch = dedupedRows.slice(i, i + CONCURRENCY);
+      for (let i = 0; i < filteredRows.length; i += CONCURRENCY) {
+        const batch = filteredRows.slice(i, i + CONCURRENCY);
         await Promise.allSettled(batch.map((r) => restoreSingleRow(r)));
       }
 
@@ -30575,14 +32110,16 @@ export async function restoreTelegramUserSessionsOnStartup(
       if (restoredCount > 0) {
         telegramSessionRestoreState.lastSuccessAt = Date.now();
         telegramSessionRestoreState.lastError = null;
-        console.log(`[Telegram User Auth Recovery] Successfully restored ${restoredCount} active personal user session(s) from encrypted storage.`);
+        console.log(
+          `[Telegram User Auth Recovery] Successfully restored ${restoredCount} active personal user session(s) from encrypted storage.`
+        );
       } else if (lastFailureMsg) {
         telegramSessionRestoreState.lastError = lastFailureMsg;
       }
       return restoredCount;
     } catch (err: any) {
       telegramSessionRestoreState.lastError = err?.message || '恢复 Telegram 会话失败';
-      console.warn('[Telegram User Auth Recovery Exception]:', err.message);
+      console.warn('[Telegram User Auth Recovery Exception]:', err?.message || err);
       return 0;
     } finally {
       telegramSessionRestoreState.inProgress = false;
@@ -30594,11 +32131,321 @@ export async function restoreTelegramUserSessionsOnStartup(
   return activeRestorePromise;
 }
 
-// Background Connection Health Watchdog (every 25s): rebuilds dropped non-expired MTProto sessions
-let telegramWatchdogInterval: NodeJS.Timeout | null = null;
-let lastWatchdogFailureAt = 0;
+let inFlightProxyRecovery: {
+  proxyFingerprint: string;
+  promise: Promise<{ triggered: boolean; targetKeys: string[] }>;
+} | null = null;
 
-export async function runTelegramConnectionWatchdogCycle(): Promise<number> {
+export async function triggerProxyChangeRecovery(
+  bearerToken?: string
+): Promise<{ triggered: boolean; targetKeys: string[] }> {
+  const newProxyFingerprint = getTelegramProxyFingerprint(getConfiguredTelegramProxy());
+
+  // Coalesce concurrent/duplicate /api/auth/proxy and /api/system/proxy triggers for the same proxy configuration
+  if (inFlightProxyRecovery && inFlightProxyRecovery.proxyFingerprint === newProxyFingerprint) {
+    return inFlightProxyRecovery.promise;
+  }
+
+  const recoveryPromise = (async (): Promise<{ triggered: boolean; targetKeys: string[] }> => {
+    let activeRows: any[] = [];
+    try {
+      activeRows = (await db
+        .prepare('SELECT phone, user_id FROM telegram_user_sessions WHERE is_active = 1 LIMIT ?')
+        .all(MAX_TELEGRAM_ACCOUNTS * 2)) as any[];
+    } catch (err: any) {
+      console.error('[Telegram Proxy Recovery DB Error]:', err?.message || err);
+      return { triggered: false, targetKeys: [] };
+    }
+
+    const switchKeys: string[] = [];
+    const offlineKeys: string[] = [];
+    const seenKeys = new Set<string>();
+
+    for (const row of activeRows) {
+      const uid = row?.user_id ? String(row.user_id).trim() : '';
+      const rawPhone = row?.phone ? String(row.phone).trim() : '';
+      const phone = rawPhone ? normalizePhoneNumber(rawPhone) || rawPhone : '';
+      const key = resolveTelegramAccountRuntimeKey({
+        userId: uid || undefined,
+        phone: phone || undefined,
+      });
+      if (!key || seenKeys.has(key)) continue;
+      seenKeys.add(key);
+
+      const isExpired = Boolean(
+        (uid && (recentlyExpiredAccounts.has(uid) || recentlyExpiredAccounts.has(`acc_tg_${uid}`))) ||
+          (phone && recentlyExpiredAccounts.has(phone)) ||
+          (rawPhone && recentlyExpiredAccounts.has(rawPhone))
+      );
+      if (isExpired) continue;
+
+      const runtime = getOrCreateTelegramAccountRuntimeState({
+        userId: uid || undefined,
+        phone: phone || undefined,
+        accountId: uid ? `acc_tg_${uid}` : phone,
+      });
+      const conn = resolveConnectedTelegramUser(
+        uid ? `acc_tg_${uid}` : phone,
+        phone || rawPhone,
+        uid
+      );
+      const snap = getTelegramAccountConnectionSnapshot(conn, runtime);
+
+      // Missing/empty proxyFingerprint is treated as UNKNOWN, never assumed matching
+      const hasKnownMatchingProxy = Boolean(
+        conn?.proxyFingerprint && conn.proxyFingerprint === newProxyFingerprint
+      );
+      if (snap.isConnected && hasKnownMatchingProxy) {
+        continue;
+      }
+
+      // Respect active official FLOOD_WAIT cooldown
+      if (
+        getTelegramFloodCooldown({
+          accountId: uid ? `acc_tg_${uid}` : phone,
+          userId: uid || undefined,
+          phone: phone || undefined,
+        })
+      ) {
+        continue;
+      }
+
+      if (snap.isConnected && !hasKnownMatchingProxy) {
+        runtime.nextRetryAt = 0;
+        runtime.retryCount = 0;
+        switchKeys.push(key);
+      } else if (!runtime.activeRestoreTask || runtime.proxyFingerprint !== newProxyFingerprint) {
+        runtime.nextRetryAt = 0;
+        runtime.retryCount = 0;
+        offlineKeys.push(key);
+      }
+    }
+
+    const allTargets = [...switchKeys, ...offlineKeys];
+    if (allTargets.length === 0) {
+      return { triggered: false, targetKeys: [] };
+    }
+
+    const runBackground = async () => {
+      if (switchKeys.length > 0) {
+        await restoreTelegramUserSessionsOnStartup(bearerToken, {
+          targetAccountKeys: switchKeys,
+          forceReconnect: true,
+          reason: 'proxy_changed',
+        });
+      }
+      if (offlineKeys.length > 0) {
+        await restoreTelegramUserSessionsOnStartup(bearerToken, {
+          targetAccountKeys: offlineKeys,
+          forceReconnect: false,
+          reason: 'proxy_changed',
+        });
+      }
+    };
+    runBackground().catch((bgErr: any) => {
+      const msg = bgErr?.message || String(bgErr || '代理切换恢复任务失败');
+      telegramSessionRestoreState.lastError = msg;
+      console.error('[Telegram Proxy Recovery Async Error]:', msg);
+    });
+
+    return { triggered: true, targetKeys: allTargets };
+  })().finally(() => {
+    if (inFlightProxyRecovery?.promise === recoveryPromise) {
+      inFlightProxyRecovery = null;
+    }
+  });
+
+  inFlightProxyRecovery = { proxyFingerprint: newProxyFingerprint, promise: recoveryPromise };
+  return recoveryPromise;
+}
+
+// Background Connection Health Watchdog (every 25s): respects GramJS auto-reconnect, uses per-account tiered backoff, and detects OS sleep/wake
+let telegramWatchdogInterval: NodeJS.Timeout | null = null;
+let lastWatchdogTickAt = 0;
+let lastSystemResumeAt = 0;
+let inFlightSystemResumePromise: Promise<number> | null = null;
+let lastHttpSystemResumeAt = 0;
+
+export async function handleSystemResumeWakeup(source = 'power_resume'): Promise<number> {
+  if (inFlightSystemResumePromise) {
+    return inFlightSystemResumePromise;
+  }
+  lastSystemResumeAt = Date.now();
+  const wakePromise = (async (): Promise<number> => {
+  // Verify seemingly-connected clients whose socket may have gone half-open during OS sleep
+  const uniqueConns = new Map<string, ConnectedTelegramUser>();
+  for (const u of connectedUserClients.values()) {
+    const dedupKey = u?.userId || u?.phone;
+    if (dedupKey && !uniqueConns.has(dedupKey)) {
+      uniqueConns.set(dedupKey, u);
+    }
+  }
+  await Promise.allSettled(
+    Array.from(uniqueConns.values()).map(async (conn) => {
+      if (!conn?.client || (conn.client as any)._destroyed) return;
+      const connAccountId = conn.userId ? `acc_tg_${conn.userId}` : conn.phone;
+      const runtime = getOrCreateTelegramAccountRuntimeState({
+        userId: conn.userId || undefined,
+        phone: conn.phone,
+        accountId: connAccountId,
+      });
+      const snap = getTelegramAccountConnectionSnapshot(conn, runtime, { now: Date.now() });
+      if (!snap.isConnected) return;
+      try {
+        await withTelegramTimeout(conn.client.getMe(), 5000, '唤醒后连接探活超时');
+        runtime.lastConnectedAt = Date.now();
+        runtime.retryCount = 0;
+        runtime.lastError = null;
+        runtime.lastErrorCategory = null;
+        runtime.offlineReason = null;
+      } catch (probeErr: any) {
+        if (isTelegramSessionExpiredError(probeErr)) {
+          let canonicalUid = conn.userId ? String(conn.userId).trim() : '';
+          let canonicalPhone = conn.phone ? String(conn.phone).trim() : '';
+          try {
+            let uidRow: { phone: string; user_id: string | null } | null = null;
+            let phoneRow: { phone: string; user_id: string | null } | null = null;
+            if (canonicalUid) {
+              const rows = (await db
+                .prepare('SELECT phone, user_id FROM telegram_user_sessions WHERE user_id = ?')
+                .all(canonicalUid)) as any[];
+              if (rows.length === 1 && rows[0]?.phone) {
+                uidRow = {
+                  phone: String(rows[0].phone).trim(),
+                  user_id: rows[0].user_id ? String(rows[0].user_id).trim() : null,
+                };
+              }
+            }
+            const normP = canonicalPhone ? normalizePhoneNumber(canonicalPhone) : '';
+            const pList = Array.from(new Set([canonicalPhone, normP].filter(Boolean)));
+            if (pList.length > 0) {
+              const rows = (await db
+                .prepare(
+                  `SELECT phone, user_id FROM telegram_user_sessions WHERE phone IN (${pList.map(() => '?').join(', ')})`
+                )
+                .all(...pList)) as any[];
+              if (rows.length === 1 && rows[0]?.phone) {
+                phoneRow = {
+                  phone: String(rows[0].phone).trim(),
+                  user_id: rows[0].user_id ? String(rows[0].user_id).trim() : null,
+                };
+              }
+            }
+            const chosen =
+              uidRow && phoneRow ? (uidRow.phone === phoneRow.phone ? uidRow : null) : uidRow || phoneRow;
+            if (chosen) {
+              if (chosen.user_id) canonicalUid = chosen.user_id;
+              if (chosen.phone) canonicalPhone = chosen.phone;
+            }
+          } catch (lookupErr: any) {
+            console.error('[Telegram Power Resume DB Lookup Error]:', lookupErr?.message || lookupErr);
+          }
+          await markTelegramSessionExpired({
+            accountId: canonicalUid ? `acc_tg_${canonicalUid}` : canonicalPhone || connAccountId,
+            userId: canonicalUid || undefined,
+            phone: canonicalPhone || undefined,
+            reason: formatTelegramError(probeErr),
+          });
+          return;
+        }
+        const probeFloodSec = extractFloodWaitSeconds(probeErr);
+        if (probeFloodSec !== null) {
+          const floodEntry = recordTelegramFloodWait(
+            { accountId: connAccountId, userId: conn.userId || undefined, phone: conn.phone },
+            probeFloodSec,
+            `resume.${source}`
+          );
+          const formattedFlood = formatTelegramError(probeErr);
+          runtime.nextRetryAt = Math.max(
+            runtime.nextRetryAt,
+            floodEntry?.floodWaitUntil || Date.now() + probeFloodSec * 1000
+          );
+          runtime.lastError = formattedFlood;
+          runtime.lastErrorCategory = 'telegram_unreachable';
+          runtime.offlineReason = formattedFlood;
+          return;
+        }
+        const currentProxyFp = getTelegramProxyFingerprint(getConfiguredTelegramProxy());
+        const sameProxyForNativeReconnect = Boolean(
+          conn.proxyFingerprint && conn.proxyFingerprint === currentProxyFp
+        );
+        try {
+          const senderAny = (conn.client as any)?._sender;
+          if (!sameProxyForNativeReconnect && senderAny) {
+            // Proxy changed while asleep: silence native reconnect (which reuses old proxy) so Watchdog rebuilds with new proxy
+            silenceGramJsSenderReconnect(conn.client);
+          } else {
+            senderAny?._connection?.disconnect?.();
+            senderAny?.reconnect?.();
+          }
+        } catch {}
+        runtime.lastDisconnectedAt = Date.now();
+        runtime.nextRetryAt = 0;
+        runtime.offlineReason = `系统唤醒探测失败 (${source})，正在重新连接...`;
+      }
+    })
+  );
+
+  // Trigger recovery cycle for disconnected accounts (non-FLOOD_WAIT backoff cleared on resume)
+  return await runTelegramConnectionWatchdogCycle({ bypassBackoff: true, reason: source });
+  })().finally(() => {
+    if (inFlightSystemResumePromise === wakePromise) {
+      inFlightSystemResumePromise = null;
+    }
+  });
+  inFlightSystemResumePromise = wakePromise;
+  return wakePromise;
+}
+
+app.post('/api/internal/system-resume', async (req: Request, res: Response) => {
+  const remoteIp = String(req.socket?.remoteAddress || '')
+    .replace(/^::ffff:/, '')
+    .trim();
+  const hasProxyForwardHeader = Boolean(
+    req.headers['x-forwarded-for'] ||
+      req.headers['forwarded'] ||
+      req.headers['x-real-ip'] ||
+      req.headers['cf-connecting-ip'] ||
+      req.headers['true-client-ip'] ||
+      req.headers['x-forwarded-host'] ||
+      req.headers['via']
+  );
+  const secFetchSite = String(req.headers['sec-fetch-site'] || '').trim().toLowerCase();
+  const isLoopback =
+    !hasProxyForwardHeader && (remoteIp === '127.0.0.1' || remoteIp === '::1');
+  if (!isLoopback || secFetchSite === 'cross-site' || !isAllowedClientOrigin(req)) {
+    return res.status(403).json({ ok: false, error: 'Forbidden' });
+  }
+  const nowTs = Date.now();
+  if (!inFlightSystemResumePromise && nowTs - lastHttpSystemResumeAt < 2000) {
+    return res.json({ ok: true, restoredCount: 0, throttled: true });
+  }
+  lastHttpSystemResumeAt = nowTs;
+  try {
+    const source = typeof req.body?.source === 'string' && req.body.source.trim()
+      ? req.body.source.trim()
+      : 'power_resume';
+    const restoredCount = await handleSystemResumeWakeup(source);
+    return res.json({ ok: true, restoredCount, source });
+  } catch (err: any) {
+    return res.status(500).json({ ok: false, error: err?.message || '唤醒恢复失败' });
+  }
+});
+
+export async function runTelegramConnectionWatchdogCycle(options?: {
+  bypassBackoff?: boolean;
+  reason?: string;
+}): Promise<number> {
+  const now = Date.now();
+  if (lastWatchdogTickAt > 0 && now - lastWatchdogTickAt > 60_000 && !options?.bypassBackoff) {
+    // Detected OS sleep/suspend wall-clock jump > 60s
+    lastWatchdogTickAt = now;
+    if (now - lastSystemResumeAt > 10_000) {
+      return await handleSystemResumeWakeup('watchdog_wallclock_jump');
+    }
+  }
+  lastWatchdogTickAt = now;
+
   if (telegramSessionRestoreState.inProgress || activeRestorePromise) return 0;
   // Require either active user JWT or configured env/RAM credentials before attempting reconnect
   const hasCredsPath = Boolean(
@@ -30616,7 +32463,9 @@ export async function runTelegramConnectionWatchdogCycle(): Promise<number> {
   }
   if (!Array.isArray(activeRows) || activeRows.length === 0) return 0;
 
-  let needsReconnect = false;
+  const currentProxyFingerprint = getTelegramProxyFingerprint(getConfiguredTelegramProxy());
+  const targetAccountKeys: string[] = [];
+
   for (const row of activeRows) {
     const uid = row?.user_id ? String(row.user_id).trim() : '';
     const phone = row?.phone ? String(row.phone).trim() : '';
@@ -30628,30 +32477,68 @@ export async function runTelegramConnectionWatchdogCycle(): Promise<number> {
     );
     if (isExpired) continue;
 
+    const runtime = getOrCreateTelegramAccountRuntimeState({
+      userId: uid || undefined,
+      phone: phone || undefined,
+      accountId: uid ? `acc_tg_${uid}` : phone,
+    });
     const conn = resolveConnectedTelegramUser(uid ? `acc_tg_${uid}` : phone, phone, uid);
-    if (!conn || !conn.client || conn.client.connected === false) {
-      needsReconnect = true;
-      break;
+    const snap = getTelegramAccountConnectionSnapshot(conn, runtime, { now });
+
+    // Missing/empty proxyFingerprint is treated as UNKNOWN, never assumed matching
+    const hasKnownMatchingProxy = Boolean(
+      conn?.proxyFingerprint && conn.proxyFingerprint === currentProxyFingerprint
+    );
+    const proxyChanged = Boolean(conn && !hasKnownMatchingProxy);
+
+    // Healthy online account with matching proxy -> reset backoff counters & skip
+    if (snap.isConnected && !proxyChanged) {
+      runtime.retryCount = 0;
+      runtime.nextRetryAt = 0;
+      runtime.lastError = null;
+      runtime.lastErrorCategory = null;
+      runtime.offlineReason = null;
+      continue;
+    }
+
+    // Active per-account restore or GramJS native auto-reconnect (same proxy) -> let it finish
+    if (runtime.activeRestoreTask || ((snap.isReconnecting || snap.isConnecting) && !proxyChanged)) {
+      continue;
+    }
+
+    // Per-account tiered backoff (never freezes other accounts!)
+    if (!options?.bypassBackoff && !proxyChanged && runtime.nextRetryAt > now) {
+      continue;
+    }
+
+    // Never bypass active official Telegram FLOOD_WAIT cooldown during Watchdog (even on bypassBackoff wakeup)
+    const activeFlood = getTelegramFloodCooldown(
+      { accountId: uid ? `acc_tg_${uid}` : phone, userId: uid || undefined, phone: phone || undefined },
+      now
+    );
+    if (activeFlood) {
+      runtime.nextRetryAt = Math.max(runtime.nextRetryAt, activeFlood.floodWaitUntil);
+      continue;
+    }
+
+    if (runtime.accountKey) {
+      targetAccountKeys.push(runtime.accountKey);
     }
   }
 
-  if (!needsReconnect) {
-    lastWatchdogFailureAt = 0;
+  if (targetAccountKeys.length === 0) {
     return 0;
   }
 
-  // Cooldown 45s after a failed reconnect attempt so offline environments don't thrash
-  if (lastWatchdogFailureAt > 0 && Date.now() - lastWatchdogFailureAt < 45000) {
-    return 0;
-  }
-
-  const restored = await restoreTelegramUserSessionsOnStartup(lastActiveUserJwt || undefined);
-  if (restored > 0) {
-    lastWatchdogFailureAt = 0;
-  } else {
-    lastWatchdogFailureAt = Date.now();
-  }
-  return restored;
+  return await restoreTelegramUserSessionsOnStartup(lastActiveUserJwt || undefined, {
+    targetAccountKeys,
+    forceReconnect: targetAccountKeys.some((k) => {
+      const rt = telegramAccountRuntimeStates.get(k);
+      const conn = rt ? resolveConnectedTelegramUser(rt.accountId, rt.phone, rt.userId) : undefined;
+      return Boolean(conn && (!conn.proxyFingerprint || conn.proxyFingerprint !== currentProxyFingerprint));
+    }),
+    reason: options?.reason || 'watchdog',
+  });
 }
 
 export function startTelegramConnectionWatchdog(): void {
@@ -30674,6 +32561,15 @@ export async function gracefulShutdownServer(reason = 'shutdown'): Promise<void>
   await stopTelegramBotLongPolling();
   stopTelegramConnectionWatchdog();
   stopTelegramCacheCleanupTimer();
+
+  // Force-abort any pending withTelegramTimeout operations & destroy their temporary sockets cleanly
+  for (const cancelFn of Array.from(activeTimeoutCleanupCallbacks)) {
+    try {
+      cancelFn();
+    } catch {}
+  }
+  activeTimeoutCleanupCallbacks.clear();
+
   try {
     for (const qrSession of activeQrSessions.values()) {
       try {
@@ -30704,6 +32600,7 @@ export async function gracefulShutdownServer(reason = 'shutdown'): Promise<void>
     }
     await Promise.allSettled(Array.from(uniqueClients).map((c) => destroyTelegramClientSafely(c)));
     connectedUserClients.clear();
+    telegramAccountRuntimeStates.clear();
   } catch {}
 
   await checkpointSqliteWal();

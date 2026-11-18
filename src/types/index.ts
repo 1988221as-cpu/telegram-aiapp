@@ -11,9 +11,14 @@ export interface Account {
   unreadTotal: number;
   isActive: boolean;
   status: 'online' | 'offline' | 'away' | 'expired';
+  connectionPhase?: 'online' | 'connecting' | 'reconnecting' | 'restoring' | 'offline' | 'expired';
   bio?: string;
   remark?: string;
   groupId?: string;
+  lastError?: string | null;
+  retryCount?: number;
+  nextRetryAt?: number;
+  lastConnectedAt?: number | null;
 }
 
 export interface AccountGroup {

@@ -1,4 +1,4 @@
-const { app, BrowserWindow, Menu, dialog, shell, ipcMain, safeStorage } = require('electron');
+const { app, BrowserWindow, Menu, dialog, shell, ipcMain, safeStorage, powerMonitor } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const http = require('http');
@@ -1513,6 +1513,36 @@ function registerUpdaterIpcHandlers() {
 app.whenReady().then(() => {
   registerCryptoIpcHandlers();
   registerUpdaterIpcHandlers();
+  if (powerMonitor && typeof powerMonitor.on === 'function') {
+    let lastResumeNotifyAt = 0;
+    powerMonitor.on('resume', () => {
+      if (isQuitting) return;
+      const now = Date.now();
+      if (now - lastResumeNotifyAt < 3000) return;
+      lastResumeNotifyAt = now;
+      const portToNotify = Number.isInteger(currentPort) && currentPort > 0 ? currentPort : FIXED_APP_PORT;
+      try {
+        const payload = JSON.stringify({ source: 'electron_power_resume' });
+        const req = http.request(
+          {
+            hostname: '127.0.0.1',
+            port: portToNotify,
+            path: '/api/internal/system-resume',
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'Content-Length': Buffer.byteLength(payload),
+            },
+          },
+          (res) => res.resume()
+        );
+        req.setTimeout(3000, () => req.destroy());
+        req.on('error', () => {});
+        req.write(payload);
+        req.end();
+      } catch {}
+    });
+  }
   try {
     const swapFailMarker = path.join(app.getPath('userData'), 'logs', 'portable_swap_failed.txt');
     if (fs.existsSync(swapFailMarker)) {
