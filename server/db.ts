@@ -437,7 +437,13 @@ export async function initDatabase() {
       key_memories TEXT DEFAULT '[]',
       total_messages_count INTEGER DEFAULT 0,
       last_analyzed_at INTEGER DEFAULT 0,
-      updated_at INTEGER NOT NULL
+      updated_at INTEGER NOT NULL,
+      family_marital_status TEXT DEFAULT '',
+      active_schedule TEXT DEFAULT '',
+      financial_profile TEXT DEFAULT '',
+      investment_attitude TEXT DEFAULT '',
+      trust_level TEXT DEFAULT '',
+      next_step_strategy TEXT DEFAULT ''
     );
 
     -- 2.1 Account-Isolated Customer Holographic Profile (Composite PK: account_id + chat_id)
@@ -457,6 +463,12 @@ export async function initDatabase() {
       total_messages_count INTEGER DEFAULT 0,
       last_analyzed_at INTEGER DEFAULT 0,
       updated_at INTEGER NOT NULL,
+      family_marital_status TEXT DEFAULT '',
+      active_schedule TEXT DEFAULT '',
+      financial_profile TEXT DEFAULT '',
+      investment_attitude TEXT DEFAULT '',
+      trust_level TEXT DEFAULT '',
+      next_step_strategy TEXT DEFAULT '',
       PRIMARY KEY (account_id, chat_id)
     );
 
@@ -573,6 +585,22 @@ export async function initDatabase() {
     await db.exec(`ALTER TABLE customer_profiles ADD COLUMN account_id TEXT DEFAULT 'acc_1'`);
   } catch {
     // Column already exists
+  }
+
+  for (const colDef of [
+    "family_marital_status TEXT DEFAULT ''",
+    "active_schedule TEXT DEFAULT ''",
+    "financial_profile TEXT DEFAULT ''",
+    "investment_attitude TEXT DEFAULT ''",
+    "trust_level TEXT DEFAULT ''",
+    "next_step_strategy TEXT DEFAULT ''",
+  ]) {
+    try {
+      await db.exec(`ALTER TABLE customer_profiles ADD COLUMN ${colDef}`);
+    } catch {}
+    try {
+      await db.exec(`ALTER TABLE account_customer_profiles ADD COLUMN ${colDef}`);
+    } catch {}
   }
 
   try {

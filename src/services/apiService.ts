@@ -2669,12 +2669,15 @@ export async function analyzeCustomerMemory(
           chatTitle,
         }),
       },
-      35000
+      55000
     );
     if (res.ok) {
       const data = await res.json();
       if (typeof data?.message === 'string' && data.message.trim() && onInfoNotice) {
         onInfoNotice(data.message.trim());
+      }
+      if (!data?.profile || typeof data.profile !== 'object') {
+        throw new Error(data?.error || 'AI 画像记忆提炼未返回有效的档案数据');
       }
       return data.profile;
     }

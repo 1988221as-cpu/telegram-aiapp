@@ -13,6 +13,8 @@ import {
   CheckCircle2,
   Download,
   Edit3,
+  HeartHandshake,
+  TrendingUp,
 } from 'lucide-react';
 import { CustomerProfile, CustomerMemoryItem, CustomLLMConfig } from '../types';
 import {
@@ -68,6 +70,16 @@ export const CustomerMemoryDrawer: React.FC<CustomerMemoryDrawerProps> = ({
   const [editOccupation, setEditOccupation] = useState('');
   const [editTone, setEditTone] = useState('');
   const [editStage, setEditStage] = useState('');
+  const [editFamilyMarital, setEditFamilyMarital] = useState('');
+  const [editActiveSchedule, setEditActiveSchedule] = useState('');
+  const [editEmotionalNeeds, setEditEmotionalNeeds] = useState('');
+
+  // Manual investment & strategy editing
+  const [isEditingStrategy, setIsEditingStrategy] = useState(false);
+  const [editFinancialProfile, setEditFinancialProfile] = useState('');
+  const [editInvestmentAttitude, setEditInvestmentAttitude] = useState('');
+  const [editTrustLevel, setEditTrustLevel] = useState('');
+  const [editNextStepStrategy, setEditNextStepStrategy] = useState('');
 
   const activeScope = `${chatId || ''}::${currentAccountId || ''}`;
   const activeScopeRef = useRef(activeScope);
@@ -116,6 +128,7 @@ export const CustomerMemoryDrawer: React.FC<CustomerMemoryDrawerProps> = ({
     }
     setIsAnalyzing(false);
     setIsEditingAttributes(false);
+    setIsEditingStrategy(false);
     setIsAddingMemory(false);
     setMemDate(new Date().toISOString().split('T')[0]);
     setMemTopic('');
@@ -134,6 +147,16 @@ export const CustomerMemoryDrawer: React.FC<CustomerMemoryDrawerProps> = ({
 
   if (!isOpen) return null;
 
+  const normalizeAccountKey = (id?: string) => {
+    const raw = String(id || '').trim();
+    return raw.startsWith('acc_tg_') ? raw.slice('acc_tg_'.length) : raw;
+  };
+  const isSameAccountScope = (a?: string, b?: string) => {
+    if (!a || !b) return true;
+    if (a === b) return true;
+    return normalizeAccountKey(a) === normalizeAccountKey(b);
+  };
+
   const effectiveAccountId =
     currentAccountId ||
     (profile && (!chatId || normalizeProfileChatId(profile.chatId) === normalizeProfileChatId(chatId)) ? profile.accountId : '') ||
@@ -142,7 +165,7 @@ export const CustomerMemoryDrawer: React.FC<CustomerMemoryDrawerProps> = ({
   const scopedProfile =
     profile &&
     (!chatId || normalizeProfileChatId(profile.chatId) === normalizeProfileChatId(chatId)) &&
-    (!effectiveAccountId || profile.accountId === effectiveAccountId)
+    isSameAccountScope(profile.accountId, effectiveAccountId)
       ? { ...profile, accountId: profile.accountId || effectiveAccountId }
       : null;
 
@@ -154,10 +177,16 @@ export const CustomerMemoryDrawer: React.FC<CustomerMemoryDrawerProps> = ({
     ageEstimate: '',
     occupation: '',
     locationTimezone: '',
+    familyMaritalStatus: '',
+    activeSchedule: '',
     toneStyle: '',
     likesInterests: [],
     dislikesTaboos: [],
     emotionalNeeds: '',
+    financialProfile: '',
+    investmentAttitude: '',
+    trustLevel: '',
+    nextStepStrategy: '',
     keyMemories: [],
     totalMessagesCount: 0,
     updatedAt: Date.now(),
@@ -219,10 +248,16 @@ export const CustomerMemoryDrawer: React.FC<CustomerMemoryDrawerProps> = ({
         }
         commitProfileUpdate(scopedFresh, { skipRemoteSave: true });
         showTransientSuccess(sparseNotice, sparseNotice ? 4500 : 3000);
+      } else if (activeScopeRef.current === requestScope) {
+        setErrorMessage('AI 记忆提炼未返回有效画像数据，请稍后重试');
       }
     } catch (err: any) {
       if (activeScopeRef.current === requestScope) {
-        showTransientError(err?.message || 'AI 记忆提炼失败，请检查网络或模型配置', 5000);
+        if (errorTimerRef.current) {
+          clearTimeout(errorTimerRef.current);
+          errorTimerRef.current = null;
+        }
+        setErrorMessage(err?.message || 'AI 记忆提炼失败，请检查网络或模型配置');
       }
     } finally {
       if (activeScopeRef.current === requestScope && analyzeSeqRef.current === requestSeq) {
@@ -313,6 +348,9 @@ export const CustomerMemoryDrawer: React.FC<CustomerMemoryDrawerProps> = ({
     setEditOccupation(currentProfile.occupation || '');
     setEditTone(currentProfile.toneStyle || '');
     setEditStage(currentProfile.relationshipStage || '');
+    setEditFamilyMarital(currentProfile.familyMaritalStatus || '');
+    setEditActiveSchedule(currentProfile.activeSchedule || '');
+    setEditEmotionalNeeds(currentProfile.emotionalNeeds || '');
     setIsEditingAttributes(true);
   };
 
@@ -324,10 +362,36 @@ export const CustomerMemoryDrawer: React.FC<CustomerMemoryDrawerProps> = ({
       occupation: editOccupation.trim(),
       toneStyle: editTone.trim(),
       relationshipStage: editStage.trim() || '尚未分析',
+      familyMaritalStatus: editFamilyMarital.trim(),
+      activeSchedule: editActiveSchedule.trim(),
+      emotionalNeeds: editEmotionalNeeds.trim(),
       updatedAt: Date.now(),
     };
     commitProfileUpdate(updated);
     setIsEditingAttributes(false);
+    showTransientSuccess(null, 2500);
+  };
+
+  // Manual investment & strategy editing
+  const handleStartEditStrategy = () => {
+    setEditFinancialProfile(currentProfile.financialProfile || '');
+    setEditInvestmentAttitude(currentProfile.investmentAttitude || '');
+    setEditTrustLevel(currentProfile.trustLevel || '');
+    setEditNextStepStrategy(currentProfile.nextStepStrategy || '');
+    setIsEditingStrategy(true);
+  };
+
+  const handleSaveStrategy = () => {
+    const updated = {
+      ...currentProfile,
+      financialProfile: editFinancialProfile.trim(),
+      investmentAttitude: editInvestmentAttitude.trim(),
+      trustLevel: editTrustLevel.trim(),
+      nextStepStrategy: editNextStepStrategy.trim(),
+      updatedAt: Date.now(),
+    };
+    commitProfileUpdate(updated);
+    setIsEditingStrategy(false);
     showTransientSuccess(null, 2500);
   };
 
@@ -458,6 +522,32 @@ export const CustomerMemoryDrawer: React.FC<CustomerMemoryDrawerProps> = ({
 
             {isEditingAttributes ? (
               <div className="space-y-2 text-xs">
+                <div>
+                  <label className="text-[10px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] block mb-1">当前关系阶段（自动联动 AI 回复分阶段话术）</label>
+                  <div className="flex flex-wrap gap-1 mb-1.5">
+                    {['初识破冰', '朋友熟络', '情感升温', '信任深化', '投资切入'].map((stageOpt) => (
+                      <button
+                        key={stageOpt}
+                        type="button"
+                        onClick={() => setEditStage(stageOpt)}
+                        className={`px-2 py-0.5 rounded-md text-[11px] border cursor-pointer transition-colors ${
+                          editStage === stageOpt
+                            ? 'bg-[#2481cc] dark:bg-[#2ba0ff] aurora:bg-[#0d9488] text-white border-transparent'
+                            : 'bg-white dark:bg-[#08101a] aurora:bg-[#081014] text-[#475569] dark:text-[#b4c6d8] border-[#cbd5e1] dark:border-[#1e3148] hover:border-[#2481cc]'
+                        }`}
+                      >
+                        {stageOpt}
+                      </button>
+                    ))}
+                  </div>
+                  <input
+                    type="text"
+                    value={editStage}
+                    onChange={(e) => setEditStage(e.target.value)}
+                    placeholder="如: 朋友熟络 / 情感升温 / 投资切入"
+                    className="w-full bg-white dark:bg-[#08101a] aurora:bg-[#081014] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] rounded-lg px-2.5 py-1.5 text-xs text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] placeholder-[#94a3b8] dark:placeholder-[#4e657e] aurora:placeholder-[#5a7782] focus:outline-none focus:border-[#2481cc] dark:focus:border-[#2ba0ff] aurora:focus:border-[#2dd4bf]"
+                  />
+                </div>
                 <div className="grid grid-cols-2 gap-2">
                   <div>
                     <label className="text-[10px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] block mb-0.5">年龄 / 生日</label>
@@ -475,7 +565,27 @@ export const CustomerMemoryDrawer: React.FC<CustomerMemoryDrawerProps> = ({
                       type="text"
                       value={editLocation}
                       onChange={(e) => setEditLocation(e.target.value)}
-                      placeholder="如: 伦敦 (UTC+0)"
+                      placeholder="如: 伊斯坦布尔 (UTC+3)"
+                      className="w-full bg-white dark:bg-[#08101a] aurora:bg-[#081014] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] rounded-lg px-2.5 py-1.5 text-xs text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] placeholder-[#94a3b8] dark:placeholder-[#4e657e] aurora:placeholder-[#5a7782] focus:outline-none focus:border-[#2481cc] dark:focus:border-[#2ba0ff] aurora:focus:border-[#2dd4bf]"
+                    />
+                  </div>
+                  <div>
+                    <label className="text-[10px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] block mb-0.5">婚恋与家庭状态</label>
+                    <input
+                      type="text"
+                      value={editFamilyMarital}
+                      onChange={(e) => setEditFamilyMarital(e.target.value)}
+                      placeholder="如: 单身 / 已婚有娃 / 独居"
+                      className="w-full bg-white dark:bg-[#08101a] aurora:bg-[#081014] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] rounded-lg px-2.5 py-1.5 text-xs text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] placeholder-[#94a3b8] dark:placeholder-[#4e657e] aurora:placeholder-[#5a7782] focus:outline-none focus:border-[#2481cc] dark:focus:border-[#2ba0ff] aurora:focus:border-[#2dd4bf]"
+                    />
+                  </div>
+                  <div>
+                    <label className="text-[10px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] block mb-0.5">作息活跃窗口</label>
+                    <input
+                      type="text"
+                      value={editActiveSchedule}
+                      onChange={(e) => setEditActiveSchedule(e.target.value)}
+                      placeholder="如: 晚21点后活跃 / 周末休息"
                       className="w-full bg-white dark:bg-[#08101a] aurora:bg-[#081014] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] rounded-lg px-2.5 py-1.5 text-xs text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] placeholder-[#94a3b8] dark:placeholder-[#4e657e] aurora:placeholder-[#5a7782] focus:outline-none focus:border-[#2481cc] dark:focus:border-[#2ba0ff] aurora:focus:border-[#2dd4bf]"
                     />
                   </div>
@@ -486,7 +596,7 @@ export const CustomerMemoryDrawer: React.FC<CustomerMemoryDrawerProps> = ({
                     type="text"
                     value={editOccupation}
                     onChange={(e) => setEditOccupation(e.target.value)}
-                    placeholder="如: 外贸采购经理 / 投资人"
+                    placeholder="如: 医院职员 / 外贸老板"
                     className="w-full bg-white dark:bg-[#08101a] aurora:bg-[#081014] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] rounded-lg px-2.5 py-1.5 text-xs text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] placeholder-[#94a3b8] dark:placeholder-[#4e657e] aurora:placeholder-[#5a7782] focus:outline-none focus:border-[#2481cc] dark:focus:border-[#2ba0ff] aurora:focus:border-[#2dd4bf]"
                   />
                 </div>
@@ -496,8 +606,18 @@ export const CustomerMemoryDrawer: React.FC<CustomerMemoryDrawerProps> = ({
                     type="text"
                     value={editTone}
                     onChange={(e) => setEditTone(e.target.value)}
-                    placeholder="如: 讲究效率、干脆利落"
+                    placeholder="如: 慢热真诚 / 喜欢生活分享"
                     className="w-full bg-white dark:bg-[#08101a] aurora:bg-[#081014] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] rounded-lg px-2.5 py-1.5 text-xs text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] placeholder-[#94a3b8] dark:placeholder-[#4e657e] aurora:placeholder-[#5a7782] focus:outline-none focus:border-[#2481cc] dark:focus:border-[#2ba0ff] aurora:focus:border-[#2dd4bf]"
+                  />
+                </div>
+                <div>
+                  <label className="text-[10px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] block mb-0.5">深层情感诉求与生活痛点</label>
+                  <textarea
+                    rows={2}
+                    value={editEmotionalNeeds}
+                    onChange={(e) => setEditEmotionalNeeds(e.target.value)}
+                    placeholder="如: 工作辛苦缺少倾听陪伴，希望能改善家人生活条件"
+                    className="w-full bg-white dark:bg-[#08101a] aurora:bg-[#081014] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] rounded-lg px-2.5 py-1.5 text-xs text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] placeholder-[#94a3b8] dark:placeholder-[#4e657e] aurora:placeholder-[#5a7782] focus:outline-none focus:border-[#2481cc] dark:focus:border-[#2ba0ff] aurora:focus:border-[#2dd4bf] resize-none"
                   />
                 </div>
                 <div className="flex justify-end pt-1">
@@ -513,6 +633,12 @@ export const CustomerMemoryDrawer: React.FC<CustomerMemoryDrawerProps> = ({
               <div className="space-y-2.5 pt-1 text-xs">
                 <div className="grid grid-cols-2 gap-3">
                   <div>
+                    <span className="text-[10px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] block">当前关系阶段</span>
+                    <span className="font-medium text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf] text-xs mt-0.5 block truncate">
+                      {currentProfile.relationshipStage || '待分析'}
+                    </span>
+                  </div>
+                  <div>
                     <span className="text-[10px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] block">年龄 / 生日</span>
                     <span className="font-medium text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] text-xs mt-0.5 block truncate">
                       {currentProfile.ageEstimate || '待确认'}
@@ -524,10 +650,22 @@ export const CustomerMemoryDrawer: React.FC<CustomerMemoryDrawerProps> = ({
                       {currentProfile.locationTimezone || '待确认'}
                     </span>
                   </div>
-                  <div className="col-span-2 pt-1.5 border-t border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34]">
+                  <div>
+                    <span className="text-[10px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] block">婚恋与家庭状态</span>
+                    <span className="font-medium text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] text-xs mt-0.5 block truncate">
+                      {currentProfile.familyMaritalStatus || '待确认'}
+                    </span>
+                  </div>
+                  <div>
                     <span className="text-[10px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] block">职业 / 身份</span>
                     <span className="font-medium text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] text-xs mt-0.5 block truncate">
                       {currentProfile.occupation || '待确认'}
+                    </span>
+                  </div>
+                  <div>
+                    <span className="text-[10px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] block">活跃作息窗口</span>
+                    <span className="font-medium text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] text-xs mt-0.5 block truncate">
+                      {currentProfile.activeSchedule || '待观察'}
                     </span>
                   </div>
                 </div>
@@ -638,15 +776,138 @@ export const CustomerMemoryDrawer: React.FC<CustomerMemoryDrawerProps> = ({
             </div>
           </div>
 
-          {/* 4. Emotional Needs */}
-          {currentProfile.emotionalNeeds && currentProfile.emotionalNeeds !== '暂无特定记录' && currentProfile.emotionalNeeds !== '暂无记录' && (
-            <div className="bg-[#f8fafc] dark:bg-[#0e1726]/85 aurora:bg-[#101c23]/90 p-3.5 rounded-xl border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] space-y-1.5">
-              <span className="text-xs font-semibold text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] block">核心诉求分析</span>
-              <p className="text-xs text-[#475569] dark:text-[#b4c6d8] aurora:text-[#b7d0d8] bg-white dark:bg-[#08101a] aurora:bg-[#081014] p-2.5 rounded-lg border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] leading-relaxed">
-                {currentProfile.emotionalNeeds}
-              </p>
+          {/* 4. Emotional Needs (Always visible & manually editable via Attributes) */}
+          <div className="bg-[#f8fafc] dark:bg-[#0e1726]/85 aurora:bg-[#101c23]/90 p-3.5 rounded-xl border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] space-y-1.5">
+            <div className="flex items-center justify-between text-xs font-semibold text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8]">
+              <span className="flex items-center gap-1.5">
+                <HeartHandshake className="w-3.5 h-3.5 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf]" />
+                <span>核心诉求分析</span>
+              </span>
+              {!isEditingAttributes && (
+                <button
+                  onClick={handleStartEdit}
+                  className="text-[11px] text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf] hover:opacity-80 flex items-center gap-1 cursor-pointer transition-colors"
+                >
+                  <Edit3 className="w-3 h-3" />
+                  <span>补录/修改</span>
+                </button>
+              )}
             </div>
-          )}
+            <p className="text-xs text-[#475569] dark:text-[#b4c6d8] aurora:text-[#b7d0d8] bg-white dark:bg-[#08101a] aurora:bg-[#081014] p-2.5 rounded-lg border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] leading-relaxed">
+              {currentProfile.emotionalNeeds || '暂无记录（待真实沟通后提炼或点击右上角手动补录）'}
+            </p>
+          </div>
+
+          {/* 4.5 Financial, Investment Attitude & Next-Step Strategy */}
+          <div className="bg-[#f8fafc] dark:bg-[#0e1726]/85 aurora:bg-[#101c23]/90 p-3.5 rounded-xl border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] space-y-2.5">
+            <div className="flex items-center justify-between text-xs font-semibold text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8]">
+              <span className="flex items-center gap-1.5">
+                <TrendingUp className="w-3.5 h-3.5 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf]" />
+                <span>经济投资画像与推进策略</span>
+              </span>
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={() => (isEditingStrategy ? handleSaveStrategy() : handleStartEditStrategy())}
+                  className="text-[11px] text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf] hover:opacity-80 flex items-center gap-1 cursor-pointer transition-colors"
+                >
+                  <Edit3 className="w-3 h-3" />
+                  <span>{isEditingStrategy ? '保存策略' : '手动修改'}</span>
+                </button>
+                {isEditingStrategy && (
+                  <button
+                    onClick={() => setIsEditingStrategy(false)}
+                    className="text-[11px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] hover:text-[#0f172a] dark:hover:text-[#eef4fb] aurora:hover:text-[#ecf6f8] cursor-pointer"
+                  >
+                    取消
+                  </button>
+                )}
+              </div>
+            </div>
+
+            {isEditingStrategy ? (
+              <div className="space-y-2 text-xs">
+                <div className="grid grid-cols-2 gap-2">
+                  <div>
+                    <label className="text-[10px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] block mb-0.5">当前信任度</label>
+                    <input
+                      type="text"
+                      value={editTrustLevel}
+                      onChange={(e) => setEditTrustLevel(e.target.value)}
+                      placeholder="如: 中（建立好感）"
+                      className="w-full bg-white dark:bg-[#08101a] aurora:bg-[#081014] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] rounded-lg px-2.5 py-1.5 text-xs text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] placeholder-[#94a3b8] dark:placeholder-[#4e657e] aurora:placeholder-[#5a7782] focus:outline-none focus:border-[#2481cc] dark:focus:border-[#2ba0ff] aurora:focus:border-[#2dd4bf]"
+                    />
+                  </div>
+                  <div>
+                    <label className="text-[10px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] block mb-0.5">投资态度与顾虑</label>
+                    <input
+                      type="text"
+                      value={editInvestmentAttitude}
+                      onChange={(e) => setEditInvestmentAttitude(e.target.value)}
+                      placeholder="如: 想找副业但怕亏本"
+                      className="w-full bg-white dark:bg-[#08101a] aurora:bg-[#081014] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] rounded-lg px-2.5 py-1.5 text-xs text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] placeholder-[#94a3b8] dark:placeholder-[#4e657e] aurora:placeholder-[#5a7782] focus:outline-none focus:border-[#2481cc] dark:focus:border-[#2ba0ff] aurora:focus:border-[#2dd4bf]"
+                    />
+                  </div>
+                </div>
+                <div>
+                  <label className="text-[10px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] block mb-0.5">经济实力与资金线索</label>
+                  <input
+                    type="text"
+                    value={editFinancialProfile}
+                    onChange={(e) => setEditFinancialProfile(e.target.value)}
+                    placeholder="如: 月薪普通有房贷压力，渴望稳定额外收入"
+                    className="w-full bg-white dark:bg-[#08101a] aurora:bg-[#081014] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] rounded-lg px-2.5 py-1.5 text-xs text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] placeholder-[#94a3b8] dark:placeholder-[#4e657e] aurora:placeholder-[#5a7782] focus:outline-none focus:border-[#2481cc] dark:focus:border-[#2ba0ff] aurora:focus:border-[#2dd4bf]"
+                  />
+                </div>
+                <div>
+                  <label className="text-[10px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] block mb-0.5">下一步推进策略建议</label>
+                  <textarea
+                    rows={2}
+                    value={editNextStepStrategy}
+                    onChange={(e) => setEditNextStepStrategy(e.target.value)}
+                    placeholder="如: 先关心工作辛苦与家庭近况巩固情感链接，待对方主动问副业后再轻聊思路"
+                    className="w-full bg-white dark:bg-[#08101a] aurora:bg-[#081014] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] rounded-lg px-2.5 py-1.5 text-xs text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] placeholder-[#94a3b8] dark:placeholder-[#4e657e] aurora:placeholder-[#5a7782] focus:outline-none focus:border-[#2481cc] dark:focus:border-[#2ba0ff] aurora:focus:border-[#2dd4bf] resize-none"
+                  />
+                </div>
+                <div className="flex justify-end pt-1">
+                  <button
+                    onClick={handleSaveStrategy}
+                    className="px-3 py-1.5 bg-[#2481cc] hover:bg-[#1d6fb3] dark:bg-[#2ba0ff] dark:hover:bg-[#1e8ee8] aurora:bg-[#0d9488] aurora:hover:bg-[#0f766e] text-white rounded-lg text-xs font-medium cursor-pointer transition-colors"
+                  >
+                    保存推进策略
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <div className="space-y-2 pt-0.5 text-xs">
+                <div className="grid grid-cols-2 gap-3">
+                  <div className="col-span-2">
+                    <span className="text-[10px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] block">当前信任度</span>
+                    <span className="font-medium text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] text-xs mt-0.5 block">
+                      {currentProfile.trustLevel || '低（初识）'}
+                    </span>
+                  </div>
+                  <div className="col-span-2 pt-1.5 border-t border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34]">
+                    <span className="text-[10px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] block">投资态度与顾虑</span>
+                    <p className="text-xs text-[#475569] dark:text-[#b4c6d8] aurora:text-[#b7d0d8] leading-relaxed mt-0.5">
+                      {currentProfile.investmentAttitude || '待观察'}
+                    </p>
+                  </div>
+                  <div className="col-span-2 pt-1.5 border-t border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34]">
+                    <span className="text-[10px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] block">经济实力与资金线索</span>
+                    <p className="text-xs text-[#475569] dark:text-[#b4c6d8] aurora:text-[#b7d0d8] leading-relaxed mt-0.5">
+                      {currentProfile.financialProfile || '待进一步了解'}
+                    </p>
+                  </div>
+                </div>
+                <div className="pt-1.5 border-t border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34]">
+                  <span className="text-[10px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] block mb-0.5">AI / 运营下一步推进建议</span>
+                  <p className="text-xs text-[#475569] dark:text-[#b4c6d8] aurora:text-[#b7d0d8] bg-white dark:bg-[#08101a] aurora:bg-[#081014] p-2.5 rounded-lg border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] leading-relaxed">
+                    {currentProfile.nextStepStrategy || '自然破冰与日常共情，暂不提及投资'}
+                  </p>
+                </div>
+              </div>
+            )}
+          </div>
 
           {/* 5. Key Shared Memories */}
           <div className="bg-[#f8fafc] dark:bg-[#0e1726]/85 aurora:bg-[#101c23]/90 p-3.5 rounded-xl border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] space-y-2.5">

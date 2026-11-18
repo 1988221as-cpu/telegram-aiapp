@@ -12,6 +12,7 @@ import {
   getLocalMachineDeviceId,
   verifyJwtTokenWithReason,
   isAllowedClientOrigin,
+  extractFirstJsonObject,
 } from '../server.ts';
 
 before(async () => {
@@ -10975,6 +10976,22 @@ test('Railway Cloud Brain /v1/chat/completions filters unsafe forward fields, fo
     assert.equal('tool_choice' in capturedBody, false);
     assert.equal('stream_options' in capturedBody, false);
     assert.equal('purpose' in capturedBody, false);
+    assert.equal(
+      Array.isArray(capturedBody.messages) &&
+        capturedBody.messages.some((m: any) => m?.role === 'system' && String(m.content).includes('云端私有语料与真人聊天拟真底层引擎')),
+      true
+    );
+
+    // 1b. purpose='memory_extraction' must NOT inject casual oral chat system directives
+    const memRes = await sendChat({ purpose: 'memory_extraction' });
+    assert.equal(memRes.status, 200);
+    const capturedMemBody = lastUpstreamBody as Record<string, any> | null;
+    assert.ok(capturedMemBody, 'Expected memory_extraction upstream payload');
+    assert.equal(
+      Array.isArray(capturedMemBody.messages) &&
+        capturedMemBody.messages.some((m: any) => m?.role === 'system' && String(m.content).includes('云端私有语料与真人聊天拟真底层引擎')),
+      false
+    );
 
     // 2. Upstream returning SSE stream despite stream=false -> HTTP 502 (NOT HTTP 200 {})
     upstreamMode = 'sse';
@@ -11058,3 +11075,387 @@ test('Historical messages expose clickable manual translate button, restore hove
   assert.match(appSrc, /fallbackMessage && fallbackMessage\.id === messageId \? fallbackMessage : undefined/);
   assert.equal(appSrc.includes('return { translatedText: finalTranslatedText };'), true);
 });
+
+test('extractFirstJsonObject parses fenced JSON and balanced objects surrounded by explanatory text', () => {
+  assert.deepEqual(
+    extractFirstJsonObject('```json\n{"clientName":"Mehmet","ageEstimate":"40岁"}\n```'),
+    { clientName: 'Mehmet', ageEstimate: '40岁' }
+  );
+  assert.deepEqual(
+    extractFirstJsonObject(
+      '分析如下（说明：{仅供参考}）：\n{"clientName":"Mehmet","likesInterests":["医院工作","家庭 {和谐}"]}\n以上是全部内容。'
+    ),
+    { clientName: 'Mehmet', likesInterests: ['医院工作', '家庭 {和谐}'] }
+  );
+  assert.deepEqual(
+    extractFirstJsonObject(
+      '好的，提取结果如下：\n{"clientName":"Mehmet","toneStyle":"真诚礼貌 {日常}","keyMemories":[{"id":"m1","date":"2026-11-16","topic":"职业","summary":"在医院做清洁工作","emotion":"正常交流"}]}\n完毕。'
+    ),
+    {
+      clientName: 'Mehmet',
+      toneStyle: '真诚礼貌 {日常}',
+      keyMemories: [
+        {
+          id: 'm1',
+          date: '2026-11-16',
+          topic: '职业',
+          summary: '在医院做清洁工作',
+          emotion: '正常交流',
+        },
+      ],
+    }
+  );
+  assert.deepEqual(
+    extractFirstJsonObject(
+      '客户提到"下周再谈：\n```json\n{"clientName":"Mehmet","occupation":"医院清洁工"}\n```\n请查收。'
+    ),
+    { clientName: 'Mehmet', occupation: '医院清洁工' }
+  );
+  assert.equal(extractFirstJsonObject('["not-an-object"]'), null);
+  assert.equal(extractFirstJsonObject('纯文本无JSON'), null);
+});
+
+test('/api/customer/analyze/:chatId restores masked apiKey from server config, includes chatTitle context, and parses fenced JSON response', async () => {
+  const http = await import('node:http');
+  const { createHmac } = await import('node:crypto');
+  const { app, maskSecretValue, syncServerCustomLlmConfig, getServerCustomLlmConfig } = await import('../server.ts');
+  const { db } = await import('../server/db.ts');
+
+  const prevJwtSecret = process.env.JWT_SECRET;
+  const prevCustomCfg = await getServerCustomLlmConfig().catch(() => null);
+  process.env.JWT_SECRET = process.env.JWT_SECRET || 'analyze_test_jwt_secret';
+
+  let receivedAuth = '';
+  let receivedPrompt = '';
+  const mockLlmSrv = http.createServer((req, res) => {
+    let body = '';
+    req.on('data', (c) => (body += c));
+    req.on('end', () => {
+      receivedAuth = String(req.headers.authorization || '');
+      const parsed = JSON.parse(body || '{}');
+      receivedPrompt = String(parsed?.messages?.[0]?.content || '');
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(
+        JSON.stringify({
+          choices: [
+            {
+              message: {
+                content:
+                  '这是客户分析结果：\n```json\n{"clientName":"Mehmet","relationshipStage":"初步沟通","ageEstimate":"40岁","occupation":"医院清洁工","locationTimezone":"马尔丁","toneStyle":"真诚日常","likesInterests":["足球"],"dislikesTaboos":[],"emotionalNeeds":"日常交流沟通","keyMemories":[{"id":"m_tr_1","date":"2026-11-16","topic":"家庭与工作","summary":"在马尔丁医院从事清洁工作，已婚","emotion":"平和"}]}\n```',
+              },
+            },
+          ],
+        })
+      );
+    });
+  });
+
+  await new Promise<void>((r) => mockLlmSrv.listen(0, '127.0.0.1', r));
+  const llmPort = (mockLlmSrv.address() as any).port;
+
+  const appSrv = http.createServer(app);
+  await new Promise<void>((r) => appSrv.listen(0, '127.0.0.1', r));
+  const appPort = (appSrv.address() as any).port;
+
+  const testAcc = `acc_analyze_mask_${Date.now()}`;
+  const testChat = `tg_${Date.now()}`;
+  const realKey = 'sk-real-custom-secret-987654';
+  const maskedKey = maskSecretValue(realKey);
+
+  try {
+    await syncServerCustomLlmConfig({
+      enabled: true,
+      explicitlyDisabled: false,
+      engineMode: 'custom',
+      protocol: 'openai',
+      baseUrl: `http://127.0.0.1:${llmPort}/v1`,
+      apiKey: realKey,
+      modelName: 'gpt-4o-mini',
+    });
+
+    const headerB64 = Buffer.from(JSON.stringify({ alg: 'HS256', typ: 'JWT' })).toString('base64url');
+    const payloadB64 = Buffer.from(
+      JSON.stringify({ sub: 'analyze_tester', username: 'analyze_tester', role: 'member', exp: Math.floor(Date.now() / 1000) + 3600 })
+    ).toString('base64url');
+    const sigB64 = createHmac('sha256', process.env.JWT_SECRET).update(`${headerB64}.${payloadB64}`).digest('base64url');
+    const token = `${headerB64}.${payloadB64}.${sigB64}`;
+
+    const analyzeRes = await fetch(`http://127.0.0.1:${appPort}/api/customer/analyze/${testChat}`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({
+        accountId: testAcc,
+        chatTitle: '11.16 Mehmet 40岁 医院清洁工 马尔丁 已婚',
+        messages: [
+          { sender: 'peer', text: 'Merhaba, bugün hastanedeyim işim biraz yoğun.' },
+          { sender: 'me', text: 'Kolay gelsin, müsait olunca konuşuruz.' },
+        ],
+        customConfig: {
+          enabled: true,
+          explicitlyDisabled: false,
+          engineMode: 'custom',
+          protocol: 'openai',
+          baseUrl: `http://127.0.0.1:${llmPort}/v1`,
+          apiKey: maskedKey,
+          modelName: 'gpt-4o-mini',
+        },
+      }),
+    });
+
+    assert.equal(analyzeRes.status, 200);
+    const json: any = await analyzeRes.json();
+    assert.equal(json.success, true);
+    assert.equal(receivedAuth, `Bearer ${realKey}`, 'Masked apiKey placeholder must resolve to real server secret');
+    assert.match(receivedPrompt, /11\.16 Mehmet 40岁 医院清洁工 马尔丁 已婚/);
+    assert.match(receivedPrompt, /外语/);
+    assert.equal(json.profile.occupation, '医院清洁工');
+    assert.equal(json.profile.locationTimezone, '马尔丁');
+    assert.equal(json.profile.ageEstimate, '40岁');
+    assert.equal(json.profile.keyMemories.length, 1);
+
+    const savedRow = await db
+      .prepare(`SELECT occupation, location_timezone, age_estimate FROM account_customer_profiles WHERE account_id = ? AND chat_id = ?`)
+      .get(testAcc, testChat) as any;
+    assert.equal(savedRow?.occupation, '医院清洁工');
+    assert.equal(savedRow?.location_timezone, '马尔丁');
+    assert.equal(savedRow?.age_estimate, '40岁');
+  } finally {
+    await db.prepare(`DELETE FROM account_customer_profiles WHERE account_id = ?`).run(testAcc);
+    await db.prepare(`DELETE FROM messages WHERE account_id = ?`).run(testAcc);
+    if (prevCustomCfg) {
+      await syncServerCustomLlmConfig(prevCustomCfg);
+    } else {
+      await db.prepare(`DELETE FROM system_config WHERE key = 'custom_llm_config'`).run();
+    }
+    if (prevJwtSecret === undefined) {
+      delete process.env.JWT_SECRET;
+    } else {
+      process.env.JWT_SECRET = prevJwtSecret;
+    }
+    appSrv.closeAllConnections?.();
+    await new Promise<void>((r) => appSrv.close(() => r()));
+    mockLlmSrv.closeAllConnections?.();
+    await new Promise<void>((r) => mockLlmSrv.close(() => r()));
+  }
+});
+
+test('resolveCustomerPersonaStageKey and buildCustomerProfilePromptSection map relationshipStage, take newest 5 memories, and render relationship-investment fields', async () => {
+  const { resolveCustomerPersonaStageKey, buildCustomerProfilePromptSection } = await import('../server.ts');
+
+  assert.equal(resolveCustomerPersonaStageKey('初识破冰'), 'icebreaker');
+  assert.equal(resolveCustomerPersonaStageKey('朋友熟络'), 'dailyFriend');
+  assert.equal(resolveCustomerPersonaStageKey('情感升温'), 'emotionalLove');
+  assert.equal(resolveCustomerPersonaStageKey('信任深化'), 'trustDefense');
+  assert.equal(resolveCustomerPersonaStageKey('投资切入'), 'wealthDiscussion');
+  assert.equal(resolveCustomerPersonaStageKey('未知自定义状态', 'dailyFriend'), 'dailyFriend');
+
+  const promptSection = buildCustomerProfilePromptSection(
+    {
+      chat_id: 'tg_9001',
+      client_name: 'Mehmet',
+      relationship_stage: '情感升温',
+      trust_level: '中（建立好感）',
+      age_estimate: '40岁',
+      family_marital_status: '已婚有娃，家庭经济负担较重',
+      occupation: '医院清洁工',
+      location_timezone: '马尔丁 (UTC+3)',
+      active_schedule: '晚上21:30后活跃',
+      tone_style: '慢热但真诚',
+      emotional_needs: '下班疲惫需要被倾听理解',
+      financial_profile: '收入有限但想找稳健副业',
+      investment_attitude: '对亏损很敏感，需先建立信任',
+      next_step_strategy: '先共情加班辛苦，暂不主动提投资产品',
+    },
+    ['足球', '咖啡'],
+    ['催单'],
+    [
+      { date: '2026-11-18', topic: '最新-医院夜班', summary: '昨晚加班到十一点' },
+      { date: '2026-11-17', topic: '最新-孩子学费', summary: '提到家里孩子开销大' },
+      { date: '2026-11-16', topic: '最新-周末休息', summary: '周日有半天休息' },
+      { date: '2026-11-15', topic: '最新-家乡饮食', summary: '喜欢喝土耳其红茶' },
+      { date: '2026-11-14', topic: '最新-职业背景', summary: '医院工作五年' },
+      { date: '2026-11-01', topic: '最旧-破冰打招呼', summary: '初次加好友' },
+    ]
+  );
+
+  assert.match(promptSection, /已婚有娃，家庭经济负担较重/);
+  assert.match(promptSection, /晚上21:30后活跃/);
+  assert.match(promptSection, /收入有限但想找稳健副业/);
+  assert.match(promptSection, /对亏损很敏感，需先建立信任/);
+  assert.match(promptSection, /中（建立好感）/);
+  assert.match(promptSection, /先共情加班辛苦，暂不主动提投资产品/);
+  assert.match(promptSection, /最新-医院夜班/);
+  assert.doesNotMatch(promptSection, /最旧-破冰打招呼/, 'Must select newest 5 head items instead of trailing tail');
+  assert.match(promptSection, /【AI 使用上述客户资料的回复准则】/);
+});
+
+test('/api/customer/profile/:chatId and /api/llm/chat persist extended dimensions and dynamically switch stagedPrompt by customer relationshipStage', async () => {
+  const http = await import('node:http');
+  const { createHmac } = await import('node:crypto');
+  const {
+    app,
+    syncServerCustomLlmConfig,
+    getServerCustomLlmConfig,
+  } = await import('../server.ts');
+  const { db, saveGlobalPersonaToDb } = await import('../server/db.ts');
+
+  const prevJwtSecret = process.env.JWT_SECRET;
+  const prevCustomCfg = await getServerCustomLlmConfig().catch(() => null);
+  process.env.JWT_SECRET = process.env.JWT_SECRET || 'stage_profile_jwt_secret';
+
+  let capturedSystemPrompt = '';
+  const mockLlmSrv = http.createServer((req, res) => {
+    let body = '';
+    req.on('data', (c) => (body += c));
+    req.on('end', () => {
+      const parsed = JSON.parse(body || '{}');
+      const sysMsg = (parsed?.messages || []).find((m: any) => m.role === 'system');
+      capturedSystemPrompt = String(sysMsg?.content || '');
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(
+        JSON.stringify({
+          choices: [{ message: { content: '最近在医院忙完回家一定很累吧，今晚早点歇会儿' } }],
+        })
+      );
+    });
+  });
+
+  await new Promise<void>((r) => mockLlmSrv.listen(0, '127.0.0.1', r));
+  const llmPort = (mockLlmSrv.address() as any).port;
+
+  const appSrv = http.createServer(app);
+  await new Promise<void>((r) => appSrv.listen(0, '127.0.0.1', r));
+  const appPort = (appSrv.address() as any).port;
+
+  const testAcc = `acc_stage_profile_${Date.now()}`;
+  const testChat = `tg_${Date.now()}`;
+
+  try {
+    await syncServerCustomLlmConfig({
+      enabled: true,
+      explicitlyDisabled: false,
+      engineMode: 'custom',
+      protocol: 'openai',
+      baseUrl: `http://127.0.0.1:${llmPort}/v1`,
+      apiKey: 'sk-stage-test-key',
+      modelName: 'gpt-4o-mini',
+      enableKnowledgeBaseRAG: false,
+    });
+
+    await saveGlobalPersonaToDb(
+      {
+        personaName: 'Elena',
+        personaRole: '生活观察者',
+        age: '29',
+        location: 'Singapore',
+        personalityTraits: ['温柔'],
+        lifeStyleDetails: '喝咖啡看盘',
+        investmentPhilosophy: '稳健风控',
+        activeStage: 'icebreaker',
+        stagedPrompts: {
+          icebreaker: 'STAGE_ICEBREAKER_MARKER',
+          dailyFriend: 'STAGE_DAILY_FRIEND_MARKER',
+          emotionalLove: 'STAGE_EMOTIONAL_LOVE_MARKER',
+          wealthDiscussion: 'STAGE_WEALTH_DISCUSSION_MARKER',
+          trustDefense: 'STAGE_TRUST_DEFENSE_MARKER',
+        },
+        tabooKeywords: [],
+      },
+      testAcc
+    );
+
+    const headerB64 = Buffer.from(JSON.stringify({ alg: 'HS256', typ: 'JWT' })).toString('base64url');
+    const payloadB64 = Buffer.from(
+      JSON.stringify({ sub: 'stage_tester', username: 'stage_tester', role: 'member', exp: Math.floor(Date.now() / 1000) + 3600 })
+    ).toString('base64url');
+    const sigB64 = createHmac('sha256', process.env.JWT_SECRET).update(`${headerB64}.${payloadB64}`).digest('base64url');
+    const token = `${headerB64}.${payloadB64}.${sigB64}`;
+
+    const saveRes = await fetch(`http://127.0.0.1:${appPort}/api/customer/profile/${testChat}`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({
+        accountId: testAcc,
+        clientName: 'Mehmet',
+        relationshipStage: '情感升温',
+        familyMaritalStatus: '已婚有娃',
+        activeSchedule: '晚22点后有空',
+        financialProfile: '月薪中等、想存点家用备用金',
+        investmentAttitude: '怕风险，偏谨慎',
+        trustLevel: '中（建立好感）',
+        nextStepStrategy: '持续情感关怀与共鸣，先了解家庭日常压力',
+        likesInterests: ['家庭', '足球'],
+      }),
+    });
+    assert.equal(saveRes.status, 200);
+
+    const getRes = await fetch(
+      `http://127.0.0.1:${appPort}/api/customer/profile/${testChat}?accountId=${encodeURIComponent(testAcc)}`,
+      { headers: { Authorization: `Bearer ${token}` } }
+    );
+    assert.equal(getRes.status, 200);
+    const getJson: any = await getRes.json();
+    assert.equal(getJson.familyMaritalStatus, '已婚有娃');
+    assert.equal(getJson.activeSchedule, '晚22点后有空');
+    assert.equal(getJson.financialProfile, '月薪中等、想存点家用备用金');
+    assert.equal(getJson.investmentAttitude, '怕风险，偏谨慎');
+    assert.equal(getJson.trustLevel, '中（建立好感）');
+    assert.equal(getJson.nextStepStrategy, '持续情感关怀与共鸣，先了解家庭日常压力');
+
+    const chatRes = await fetch(`http://127.0.0.1:${appPort}/api/llm/chat`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({
+        chatId: testChat,
+        accountId: testAcc,
+        messages: [{ role: 'user', sender: 'peer', text: '今天下班太累了' }],
+        customConfig: {
+          enabled: true,
+          explicitlyDisabled: false,
+          engineMode: 'custom',
+          protocol: 'openai',
+          baseUrl: `http://127.0.0.1:${llmPort}/v1`,
+          apiKey: 'sk-stage-test-key',
+          modelName: 'gpt-4o-mini',
+          enableKnowledgeBaseRAG: false,
+        },
+      }),
+    });
+    assert.equal(chatRes.status, 200);
+    assert.match(capturedSystemPrompt, /STAGE_EMOTIONAL_LOVE_MARKER/);
+    assert.doesNotMatch(capturedSystemPrompt, /STAGE_ICEBREAKER_MARKER/);
+    assert.match(capturedSystemPrompt, /已婚有娃/);
+    assert.match(capturedSystemPrompt, /晚22点后有空/);
+    assert.match(capturedSystemPrompt, /怕风险，偏谨慎/);
+    assert.match(capturedSystemPrompt, /持续情感关怀与共鸣，先了解家庭日常压力/);
+  } finally {
+    await db.prepare(`DELETE FROM account_customer_profiles WHERE account_id = ?`).run(testAcc);
+    await db.prepare(`DELETE FROM messages WHERE account_id = ?`).run(testAcc);
+    await db.prepare(`DELETE FROM system_config WHERE key = ?`).run(`global_persona_config::${testAcc}`);
+    if (prevCustomCfg) {
+      await syncServerCustomLlmConfig(prevCustomCfg);
+    } else {
+      await db.prepare(`DELETE FROM system_config WHERE key = 'custom_llm_config'`).run();
+    }
+    if (prevJwtSecret === undefined) {
+      delete process.env.JWT_SECRET;
+    } else {
+      process.env.JWT_SECRET = prevJwtSecret;
+    }
+    appSrv.closeAllConnections?.();
+    await new Promise<void>((r) => appSrv.close(() => r()));
+    mockLlmSrv.closeAllConnections?.();
+    await new Promise<void>((r) => mockLlmSrv.close(() => r()));
+  }
+});
+
+

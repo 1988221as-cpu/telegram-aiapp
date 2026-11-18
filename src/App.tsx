@@ -6081,7 +6081,9 @@ export default function App() {
             if (
               updated.accountId &&
               activeAccountIdRef.current &&
-              updated.accountId !== activeAccountIdRef.current
+              updated.accountId !== activeAccountIdRef.current &&
+              updated.accountId.replace(/^acc_tg_/, '') !==
+                activeAccountIdRef.current.replace(/^acc_tg_/, '')
             ) {
               return;
             }
@@ -6110,7 +6112,9 @@ export default function App() {
             if (
               updated.accountId &&
               activeAccountIdRef.current &&
-              updated.accountId !== activeAccountIdRef.current
+              updated.accountId !== activeAccountIdRef.current &&
+              updated.accountId.replace(/^acc_tg_/, '') !==
+                activeAccountIdRef.current.replace(/^acc_tg_/, '')
             ) {
               return;
             }

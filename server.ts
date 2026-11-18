@@ -439,6 +439,67 @@ export function safeJsonParse<T>(raw: string | null | undefined, fallback: T): T
   }
 }
 
+export function extractFirstJsonObject(raw: string | null | undefined): Record<string, any> | null {
+  if (!raw || typeof raw !== 'string') return null;
+  const scanBalancedObject = (src: string): Record<string, any> | null => {
+    const direct = safeJsonParse<any>(src, null);
+    if (direct && typeof direct === 'object' && !Array.isArray(direct)) {
+      return direct;
+    }
+    let inString = false;
+    let escaped = false;
+    let depth = 0;
+    let startIdx = -1;
+    for (let i = 0; i < src.length; i++) {
+      const ch = src[i];
+      if (inString) {
+        if (escaped) {
+          escaped = false;
+        } else if (ch === '\\') {
+          escaped = true;
+        } else if (ch === '"') {
+          inString = false;
+        }
+        continue;
+      }
+      if (ch === '"') {
+        inString = true;
+        continue;
+      }
+      if (ch === '{') {
+        if (depth === 0) startIdx = i;
+        depth++;
+      } else if (ch === '}' && depth > 0) {
+        depth--;
+        if (depth === 0 && startIdx >= 0) {
+          const parsed = safeJsonParse<any>(src.slice(startIdx, i + 1), null);
+          if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+            return parsed;
+          }
+          startIdx = -1;
+        }
+      }
+    }
+    return null;
+  };
+
+  const trimmed = raw.trim();
+  if (!trimmed) return null;
+  const fenceRegex = /```(?:json)?\s*([\s\S]*?)```/gi;
+  let match: RegExpExecArray | null;
+  while ((match = fenceRegex.exec(trimmed)) !== null) {
+    const inner = String(match[1] || '').trim();
+    if (!inner) continue;
+    const parsedBlock = scanBalancedObject(inner);
+    if (parsedBlock) return parsedBlock;
+  }
+  const cleaned = trimmed
+    .replace(/^```(?:json)?\s*/i, '')
+    .replace(/\s*```$/i, '')
+    .trim();
+  return cleaned ? scanBalancedObject(cleaned) : null;
+}
+
 export function sanitizeHttpHeaderValue(val?: any): string {
   if (!val || typeof val !== 'string') return '';
   return val.replace(/[^\x20-\x7E]/g, '').trim();
@@ -6366,6 +6427,12 @@ export async function getScopedCustomerProfile(chatId: string, accountId?: strin
               likesInterests: safeJsonParse(row.likes_interests, []),
               dislikesTaboos: safeJsonParse(row.dislikes_taboos, []),
               emotionalNeeds: row.emotional_needs,
+              familyMaritalStatus: row.family_marital_status,
+              activeSchedule: row.active_schedule,
+              financialProfile: row.financial_profile,
+              investmentAttitude: row.investment_attitude,
+              trustLevel: row.trust_level,
+              nextStepStrategy: row.next_step_strategy,
               keyMemories: safeJsonParse(row.key_memories, []),
             },
             preserveOnSparse: true,
@@ -6380,10 +6447,16 @@ export async function getScopedCustomerProfile(chatId: string, accountId?: strin
         age_estimate: merged.ageEstimate,
         occupation: merged.occupation,
         location_timezone: merged.locationTimezone,
+        family_marital_status: merged.familyMaritalStatus,
+        active_schedule: merged.activeSchedule,
         tone_style: merged.toneStyle,
         likes_interests: JSON.stringify(merged.likesInterests),
         dislikes_taboos: JSON.stringify(merged.dislikesTaboos),
         emotional_needs: merged.emotionalNeeds,
+        financial_profile: merged.financialProfile,
+        investment_attitude: merged.investmentAttitude,
+        trust_level: merged.trustLevel,
+        next_step_strategy: merged.nextStepStrategy,
         key_memories: JSON.stringify(merged.keyMemories),
       };
     }
@@ -6468,10 +6541,16 @@ export async function upsertScopedCustomerProfile(params: {
   ageEstimate: string;
   occupation: string;
   locationTimezone: string;
+  familyMaritalStatus?: string;
+  activeSchedule?: string;
   toneStyle: string;
   likesInterests: string;
   dislikesTaboos: string;
   emotionalNeeds: string;
+  financialProfile?: string;
+  investmentAttitude?: string;
+  trustLevel?: string;
+  nextStepStrategy?: string;
   keyMemories: string;
   totalMessagesCount?: number;
   lastAnalyzedAt?: number;
@@ -6480,24 +6559,37 @@ export async function upsertScopedCustomerProfile(params: {
   const effAcc = String(params.accountId || 'acc_1').trim() || 'acc_1';
   const canonicalChatId = canonicalizeCustomerChatId(params.chatId);
   const altChatId = canonicalChatId.startsWith('tg_') ? canonicalChatId.replace(/^tg_/, '') : '';
+  const familyMaritalVal = String(params.familyMaritalStatus ?? '');
+  const activeScheduleVal = String(params.activeSchedule ?? '');
+  const financialProfileVal = String(params.financialProfile ?? '');
+  const investmentAttitudeVal = String(params.investmentAttitude ?? '');
+  const trustLevelVal = String(params.trustLevel ?? '');
+  const nextStepStrategyVal = String(params.nextStepStrategy ?? '');
 
   await db
     .prepare(
       `INSERT INTO account_customer_profiles (
         account_id, chat_id, client_name, relationship_stage, age_estimate, occupation,
-        location_timezone, tone_style, likes_interests, dislikes_taboos, emotional_needs,
+        location_timezone, family_marital_status, active_schedule, tone_style, likes_interests, dislikes_taboos, emotional_needs,
+        financial_profile, investment_attitude, trust_level, next_step_strategy,
         key_memories, total_messages_count, last_analyzed_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(account_id, chat_id) DO UPDATE SET
         client_name = excluded.client_name,
         relationship_stage = excluded.relationship_stage,
         age_estimate = excluded.age_estimate,
         occupation = excluded.occupation,
         location_timezone = excluded.location_timezone,
+        family_marital_status = excluded.family_marital_status,
+        active_schedule = excluded.active_schedule,
         tone_style = excluded.tone_style,
         likes_interests = excluded.likes_interests,
         dislikes_taboos = excluded.dislikes_taboos,
         emotional_needs = excluded.emotional_needs,
+        financial_profile = excluded.financial_profile,
+        investment_attitude = excluded.investment_attitude,
+        trust_level = excluded.trust_level,
+        next_step_strategy = excluded.next_step_strategy,
         key_memories = excluded.key_memories,
         total_messages_count = CASE WHEN excluded.total_messages_count > account_customer_profiles.total_messages_count THEN excluded.total_messages_count ELSE account_customer_profiles.total_messages_count END,
         last_analyzed_at = CASE WHEN excluded.last_analyzed_at > 0 THEN excluded.last_analyzed_at ELSE account_customer_profiles.last_analyzed_at END,
@@ -6511,10 +6603,16 @@ export async function upsertScopedCustomerProfile(params: {
       params.ageEstimate,
       params.occupation,
       params.locationTimezone,
+      familyMaritalVal,
+      activeScheduleVal,
       params.toneStyle,
       params.likesInterests,
       params.dislikesTaboos,
       params.emotionalNeeds,
+      financialProfileVal,
+      investmentAttitudeVal,
+      trustLevelVal,
+      nextStepStrategyVal,
       params.keyMemories,
       params.totalMessagesCount ?? 0,
       params.lastAnalyzedAt ?? 0,
@@ -6544,9 +6642,10 @@ export async function upsertScopedCustomerProfile(params: {
         .prepare(
           `INSERT INTO customer_profiles (
             chat_id, account_id, client_name, relationship_stage, age_estimate, occupation,
-            location_timezone, tone_style, likes_interests, dislikes_taboos, emotional_needs,
+            location_timezone, family_marital_status, active_schedule, tone_style, likes_interests, dislikes_taboos, emotional_needs,
+            financial_profile, investment_attitude, trust_level, next_step_strategy,
             key_memories, total_messages_count, last_analyzed_at, updated_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
           ON CONFLICT(chat_id) DO UPDATE SET
             account_id = excluded.account_id,
             client_name = excluded.client_name,
@@ -6554,10 +6653,16 @@ export async function upsertScopedCustomerProfile(params: {
             age_estimate = excluded.age_estimate,
             occupation = excluded.occupation,
             location_timezone = excluded.location_timezone,
+            family_marital_status = excluded.family_marital_status,
+            active_schedule = excluded.active_schedule,
             tone_style = excluded.tone_style,
             likes_interests = excluded.likes_interests,
             dislikes_taboos = excluded.dislikes_taboos,
             emotional_needs = excluded.emotional_needs,
+            financial_profile = excluded.financial_profile,
+            investment_attitude = excluded.investment_attitude,
+            trust_level = excluded.trust_level,
+            next_step_strategy = excluded.next_step_strategy,
             key_memories = excluded.key_memories,
             total_messages_count = CASE WHEN excluded.total_messages_count > customer_profiles.total_messages_count THEN excluded.total_messages_count ELSE customer_profiles.total_messages_count END,
             last_analyzed_at = CASE WHEN excluded.last_analyzed_at > 0 THEN excluded.last_analyzed_at ELSE customer_profiles.last_analyzed_at END,
@@ -6571,10 +6676,16 @@ export async function upsertScopedCustomerProfile(params: {
           params.ageEstimate,
           params.occupation,
           params.locationTimezone,
+          familyMaritalVal,
+          activeScheduleVal,
           params.toneStyle,
           params.likesInterests,
           params.dislikesTaboos,
           params.emotionalNeeds,
+          financialProfileVal,
+          investmentAttitudeVal,
+          trustLevelVal,
+          nextStepStrategyVal,
           params.keyMemories,
           params.totalMessagesCount ?? 0,
           params.lastAnalyzedAt ?? 0,
@@ -9311,7 +9422,7 @@ app.get('/api/customer/profile/:chatId', requireTenantAuth, async (req: Request,
     }
 
     const resolvedTotalMessagesCount = Math.max(Number(profile?.total_messages_count) || 0, dbMsgCount);
-    res.json({
+      res.json({
       chatId: canonicalChatId,
       accountId: profile.account_id || effectiveAccountId,
       clientName: profile.client_name,
@@ -9319,10 +9430,16 @@ app.get('/api/customer/profile/:chatId', requireTenantAuth, async (req: Request,
       ageEstimate: profile.age_estimate,
       occupation: profile.occupation,
       locationTimezone: profile.location_timezone,
+      familyMaritalStatus: profile.family_marital_status || '',
+      activeSchedule: profile.active_schedule || '',
       toneStyle: profile.tone_style,
       likesInterests: safeJsonParse(profile.likes_interests, []),
       dislikesTaboos: safeJsonParse(profile.dislikes_taboos, []),
       emotionalNeeds: profile.emotional_needs,
+      financialProfile: profile.financial_profile || '',
+      investmentAttitude: profile.investment_attitude || '',
+      trustLevel: profile.trust_level || '',
+      nextStepStrategy: profile.next_step_strategy || '',
       keyMemories: safeJsonParse(profile.key_memories, []),
       totalMessagesCount: resolvedTotalMessagesCount,
       lastAnalyzedAt: profile.last_analyzed_at,
@@ -9344,7 +9461,10 @@ app.post('/api/customer/profile/:chatId', requireTenantAuth, async (req: Request
     }
     const {
       clientName, relationshipStage, ageEstimate, occupation, locationTimezone,
-      toneStyle, likesInterests, dislikesTaboos, emotionalNeeds, keyMemories
+      familyMaritalStatus, activeSchedule,
+      toneStyle, likesInterests, dislikesTaboos, emotionalNeeds,
+      financialProfile, investmentAttitude, trustLevel, nextStepStrategy,
+      keyMemories
     } = req.body;
     const effectiveAccountId = scope.accountId;
     const bodyObj = req.body && typeof req.body === 'object' ? req.body : {};
@@ -9367,6 +9487,12 @@ app.post('/api/customer/profile/:chatId', requireTenantAuth, async (req: Request
       locationTimezone: hasField('locationTimezone')
         ? String(locationTimezone ?? '')
         : String(existing?.location_timezone ?? ''),
+      familyMaritalStatus: hasField('familyMaritalStatus')
+        ? String(familyMaritalStatus ?? '')
+        : String(existing?.family_marital_status ?? ''),
+      activeSchedule: hasField('activeSchedule')
+        ? String(activeSchedule ?? '')
+        : String(existing?.active_schedule ?? ''),
       toneStyle: hasField('toneStyle') ? String(toneStyle ?? '') : String(existing?.tone_style ?? ''),
       likesInterests: hasField('likesInterests')
         ? JSON.stringify(Array.isArray(likesInterests) ? likesInterests : [])
@@ -9381,6 +9507,18 @@ app.post('/api/customer/profile/:chatId', requireTenantAuth, async (req: Request
       emotionalNeeds: hasField('emotionalNeeds')
         ? String(emotionalNeeds ?? '')
         : String(existing?.emotional_needs ?? ''),
+      financialProfile: hasField('financialProfile')
+        ? String(financialProfile ?? '')
+        : String(existing?.financial_profile ?? ''),
+      investmentAttitude: hasField('investmentAttitude')
+        ? String(investmentAttitude ?? '')
+        : String(existing?.investment_attitude ?? ''),
+      trustLevel: hasField('trustLevel')
+        ? String(trustLevel ?? '')
+        : String(existing?.trust_level ?? ''),
+      nextStepStrategy: hasField('nextStepStrategy')
+        ? String(nextStepStrategy ?? '')
+        : String(existing?.next_step_strategy ?? ''),
       keyMemories: hasField('keyMemories')
         ? JSON.stringify(Array.isArray(keyMemories) ? keyMemories : [])
         : typeof existing?.key_memories === 'string'
@@ -9426,7 +9564,12 @@ app.post('/api/customer/analyze/:chatId', requireTenantAuth, async (req: Request
                 ? !customConfig.enabled
                 : Boolean(customConfig.explicitlyDisabled ?? serverCustomCfg?.explicitlyDisabled),
             baseUrl: (typeof customConfig.baseUrl === 'string' ? customConfig.baseUrl : (serverCustomCfg?.baseUrl || '')).trim(),
-            apiKey: (typeof customConfig.apiKey === 'string' ? customConfig.apiKey : (serverCustomCfg?.apiKey || '')).trim(),
+            apiKey: resolveSecretUpdate(customConfig.apiKey, serverCustomCfg?.apiKey, true),
+            engineLicenseKey: resolveSecretUpdate(
+              customConfig.engineLicenseKey,
+              serverCustomCfg?.engineLicenseKey,
+              true
+            ),
             modelName:
               (customConfig.engineMode || serverCustomCfg?.engineMode) === 'custom'
                 ? (typeof customConfig.modelName === 'string'
@@ -9525,10 +9668,16 @@ app.post('/api/customer/analyze/:chatId', requireTenantAuth, async (req: Request
         ageEstimate: mergedEmpty.ageEstimate,
         occupation: mergedEmpty.occupation,
         locationTimezone: mergedEmpty.locationTimezone,
+        familyMaritalStatus: mergedEmpty.familyMaritalStatus,
+        activeSchedule: mergedEmpty.activeSchedule,
         toneStyle: mergedEmpty.toneStyle,
         likesInterests: JSON.stringify(mergedEmpty.likesInterests),
         dislikesTaboos: JSON.stringify(mergedEmpty.dislikesTaboos),
         emotionalNeeds: mergedEmpty.emotionalNeeds,
+        financialProfile: mergedEmpty.financialProfile,
+        investmentAttitude: mergedEmpty.investmentAttitude,
+        trustLevel: mergedEmpty.trustLevel,
+        nextStepStrategy: mergedEmpty.nextStepStrategy,
         keyMemories: JSON.stringify(mergedEmpty.keyMemories),
         totalMessagesCount: actualMessageCount,
         lastAnalyzedAt: now,
@@ -9577,10 +9726,16 @@ app.post('/api/customer/analyze/:chatId', requireTenantAuth, async (req: Request
         ageEstimate: mergedSparse.ageEstimate,
         occupation: mergedSparse.occupation,
         locationTimezone: mergedSparse.locationTimezone,
+        familyMaritalStatus: mergedSparse.familyMaritalStatus,
+        activeSchedule: mergedSparse.activeSchedule,
         toneStyle: mergedSparse.toneStyle,
         likesInterests: JSON.stringify(mergedSparse.likesInterests),
         dislikesTaboos: JSON.stringify(mergedSparse.dislikesTaboos),
         emotionalNeeds: mergedSparse.emotionalNeeds,
+        financialProfile: mergedSparse.financialProfile,
+        investmentAttitude: mergedSparse.investmentAttitude,
+        trustLevel: mergedSparse.trustLevel,
+        nextStepStrategy: mergedSparse.nextStepStrategy,
         keyMemories: JSON.stringify(mergedSparse.keyMemories),
         totalMessagesCount: actualMessageCount,
         lastAnalyzedAt: now,
@@ -9606,28 +9761,50 @@ app.post('/api/customer/analyze/:chatId', requireTenantAuth, async (req: Request
       return `${sender}: ${content}`;
     }).join('\n');
 
-    const analysisPrompt = `作为客观严谨的客户画像与长期记忆提炼助手，请深度客观分析以下真实客户与我方的聊天历史（最近50条消息）。
+    const existingSummaryParts = existingProfile
+      ? [
+          existingProfile.relationship_stage ? `关系阶段:${existingProfile.relationship_stage}` : '',
+          existingProfile.family_marital_status ? `婚恋家庭:${existingProfile.family_marital_status}` : '',
+          existingProfile.active_schedule ? `作息:${existingProfile.active_schedule}` : '',
+          existingProfile.financial_profile ? `经济背景:${existingProfile.financial_profile}` : '',
+          existingProfile.investment_attitude ? `投资态度:${existingProfile.investment_attitude}` : '',
+          existingProfile.trust_level ? `信任度:${existingProfile.trust_level}` : '',
+          existingProfile.next_step_strategy ? `既有策略:${existingProfile.next_step_strategy}` : '',
+        ].filter(Boolean)
+      : [];
+    const existingProfileSummary = existingSummaryParts.join('；');
+
+    const analysisPrompt = `作为客观严谨的客户画像与长期记忆提炼助手，请深度客观分析以下真实客户与我方的聊天历史（最近50条消息），服务于“交朋友 -> 情感升温 -> 深度信任 -> 投资探讨”的长周期私域沟通。
 【严格规则 - 禁止任何假设与虚假编造】：
-1. 只能提取对话中真实明确提及或明确体现的事实。未在对话中出现的年龄、职业或时区必须返回"未知"或"未提及"，严禁擅自猜测或套用模板！
+1. 只能提取对话中真实明确提及或明确体现的事实（含婚恋家庭、作息规律、收入经济线索、投资或副业态度）。未在对话中出现的年龄、职业、婚恋或时区必须返回"未知"或"未提及"，严禁擅自猜测或套用模板！
 2. 喜好偏好(likesInterests)与敏感雷区(dislikesTaboos)若对话中未明确表达，必须返回空数组 []，严禁添加未讨论的假标签。
 3. 关键记忆(keyMemories)必须基于真实对话中的事件或约定，若无明确约定则返回空数组 []。
+4. 若对话使用外语（如土耳其语、英语等），请先理解其真实含义后再以简体中文输出提炼结果，不得因外语内容而遗漏分析。
 
 请返回严格的 JSON 格式（不要包含任何 markdown 代码块或额外文字）：
 {
   "clientName": "从聊天推断的真实称谓或称呼",
-  "relationshipStage": "例如：初次沟通 / 需求咨询 / 合作推进 / 长期稳定合作",
+  "relationshipStage": "从五阶段中客观判断当前所处阶段：初识破冰 / 朋友熟络 / 情感升温 / 信任深化 / 投资切入",
   "ageEstimate": "对话中明确提及的年龄，未提及则填'未知'",
   "occupation": "对话中明确提及的职业或行业，未提及则填'未知'",
   "locationTimezone": "对话中明确提及的所在地或时区，未提及则填'未提及'",
-  "toneStyle": "客观分析得出的说话用词与沟通风格（如：严谨专业 / 简洁直接 / 热情礼貌 / 随和日常）",
-  "likesInterests": ["真实聊到的具体兴趣或业务关注点，无则空数组"],
-  "dislikesTaboos": ["真实表达的反感情绪或避讳雷区，无则空数组"],
-  "emotionalNeeds": "真实的沟通与业务诉求，无则填'待进一步沟通交流'",
+  "familyMaritalStatus": "对话或备注中明确提及的婚恋/家庭状态（如：已婚有娃/单身/离异/独居），未提及则填'未知'",
+  "activeSchedule": "从聊天时间与内容体现的作息空闲窗口（如：夜班/晚21点后活跃/周末休息），未体现则填'未提及'",
+  "toneStyle": "客观分析得出的说话用词与沟通风格（如：热情话多 / 谨慎慢热 / 直接务实 / 情感细腻）",
+  "likesInterests": ["真实聊到的具体兴趣、生活关注点或共同话题，无则空数组"],
+  "dislikesTaboos": ["真实表达的反感情绪、拒绝话题或敏感雷区，无则空数组"],
+  "emotionalNeeds": "真实的深层情感诉求与生活痛点（如缺陪伴/工作累/家庭开销压力/渴望认可），无则填'待进一步沟通交流'",
+  "financialProfile": "对话中流露的经济实力、收入感受或资金压力线索，未提及则填'待进一步了解'",
+  "investmentAttitude": "对副业/理财/投资的态度、过往经验或顾虑点，未提及则填'待观察'",
+  "trustLevel": "结合互动主动度与倾诉深度评估：低（初识）/ 中（建立好感）/ 高（深度信任）",
+  "nextStepStrategy": "基于当前关系阶段给出的1~2句下一步话题切入与推进建议（未到信任或投资阶段切勿强推）",
   "keyMemories": [
     { "id": "mem_1", "date": "日期或近期", "topic": "关键话题", "summary": "真实事实或约定简述", "emotion": "正常交流" }
   ]
 }
 
+当前联系人备注/昵称：${String(chatTitle || '客户').trim() || '客户'}（如备注中已含称谓/年龄/职业/婚恋/城市等明确信息可参考提取，未明确处仍填"未知"或"未提及"）
+当前已录入的客户基准档案（若已有明确人工记录请保留并在此基础上补充深化，未矛盾时不要覆盖）：${existingProfileSummary || '暂无'}
 真实聊天历史记录：
 ${conversationTranscript}`;
 
@@ -9643,8 +9820,10 @@ ${conversationTranscript}`;
     );
 
     const effectiveLicenseKey =
-      (typeof customConfig?.engineLicenseKey === 'string' && customConfig.engineLicenseKey.trim()) ||
-      (typeof serverCustomCfg?.engineLicenseKey === 'string' && serverCustomCfg.engineLicenseKey.trim()) ||
+      (typeof effectiveAnalyzeConfig?.engineLicenseKey === 'string' && effectiveAnalyzeConfig.engineLicenseKey.trim()) ||
+      (typeof serverCustomCfg?.engineLicenseKey === 'string' &&
+        !isMaskedSecretPlaceholder(serverCustomCfg.engineLicenseKey) &&
+        serverCustomCfg.engineLicenseKey.trim()) ||
       (process.env.RAILWAY_BRAIN_KEY || '').trim() ||
       undefined;
     const effectiveUserJwt = bearerJwt || undefined;
@@ -9700,15 +9879,16 @@ ${conversationTranscript}`;
           },
           messages: [{ role: 'user', content: analysisPrompt }],
           temperature: 0.1,
-          maxTokens: 1000,
-          timeoutMs: 20000,
+          maxTokens: 2048,
+          timeoutMs: 35000,
+          maxRetries: 0,
           throwOnError: true,
           skipSync: true,
         });
         if (txt) {
-          const jsonMatch = txt.match(/\{[\s\S]*\}/);
-          if (jsonMatch) {
-            extractedData = JSON.parse(jsonMatch[0]);
+          const parsedObj = extractFirstJsonObject(txt);
+          if (parsedObj) {
+            extractedData = parsedObj;
           } else {
             analysisErrorMsg = '自有模型网关返回内容未能解析为有效的客户画像 JSON';
           }
@@ -9749,17 +9929,18 @@ ${conversationTranscript}`;
           },
           messages: [{ role: 'user', content: analysisPrompt }],
           temperature: 0.1,
-          maxTokens: 1000,
-          timeoutMs: 20000,
+          maxTokens: 2048,
+          timeoutMs: 35000,
+          maxRetries: 0,
           userJwt: effectiveUserJwt,
           throwOnError: true,
           skipSync: true,
           extraPayload: { purpose: 'memory_extraction' },
         });
         if (txt) {
-          const jsonMatch = txt.match(/\{[\s\S]*\}/);
-          if (jsonMatch) {
-            extractedData = JSON.parse(jsonMatch[0]);
+          const parsedObj = extractFirstJsonObject(txt);
+          if (parsedObj) {
+            extractedData = parsedObj;
           } else {
             analysisErrorMsg = 'HumanSense 云端引擎返回内容未能解析为有效的客户画像 JSON';
           }
@@ -9795,10 +9976,16 @@ ${conversationTranscript}`;
       ageEstimate: mergedProfile.ageEstimate,
       occupation: mergedProfile.occupation,
       locationTimezone: mergedProfile.locationTimezone,
+      familyMaritalStatus: mergedProfile.familyMaritalStatus,
+      activeSchedule: mergedProfile.activeSchedule,
       toneStyle: mergedProfile.toneStyle,
       likesInterests: JSON.stringify(mergedProfile.likesInterests),
       dislikesTaboos: JSON.stringify(mergedProfile.dislikesTaboos),
       emotionalNeeds: mergedProfile.emotionalNeeds,
+      financialProfile: mergedProfile.financialProfile,
+      investmentAttitude: mergedProfile.investmentAttitude,
+      trustLevel: mergedProfile.trustLevel,
+      nextStepStrategy: mergedProfile.nextStepStrategy,
       keyMemories: JSON.stringify(mergedProfile.keyMemories),
       totalMessagesCount: actualMessageCount,
       lastAnalyzedAt: now,
@@ -15310,12 +15497,72 @@ export interface StructuredHolographicProfile {
   ageEstimate: string;
   occupation: string;
   locationTimezone: string;
+  familyMaritalStatus?: string;
+  activeSchedule?: string;
   toneStyle: string;
   likesInterests: string[];
   dislikesTaboos: string[];
   emotionalNeeds: string;
+  financialProfile?: string;
+  investmentAttitude?: string;
+  trustLevel?: string;
+  nextStepStrategy?: string;
   keyMemories: Array<{ date?: string; topic?: string; summary?: string; emotion?: string }>;
   isColdStart: boolean;
+}
+
+export function resolveCustomerPersonaStageKey(
+  relationshipStage?: string | null,
+  fallbackStage?: string
+): string | undefined {
+  const s = String(relationshipStage || '').trim();
+  if (!s) return fallbackStage;
+  if (/投资|理财|财富|资产|项目|合作/.test(s)) return 'wealthDiscussion';
+  if (/信任|防线|深度|稳定/.test(s)) return 'trustDefense';
+  if (/恋爱|情感|暧昧|升温/.test(s)) return 'emotionalLove';
+  if (/朋友|熟络|日常|沟通/.test(s)) return 'dailyFriend';
+  if (/初识|破冰|初次|尚未/.test(s)) return 'icebreaker';
+  return fallbackStage;
+}
+
+export function buildCustomerProfilePromptSection(
+  profile: any,
+  likes: string[] = [],
+  taboos: string[] = [],
+  memories: any[] = [],
+  customerIdFallback?: string
+): string {
+  if (!profile) return '';
+  const recentMems = Array.isArray(memories) ? memories.slice(0, 5) : [];
+  const memoriesBlock =
+    recentMems.length > 0
+      ? recentMems
+          .map(
+            (m: any) =>
+              `  * [${m?.date || '近期'}] ${m?.topic || '日常'}: ${m?.summary || ''} (当时情绪: ${m?.emotion || '共鸣'})`
+          )
+          .join('\n')
+      : '  * 暂无';
+  return `
+【数据库已载入该客户的全息专属画像与长期记忆档案】：
+- 客户 ID：${String(profile.chat_id || customerIdFallback || '')}
+- 客户昵称/称谓：${profile.client_name || '客户'}
+- 当前关系阶段与信任度：${profile.relationship_stage || '初识破冰'} ｜ 信任度：${String(profile.trust_level || '低（初识）').trim() || '低（初识）'}
+- 年龄估算 / 婚恋家庭：${String(profile.age_estimate || '-').trim() || '-'} ｜ ${String(profile.family_marital_status || '未知').trim() || '未知'}
+- 职业背景：${String(profile.occupation || '未知').trim() || '未知'}
+- 所在地区/时区与活跃作息：${String(profile.location_timezone || '未知').trim() || '未知'} ｜ 作息窗口：${String(profile.active_schedule || '未提及').trim() || '未提及'}
+- 客户性格与语气风格：${profile.tone_style || '待观察'}
+- 客户的核心喜好与爱聊话题：${likes.join('、') || '暂无'}
+- 客户的忌讳与敏感雷区：${taboos.join('、') || '暂无'}
+- 客户内心深层情感诉求：${profile.emotional_needs || '待进一步沟通交流'}
+- 经济背景与投资态度：${String(profile.financial_profile || '待进一步了解').trim() || '待进一步了解'} ｜ ${String(profile.investment_attitude || '待观察').trim() || '待观察'}
+- 下一步互动建议：${String(profile.next_step_strategy || '自然破冰与日常共情，未到时机切勿急躁推销').trim() || '自然破冰与日常共情，未到时机切勿急躁推销'}
+- 最新关键记忆与约定（最新 ${recentMems.length} 条）：
+${memoriesBlock}
+【AI 使用上述客户资料的回复准则】：
+1. 严格匹配「关系阶段与信任度」定分寸：初识/朋友阶段保持自然生活化交流，严禁直接硬推投资或理财；情感升温/信任深化阶段再结合对方诉求、家庭或经济话题顺势延展。
+2. 对照「婚恋家庭 / 职业 / 作息窗口」选好共情切入点与得体称呼，绝对避开「忌讳与敏感雷区」里的任何字眼与话题。
+3. 可自然承接 1 条「最新关键记忆」或喜好点体现“我一直在用心听你说”，但禁止像背诵档案一样一次性生硬列举多条信息。`;
 }
 
 export interface StructuredReplyJsonRequest {
@@ -15980,10 +16227,97 @@ app.post('/api/llm/chat', aiGenerationLimiter, requireTenantAuth, async (req: Re
     const chatTranslationTargetLang =
       explicitInboundTarget || (await getScopedChatTargetLang(customerId, accountId)) || undefined;
 
-    // Step 3: Read real Persona & active evolution habits strictly scoped by accountId
+    // Step 3 & Step 4: Load Customer Holographic Profile first so Persona stagePrompt tracks customer relationshipStage
     const globalPersona = await getGlobalPersonaFromDb(accountId).catch(() => DEFAULT_GLOBAL_PERSONA);
     const evolutionState = await getEvolutionStateFromDb(accountId).catch(() => DEFAULT_EVOLUTION_STATE);
-    const personaCtx = buildActivePersonaAndEvolutionContext(globalPersona, evolutionState, undefined, 3);
+
+    let profileContext = '';
+    let customerProfileData: any = null;
+    let holographicPayload: StructuredHolographicProfile = {
+      found: false,
+      customerId,
+      clientName: '',
+      relationshipStage: '尚未沟通',
+      ageEstimate: '-',
+      occupation: '',
+      locationTimezone: '',
+      familyMaritalStatus: '',
+      activeSchedule: '',
+      toneStyle: '',
+      likesInterests: [],
+      dislikesTaboos: [],
+      emotionalNeeds: '',
+      financialProfile: '',
+      investmentAttitude: '',
+      trustLevel: '',
+      nextStepStrategy: '',
+      keyMemories: [],
+      isColdStart: true,
+    };
+
+    let customerLikes: string[] = [];
+    let customerMemories: any[] = [];
+
+    if (customerId) {
+      try {
+        const p = await getScopedCustomerProfile(customerId, accountId);
+
+        if (p) {
+          customerProfileData = p;
+          const likes = safeJsonParse<string[]>(p.likes_interests, []);
+          const taboos = safeJsonParse<string[]>(p.dislikes_taboos, []);
+          const memories = safeJsonParse<any[]>(p.key_memories, []);
+          customerLikes = Array.isArray(likes) ? likes : [];
+          customerMemories = Array.isArray(memories) ? memories : [];
+          const cleanTaboos = Array.isArray(taboos) ? taboos : [];
+
+          const isColdStart = isCustomerColdStartProfile(p, customerLikes, customerMemories);
+
+          holographicPayload = {
+            found: true,
+            customerId: String(p.chat_id || customerId),
+            clientName: String(p.client_name || '').trim(),
+            relationshipStage: String(p.relationship_stage || '').trim() || '尚未沟通',
+            ageEstimate: String(p.age_estimate || '-').trim(),
+            occupation: String(p.occupation || '').trim(),
+            locationTimezone: String(p.location_timezone || '').trim(),
+            familyMaritalStatus: String(p.family_marital_status || '').trim(),
+            activeSchedule: String(p.active_schedule || '').trim(),
+            toneStyle: String(p.tone_style || '').trim(),
+            likesInterests: customerLikes,
+            dislikesTaboos: cleanTaboos,
+            emotionalNeeds: String(p.emotional_needs || '').trim(),
+            financialProfile: String(p.financial_profile || '').trim(),
+            investmentAttitude: String(p.investment_attitude || '').trim(),
+            trustLevel: String(p.trust_level || '').trim(),
+            nextStepStrategy: String(p.next_step_strategy || '').trim(),
+            keyMemories: customerMemories,
+            isColdStart,
+          };
+
+          profileContext = buildCustomerProfilePromptSection(
+            p,
+            customerLikes,
+            cleanTaboos,
+            customerMemories,
+            holographicPayload.customerId
+          );
+        }
+      } catch (err) {
+        console.warn('Could not read customer profile from db:', err);
+      }
+    }
+
+    const customerStageOverride = resolveCustomerPersonaStageKey(
+      customerProfileData?.relationship_stage,
+      datingMode ? 'emotionalLove' : undefined
+    );
+    const personaCtx = buildActivePersonaAndEvolutionContext(
+      globalPersona,
+      evolutionState,
+      customerStageOverride,
+      3
+    );
     const globalPersonaContext = personaCtx.context;
     const injectedHabitIds = personaCtx.activeHabitIds;
 
@@ -16016,78 +16350,6 @@ app.post('/api/llm/chat', aiGenerationLimiter, requireTenantAuth, async (req: Re
       hasConfiguredPersona: personaCtx.hasConfiguredPersona,
       fallbackPrompt: String(personaPrompt || '').trim(),
     };
-
-    // Step 4: Read current Customer Holographic Profile from DB
-    let profileContext = '';
-    let customerProfileData: any = null;
-    let holographicPayload: StructuredHolographicProfile = {
-      found: false,
-      customerId,
-      clientName: '',
-      relationshipStage: '尚未沟通',
-      ageEstimate: '-',
-      occupation: '',
-      locationTimezone: '',
-      toneStyle: '',
-      likesInterests: [],
-      dislikesTaboos: [],
-      emotionalNeeds: '',
-      keyMemories: [],
-      isColdStart: true,
-    };
-
-    let customerLikes: string[] = [];
-    let customerMemories: any[] = [];
-
-    if (customerId) {
-      try {
-        const p = await getScopedCustomerProfile(customerId, accountId);
-
-        if (p) {
-          customerProfileData = p;
-          const likes = safeJsonParse<string[]>(p.likes_interests, []);
-          const taboos = safeJsonParse<string[]>(p.dislikes_taboos, []);
-          const memories = safeJsonParse<any[]>(p.key_memories, []);
-          customerLikes = Array.isArray(likes) ? likes : [];
-          customerMemories = Array.isArray(memories) ? memories : [];
-
-          const isColdStart = isCustomerColdStartProfile(p, customerLikes, customerMemories);
-
-          holographicPayload = {
-            found: true,
-            customerId: String(p.chat_id || customerId),
-            clientName: String(p.client_name || '').trim(),
-            relationshipStage: String(p.relationship_stage || '').trim() || '尚未沟通',
-            ageEstimate: String(p.age_estimate || '-').trim(),
-            occupation: String(p.occupation || '').trim(),
-            locationTimezone: String(p.location_timezone || '').trim(),
-            toneStyle: String(p.tone_style || '').trim(),
-            likesInterests: customerLikes,
-            dislikesTaboos: Array.isArray(taboos) ? taboos : [],
-            emotionalNeeds: String(p.emotional_needs || '').trim(),
-            keyMemories: customerMemories,
-            isColdStart,
-          };
-
-          profileContext = `
-【数据库已载入该客户的全息专属画像与长期记忆档案】：
-- 客户 ID：${holographicPayload.customerId}
-- 客户昵称/称谓：${p.client_name}
-- 当前关系阶段：${p.relationship_stage}
-- 年龄估算：${holographicPayload.ageEstimate || '-'}
-- 职业背景：${holographicPayload.occupation || '未知'}
-- 所在地区/时区：${holographicPayload.locationTimezone || '未知'}
-- 客户性格与语气风格：${p.tone_style}
-- 客户的核心喜好与爱聊话题：${customerLikes.join('、')}
-- 客户的忌讳与敏感雷区：${(Array.isArray(taboos) ? taboos : []).join('、')}
-- 客户内心深层情感诉求：${p.emotional_needs}
-- 过去双方经历的关键记忆与约定：
-${customerMemories.map((m: any) => `  * [${m.date}] ${m.topic}: ${m.summary} (当时情绪: ${m.emotion || '共鸣'})`).join('\n')}`;
-        }
-      } catch (err) {
-        console.warn('Could not read customer profile from db:', err);
-      }
-    }
 
     const coldStartGuideline = buildUnifiedColdStartGuideline(
       isCustomerColdStartProfile(customerProfileData, customerLikes, customerMemories),
@@ -18891,18 +19153,13 @@ async function processTelegramMessageAsync(
       webhookLikes = Array.isArray(likes) ? likes : [];
       webhookMemories = Array.isArray(memories) ? memories : [];
 
-      profileContext = `
-【全息客户画像与长期记忆档案】：
-- 客户姓名/称谓: ${profile.client_name}
-- 当前关系阶段: ${profile.relationship_stage || '初次结识'}
-- 年龄估算: ${String(profile.age_estimate || '-').trim() || '-'}
-- 职业背景: ${String(profile.occupation || '未知').trim() || '未知'}
-- 所在地区/时区: ${String(profile.location_timezone || '未知').trim() || '未知'}
-- 性格与互动特征: ${profile.tone_style || '真实自然、随和礼貌'}
-- 核心喜好与兴趣: ${webhookLikes.join('、')}
-- 敏感雷区与禁忌: ${Array.isArray(taboos) ? taboos.join('、') : ''}
-- 核心情感需求: ${profile.emotional_needs || '暂无记录（待真实沟通后提炼）'}
-- 过往核心共同记忆: ${webhookMemories.slice(-3).map((mem: any) => `[${mem.topic || '约定'}]: ${mem.summary || ''}`).join('；')}`;
+      profileContext = buildCustomerProfilePromptSection(
+        profile,
+        webhookLikes,
+        Array.isArray(taboos) ? taboos : [],
+        webhookMemories,
+        chatId
+      );
     } catch {
       // ignore JSON parse error
     }
@@ -19003,7 +19260,8 @@ async function processTelegramMessageAsync(
     try {
       const globalPersona = await getGlobalPersonaFromDb('acc_telegram_bot');
       const webhookEvo = await getEvolutionStateFromDb('acc_telegram_bot');
-      webhookPersonaContext = buildActivePersonaAndEvolutionContext(globalPersona, webhookEvo, undefined, 3);
+      const webhookStageOverride = resolveCustomerPersonaStageKey(profile?.relationship_stage);
+      webhookPersonaContext = buildActivePersonaAndEvolutionContext(globalPersona, webhookEvo, webhookStageOverride, 3);
     } catch {}
     const webhookHabitIds = webhookPersonaContext.activeHabitIds;
 
@@ -30315,7 +30573,8 @@ export function attachTelegramClientMessageListener(client: TelegramClient, phon
               try {
                 const autoPersona = await getGlobalPersonaFromDb(accountId);
                 const autoEvo = await getEvolutionStateFromDb(accountId);
-                const autoCtx = buildActivePersonaAndEvolutionContext(autoPersona, autoEvo, undefined, 3);
+                const autoStageOverride = resolveCustomerPersonaStageKey(p?.relationship_stage);
+                const autoCtx = buildActivePersonaAndEvolutionContext(autoPersona, autoEvo, autoStageOverride, 3);
                 autoPersonaContext = autoCtx.context;
                 autoHabitIds = autoCtx.activeHabitIds;
                 hasAutoConfiguredPersona = autoCtx.hasConfiguredPersona;
@@ -30426,18 +30685,15 @@ export function attachTelegramClientMessageListener(client: TelegramClient, phon
                   : ''
               }`;
 
-              const autoProfileSection = `【客户全息画像与长期记忆档案】：
-- 客户称谓: ${p?.client_name || '好友'}
-- 当前关系阶段: ${p?.relationship_stage || '初次结识'}
-- 年龄估算: ${String(p?.age_estimate || '-').trim() || '-'}
-- 职业背景: ${String(p?.occupation || '未知').trim() || '未知'}
-- 所在地区/时区: ${String(p?.location_timezone || '未知').trim() || '未知'}
-- 性格风格: ${p?.tone_style || '自然亲切、口语化交流'}
-- 喜好: ${likes.join('、')}
-- 忌讳雷区: ${taboos.join('、')}
-- 核心情感诉求: ${p?.emotional_needs || '暂无记录'}
-- 关键约定与共同记忆:
-${memories.slice(-3).map((m: any) => `  * [${m.date}] ${m.topic}: ${m.summary}`).join('\n')}`;
+              const autoProfileSection = p
+                ? buildCustomerProfilePromptSection(
+                    p,
+                    likes,
+                    Array.isArray(taboos) ? taboos : [],
+                    memories,
+                    canonicalChatId
+                  )
+                : '';
 
               const budgetedAutopilotPrompt = applyPromptCharacterBudget({
                 persona: autoBasePersona,

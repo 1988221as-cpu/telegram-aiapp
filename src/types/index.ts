@@ -263,10 +263,16 @@ export interface CustomerProfile {
   ageEstimate?: string;
   occupation?: string;
   locationTimezone?: string;
+  familyMaritalStatus?: string;
+  activeSchedule?: string;
   toneStyle: string;
   likesInterests: string[];
   dislikesTaboos: string[];
   emotionalNeeds: string;
+  financialProfile?: string;
+  investmentAttitude?: string;
+  trustLevel?: string;
+  nextStepStrategy?: string;
   keyMemories: CustomerMemoryItem[];
   totalMessagesCount: number;
   lastAnalyzedAt?: number;

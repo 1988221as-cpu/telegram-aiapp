@@ -703,6 +703,13 @@ const CUSTOMER_PLACEHOLDER_VALUES = new Set([
   '联系人',
   '客户',
   'VIP客户',
+  '待补充',
+  '暂无评估',
+  '待明确',
+  '待进一步了解',
+  '待观察',
+  '低（初识）',
+  '自然破冰与日常共情，暂不提及投资',
 ]);
 
 function isPlaceholderProfileValue(val?: string | null): boolean {
@@ -774,10 +781,16 @@ export function mergeCustomerProfileWithManualData(params: {
   ageEstimate: string;
   occupation: string;
   locationTimezone: string;
+  familyMaritalStatus: string;
+  activeSchedule: string;
   toneStyle: string;
   likesInterests: string[];
   dislikesTaboos: string[];
   emotionalNeeds: string;
+  financialProfile: string;
+  investmentAttitude: string;
+  trustLevel: string;
+  nextStepStrategy: string;
   keyMemories: any[];
 } {
   const existing = params.existingProfile || null;
@@ -834,6 +847,16 @@ export function mergeCustomerProfileWithManualData(params: {
       ai.locationTimezone,
       '未提及'
     ),
+    familyMaritalStatus: pickScalar(
+      existing?.family_marital_status ?? existing?.familyMaritalStatus,
+      ai.familyMaritalStatus,
+      '未知'
+    ),
+    activeSchedule: pickScalar(
+      existing?.active_schedule ?? existing?.activeSchedule,
+      ai.activeSchedule,
+      '未提及'
+    ),
     toneStyle: pickScalar(existing?.tone_style ?? existing?.toneStyle, ai.toneStyle, ''),
     likesInterests: mergeUniqueStringTags(
       safeParseArr(existing?.likes_interests ?? existing?.likesInterests),
@@ -847,6 +870,26 @@ export function mergeCustomerProfileWithManualData(params: {
       existing?.emotional_needs ?? existing?.emotionalNeeds,
       ai.emotionalNeeds,
       '待进一步沟通交流'
+    ),
+    financialProfile: pickScalar(
+      existing?.financial_profile ?? existing?.financialProfile,
+      ai.financialProfile,
+      '待进一步了解'
+    ),
+    investmentAttitude: pickScalar(
+      existing?.investment_attitude ?? existing?.investmentAttitude,
+      ai.investmentAttitude,
+      '待观察'
+    ),
+    trustLevel: pickScalar(
+      existing?.trust_level ?? existing?.trustLevel,
+      ai.trustLevel,
+      '低（初识）'
+    ),
+    nextStepStrategy: pickScalar(
+      existing?.next_step_strategy ?? existing?.nextStepStrategy,
+      ai.nextStepStrategy,
+      '自然破冰与日常共情，暂不提及投资'
     ),
     keyMemories: mergeKeyMemories(
       safeParseArr(existing?.key_memories ?? existing?.keyMemories),

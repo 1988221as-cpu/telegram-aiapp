@@ -409,7 +409,9 @@ app.post('/v1/chat/completions', requireCloudAuth, async (req: Request, res: Res
   const upstreamBase = String(process.env.UPSTREAM_LLM_BASE_URL || '').replace(/\/+$/, '');
   const upstreamKey = String(process.env.UPSTREAM_LLM_API_KEY || '').trim();
   const geminiApiKey = String(process.env.GEMINI_API_KEY || '').trim();
-  const isTranslationTask = req.body?.purpose === 'translation';
+  const requestPurpose = String(req.body?.purpose || '').trim();
+  const isTranslationTask = requestPurpose === 'translation';
+  const skipCloudOralDirectives = isTranslationTask || requestPurpose === 'memory_extraction';
   const requestedModel = typeof req.body?.model === 'string' ? req.body.model.trim() : '';
   const contextPayload = req.body?.contextPayload;
 
@@ -436,7 +438,7 @@ app.post('/v1/chat/completions', requireCloudAuth, async (req: Request, res: Res
       : String(process.env.UPSTREAM_LLM_MODEL || requestedModel || (geminiApiKey ? 'gemini-4-hydrogen' : 'gpt-4o-mini')).trim();
 
   const incomingMessages = Array.isArray(req.body?.messages) ? req.body.messages : [];
-  const mergedMessages = isTranslationTask
+  const mergedMessages = skipCloudOralDirectives
     ? incomingMessages
     : [
         { role: 'system', content: buildDynamicCloudSystemDirectives() },
