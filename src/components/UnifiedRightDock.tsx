@@ -122,26 +122,26 @@ export const UnifiedRightDock: React.FC<UnifiedRightDockProps> = ({
         onClick={(e) => e.stopPropagation()}
         className={`w-full ${
           activePanel === 'persona' ? 'max-w-5xl' : 'max-w-3xl'
-        } h-[88vh] max-h-[860px] rounded-2xl flex flex-col overflow-hidden bg-white/95 dark:bg-[#09111b]/95 aurora:bg-[#0c151b]/95 backdrop-blur-xl border border-[#e2e8f0] dark:border-[#1e3148] aurora:border-[#1c343e] shadow-2xl text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] select-none transition-colors animate-in zoom-in-95 fade-in duration-150`}
+        } h-[88vh] max-h-[860px] rounded-2xl flex flex-col overflow-hidden bg-white/95 dark:bg-[#09111b]/95 aurora:bg-[#0c151b]/95 linen:bg-[#f8f2e7]/96 backdrop-blur-xl border border-[#e2e8f0] dark:border-[#1e3148] aurora:border-[#1c343e] linen:border-[#cbbba2] shadow-2xl text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118] select-none transition-colors animate-in zoom-in-95 fade-in duration-150`}
       >
         {/* Top Precision Hairline Accent */}
-        <div className="h-[2px] w-full bg-gradient-to-r from-transparent via-[#2481cc]/60 dark:via-[#2ba0ff]/75 aurora:via-[#2dd4bf]/80 to-transparent shrink-0" />
+        <div className="h-[2px] w-full bg-gradient-to-r from-transparent via-[#2481cc]/60 dark:via-[#2ba0ff]/75 aurora:via-[#2dd4bf]/80 linen:via-[#a86a43]/75 to-transparent shrink-0" />
 
         {/* Unified Dock Header */}
-        <div className="px-4 pt-3 pb-2.5 border-b border-[#e2e8f0] dark:border-[#162436] aurora:border-[#182b34] bg-[#f8fafc]/90 dark:bg-[#0b1523]/90 aurora:bg-[#0e1920]/92 shrink-0 space-y-2.5">
+        <div className="px-4 pt-3 pb-2.5 border-b border-[#e2e8f0] dark:border-[#162436] aurora:border-[#182b34] linen:border-[#dfd2bc] bg-[#f8fafc]/90 dark:bg-[#0b1523]/90 aurora:bg-[#0e1920]/92 linen:bg-[#f0e6d5]/92 shrink-0 space-y-2.5">
           {/* Row 1: Active Panel Identity + Close */}
           <div className="flex items-center justify-between gap-2">
             <div className="flex items-center gap-2.5 min-w-0">
-              <div className="w-8 h-8 rounded-lg bg-[#e8f3ff] dark:bg-[#2ba0ff]/12 aurora:bg-[#112d36] border border-[#bfdbfe] dark:border-[#2ba0ff]/25 aurora:border-[#2dd4bf]/35 flex items-center justify-center text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#5eead4] shrink-0">
+              <div className="w-8 h-8 rounded-lg bg-[#e8f3ff] dark:bg-[#2ba0ff]/12 aurora:bg-[#112d36] linen:bg-[#a86a43]/15 border border-[#bfdbfe] dark:border-[#2ba0ff]/25 aurora:border-[#2dd4bf]/35 linen:border-[#cbbba2] flex items-center justify-center text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#5eead4] linen:text-[#8c522d] shrink-0">
                 <ActiveIcon className="w-4 h-4" />
               </div>
               <div className="min-w-0">
-                <h2 className="text-[13.5px] font-semibold text-[#0f172a] dark:text-[#f1f6fc] aurora:text-[#ecf6f8] truncate leading-tight">
+                <h2 className="text-[13.5px] font-semibold text-[#0f172a] dark:text-[#f1f6fc] aurora:text-[#ecf6f8] linen:text-[#2b2118] truncate leading-tight">
                   {activePanel === 'memory'
                     ? `${currentChat?.title || '当前联系人'} · 全息记忆`
                     : activeMeta.title}
                 </h2>
-                <p className="text-[11px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] truncate leading-tight mt-0.5">
+                <p className="text-[11px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a] truncate leading-tight mt-0.5">
                   {activePanel === 'memory'
                     ? `${customerProfile?.relationshipStage || '尚未分析'} · 独立配置页`
                     : activePanel === 'llm'
@@ -169,7 +169,7 @@ export const UnifiedRightDock: React.FC<UnifiedRightDockProps> = ({
               type="button"
               onClick={onClose}
               title="关闭并返回聊天 (Esc)"
-              className="w-7 h-7 rounded-lg flex items-center justify-center text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] hover:text-[#0f172a] dark:hover:text-white aurora:hover:text-[#ecf6f8] hover:bg-[#e2e8f0]/70 dark:hover:bg-[#172638] aurora:hover:bg-[#152934] transition-colors cursor-pointer shrink-0"
+              className="w-7 h-7 rounded-lg flex items-center justify-center text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a] hover:text-[#0f172a] dark:hover:text-white aurora:hover:text-[#ecf6f8] linen:hover:text-[#2b2118] hover:bg-[#e2e8f0]/70 dark:hover:bg-[#172638] aurora:hover:bg-[#152934] linen:hover:bg-[#e5d9c6] transition-colors cursor-pointer shrink-0"
             >
               <X className="w-4 h-4" />
             </button>
@@ -179,7 +179,7 @@ export const UnifiedRightDock: React.FC<UnifiedRightDockProps> = ({
           <div
             role="tablist"
             aria-label="独立功能配置页切换"
-            className="grid grid-cols-5 gap-1 p-1 rounded-xl bg-[#eef2f6] dark:bg-[#060c14] aurora:bg-[#081014] border border-[#e2e8f0] dark:border-[#152233] aurora:border-[#182b34]"
+            className="grid grid-cols-5 gap-1 p-1 rounded-xl bg-[#eef2f6] dark:bg-[#060c14] aurora:bg-[#081014] linen:bg-[#e7dccb] border border-[#e2e8f0] dark:border-[#152233] aurora:border-[#182b34] linen:border-[#cbbba2]"
           >
             {PANEL_TABS.map((tab) => {
               const Icon = tab.icon;
@@ -193,14 +193,14 @@ export const UnifiedRightDock: React.FC<UnifiedRightDockProps> = ({
                   onClick={() => onSelectPanel(tab.id)}
                   className={`h-8 px-1.5 rounded-lg text-[11.5px] font-medium flex items-center justify-center gap-1.5 transition-all cursor-pointer whitespace-nowrap relative ${
                     isSelected
-                      ? 'bg-white dark:bg-[#132234] aurora:bg-[#112d36] text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#5eead4] shadow-xs border border-[#cbd5e1]/80 dark:border-[#2ba0ff]/35 aurora:border-[#2dd4bf]/45 font-semibold'
-                      : 'text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] hover:text-[#0f172a] dark:hover:text-[#e2ebf5] aurora:hover:text-[#ecf6f8] hover:bg-white/60 dark:hover:bg-[#0e1928] aurora:hover:bg-[#112028] border border-transparent'
+                      ? 'bg-white dark:bg-[#132234] aurora:bg-[#112d36] linen:bg-[#faf5ec] text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#5eead4] linen:text-[#8c522d] shadow-xs border border-[#cbd5e1]/80 dark:border-[#2ba0ff]/35 aurora:border-[#2dd4bf]/45 linen:border-[#cbbba2] font-semibold'
+                      : 'text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a] hover:text-[#0f172a] dark:hover:text-[#e2ebf5] aurora:hover:text-[#ecf6f8] linen:hover:text-[#2b2118] hover:bg-white/60 dark:hover:bg-[#0e1928] aurora:hover:bg-[#112028] linen:hover:bg-[#f4ece0] border border-transparent'
                   }`}
                 >
                   <span className="relative shrink-0">
                     <Icon className="w-3.5 h-3.5" />
                     {tab.id === 'voice' && isMasterVoiceActive && (
-                      <span className="absolute -top-0.5 -right-0.5 w-1.5 h-1.5 rounded-full bg-[#2481cc] dark:bg-[#2ba0ff] aurora:bg-[#2dd4bf]" />
+                      <span className="absolute -top-0.5 -right-0.5 w-1.5 h-1.5 rounded-full bg-[#2481cc] dark:bg-[#2ba0ff] aurora:bg-[#2dd4bf] linen:bg-[#a86a43]" />
                     )}
                   </span>
                   <span className="truncate">{tab.label}</span>

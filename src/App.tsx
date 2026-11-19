@@ -713,7 +713,7 @@ export default function App() {
   const [isTelegramMenuOpen, setIsTelegramMenuOpen] = useState(false);
   const [theme, setTheme] = useState<AppThemeMode>(() => {
     const saved = localStorage.getItem('tg_pro_theme');
-    return saved === 'dark' || saved === 'aurora' || saved === 'light' ? saved : 'light';
+    return saved === 'dark' || saved === 'aurora' || saved === 'light' || saved === 'linen' ? saved : 'linen';
   });
   const [clientPrefs, setClientPrefs] = useState<TelegramClientPrefs>(() =>
     loadStoredClientPrefs(activeAccountId)
@@ -936,6 +936,7 @@ export default function App() {
     localStorage.setItem('tg_pro_theme', theme);
     document.documentElement.classList.toggle('dark', theme === 'dark' || theme === 'aurora');
     document.documentElement.classList.toggle('theme-aurora', theme === 'aurora');
+    document.documentElement.classList.toggle('theme-linen', theme === 'linen');
   }, [theme]);
 
   useEffect(() => {
@@ -1207,7 +1208,7 @@ export default function App() {
       if (isRestore) {
         setContacts(getScopedContacts(resolvedActiveAccId || activeAccountIdRef.current));
         const savedTheme = localStorage.getItem('tg_pro_theme');
-        if (savedTheme === 'dark' || savedTheme === 'light' || savedTheme === 'aurora') {
+        if (savedTheme === 'dark' || savedTheme === 'light' || savedTheme === 'aurora' || savedTheme === 'linen') {
           setTheme(savedTheme);
         }
         const prefsAccId = resolvedActiveAccId || activeAccountIdRef.current || nextAccounts?.[0]?.id || '';
@@ -5800,7 +5801,7 @@ export default function App() {
   const currentAccount = accounts.find((a) => a.id === activeAccountId) || accounts[0];
 
   return (
-    <div className="flex h-screen w-screen overflow-hidden bg-[#f4f7fb] text-[#0f172a] dark:bg-[#05080f] dark:text-[#eef4fb] aurora:bg-[#081116] aurora:text-[#ecf6f8] font-sans antialiased transition-colors">
+    <div className="flex h-screen w-screen overflow-hidden bg-[#f4f7fb] text-[#0f172a] dark:bg-[#05080f] dark:text-[#eef4fb] aurora:bg-[#081116] aurora:text-[#ecf6f8] linen:bg-[#ddd2bc] linen:text-[#2b2118] font-sans antialiased transition-colors">
       {/* 1. Leftmost Features & Multi-Account Activity Rail (56px) */}
       <LeftSidebar
         accounts={accounts.map((a) => ({
@@ -5857,8 +5858,8 @@ export default function App() {
             <div
               className={`shrink-0 px-4 py-2 border-b flex items-center justify-between gap-3 text-xs ${
                 currentAccount.status === 'expired'
-                  ? 'bg-rose-50 dark:bg-rose-950/60 aurora:bg-rose-950/60 border-rose-200 dark:border-rose-800/60 aurora:border-rose-700/60 text-rose-700 dark:text-rose-200 aurora:text-rose-200'
-                  : 'bg-amber-50 dark:bg-amber-950/50 aurora:bg-amber-950/55 border-amber-200 dark:border-amber-800/60 aurora:border-amber-700/55 text-amber-800 dark:text-amber-200 aurora:text-amber-200'
+                  ? 'bg-rose-50 dark:bg-rose-950/60 aurora:bg-rose-950/60 linen:bg-[#f2ded9] border-rose-200 dark:border-rose-800/60 aurora:border-rose-700/60 linen:border-[#d4a59a] text-rose-700 dark:text-rose-200 aurora:text-rose-200 linen:text-[#7a2e22]'
+                  : 'bg-amber-50 dark:bg-amber-950/50 aurora:bg-amber-950/55 linen:bg-[#f2e8d4] border-amber-200 dark:border-amber-800/60 aurora:border-amber-700/55 linen:border-[#cbbba2] text-amber-800 dark:text-amber-200 aurora:text-amber-200 linen:text-[#5c4328]'
               }`}
             >
               <div className="flex items-center gap-2 min-w-0">
@@ -5868,7 +5869,7 @@ export default function App() {
                       ? 'bg-rose-500'
                       : currentAccount.status === 'away'
                         ? 'bg-amber-500 animate-pulse'
-                        : 'bg-slate-400 aurora:bg-[#5a7782]'
+                        : 'bg-slate-400 aurora:bg-[#5a7782] linen:bg-[#9c8468]'
                   }`}
                 />
                 <span className="truncate font-medium">
@@ -5891,7 +5892,7 @@ export default function App() {
                     type="button"
                     disabled={isReconnectingAccount}
                     onClick={handleReconnectTelegram}
-                    className="px-2.5 py-1 rounded-lg bg-[#2481cc] hover:bg-[#1e6fb0] dark:bg-[#2ba0ff] dark:hover:bg-[#1e8ee8] aurora:bg-[#0d9488] aurora:hover:bg-[#0f766e] text-white font-medium cursor-pointer transition-colors disabled:opacity-50"
+                    className="px-2.5 py-1 rounded-lg bg-[#2481cc] hover:bg-[#1e6fb0] dark:bg-[#2ba0ff] dark:hover:bg-[#1e8ee8] aurora:bg-[#0d9488] aurora:hover:bg-[#0f766e] linen:bg-[#a86a43] linen:hover:bg-[#935a36] text-white font-medium cursor-pointer transition-colors disabled:opacity-50"
                   >
                     {isReconnectingAccount ? '正在重连...' : '立即重连'}
                   </button>
@@ -5902,7 +5903,7 @@ export default function App() {
                     setReloginAccount(currentAccount);
                     setIsMultiAccountOpen(true);
                   }}
-                  className="px-2.5 py-1 rounded-lg bg-white/80 dark:bg-white/10 aurora:bg-white/10 hover:bg-white dark:hover:bg-white/20 aurora:hover:bg-white/20 border border-current/20 font-medium cursor-pointer transition-colors"
+                  className="px-2.5 py-1 rounded-lg bg-white/80 dark:bg-white/10 aurora:bg-white/10 linen:bg-[#faf5ec] hover:bg-white dark:hover:bg-white/20 aurora:hover:bg-white/20 linen:hover:bg-white border border-current/20 linen:border-[#cbbba2] font-medium cursor-pointer transition-colors"
                 >
                   重新扫码登录
                 </button>
@@ -6154,7 +6155,7 @@ export default function App() {
         onSelectChat={handleSelectChat}
         onDeleteAccount={handleDeleteAccount}
         theme={theme}
-        onToggleTheme={() => setTheme((prev) => (prev === 'light' ? 'dark' : prev === 'dark' ? 'aurora' : 'light'))}
+        onToggleTheme={() => setTheme((prev) => (prev === 'light' ? 'dark' : prev === 'dark' ? 'aurora' : prev === 'aurora' ? 'linen' : 'light'))}
         onSelectTheme={setTheme}
         onOpenNewGroup={() => setIsNewGroupOpen(true)}
         onOpenNewChannel={() => setIsNewChannelOpen(true)}
@@ -6270,7 +6271,7 @@ export default function App() {
         currentAccount={currentAccount}
         onUpdateAccount={handleUpdateCurrentAccount}
         theme={theme}
-        onToggleTheme={() => setTheme((prev) => (prev === 'light' ? 'dark' : prev === 'dark' ? 'aurora' : 'light'))}
+        onToggleTheme={() => setTheme((prev) => (prev === 'light' ? 'dark' : prev === 'dark' ? 'aurora' : prev === 'aurora' ? 'linen' : 'light'))}
         onSelectTheme={setTheme}
         onOpenSystemAdmin={() => setIsSystemSettingsOpen(true)}
         clientPrefs={clientPrefs}
@@ -6393,11 +6394,11 @@ export default function App() {
 
         return (
           <div className="fixed inset-0 z-[70] bg-black/55 backdrop-blur-xs flex items-center justify-center p-4 select-none">
-            <div className="w-full max-w-md bg-white dark:bg-[#0b131f] aurora:bg-[#0c151b] border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] rounded-2xl shadow-2xl overflow-hidden text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8]">
-              <div className="px-5 py-4 border-b border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] bg-[#f8fafc] dark:bg-[#0d1726] aurora:bg-[#0e1920] flex items-center justify-between">
+            <div className="w-full max-w-md bg-white dark:bg-[#0b131f] aurora:bg-[#0c151b] linen:bg-[#f8f2e7] border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] linen:border-[#cbbba2] rounded-2xl shadow-2xl overflow-hidden text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118]">
+              <div className="px-5 py-4 border-b border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] linen:border-[#dfd2bc] bg-[#f8fafc] dark:bg-[#0d1726] aurora:bg-[#0e1920] linen:bg-[#f0e6d5] flex items-center justify-between">
                 <div className="text-sm font-bold">
                   发现新版本 v{appUpdateInfo.latestVersion}
-                  <span className="ml-2 text-xs font-normal text-[#64748b] dark:text-[#7b93ad]">
+                  <span className="ml-2 text-xs font-normal text-[#64748b] dark:text-[#7b93ad] linen:text-[#6e5c4a]">
                     (当前 v{appUpdateInfo.currentVersion})
                   </span>
                 </div>
@@ -6405,7 +6406,7 @@ export default function App() {
                   <button
                     type="button"
                     onClick={() => setIsUpdateModalOpen(false)}
-                    className="text-xs text-[#64748b] hover:text-[#0f172a] dark:text-[#7b93ad] dark:hover:text-white cursor-pointer"
+                    className="text-xs text-[#64748b] hover:text-[#0f172a] dark:text-[#7b93ad] dark:hover:text-white linen:text-[#6e5c4a] linen:hover:text-[#2b2118] cursor-pointer"
                   >
                     ✕
                   </button>
@@ -6413,25 +6414,25 @@ export default function App() {
               </div>
               <div className="p-5 space-y-3 text-xs">
                 {displayAssetName && (
-                  <div className="text-[#475569] dark:text-[#b4c6d8] flex items-center justify-between gap-2">
+                  <div className="text-[#475569] dark:text-[#b4c6d8] linen:text-[#4e3f32] flex items-center justify-between gap-2">
                     <span className="truncate">
                       更新包：<span className="font-mono font-medium">{displayAssetName}</span>
                     </span>
                     {canInAppUpdate && (
-                      <span className="shrink-0 text-[11px] text-[#64748b] dark:text-[#7b93ad]">
+                      <span className="shrink-0 text-[11px] text-[#64748b] dark:text-[#7b93ad] linen:text-[#6e5c4a]">
                         {desktopUpdaterInfo?.mode === 'portable' ? '便携直更模式' : '自动安装模式'}
                       </span>
                     )}
                   </div>
                 )}
-                <div className="max-h-44 overflow-y-auto whitespace-pre-wrap rounded-xl bg-[#f8fafc] dark:bg-[#08101a] aurora:bg-[#081014] border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] p-3 text-[#334155] dark:text-[#b4c6d8] leading-relaxed select-text">
+                <div className="max-h-44 overflow-y-auto whitespace-pre-wrap rounded-xl bg-[#f8fafc] dark:bg-[#08101a] aurora:bg-[#081014] linen:bg-[#efe6d6] border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] linen:border-[#d5c6ae] p-3 text-[#334155] dark:text-[#b4c6d8] linen:text-[#4e3f32] leading-relaxed select-text">
                   {appUpdateInfo.releaseNotes?.trim() || '本次发布包含功能优化与问题修复，建议更新至最新版本。'}
                 </div>
 
                 {canInAppUpdate && (isCheckingMeta || isDownloading || isDownloaded || isInstalling) && (
-                  <div className="rounded-xl bg-[#f1f5f9] dark:bg-[#0d1726] aurora:bg-[#0e1920] border border-[#e2e8f0] dark:border-[#1e3148] aurora:border-[#1f343d] p-3 space-y-2">
+                  <div className="rounded-xl bg-[#f1f5f9] dark:bg-[#0d1726] aurora:bg-[#0e1920] linen:bg-[#efe6d6] border border-[#e2e8f0] dark:border-[#1e3148] aurora:border-[#1f343d] linen:border-[#cbbba2] p-3 space-y-2">
                     <div className="flex items-center justify-between text-[11px]">
-                      <span className="font-medium text-[#0f172a] dark:text-[#eef4fb]">
+                      <span className="font-medium text-[#0f172a] dark:text-[#eef4fb] linen:text-[#2b2118]">
                         {isCheckingMeta
                           ? '正在校验更新清单...'
                           : isDownloading
@@ -6441,23 +6442,23 @@ export default function App() {
                               : '正在关闭本地服务并重启安装...'}
                       </span>
                       {isDownloading && (
-                        <span className="text-[#64748b] dark:text-[#7b93ad] tabular-nums">
+                        <span className="text-[#64748b] dark:text-[#7b93ad] linen:text-[#6e5c4a] tabular-nums">
                           {updaterState.bytesPerSecond ? `${formatUpdateBytes(updaterState.bytesPerSecond)}/s` : ''}
                         </span>
                       )}
                     </div>
-                    <div className="w-full h-2 rounded-full bg-[#cbd5e1] dark:bg-[#1e293b] overflow-hidden">
+                    <div className="w-full h-2 rounded-full bg-[#cbd5e1] dark:bg-[#1e293b] linen:bg-[#dfd2bc] overflow-hidden">
                       <div
                         className={`h-full rounded-full transition-all duration-200 ${
                           isDownloaded || isInstalling
                             ? 'bg-[#16a34a] dark:bg-[#22c55e]'
-                            : 'bg-[#2481cc] dark:bg-[#2ba0ff] aurora:bg-[#0d9488]'
+                            : 'bg-[#2481cc] dark:bg-[#2ba0ff] aurora:bg-[#0d9488] linen:bg-[#a86a43]'
                         } ${isCheckingMeta ? 'animate-pulse w-1/3' : ''}`}
                         style={isCheckingMeta ? undefined : { width: `${isDownloaded || isInstalling ? 100 : percent}%` }}
                       />
                     </div>
                     {(isDownloading || isDownloaded) && (updaterState.total || updaterState.transferred) ? (
-                      <div className="flex items-center justify-between text-[11px] text-[#64748b] dark:text-[#7b93ad] tabular-nums">
+                      <div className="flex items-center justify-between text-[11px] text-[#64748b] dark:text-[#7b93ad] linen:text-[#6e5c4a] tabular-nums">
                         <span>
                           {formatUpdateBytes(updaterState.transferred)}
                           {updaterState.total ? ` / ${formatUpdateBytes(updaterState.total)}` : ''}
@@ -6474,12 +6475,12 @@ export default function App() {
                   </div>
                 )}
               </div>
-              <div className="px-5 py-3.5 border-t border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] bg-[#f8fafc] dark:bg-[#0d1726] aurora:bg-[#0e1920] flex items-center justify-between gap-2 text-xs">
+              <div className="px-5 py-3.5 border-t border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] linen:border-[#dfd2bc] bg-[#f8fafc] dark:bg-[#0d1726] aurora:bg-[#0e1920] linen:bg-[#f0e6d5] flex items-center justify-between gap-2 text-xs">
                 {canInAppUpdate && (isDownloading || isCheckingMeta) ? (
                   <button
                     type="button"
                     onClick={handleCancelInAppDownload}
-                    className="text-[#64748b] hover:text-[#dc2626] dark:text-[#7b93ad] dark:hover:text-[#f87171] cursor-pointer"
+                    className="text-[#64748b] hover:text-[#dc2626] dark:text-[#7b93ad] dark:hover:text-[#f87171] linen:text-[#6e5c4a] cursor-pointer"
                   >
                     取消下载
                   </button>
@@ -6494,12 +6495,12 @@ export default function App() {
                       } catch {}
                       setIsUpdateModalOpen(false);
                     }}
-                    className="text-[#64748b] hover:text-[#0f172a] dark:text-[#7b93ad] dark:hover:text-white cursor-pointer"
+                    className="text-[#64748b] hover:text-[#0f172a] dark:text-[#7b93ad] dark:hover:text-white linen:text-[#6e5c4a] linen:hover:text-[#2b2118] cursor-pointer"
                   >
                     忽略此版本
                   </button>
                 ) : (
-                  <span className="text-[11px] text-[#64748b] dark:text-[#7b93ad]">请勿手动关闭...</span>
+                  <span className="text-[11px] text-[#64748b] dark:text-[#7b93ad] linen:text-[#6e5c4a]">请勿手动关闭...</span>
                 )}
 
                 <div className="flex items-center gap-2">
@@ -6509,7 +6510,7 @@ export default function App() {
                         <button
                           type="button"
                           onClick={() => setIsUpdateModalOpen(false)}
-                          className="px-3 py-1.5 rounded-lg border border-[#cbd5e1] dark:border-[#1e3148] hover:border-[#2481cc] text-[#334155] dark:text-[#b4c6d8] font-medium cursor-pointer"
+                          className="px-3 py-1.5 rounded-lg border border-[#cbd5e1] dark:border-[#1e3148] linen:border-[#cbbba2] hover:border-[#2481cc] linen:hover:border-[#a86a43] text-[#334155] dark:text-[#b4c6d8] linen:text-[#4e3f32] font-medium cursor-pointer"
                         >
                           后台下载
                         </button>
@@ -6535,14 +6536,14 @@ export default function App() {
                             href={downloadHref}
                             target="_blank"
                             rel="noopener noreferrer"
-                            className="px-3 py-1.5 rounded-lg border border-[#cbd5e1] dark:border-[#1e3148] hover:border-[#2481cc] text-[#334155] dark:text-[#b4c6d8] font-medium"
+                            className="px-3 py-1.5 rounded-lg border border-[#cbd5e1] dark:border-[#1e3148] linen:border-[#cbbba2] hover:border-[#2481cc] linen:hover:border-[#a86a43] text-[#334155] dark:text-[#b4c6d8] linen:text-[#4e3f32] font-medium"
                           >
                             浏览器下载
                           </a>
                           <button
                             type="button"
                             onClick={handleStartInAppDownload}
-                            className="px-3.5 py-1.5 rounded-lg bg-[#2481cc] hover:bg-[#1d6fb3] dark:bg-[#2ba0ff] dark:hover:bg-[#1e8ee8] aurora:bg-[#0d9488] aurora:hover:bg-[#0f766e] text-white font-semibold cursor-pointer"
+                            className="px-3.5 py-1.5 rounded-lg bg-[#2481cc] hover:bg-[#1d6fb3] dark:bg-[#2ba0ff] dark:hover:bg-[#1e8ee8] aurora:bg-[#0d9488] aurora:hover:bg-[#0f766e] linen:bg-[#a86a43] linen:hover:bg-[#8f5734] text-white font-semibold cursor-pointer"
                           >
                             {isError ? '重新下载更新' : '立即下载更新'}
                           </button>
@@ -6556,7 +6557,7 @@ export default function App() {
                         target="_blank"
                         rel="noopener noreferrer"
                         onClick={() => setIsUpdateModalOpen(false)}
-                        className="px-3.5 py-1.5 rounded-lg bg-[#2481cc] hover:bg-[#1d6fb3] dark:bg-[#2ba0ff] dark:hover:bg-[#1e8ee8] aurora:bg-[#0d9488] aurora:hover:bg-[#0f766e] text-white font-semibold"
+                        className="px-3.5 py-1.5 rounded-lg bg-[#2481cc] hover:bg-[#1d6fb3] dark:bg-[#2ba0ff] dark:hover:bg-[#1e8ee8] aurora:bg-[#0d9488] aurora:hover:bg-[#0f766e] linen:bg-[#a86a43] linen:hover:bg-[#8f5734] text-white font-semibold"
                       >
                         立即下载新版
                       </a>

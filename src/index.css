@@ -1,6 +1,7 @@
 @import "tailwindcss";
 @variant dark (&:where(.dark, .dark *));
 @variant aurora (&:where(.theme-aurora, .theme-aurora *));
+@variant linen (&:where(.theme-linen, .theme-linen *));
 
 @layer base {
   :root {
@@ -57,6 +58,24 @@
     --tg-border-glow: rgba(45, 212, 191, 0.38);
   }
 
+  .theme-linen {
+    color-scheme: light;
+    --tg-bg-base: #ddd2bc;
+    --tg-bg-surface: #f4ede0;
+    --tg-bg-card: #fbf7ef;
+    --tg-bg-glass: rgba(244, 237, 224, 0.92);
+    --tg-bg-active: #3a6652;
+    --tg-bg-bubble-in: #faf6ee;
+    --tg-bg-bubble-out: #3a6652;
+    --tg-color-primary: #a86a43;
+    --tg-color-accent-glow: rgba(168, 106, 67, 0.22);
+    --tg-color-text-primary: #2b2118;
+    --tg-color-text-secondary: #6e5c4a;
+    --tg-border: #cbbba2;
+    --tg-border-subtle: #dfd2be;
+    --tg-border-glow: rgba(168, 106, 67, 0.36);
+  }
+
   body {
     font-family: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
     background-color: var(--tg-bg-base);
@@ -104,6 +123,13 @@
   .theme-aurora ::-webkit-scrollbar-thumb:hover {
     background: rgba(45, 212, 191, 0.42);
   }
+
+  .theme-linen ::-webkit-scrollbar-thumb {
+    background: rgba(110, 92, 74, 0.28);
+  }
+  .theme-linen ::-webkit-scrollbar-thumb:hover {
+    background: rgba(168, 106, 67, 0.5);
+  }
 }
 
 /* Utilities */
@@ -139,6 +165,33 @@
     radial-gradient(circle at 50% -6%, rgba(45, 212, 191, 0.14), transparent 54%),
     radial-gradient(rgba(94, 234, 212, 0.075) 1px, transparent 0);
   background-size: 100% 100%, 100% 100%, 24px 24px;
+}
+
+/* 羊皮深纹理：左侧深咖麻布纵纹 / 会话列表细纹 / 聊天区深亚麻编织纸纹 */
+@utility hs-linen-rail-bg {
+  background-color: #6d5b4b;
+  background-image:
+    repeating-linear-gradient(90deg, rgba(255, 248, 236, 0.045) 0px, rgba(255, 248, 236, 0.045) 1px, transparent 1px, transparent 4px),
+    repeating-linear-gradient(0deg, rgba(32, 22, 13, 0.085) 0px, rgba(32, 22, 13, 0.085) 1px, transparent 1px, transparent 3px),
+    linear-gradient(180deg, #796554 0%, #635243 100%);
+}
+
+@utility hs-linen-list-bg {
+  background-color: #f2eadc;
+  background-image:
+    repeating-linear-gradient(90deg, rgba(118, 92, 66, 0.075) 0px, rgba(118, 92, 66, 0.075) 1px, transparent 1px, transparent 5px),
+    repeating-linear-gradient(0deg, rgba(118, 92, 66, 0.03) 0px, rgba(118, 92, 66, 0.03) 1px, transparent 1px, transparent 6px),
+    linear-gradient(180deg, rgba(252, 247, 238, 0.65) 0%, rgba(232, 220, 200, 0.52) 100%);
+}
+
+.theme-linen .tg-chat-pattern {
+  background-color: #d6c8b0;
+  background-image:
+    radial-gradient(ellipse 80% 60% at 50% 45%, rgba(255, 250, 238, 0.18), transparent 72%),
+    repeating-linear-gradient(90deg, rgba(78, 59, 39, 0.11) 0px, rgba(78, 59, 39, 0.11) 1px, transparent 1px, transparent 4px),
+    repeating-linear-gradient(0deg, rgba(78, 59, 39, 0.095) 0px, rgba(78, 59, 39, 0.095) 1px, transparent 1px, transparent 4px),
+    repeating-linear-gradient(45deg, rgba(58, 42, 27, 0.05) 0px, rgba(58, 42, 27, 0.05) 2px, transparent 2px, transparent 8px),
+    linear-gradient(180deg, #dfd2bc 0%, #cfc0a5 100%);
 }
 
 /* Frosted Glass Surface Utility */

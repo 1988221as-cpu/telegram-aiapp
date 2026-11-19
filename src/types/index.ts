@@ -436,5 +436,5 @@ export interface EvolutionLogItem {
   createdAt: number;
 }
 
-export type AppThemeMode = 'light' | 'dark' | 'aurora';
+export type AppThemeMode = 'light' | 'dark' | 'aurora' | 'linen';
 

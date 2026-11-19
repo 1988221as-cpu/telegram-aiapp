@@ -273,20 +273,20 @@ export const TelegramEmojiPicker: React.FC<TelegramEmojiPickerProps> = ({
       }
       className={
         popupPos
-          ? 'fixed z-[9990] bg-white dark:bg-[#0b131f] aurora:bg-[#0c151b] rounded-2xl shadow-2xl border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] overflow-hidden animate-in fade-in slide-in-from-bottom-2 duration-150 select-none flex flex-col'
-          : 'fixed bottom-16 right-4 z-[9990] w-[340px] sm:w-[380px] bg-white dark:bg-[#0b131f] aurora:bg-[#0c151b] rounded-2xl shadow-2xl border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] overflow-hidden animate-in fade-in slide-in-from-bottom-2 duration-150 select-none flex flex-col max-h-[460px]'
+          ? 'fixed z-[9990] bg-white dark:bg-[#0b131f] aurora:bg-[#0c151b] linen:bg-[#f8f2e7] rounded-2xl shadow-2xl border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] linen:border-[#cbbba2] overflow-hidden animate-in fade-in slide-in-from-bottom-2 duration-150 select-none flex flex-col'
+          : 'fixed bottom-16 right-4 z-[9990] w-[340px] sm:w-[380px] bg-white dark:bg-[#0b131f] aurora:bg-[#0c151b] linen:bg-[#f8f2e7] rounded-2xl shadow-2xl border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] linen:border-[#cbbba2] overflow-hidden animate-in fade-in slide-in-from-bottom-2 duration-150 select-none flex flex-col max-h-[460px]'
       }
     >
       {/* 1. Top Header: Tabs + Close Button */}
-      <div className="flex items-center justify-between px-3 py-2 border-b border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] bg-[#f8fafc] dark:bg-[#0d1726] aurora:bg-[#0e1920] shrink-0">
+      <div className="flex items-center justify-between px-3 py-2 border-b border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] linen:border-[#dfd2bc] bg-[#f8fafc] dark:bg-[#0d1726] aurora:bg-[#0e1920] linen:bg-[#f0e6d5] shrink-0">
         <div className="flex items-center gap-1.5 text-xs font-semibold">
           <button
             type="button"
             onClick={() => setTab('emoji')}
             className={`px-3 py-1.5 rounded-xl cursor-pointer transition-all flex items-center gap-1.5 ${
               tab === 'emoji'
-                ? 'bg-[#2481cc] dark:bg-[#2ba0ff] aurora:bg-[#0d9488] text-white shadow-xs'
-                : 'text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] hover:bg-[#e2e8f0]/60 dark:hover:bg-[#132234] aurora:hover:bg-[#13252e]'
+                ? 'bg-[#2481cc] dark:bg-[#2ba0ff] aurora:bg-[#0d9488] linen:bg-[#a86a43] text-white shadow-xs'
+                : 'text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a] hover:bg-[#e2e8f0]/60 dark:hover:bg-[#132234] aurora:hover:bg-[#13252e] linen:hover:bg-[#e5d9c6]'
             }`}
           >
             <Smile className="w-3.5 h-3.5" />
@@ -301,8 +301,8 @@ export const TelegramEmojiPicker: React.FC<TelegramEmojiPickerProps> = ({
             onClick={() => setTab('stickers')}
             className={`px-3 py-1.5 rounded-xl cursor-pointer transition-all flex items-center gap-1.5 ${
               tab === 'stickers'
-                ? 'bg-[#2481cc] dark:bg-[#2ba0ff] aurora:bg-[#0d9488] text-white shadow-xs'
-                : 'text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] hover:bg-[#e2e8f0]/60 dark:hover:bg-[#132234] aurora:hover:bg-[#13252e]'
+                ? 'bg-[#2481cc] dark:bg-[#2ba0ff] aurora:bg-[#0d9488] linen:bg-[#a86a43] text-white shadow-xs'
+                : 'text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a] hover:bg-[#e2e8f0]/60 dark:hover:bg-[#132234] aurora:hover:bg-[#13252e] linen:hover:bg-[#e5d9c6]'
             }`}
           >
             <Sparkles className="w-3.5 h-3.5" />
@@ -316,28 +316,28 @@ export const TelegramEmojiPicker: React.FC<TelegramEmojiPickerProps> = ({
         <button
           type="button"
           onClick={onClose}
-          className="p-1 rounded-lg text-[#64748b] hover:text-[#0f172a] dark:text-[#7b93ad] dark:hover:text-[#eef4fb] aurora:text-[#7e9aa5] aurora:hover:text-[#ecf6f8] hover:bg-[#e2e8f0]/60 dark:hover:bg-[#132234] aurora:hover:bg-[#13252e] transition-colors cursor-pointer"
+          className="p-1 rounded-lg text-[#64748b] hover:text-[#0f172a] dark:text-[#7b93ad] dark:hover:text-[#eef4fb] aurora:text-[#7e9aa5] aurora:hover:text-[#ecf6f8] linen:text-[#6e5c4a] linen:hover:text-[#2b2118] hover:bg-[#e2e8f0]/60 dark:hover:bg-[#132234] aurora:hover:bg-[#13252e] linen:hover:bg-[#e5d9c6] transition-colors cursor-pointer"
         >
           <X className="w-4 h-4" />
         </button>
       </div>
 
       {/* 2. Official Telegram Search Bar */}
-      <div className="p-2.5 pb-2 border-b border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] shrink-0 bg-white dark:bg-[#0b131f] aurora:bg-[#0c151b]">
+      <div className="p-2.5 pb-2 border-b border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] linen:border-[#dfd2bc] shrink-0 bg-white dark:bg-[#0b131f] aurora:bg-[#0c151b] linen:bg-[#f8f2e7]">
         <div className="relative flex items-center">
-          <Search className="w-3.5 h-3.5 text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] absolute left-3 pointer-events-none" />
+          <Search className="w-3.5 h-3.5 text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#7a6957] absolute left-3 pointer-events-none" />
           <input
             type="text"
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
             placeholder={tab === 'emoji' ? '搜索表情 (输入关键词如: 笑, 赞, 爱心, 火...)' : '按 Emoji 或贴纸包名称搜索官方贴纸...'}
-            className="w-full bg-[#f8fafc] dark:bg-[#08101a] aurora:bg-[#081014] text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] text-xs pl-8 pr-7 py-1.5 rounded-xl border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] focus:border-[#2481cc] dark:focus:border-[#2ba0ff] aurora:focus:border-[#2dd4bf] focus:outline-none placeholder-[#94a3b8] dark:placeholder-[#4e657e] aurora:placeholder-[#5a7782] transition-all"
+            className="w-full bg-[#f8fafc] dark:bg-[#08101a] aurora:bg-[#081014] linen:bg-[#efe6d6] text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118] text-xs pl-8 pr-7 py-1.5 rounded-xl border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] linen:border-[#cbbba2] focus:border-[#2481cc] dark:focus:border-[#2ba0ff] aurora:focus:border-[#2dd4bf] linen:focus:border-[#a86a43] focus:outline-none placeholder-[#94a3b8] dark:placeholder-[#4e657e] aurora:placeholder-[#5a7782] linen:placeholder-[#8f7e6c] transition-all"
             autoFocus
           />
           {searchQuery && (
             <button
               onClick={() => setSearchQuery('')}
-              className="absolute right-2.5 text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] hover:text-[#0f172a] dark:hover:text-[#eef4fb] aurora:hover:text-[#ecf6f8] cursor-pointer"
+              className="absolute right-2.5 text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a] hover:text-[#0f172a] dark:hover:text-[#eef4fb] aurora:hover:text-[#ecf6f8] linen:hover:text-[#2b2118] cursor-pointer"
             >
               <X className="w-3 h-3" />
             </button>
@@ -353,8 +353,8 @@ export const TelegramEmojiPicker: React.FC<TelegramEmojiPickerProps> = ({
                 onClick={() => setSelectedEmojiCategory('all')}
                 className={`px-2 py-0.5 rounded-lg whitespace-nowrap transition-colors cursor-pointer ${
                   selectedEmojiCategory === 'all'
-                    ? 'bg-[#e8f3ff] border border-[#bfdbfe] text-[#0284c7] dark:bg-[#2ba0ff]/15 dark:border-[#2ba0ff]/35 dark:text-[#7cc4ff] aurora:bg-[#112d36] aurora:border-[#2dd4bf]/35 aurora:text-[#5eead4] font-semibold'
-                    : 'border border-transparent text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] hover:bg-[#f1f5f9] dark:hover:bg-[#132234] aurora:hover:bg-[#13252e]'
+                    ? 'bg-[#e8f3ff] border border-[#bfdbfe] text-[#0284c7] dark:bg-[#2ba0ff]/15 dark:border-[#2ba0ff]/35 dark:text-[#7cc4ff] aurora:bg-[#112d36] aurora:border-[#2dd4bf]/35 aurora:text-[#5eead4] linen:bg-[#a86a43]/15 linen:border-[#cbbba2] linen:text-[#8c522d] font-semibold'
+                    : 'border border-transparent text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a] hover:bg-[#f1f5f9] dark:hover:bg-[#132234] aurora:hover:bg-[#13252e] linen:hover:bg-[#efe4d3]'
                 }`}
               >
                 全部
@@ -364,8 +364,8 @@ export const TelegramEmojiPicker: React.FC<TelegramEmojiPickerProps> = ({
                 onClick={() => setSelectedEmojiCategory('smileys')}
                 className={`px-2 py-0.5 rounded-lg whitespace-nowrap transition-colors cursor-pointer flex items-center gap-1 ${
                   selectedEmojiCategory === 'smileys'
-                    ? 'bg-[#e8f3ff] border border-[#bfdbfe] text-[#0284c7] dark:bg-[#2ba0ff]/15 dark:border-[#2ba0ff]/35 dark:text-[#7cc4ff] aurora:bg-[#112d36] aurora:border-[#2dd4bf]/35 aurora:text-[#5eead4] font-semibold'
-                    : 'border border-transparent text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] hover:bg-[#f1f5f9] dark:hover:bg-[#132234] aurora:hover:bg-[#13252e]'
+                    ? 'bg-[#e8f3ff] border border-[#bfdbfe] text-[#0284c7] dark:bg-[#2ba0ff]/15 dark:border-[#2ba0ff]/35 dark:text-[#7cc4ff] aurora:bg-[#112d36] aurora:border-[#2dd4bf]/35 aurora:text-[#5eead4] linen:bg-[#a86a43]/15 linen:border-[#cbbba2] linen:text-[#8c522d] font-semibold'
+                    : 'border border-transparent text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a] hover:bg-[#f1f5f9] dark:hover:bg-[#132234] aurora:hover:bg-[#13252e] linen:hover:bg-[#efe4d3]'
                 }`}
               >
                 <span>😀</span> 脸部表情
@@ -375,8 +375,8 @@ export const TelegramEmojiPicker: React.FC<TelegramEmojiPickerProps> = ({
                 onClick={() => setSelectedEmojiCategory('gestures')}
                 className={`px-2 py-0.5 rounded-lg whitespace-nowrap transition-colors cursor-pointer flex items-center gap-1 ${
                   selectedEmojiCategory === 'gestures'
-                    ? 'bg-[#e8f3ff] border border-[#bfdbfe] text-[#0284c7] dark:bg-[#2ba0ff]/15 dark:border-[#2ba0ff]/35 dark:text-[#7cc4ff] aurora:bg-[#112d36] aurora:border-[#2dd4bf]/35 aurora:text-[#5eead4] font-semibold'
-                    : 'border border-transparent text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] hover:bg-[#f1f5f9] dark:hover:bg-[#132234] aurora:hover:bg-[#13252e]'
+                    ? 'bg-[#e8f3ff] border border-[#bfdbfe] text-[#0284c7] dark:bg-[#2ba0ff]/15 dark:border-[#2ba0ff]/35 dark:text-[#7cc4ff] aurora:bg-[#112d36] aurora:border-[#2dd4bf]/35 aurora:text-[#5eead4] linen:bg-[#a86a43]/15 linen:border-[#cbbba2] linen:text-[#8c522d] font-semibold'
+                    : 'border border-transparent text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a] hover:bg-[#f1f5f9] dark:hover:bg-[#132234] aurora:hover:bg-[#13252e] linen:hover:bg-[#efe4d3]'
                 }`}
               >
                 <span>👍</span> 手势人物
@@ -386,8 +386,8 @@ export const TelegramEmojiPicker: React.FC<TelegramEmojiPickerProps> = ({
                 onClick={() => setSelectedEmojiCategory('hearts')}
                 className={`px-2 py-0.5 rounded-lg whitespace-nowrap transition-colors cursor-pointer flex items-center gap-1 ${
                   selectedEmojiCategory === 'hearts'
-                    ? 'bg-[#e8f3ff] border border-[#bfdbfe] text-[#0284c7] dark:bg-[#2ba0ff]/15 dark:border-[#2ba0ff]/35 dark:text-[#7cc4ff] aurora:bg-[#112d36] aurora:border-[#2dd4bf]/35 aurora:text-[#5eead4] font-semibold'
-                    : 'border border-transparent text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] hover:bg-[#f1f5f9] dark:hover:bg-[#132234] aurora:hover:bg-[#13252e]'
+                    ? 'bg-[#e8f3ff] border border-[#bfdbfe] text-[#0284c7] dark:bg-[#2ba0ff]/15 dark:border-[#2ba0ff]/35 dark:text-[#7cc4ff] aurora:bg-[#112d36] aurora:border-[#2dd4bf]/35 aurora:text-[#5eead4] linen:bg-[#a86a43]/15 linen:border-[#cbbba2] linen:text-[#8c522d] font-semibold'
+                    : 'border border-transparent text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a] hover:bg-[#f1f5f9] dark:hover:bg-[#132234] aurora:hover:bg-[#13252e] linen:hover:bg-[#efe4d3]'
                 }`}
               >
                 <span>❤️</span> 情感爱心
@@ -397,8 +397,8 @@ export const TelegramEmojiPicker: React.FC<TelegramEmojiPickerProps> = ({
                 onClick={() => setSelectedEmojiCategory('objects')}
                 className={`px-2 py-0.5 rounded-lg whitespace-nowrap transition-colors cursor-pointer flex items-center gap-1 ${
                   selectedEmojiCategory === 'objects'
-                    ? 'bg-[#e8f3ff] border border-[#bfdbfe] text-[#0284c7] dark:bg-[#2ba0ff]/15 dark:border-[#2ba0ff]/35 dark:text-[#7cc4ff] aurora:bg-[#112d36] aurora:border-[#2dd4bf]/35 aurora:text-[#5eead4] font-semibold'
-                    : 'border border-transparent text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] hover:bg-[#f1f5f9] dark:hover:bg-[#132234] aurora:hover:bg-[#13252e]'
+                    ? 'bg-[#e8f3ff] border border-[#bfdbfe] text-[#0284c7] dark:bg-[#2ba0ff]/15 dark:border-[#2ba0ff]/35 dark:text-[#7cc4ff] aurora:bg-[#112d36] aurora:border-[#2dd4bf]/35 aurora:text-[#5eead4] linen:bg-[#a86a43]/15 linen:border-[#cbbba2] linen:text-[#8c522d] font-semibold'
+                    : 'border border-transparent text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a] hover:bg-[#f1f5f9] dark:hover:bg-[#132234] aurora:hover:bg-[#13252e] linen:hover:bg-[#efe4d3]'
                 }`}
               >
                 <span>🎉</span> 派对物品
@@ -411,8 +411,8 @@ export const TelegramEmojiPicker: React.FC<TelegramEmojiPickerProps> = ({
                 onClick={() => setSelectedPackId('all')}
                 className={`px-2 py-0.5 rounded-lg whitespace-nowrap transition-colors cursor-pointer ${
                   selectedPackId === 'all'
-                    ? 'bg-[#e8f3ff] border border-[#bfdbfe] text-[#0284c7] dark:bg-[#2ba0ff]/15 dark:border-[#2ba0ff]/35 dark:text-[#7cc4ff] aurora:bg-[#112d36] aurora:border-[#2dd4bf]/35 aurora:text-[#5eead4] font-semibold'
-                    : 'border border-transparent text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] hover:bg-[#f1f5f9] dark:hover:bg-[#132234] aurora:hover:bg-[#13252e]'
+                    ? 'bg-[#e8f3ff] border border-[#bfdbfe] text-[#0284c7] dark:bg-[#2ba0ff]/15 dark:border-[#2ba0ff]/35 dark:text-[#7cc4ff] aurora:bg-[#112d36] aurora:border-[#2dd4bf]/35 aurora:text-[#5eead4] linen:bg-[#a86a43]/15 linen:border-[#cbbba2] linen:text-[#8c522d] font-semibold'
+                    : 'border border-transparent text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a] hover:bg-[#f1f5f9] dark:hover:bg-[#132234] aurora:hover:bg-[#13252e] linen:hover:bg-[#efe4d3]'
                 }`}
               >
                 全部贴纸包 ({stickerPacks.length})
@@ -424,8 +424,8 @@ export const TelegramEmojiPicker: React.FC<TelegramEmojiPickerProps> = ({
                   onClick={() => setSelectedPackId(pack.id)}
                   className={`px-2 py-0.5 rounded-lg whitespace-nowrap transition-colors cursor-pointer max-w-[120px] truncate ${
                     selectedPackId === pack.id
-                      ? 'bg-[#e8f3ff] border border-[#bfdbfe] text-[#0284c7] dark:bg-[#2ba0ff]/15 dark:border-[#2ba0ff]/35 dark:text-[#7cc4ff] aurora:bg-[#112d36] aurora:border-[#2dd4bf]/35 aurora:text-[#5eead4] font-semibold'
-                      : 'border border-transparent text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] hover:bg-[#f1f5f9] dark:hover:bg-[#132234] aurora:hover:bg-[#13252e]'
+                      ? 'bg-[#e8f3ff] border border-[#bfdbfe] text-[#0284c7] dark:bg-[#2ba0ff]/15 dark:border-[#2ba0ff]/35 dark:text-[#7cc4ff] aurora:bg-[#112d36] aurora:border-[#2dd4bf]/35 aurora:text-[#5eead4] linen:bg-[#a86a43]/15 linen:border-[#cbbba2] linen:text-[#8c522d] font-semibold'
+                      : 'border border-transparent text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a] hover:bg-[#f1f5f9] dark:hover:bg-[#132234] aurora:hover:bg-[#13252e] linen:hover:bg-[#efe4d3]'
                   }`}
                   title={pack.title}
                 >
@@ -441,13 +441,13 @@ export const TelegramEmojiPicker: React.FC<TelegramEmojiPickerProps> = ({
       <div className="p-3 overflow-y-auto flex-1 min-h-[220px]">
         {tab === 'emoji' ? (
           filteredEmojis.length === 0 ? (
-            <div className="py-12 flex flex-col items-center justify-center text-center text-xs text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5]">
-              <Smile className="w-8 h-8 stroke-1 text-[#94a3b8] dark:text-[#4e657e] aurora:text-[#5a7782] mb-2" />
+            <div className="py-12 flex flex-col items-center justify-center text-center text-xs text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a]">
+              <Smile className="w-8 h-8 stroke-1 text-[#94a3b8] dark:text-[#4e657e] aurora:text-[#5a7782] linen:text-[#9c8a75] mb-2" />
               <p>未找到与「{searchQuery}」相关的表情</p>
               <button
                 type="button"
                 onClick={() => setSearchQuery('')}
-                className="mt-2 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf] hover:underline cursor-pointer"
+                className="mt-2 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf] linen:text-[#8c522d] hover:underline cursor-pointer"
               >
                 查看全部表情
               </button>
@@ -460,7 +460,7 @@ export const TelegramEmojiPicker: React.FC<TelegramEmojiPickerProps> = ({
                   type="button"
                   onClick={() => onSelectEmoji(item.char)}
                   title={`${item.name} (${item.char})`}
-                  className="w-9 h-9 rounded-xl hover:bg-[#f1f5f9] dark:hover:bg-[#132234] aurora:hover:bg-[#13252e] flex items-center justify-center transition-all hover:scale-125 cursor-pointer active:scale-95"
+                  className="w-9 h-9 rounded-xl hover:bg-[#f1f5f9] dark:hover:bg-[#132234] aurora:hover:bg-[#13252e] linen:hover:bg-[#efe4d3] flex items-center justify-center transition-all hover:scale-125 cursor-pointer active:scale-95"
                 >
                   <span className="leading-none">{item.char}</span>
                 </button>
@@ -468,25 +468,25 @@ export const TelegramEmojiPicker: React.FC<TelegramEmojiPickerProps> = ({
             </div>
           )
         ) : isLoadingStickers ? (
-          <div className="py-14 flex flex-col items-center justify-center text-center text-xs text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5]">
-            <Loader2 className="w-6 h-6 animate-spin text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf] mb-2" />
+          <div className="py-14 flex flex-col items-center justify-center text-center text-xs text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a]">
+            <Loader2 className="w-6 h-6 animate-spin text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf] linen:text-[#a86a43] mb-2" />
             <p>正在从 Telegram 官方云端同步已安装贴纸包...</p>
           </div>
         ) : stickersError ? (
-          <div className="py-10 px-4 flex flex-col items-center justify-center text-center text-xs text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5]">
+          <div className="py-10 px-4 flex flex-col items-center justify-center text-center text-xs text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a]">
             <AlertCircle className="w-7 h-7 text-amber-600 dark:text-amber-400 aurora:text-amber-400 mb-2" />
             <p className="text-rose-600 dark:text-rose-400 aurora:text-rose-400 font-medium mb-2">{stickersError}</p>
             <button
               type="button"
               onClick={() => void loadOfficialStickers()}
-              className="px-3 py-1 rounded-lg bg-[#e8f3ff] border border-[#bfdbfe] text-[#0284c7] hover:bg-[#dbeafe] dark:bg-[#2ba0ff]/15 dark:border-[#2ba0ff]/35 dark:text-[#7cc4ff] dark:hover:bg-[#2ba0ff]/25 aurora:bg-[#112d36] aurora:border-[#2dd4bf]/35 aurora:text-[#5eead4] aurora:hover:bg-[#153944] flex items-center gap-1 cursor-pointer transition-colors"
+              className="px-3 py-1 rounded-lg bg-[#e8f3ff] border border-[#bfdbfe] text-[#0284c7] hover:bg-[#dbeafe] dark:bg-[#2ba0ff]/15 dark:border-[#2ba0ff]/35 dark:text-[#7cc4ff] dark:hover:bg-[#2ba0ff]/25 aurora:bg-[#112d36] aurora:border-[#2dd4bf]/35 aurora:text-[#5eead4] aurora:hover:bg-[#153944] linen:bg-[#e5d5bf] linen:border-[#c2a889] linen:text-[#7c4522] linen:hover:bg-[#dcc6aa] flex items-center gap-1 cursor-pointer transition-colors"
             >
               <RefreshCw className="w-3 h-3" /> 重新加载官方贴纸
             </button>
           </div>
         ) : filteredStickers.length === 0 ? (
-          <div className="py-12 flex flex-col items-center justify-center text-center text-xs text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5]">
-            <Sparkles className="w-8 h-8 stroke-1 text-[#94a3b8] dark:text-[#4e657e] aurora:text-[#5a7782] mb-2" />
+          <div className="py-12 flex flex-col items-center justify-center text-center text-xs text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a]">
+            <Sparkles className="w-8 h-8 stroke-1 text-[#94a3b8] dark:text-[#4e657e] aurora:text-[#5a7782] linen:text-[#9c8a75] mb-2" />
             <p>
               {stickerPacks.length === 0
                 ? '当前 Telegram 账号尚未安装任何官方贴纸包'
@@ -501,7 +501,7 @@ export const TelegramEmojiPicker: React.FC<TelegramEmojiPickerProps> = ({
                   void loadOfficialStickers();
                 }
               }}
-              className="mt-2 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf] hover:underline cursor-pointer"
+              className="mt-2 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf] linen:text-[#8c522d] hover:underline cursor-pointer"
             >
               {searchQuery ? '查看全部已安装贴纸' : '刷新官方贴纸包'}
             </button>
@@ -517,9 +517,9 @@ export const TelegramEmojiPicker: React.FC<TelegramEmojiPickerProps> = ({
                   onSelectSticker?.(sticker, packTitle);
                   onClose();
                 }}
-                className="flex flex-col items-center justify-center p-1.5 rounded-xl hover:bg-[#f1f5f9] dark:hover:bg-[#132234] aurora:hover:bg-[#13252e] transition-all hover:scale-105 cursor-pointer group border border-transparent hover:border-[#2481cc]/25 dark:hover:border-[#2ba0ff]/30 aurora:hover:border-[#2dd4bf]/30"
+                className="flex flex-col items-center justify-center p-1.5 rounded-xl hover:bg-[#f1f5f9] dark:hover:bg-[#132234] aurora:hover:bg-[#13252e] linen:hover:bg-[#efe4d3] transition-all hover:scale-105 cursor-pointer group border border-transparent hover:border-[#2481cc]/25 dark:hover:border-[#2ba0ff]/30 aurora:hover:border-[#2dd4bf]/30 linen:hover:border-[#cbbba2]"
               >
-                <div className="w-16 h-16 rounded-lg overflow-hidden relative flex items-center justify-center bg-[#f8fafc] dark:bg-[#0e1726]/85 aurora:bg-[#101c23]/90">
+                <div className="w-16 h-16 rounded-lg overflow-hidden relative flex items-center justify-center bg-[#f8fafc] dark:bg-[#0e1726]/85 aurora:bg-[#101c23]/90 linen:bg-[#efe6d6]">
                   <img
                     src={sticker.thumbUrl}
                     alt={sticker.emoji}
@@ -537,7 +537,7 @@ export const TelegramEmojiPicker: React.FC<TelegramEmojiPickerProps> = ({
       </div>
 
       {/* 4. Footer Note */}
-      <div className="px-3 py-1.5 border-t border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] bg-[#f8fafc] dark:bg-[#0d1726] aurora:bg-[#0e1920] flex items-center justify-between text-[11px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5]">
+      <div className="px-3 py-1.5 border-t border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] linen:border-[#dfd2bc] bg-[#f8fafc] dark:bg-[#0d1726] aurora:bg-[#0e1920] linen:bg-[#f0e6d5] flex items-center justify-between text-[11px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a]">
         <span>Telegram 官方云端表情与贴纸库</span>
         <span>
           {tab === 'emoji'

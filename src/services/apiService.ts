@@ -2549,6 +2549,9 @@ export async function fetchCustomerProfile(
           ...data,
           chatId: data.chatId || chatId,
           accountId: data.accountId || effectiveAccountId,
+          likesInterests: Array.isArray(data.likesInterests) ? data.likesInterests : [],
+          dislikesTaboos: Array.isArray(data.dislikesTaboos) ? data.dislikesTaboos : [],
+          keyMemories: Array.isArray(data.keyMemories) ? data.keyMemories : [],
         };
       }
       return data;

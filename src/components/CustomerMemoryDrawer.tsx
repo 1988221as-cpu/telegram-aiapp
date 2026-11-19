@@ -170,7 +170,13 @@ export const CustomerMemoryDrawer: React.FC<CustomerMemoryDrawerProps> = ({
     profile &&
     (!chatId || normalizeProfileChatId(profile.chatId) === normalizeProfileChatId(chatId)) &&
     isSameAccountScope(profile.accountId, effectiveAccountId)
-      ? { ...profile, accountId: profile.accountId || effectiveAccountId }
+      ? {
+          ...profile,
+          accountId: profile.accountId || effectiveAccountId,
+          likesInterests: Array.isArray(profile.likesInterests) ? profile.likesInterests : [],
+          dislikesTaboos: Array.isArray(profile.dislikesTaboos) ? profile.dislikesTaboos : [],
+          keyMemories: Array.isArray(profile.keyMemories) ? profile.keyMemories : [],
+        }
       : null;
 
   const currentProfile: CustomerProfile = scopedProfile || {
@@ -499,17 +505,17 @@ export const CustomerMemoryDrawer: React.FC<CustomerMemoryDrawerProps> = ({
   const bodyContent = (
     <>
       {!embedded && (
-        <div className="px-5 py-4 border-b border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] flex items-center justify-between bg-[#f8fafc] dark:bg-[#0d1726] aurora:bg-[#0e1920]">
+        <div className="px-5 py-4 border-b border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] linen:border-[#dfd2bc] flex items-center justify-between bg-[#f8fafc] dark:bg-[#0d1726] aurora:bg-[#0e1920] linen:bg-[#f0e6d5]">
           <div className="flex items-center gap-3">
-            <div className="w-9 h-9 rounded-xl bg-[#2481cc]/12 dark:bg-[#2ba0ff]/12 aurora:bg-[#14b8a6]/15 border border-[#2481cc]/25 dark:border-[#2ba0ff]/30 aurora:border-[#2dd4bf]/30 flex items-center justify-center text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf] shrink-0">
+            <div className="w-9 h-9 rounded-xl bg-[#2481cc]/12 dark:bg-[#2ba0ff]/12 aurora:bg-[#14b8a6]/15 linen:bg-[#a86a43]/15 border border-[#2481cc]/25 dark:border-[#2ba0ff]/30 aurora:border-[#2dd4bf]/30 linen:border-[#cbbba2] flex items-center justify-center text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf] linen:text-[#8c522d] shrink-0">
               <Brain className="w-5 h-5" />
             </div>
             <div className="min-w-0">
               <div className="flex items-center gap-1.5">
-                <h2 className="text-sm font-bold text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] truncate">
+                <h2 className="text-sm font-bold text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118] truncate">
                   {chatTitle || '当前联系人'} · 全息记忆
                 </h2>
-                <span className="text-[11px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] shrink-0">
+                <span className="text-[11px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a] shrink-0">
                   · {currentProfile.relationshipStage || '尚未分析'}
                 </span>
               </div>
@@ -517,7 +523,7 @@ export const CustomerMemoryDrawer: React.FC<CustomerMemoryDrawerProps> = ({
           </div>
           <button
             onClick={onClose}
-            className="w-8 h-8 rounded-lg text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] hover:text-[#0f172a] dark:hover:text-[#eef4fb] aurora:hover:text-[#ecf6f8] hover:bg-black/5 dark:hover:bg-[#152438] aurora:hover:bg-[#152934] flex items-center justify-center transition-colors cursor-pointer shrink-0"
+            className="w-8 h-8 rounded-lg text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a] hover:text-[#0f172a] dark:hover:text-[#eef4fb] aurora:hover:text-[#ecf6f8] linen:hover:text-[#2b2118] hover:bg-black/5 dark:hover:bg-[#152438] aurora:hover:bg-[#152934] linen:hover:bg-[#e5d9c5] flex items-center justify-center transition-colors cursor-pointer shrink-0"
           >
             <X className="w-4 h-4" />
           </button>
@@ -525,15 +531,15 @@ export const CustomerMemoryDrawer: React.FC<CustomerMemoryDrawerProps> = ({
       )}
 
       {/* AI Deep Analysis Bar */}
-      <div className="px-4 py-2.5 bg-[#f8fafc]/90 dark:bg-[#0d1726]/90 aurora:bg-[#0e1920]/90 border-b border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] flex items-center justify-between gap-3 shrink-0">
-        <div className="text-xs font-semibold text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] flex items-center gap-1.5">
-          <Sparkles className="w-3.5 h-3.5 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf]" />
+      <div className="px-4 py-2.5 bg-[#f8fafc]/90 dark:bg-[#0d1726]/90 aurora:bg-[#0e1920]/90 linen:bg-[#f0e6d5]/90 border-b border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] linen:border-[#dfd2bc] flex items-center justify-between gap-3 shrink-0">
+        <div className="text-xs font-semibold text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118] flex items-center gap-1.5">
+          <Sparkles className="w-3.5 h-3.5 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf] linen:text-[#8c522d]" />
           <span>AI 对话画像提炼</span>
         </div>
           <button
             onClick={handleTriggerAnalysis}
             disabled={isAnalyzing}
-            className="px-3 py-1.5 rounded-lg bg-[#2481cc] hover:bg-[#1d6fb3] dark:bg-[#2ba0ff] dark:hover:bg-[#1e8ee8] aurora:bg-[#0d9488] aurora:hover:bg-[#0f766e] text-white text-xs font-medium flex items-center gap-1.5 shadow-sm cursor-pointer transition-colors disabled:opacity-50 shrink-0"
+            className="px-3 py-1.5 rounded-lg bg-[#2481cc] hover:bg-[#1d6fb3] dark:bg-[#2ba0ff] dark:hover:bg-[#1e8ee8] aurora:bg-[#0d9488] aurora:hover:bg-[#0f766e] linen:bg-[#a86a43] linen:hover:bg-[#8f5734] text-white text-xs font-medium flex items-center gap-1.5 shadow-sm cursor-pointer transition-colors disabled:opacity-50 shrink-0"
           >
             {isAnalyzing ? (
               <>
@@ -581,16 +587,16 @@ export const CustomerMemoryDrawer: React.FC<CustomerMemoryDrawerProps> = ({
         {/* Scrollable Content */}
         <div className="flex-1 overflow-y-auto p-4 space-y-3.5">
           {/* 1. Basic Stats & Attributes */}
-          <div className="bg-[#f8fafc] dark:bg-[#0e1726]/85 aurora:bg-[#101c23]/90 p-3.5 rounded-xl border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] space-y-2.5">
-            <div className="flex items-center justify-between text-xs font-semibold text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8]">
+          <div className="bg-[#f8fafc] dark:bg-[#0e1726]/85 aurora:bg-[#101c23]/90 linen:bg-[#efe6d6]/90 p-3.5 rounded-xl border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] linen:border-[#cbbba2] space-y-2.5">
+            <div className="flex items-center justify-between text-xs font-semibold text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118]">
               <span className="flex items-center gap-1.5">
-                <User className="w-3.5 h-3.5 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf]" />
+                <User className="w-3.5 h-3.5 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf] linen:text-[#8c522d]" />
                 <span>基础属性与特征</span>
               </span>
               <div className="flex items-center gap-2">
                 <button
                   onClick={() => (isEditingAttributes ? handleSaveAttributes() : handleStartEdit())}
-                  className="text-[11px] text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf] hover:opacity-80 flex items-center gap-1 cursor-pointer transition-colors"
+                  className="text-[11px] text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf] linen:text-[#8c522d] hover:opacity-80 flex items-center gap-1 cursor-pointer transition-colors"
                 >
                   <Edit3 className="w-3 h-3" />
                   <span>{isEditingAttributes ? '保存修改' : '手动修改'}</span>
@@ -598,12 +604,12 @@ export const CustomerMemoryDrawer: React.FC<CustomerMemoryDrawerProps> = ({
                 {isEditingAttributes && (
                   <button
                     onClick={() => setIsEditingAttributes(false)}
-                    className="text-[11px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] hover:text-[#0f172a] dark:hover:text-[#eef4fb] aurora:hover:text-[#ecf6f8] cursor-pointer"
+                    className="text-[11px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a] hover:text-[#0f172a] dark:hover:text-[#eef4fb] aurora:hover:text-[#ecf6f8] linen:hover:text-[#2b2118] cursor-pointer"
                   >
                     取消
                   </button>
                 )}
-                <span className="text-[11px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] font-mono tabular-nums">
+                <span className="text-[11px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a] font-mono tabular-nums">
                   {currentProfile.totalMessagesCount} 条消息
                 </span>
               </div>
@@ -612,7 +618,7 @@ export const CustomerMemoryDrawer: React.FC<CustomerMemoryDrawerProps> = ({
             {isEditingAttributes ? (
               <div className="space-y-2 text-xs">
                 <div>
-                  <label className="text-[10px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] block mb-1">当前关系阶段（自动联动 AI 回复分阶段话术）</label>
+                  <label className="text-[10px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a] block mb-1">当前关系阶段（自动联动 AI 回复分阶段话术）</label>
                   <div className="flex flex-wrap gap-1 mb-1.5">
                     {['初识破冰', '朋友熟络', '情感升温', '信任深化', '投资切入'].map((stageOpt) => (
                       <button
@@ -621,8 +627,8 @@ export const CustomerMemoryDrawer: React.FC<CustomerMemoryDrawerProps> = ({
                         onClick={() => setEditStage(stageOpt)}
                         className={`px-2 py-0.5 rounded-md text-[11px] border cursor-pointer transition-colors ${
                           editStage === stageOpt
-                            ? 'bg-[#2481cc] dark:bg-[#2ba0ff] aurora:bg-[#0d9488] text-white border-transparent'
-                            : 'bg-white dark:bg-[#08101a] aurora:bg-[#081014] text-[#475569] dark:text-[#b4c6d8] border-[#cbd5e1] dark:border-[#1e3148] hover:border-[#2481cc]'
+                            ? 'bg-[#2481cc] dark:bg-[#2ba0ff] aurora:bg-[#0d9488] linen:bg-[#a86a43] text-white border-transparent'
+                            : 'bg-white dark:bg-[#08101a] aurora:bg-[#081014] linen:bg-[#faf5ec] text-[#475569] dark:text-[#b4c6d8] linen:text-[#4e3f32] border-[#cbd5e1] dark:border-[#1e3148] linen:border-[#cbbba2] hover:border-[#2481cc] linen:hover:border-[#a86a43]'
                         }`}
                       >
                         {stageOpt}
@@ -634,86 +640,86 @@ export const CustomerMemoryDrawer: React.FC<CustomerMemoryDrawerProps> = ({
                     value={editStage}
                     onChange={(e) => setEditStage(e.target.value)}
                     placeholder="如: 朋友熟络 / 情感升温 / 投资切入"
-                    className="w-full bg-white dark:bg-[#08101a] aurora:bg-[#081014] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] rounded-lg px-2.5 py-1.5 text-xs text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] placeholder-[#94a3b8] dark:placeholder-[#4e657e] aurora:placeholder-[#5a7782] focus:outline-none focus:border-[#2481cc] dark:focus:border-[#2ba0ff] aurora:focus:border-[#2dd4bf]"
+                    className="w-full bg-white dark:bg-[#08101a] aurora:bg-[#081014] linen:bg-[#faf5ec] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] linen:border-[#cbbba2] rounded-lg px-2.5 py-1.5 text-xs text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118] placeholder-[#94a3b8] dark:placeholder-[#4e657e] aurora:placeholder-[#5a7782] linen:placeholder-[#8f7e6c] focus:outline-none focus:border-[#2481cc] dark:focus:border-[#2ba0ff] aurora:focus:border-[#2dd4bf] linen:focus:border-[#a86a43]"
                   />
                 </div>
                 <div className="grid grid-cols-2 gap-2">
                   <div>
-                    <label className="text-[10px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] block mb-0.5">年龄 / 生日</label>
+                    <label className="text-[10px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a] block mb-0.5">年龄 / 生日</label>
                     <input
                       type="text"
                       value={editAge}
                       onChange={(e) => setEditAge(e.target.value)}
                       placeholder="如: 28岁 / 6月"
-                      className="w-full bg-white dark:bg-[#08101a] aurora:bg-[#081014] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] rounded-lg px-2.5 py-1.5 text-xs text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] placeholder-[#94a3b8] dark:placeholder-[#4e657e] aurora:placeholder-[#5a7782] focus:outline-none focus:border-[#2481cc] dark:focus:border-[#2ba0ff] aurora:focus:border-[#2dd4bf]"
+                      className="w-full bg-white dark:bg-[#08101a] aurora:bg-[#081014] linen:bg-[#faf5ec] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] linen:border-[#cbbba2] rounded-lg px-2.5 py-1.5 text-xs text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118] placeholder-[#94a3b8] dark:placeholder-[#4e657e] aurora:placeholder-[#5a7782] linen:placeholder-[#8f7e6c] focus:outline-none focus:border-[#2481cc] dark:focus:border-[#2ba0ff] aurora:focus:border-[#2dd4bf] linen:focus:border-[#a86a43]"
                     />
                   </div>
                   <div>
-                    <label className="text-[10px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] block mb-0.5">所在地 / 时区</label>
+                    <label className="text-[10px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a] block mb-0.5">所在地 / 时区</label>
                     <input
                       type="text"
                       value={editLocation}
                       onChange={(e) => setEditLocation(e.target.value)}
                       placeholder="如: 伊斯坦布尔 (UTC+3)"
-                      className="w-full bg-white dark:bg-[#08101a] aurora:bg-[#081014] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] rounded-lg px-2.5 py-1.5 text-xs text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] placeholder-[#94a3b8] dark:placeholder-[#4e657e] aurora:placeholder-[#5a7782] focus:outline-none focus:border-[#2481cc] dark:focus:border-[#2ba0ff] aurora:focus:border-[#2dd4bf]"
+                      className="w-full bg-white dark:bg-[#08101a] aurora:bg-[#081014] linen:bg-[#faf5ec] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] linen:border-[#cbbba2] rounded-lg px-2.5 py-1.5 text-xs text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118] placeholder-[#94a3b8] dark:placeholder-[#4e657e] aurora:placeholder-[#5a7782] linen:placeholder-[#8f7e6c] focus:outline-none focus:border-[#2481cc] dark:focus:border-[#2ba0ff] aurora:focus:border-[#2dd4bf] linen:focus:border-[#a86a43]"
                     />
                   </div>
                   <div>
-                    <label className="text-[10px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] block mb-0.5">婚恋与家庭状态</label>
+                    <label className="text-[10px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a] block mb-0.5">婚恋与家庭状态</label>
                     <input
                       type="text"
                       value={editFamilyMarital}
                       onChange={(e) => setEditFamilyMarital(e.target.value)}
                       placeholder="如: 单身 / 已婚有娃 / 独居"
-                      className="w-full bg-white dark:bg-[#08101a] aurora:bg-[#081014] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] rounded-lg px-2.5 py-1.5 text-xs text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] placeholder-[#94a3b8] dark:placeholder-[#4e657e] aurora:placeholder-[#5a7782] focus:outline-none focus:border-[#2481cc] dark:focus:border-[#2ba0ff] aurora:focus:border-[#2dd4bf]"
+                      className="w-full bg-white dark:bg-[#08101a] aurora:bg-[#081014] linen:bg-[#faf5ec] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] linen:border-[#cbbba2] rounded-lg px-2.5 py-1.5 text-xs text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118] placeholder-[#94a3b8] dark:placeholder-[#4e657e] aurora:placeholder-[#5a7782] linen:placeholder-[#8f7e6c] focus:outline-none focus:border-[#2481cc] dark:focus:border-[#2ba0ff] aurora:focus:border-[#2dd4bf] linen:focus:border-[#a86a43]"
                     />
                   </div>
                   <div>
-                    <label className="text-[10px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] block mb-0.5">作息活跃窗口</label>
+                    <label className="text-[10px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a] block mb-0.5">作息活跃窗口</label>
                     <input
                       type="text"
                       value={editActiveSchedule}
                       onChange={(e) => setEditActiveSchedule(e.target.value)}
                       placeholder="如: 晚21点后活跃 / 周末休息"
-                      className="w-full bg-white dark:bg-[#08101a] aurora:bg-[#081014] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] rounded-lg px-2.5 py-1.5 text-xs text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] placeholder-[#94a3b8] dark:placeholder-[#4e657e] aurora:placeholder-[#5a7782] focus:outline-none focus:border-[#2481cc] dark:focus:border-[#2ba0ff] aurora:focus:border-[#2dd4bf]"
+                      className="w-full bg-white dark:bg-[#08101a] aurora:bg-[#081014] linen:bg-[#faf5ec] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] linen:border-[#cbbba2] rounded-lg px-2.5 py-1.5 text-xs text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118] placeholder-[#94a3b8] dark:placeholder-[#4e657e] aurora:placeholder-[#5a7782] linen:placeholder-[#8f7e6c] focus:outline-none focus:border-[#2481cc] dark:focus:border-[#2ba0ff] aurora:focus:border-[#2dd4bf] linen:focus:border-[#a86a43]"
                     />
                   </div>
                 </div>
                 <div>
-                  <label className="text-[10px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] block mb-0.5">职业 / 身份</label>
+                  <label className="text-[10px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a] block mb-0.5">职业 / 身份</label>
                   <input
                     type="text"
                     value={editOccupation}
                     onChange={(e) => setEditOccupation(e.target.value)}
                     placeholder="如: 医院职员 / 外贸老板"
-                    className="w-full bg-white dark:bg-[#08101a] aurora:bg-[#081014] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] rounded-lg px-2.5 py-1.5 text-xs text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] placeholder-[#94a3b8] dark:placeholder-[#4e657e] aurora:placeholder-[#5a7782] focus:outline-none focus:border-[#2481cc] dark:focus:border-[#2ba0ff] aurora:focus:border-[#2dd4bf]"
+                    className="w-full bg-white dark:bg-[#08101a] aurora:bg-[#081014] linen:bg-[#faf5ec] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] linen:border-[#cbbba2] rounded-lg px-2.5 py-1.5 text-xs text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118] placeholder-[#94a3b8] dark:placeholder-[#4e657e] aurora:placeholder-[#5a7782] linen:placeholder-[#8f7e6c] focus:outline-none focus:border-[#2481cc] dark:focus:border-[#2ba0ff] aurora:focus:border-[#2dd4bf] linen:focus:border-[#a86a43]"
                   />
                 </div>
                 <div>
-                  <label className="text-[10px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] block mb-0.5">沟通习惯与语气偏好</label>
+                  <label className="text-[10px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a] block mb-0.5">沟通习惯与语气偏好</label>
                   <input
                     type="text"
                     value={editTone}
                     onChange={(e) => setEditTone(e.target.value)}
                     placeholder="如: 慢热真诚 / 喜欢生活分享"
-                    className="w-full bg-white dark:bg-[#08101a] aurora:bg-[#081014] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] rounded-lg px-2.5 py-1.5 text-xs text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] placeholder-[#94a3b8] dark:placeholder-[#4e657e] aurora:placeholder-[#5a7782] focus:outline-none focus:border-[#2481cc] dark:focus:border-[#2ba0ff] aurora:focus:border-[#2dd4bf]"
+                    className="w-full bg-white dark:bg-[#08101a] aurora:bg-[#081014] linen:bg-[#faf5ec] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] linen:border-[#cbbba2] rounded-lg px-2.5 py-1.5 text-xs text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118] placeholder-[#94a3b8] dark:placeholder-[#4e657e] aurora:placeholder-[#5a7782] linen:placeholder-[#8f7e6c] focus:outline-none focus:border-[#2481cc] dark:focus:border-[#2ba0ff] aurora:focus:border-[#2dd4bf] linen:focus:border-[#a86a43]"
                   />
                 </div>
                 <div>
-                  <label className="text-[10px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] block mb-0.5">深层情感诉求与生活痛点</label>
+                  <label className="text-[10px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a] block mb-0.5">深层情感诉求与生活痛点</label>
                   <textarea
                     rows={2}
                     value={editEmotionalNeeds}
                     onChange={(e) => setEditEmotionalNeeds(e.target.value)}
                     placeholder="如: 工作辛苦缺少倾听陪伴，希望能改善家人生活条件"
-                    className="w-full bg-white dark:bg-[#08101a] aurora:bg-[#081014] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] rounded-lg px-2.5 py-1.5 text-xs text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] placeholder-[#94a3b8] dark:placeholder-[#4e657e] aurora:placeholder-[#5a7782] focus:outline-none focus:border-[#2481cc] dark:focus:border-[#2ba0ff] aurora:focus:border-[#2dd4bf] resize-none"
+                    className="w-full bg-white dark:bg-[#08101a] aurora:bg-[#081014] linen:bg-[#faf5ec] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] linen:border-[#cbbba2] rounded-lg px-2.5 py-1.5 text-xs text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118] placeholder-[#94a3b8] dark:placeholder-[#4e657e] aurora:placeholder-[#5a7782] linen:placeholder-[#8f7e6c] focus:outline-none focus:border-[#2481cc] dark:focus:border-[#2ba0ff] aurora:focus:border-[#2dd4bf] linen:focus:border-[#a86a43] resize-none"
                   />
                 </div>
                 <div className="flex justify-end pt-1">
                   <button
                     onClick={handleSaveAttributes}
                     disabled={isSavingProfile}
-                    className="px-3 py-1.5 bg-[#2481cc] hover:bg-[#1d6fb3] dark:bg-[#2ba0ff] dark:hover:bg-[#1e8ee8] aurora:bg-[#0d9488] aurora:hover:bg-[#0f766e] text-white rounded-lg text-xs font-medium cursor-pointer transition-colors disabled:opacity-50"
+                    className="px-3 py-1.5 bg-[#2481cc] hover:bg-[#1d6fb3] dark:bg-[#2ba0ff] dark:hover:bg-[#1e8ee8] aurora:bg-[#0d9488] aurora:hover:bg-[#0f766e] linen:bg-[#a86a43] linen:hover:bg-[#8f5734] text-white rounded-lg text-xs font-medium cursor-pointer transition-colors disabled:opacity-50"
                   >
                     {isSavingProfile ? '保存中...' : '保存客情特征'}
                   </button>
@@ -723,46 +729,46 @@ export const CustomerMemoryDrawer: React.FC<CustomerMemoryDrawerProps> = ({
               <div className="space-y-2.5 pt-1 text-xs">
                 <div className="grid grid-cols-2 gap-3">
                   <div>
-                    <span className="text-[10px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] block">当前关系阶段</span>
-                    <span className="font-medium text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf] text-xs mt-0.5 block break-words">
+                    <span className="text-[10px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a] block">当前关系阶段</span>
+                    <span className="font-medium text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf] linen:text-[#8c522d] text-xs mt-0.5 block break-words">
                       {currentProfile.relationshipStage || '待分析'}
                     </span>
                   </div>
                   <div>
-                    <span className="text-[10px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] block">年龄 / 生日</span>
-                    <span className="font-medium text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] text-xs mt-0.5 block break-words">
+                    <span className="text-[10px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a] block">年龄 / 生日</span>
+                    <span className="font-medium text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118] text-xs mt-0.5 block break-words">
                       {currentProfile.ageEstimate || '待确认'}
                     </span>
                   </div>
                   <div>
-                    <span className="text-[10px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] block">所在地 / 时区</span>
-                    <span className="font-medium text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] text-xs mt-0.5 block break-words">
+                    <span className="text-[10px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a] block">所在地 / 时区</span>
+                    <span className="font-medium text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118] text-xs mt-0.5 block break-words">
                       {currentProfile.locationTimezone || '待确认'}
                     </span>
                   </div>
                   <div>
-                    <span className="text-[10px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] block">婚恋与家庭状态</span>
-                    <span className="font-medium text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] text-xs mt-0.5 block break-words">
+                    <span className="text-[10px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a] block">婚恋与家庭状态</span>
+                    <span className="font-medium text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118] text-xs mt-0.5 block break-words">
                       {currentProfile.familyMaritalStatus || '待确认'}
                     </span>
                   </div>
                   <div>
-                    <span className="text-[10px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] block">职业 / 身份</span>
-                    <span className="font-medium text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] text-xs mt-0.5 block break-words">
+                    <span className="text-[10px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a] block">职业 / 身份</span>
+                    <span className="font-medium text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118] text-xs mt-0.5 block break-words">
                       {currentProfile.occupation || '待确认'}
                     </span>
                   </div>
                   <div>
-                    <span className="text-[10px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] block">活跃作息窗口</span>
-                    <span className="font-medium text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] text-xs mt-0.5 block break-words">
+                    <span className="text-[10px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a] block">活跃作息窗口</span>
+                    <span className="font-medium text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118] text-xs mt-0.5 block break-words">
                       {currentProfile.activeSchedule || '待观察'}
                     </span>
                   </div>
                 </div>
 
-                <div className="pt-1.5 border-t border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34]">
-                  <span className="text-[10px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] block mb-0.5">沟通习惯与语气偏好</span>
-                  <p className="text-xs text-[#475569] dark:text-[#b4c6d8] aurora:text-[#b7d0d8] leading-relaxed">
+                <div className="pt-1.5 border-t border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] linen:border-[#dfd2bc]">
+                  <span className="text-[10px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a] block mb-0.5">沟通习惯与语气偏好</span>
+                  <p className="text-xs text-[#475569] dark:text-[#b4c6d8] aurora:text-[#b7d0d8] linen:text-[#4e3f32] leading-relaxed">
                     {currentProfile.toneStyle || '待提炼'}
                   </p>
                 </div>
@@ -771,27 +777,27 @@ export const CustomerMemoryDrawer: React.FC<CustomerMemoryDrawerProps> = ({
           </div>
 
           {/* 2. Likes & Topics */}
-          <div className="bg-[#f8fafc] dark:bg-[#0e1726]/85 aurora:bg-[#101c23]/90 p-3.5 rounded-xl border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] space-y-2.5">
-            <div className="flex items-center justify-between text-xs font-semibold text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8]">
+          <div className="bg-[#f8fafc] dark:bg-[#0e1726]/85 aurora:bg-[#101c23]/90 linen:bg-[#efe6d6]/90 p-3.5 rounded-xl border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] linen:border-[#cbbba2] space-y-2.5">
+            <div className="flex items-center justify-between text-xs font-semibold text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118]">
               <span className="flex items-center gap-1.5">
-                <Tag className="w-3.5 h-3.5 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf]" />
+                <Tag className="w-3.5 h-3.5 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf] linen:text-[#8c522d]" />
                 <span className="tabular-nums">爱好与关注话题 ({currentProfile.likesInterests.length})</span>
               </span>
             </div>
 
             <div className="flex flex-wrap gap-1.5 min-h-[24px]">
               {currentProfile.likesInterests.length === 0 ? (
-                <span className="text-[11px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5]">暂无记录</span>
+                <span className="text-[11px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a]">暂无记录</span>
               ) : (
                 currentProfile.likesInterests.map((like, i) => (
                   <span
                     key={i}
-                    className="px-2.5 py-1 rounded-lg bg-[#e8f3ff] dark:bg-[#2ba0ff]/12 aurora:bg-[#112d36] border border-[#bfdbfe] dark:border-[#2ba0ff]/25 aurora:border-[#2dd4bf]/35 text-[#0f172a] dark:text-[#dbeafe] aurora:text-[#ccfbf1] text-xs flex items-center gap-1.5"
+                    className="px-2.5 py-1 rounded-lg bg-[#e8f3ff] dark:bg-[#2ba0ff]/12 aurora:bg-[#112d36] linen:bg-[#a86a43]/15 border border-[#bfdbfe] dark:border-[#2ba0ff]/25 aurora:border-[#2dd4bf]/35 linen:border-[#cbbba2] text-[#0f172a] dark:text-[#dbeafe] aurora:text-[#ccfbf1] linen:text-[#6b3c1f] text-xs flex items-center gap-1.5"
                   >
                     <span>{like}</span>
                     <button
                       onClick={() => handleRemoveLike(i)}
-                      className="text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] hover:text-[#0f172a] dark:hover:text-white aurora:hover:text-white cursor-pointer transition-colors"
+                      className="text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#8c522d] hover:text-[#0f172a] dark:hover:text-white aurora:hover:text-white linen:hover:text-[#2b2118] cursor-pointer transition-colors"
                     >
                       ×
                     </button>
@@ -807,11 +813,11 @@ export const CustomerMemoryDrawer: React.FC<CustomerMemoryDrawerProps> = ({
                 onChange={(e) => setNewLikeInput(e.target.value)}
                 onKeyDown={(e) => e.key === 'Enter' && handleAddLike()}
                 placeholder="添加关注话题或偏好..."
-                className="flex-1 bg-white dark:bg-[#08101a] aurora:bg-[#081014] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] focus:border-[#2481cc] dark:focus:border-[#2ba0ff] aurora:focus:border-[#2dd4bf] rounded-lg px-2.5 py-1.5 text-xs text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] placeholder-[#94a3b8] dark:placeholder-[#4e657e] aurora:placeholder-[#5a7782] focus:outline-none transition-colors"
+                className="flex-1 bg-white dark:bg-[#08101a] aurora:bg-[#081014] linen:bg-[#faf5ec] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] linen:border-[#cbbba2] focus:border-[#2481cc] dark:focus:border-[#2ba0ff] aurora:focus:border-[#2dd4bf] linen:focus:border-[#a86a43] rounded-lg px-2.5 py-1.5 text-xs text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118] placeholder-[#94a3b8] dark:placeholder-[#4e657e] aurora:placeholder-[#5a7782] linen:placeholder-[#8f7e6c] focus:outline-none transition-colors"
               />
               <button
                 onClick={handleAddLike}
-                className="px-3 py-1.5 rounded-lg bg-[#e8f3ff] dark:bg-[#12263f] aurora:bg-[#112d36] hover:bg-[#dbeafe] dark:hover:bg-[#183354] aurora:hover:bg-[#153a44] text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#5eead4] text-xs font-medium cursor-pointer transition-colors shrink-0 border border-[#bfdbfe] dark:border-[#2ba0ff]/30 aurora:border-[#2dd4bf]/35"
+                className="px-3 py-1.5 rounded-lg bg-[#e8f3ff] dark:bg-[#12263f] aurora:bg-[#112d36] linen:bg-[#a86a43]/15 hover:bg-[#dbeafe] dark:hover:bg-[#183354] aurora:hover:bg-[#153a44] linen:hover:bg-[#a86a43]/25 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#5eead4] linen:text-[#8c522d] text-xs font-medium cursor-pointer transition-colors shrink-0 border border-[#bfdbfe] dark:border-[#2ba0ff]/30 aurora:border-[#2dd4bf]/35 linen:border-[#cbbba2]"
               >
                 添加
               </button>
@@ -819,8 +825,8 @@ export const CustomerMemoryDrawer: React.FC<CustomerMemoryDrawerProps> = ({
           </div>
 
           {/* 3. Dislikes & Taboos */}
-          <div className="bg-[#f8fafc] dark:bg-[#0e1726]/85 aurora:bg-[#101c23]/90 p-3.5 rounded-xl border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] space-y-2.5">
-            <div className="flex items-center justify-between text-xs font-semibold text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8]">
+          <div className="bg-[#f8fafc] dark:bg-[#0e1726]/85 aurora:bg-[#101c23]/90 linen:bg-[#efe6d6]/90 p-3.5 rounded-xl border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] linen:border-[#cbbba2] space-y-2.5">
+            <div className="flex items-center justify-between text-xs font-semibold text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118]">
               <span className="flex items-center gap-1.5">
                 <ShieldAlert className="w-3.5 h-3.5 text-rose-600 dark:text-rose-400" />
                 <span className="tabular-nums">避讳与敏感雷区 ({currentProfile.dislikesTaboos.length})</span>
@@ -829,7 +835,7 @@ export const CustomerMemoryDrawer: React.FC<CustomerMemoryDrawerProps> = ({
 
             <div className="flex flex-wrap gap-1.5 min-h-[24px]">
               {currentProfile.dislikesTaboos.length === 0 ? (
-                <span className="text-[11px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5]">暂无记录</span>
+                <span className="text-[11px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a]">暂无记录</span>
               ) : (
                 currentProfile.dislikesTaboos.map((taboo, i) => (
                   <span
@@ -855,11 +861,11 @@ export const CustomerMemoryDrawer: React.FC<CustomerMemoryDrawerProps> = ({
                 onChange={(e) => setNewTabooInput(e.target.value)}
                 onKeyDown={(e) => e.key === 'Enter' && handleAddTaboo()}
                 placeholder="添加避讳要点..."
-                className="flex-1 bg-white dark:bg-[#08101a] aurora:bg-[#081014] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] focus:border-[#2481cc] dark:focus:border-[#2ba0ff] aurora:focus:border-[#2dd4bf] rounded-lg px-2.5 py-1.5 text-xs text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] placeholder-[#94a3b8] dark:placeholder-[#4e657e] aurora:placeholder-[#5a7782] focus:outline-none transition-colors"
+                className="flex-1 bg-white dark:bg-[#08101a] aurora:bg-[#081014] linen:bg-[#faf5ec] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] linen:border-[#cbbba2] focus:border-[#2481cc] dark:focus:border-[#2ba0ff] aurora:focus:border-[#2dd4bf] linen:focus:border-[#a86a43] rounded-lg px-2.5 py-1.5 text-xs text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118] placeholder-[#94a3b8] dark:placeholder-[#4e657e] aurora:placeholder-[#5a7782] linen:placeholder-[#8f7e6c] focus:outline-none transition-colors"
               />
               <button
                 onClick={handleAddTaboo}
-                className="px-3 py-1.5 rounded-lg bg-[#e8f3ff] dark:bg-[#12263f] aurora:bg-[#112d36] hover:bg-[#dbeafe] dark:hover:bg-[#183354] aurora:hover:bg-[#153a44] text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#5eead4] text-xs font-medium cursor-pointer transition-colors shrink-0 border border-[#bfdbfe] dark:border-[#2ba0ff]/30 aurora:border-[#2dd4bf]/35"
+                className="px-3 py-1.5 rounded-lg bg-[#e8f3ff] dark:bg-[#12263f] aurora:bg-[#112d36] linen:bg-[#a86a43]/15 hover:bg-[#dbeafe] dark:hover:bg-[#183354] aurora:hover:bg-[#153a44] linen:hover:bg-[#a86a43]/25 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#5eead4] linen:text-[#8c522d] text-xs font-medium cursor-pointer transition-colors shrink-0 border border-[#bfdbfe] dark:border-[#2ba0ff]/30 aurora:border-[#2dd4bf]/35 linen:border-[#cbbba2]"
               >
                 添加
               </button>
@@ -867,38 +873,38 @@ export const CustomerMemoryDrawer: React.FC<CustomerMemoryDrawerProps> = ({
           </div>
 
           {/* 4. Emotional Needs (Always visible & manually editable via Attributes) */}
-          <div className="bg-[#f8fafc] dark:bg-[#0e1726]/85 aurora:bg-[#101c23]/90 p-3.5 rounded-xl border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] space-y-1.5">
-            <div className="flex items-center justify-between text-xs font-semibold text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8]">
+          <div className="bg-[#f8fafc] dark:bg-[#0e1726]/85 aurora:bg-[#101c23]/90 linen:bg-[#efe6d6]/90 p-3.5 rounded-xl border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] linen:border-[#cbbba2] space-y-1.5">
+            <div className="flex items-center justify-between text-xs font-semibold text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118]">
               <span className="flex items-center gap-1.5">
-                <HeartHandshake className="w-3.5 h-3.5 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf]" />
+                <HeartHandshake className="w-3.5 h-3.5 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf] linen:text-[#8c522d]" />
                 <span>核心诉求分析</span>
               </span>
               {!isEditingAttributes && (
                 <button
                   onClick={handleStartEdit}
-                  className="text-[11px] text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf] hover:opacity-80 flex items-center gap-1 cursor-pointer transition-colors"
+                  className="text-[11px] text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf] linen:text-[#8c522d] hover:opacity-80 flex items-center gap-1 cursor-pointer transition-colors"
                 >
                   <Edit3 className="w-3 h-3" />
                   <span>补录/修改</span>
                 </button>
               )}
             </div>
-            <p className="text-xs text-[#475569] dark:text-[#b4c6d8] aurora:text-[#b7d0d8] bg-white dark:bg-[#08101a] aurora:bg-[#081014] p-2.5 rounded-lg border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] leading-relaxed">
+            <p className="text-xs text-[#475569] dark:text-[#b4c6d8] aurora:text-[#b7d0d8] linen:text-[#4e3f32] bg-white dark:bg-[#08101a] aurora:bg-[#081014] linen:bg-[#faf5ec] p-2.5 rounded-lg border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] linen:border-[#dfd2bc] leading-relaxed">
               {currentProfile.emotionalNeeds || '暂无记录（待真实沟通后提炼或点击右上角手动补录）'}
             </p>
           </div>
 
           {/* 4.5 Financial, Investment Attitude & Next-Step Strategy */}
-          <div className="bg-[#f8fafc] dark:bg-[#0e1726]/85 aurora:bg-[#101c23]/90 p-3.5 rounded-xl border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] space-y-2.5">
-            <div className="flex items-center justify-between text-xs font-semibold text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8]">
+          <div className="bg-[#f8fafc] dark:bg-[#0e1726]/85 aurora:bg-[#101c23]/90 linen:bg-[#efe6d6]/90 p-3.5 rounded-xl border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] linen:border-[#cbbba2] space-y-2.5">
+            <div className="flex items-center justify-between text-xs font-semibold text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118]">
               <span className="flex items-center gap-1.5">
-                <TrendingUp className="w-3.5 h-3.5 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf]" />
+                <TrendingUp className="w-3.5 h-3.5 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf] linen:text-[#8c522d]" />
                 <span>经济投资画像与推进策略</span>
               </span>
               <div className="flex items-center gap-2">
                 <button
                   onClick={() => (isEditingStrategy ? handleSaveStrategy() : handleStartEditStrategy())}
-                  className="text-[11px] text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf] hover:opacity-80 flex items-center gap-1 cursor-pointer transition-colors"
+                  className="text-[11px] text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf] linen:text-[#8c522d] hover:opacity-80 flex items-center gap-1 cursor-pointer transition-colors"
                 >
                   <Edit3 className="w-3 h-3" />
                   <span>{isEditingStrategy ? '保存策略' : '手动修改'}</span>
@@ -906,7 +912,7 @@ export const CustomerMemoryDrawer: React.FC<CustomerMemoryDrawerProps> = ({
                 {isEditingStrategy && (
                   <button
                     onClick={() => setIsEditingStrategy(false)}
-                    className="text-[11px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] hover:text-[#0f172a] dark:hover:text-[#eef4fb] aurora:hover:text-[#ecf6f8] cursor-pointer"
+                    className="text-[11px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a] hover:text-[#0f172a] dark:hover:text-[#eef4fb] aurora:hover:text-[#ecf6f8] linen:hover:text-[#2b2118] cursor-pointer"
                   >
                     取消
                   </button>
@@ -918,51 +924,51 @@ export const CustomerMemoryDrawer: React.FC<CustomerMemoryDrawerProps> = ({
               <div className="space-y-2 text-xs">
                 <div className="grid grid-cols-2 gap-2">
                   <div>
-                    <label className="text-[10px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] block mb-0.5">当前信任度</label>
+                    <label className="text-[10px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a] block mb-0.5">当前信任度</label>
                     <input
                       type="text"
                       value={editTrustLevel}
                       onChange={(e) => setEditTrustLevel(e.target.value)}
                       placeholder="如: 中（建立好感）"
-                      className="w-full bg-white dark:bg-[#08101a] aurora:bg-[#081014] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] rounded-lg px-2.5 py-1.5 text-xs text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] placeholder-[#94a3b8] dark:placeholder-[#4e657e] aurora:placeholder-[#5a7782] focus:outline-none focus:border-[#2481cc] dark:focus:border-[#2ba0ff] aurora:focus:border-[#2dd4bf]"
+                      className="w-full bg-white dark:bg-[#08101a] aurora:bg-[#081014] linen:bg-[#faf5ec] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] linen:border-[#cbbba2] rounded-lg px-2.5 py-1.5 text-xs text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118] placeholder-[#94a3b8] dark:placeholder-[#4e657e] aurora:placeholder-[#5a7782] linen:placeholder-[#8f7e6c] focus:outline-none focus:border-[#2481cc] dark:focus:border-[#2ba0ff] aurora:focus:border-[#2dd4bf] linen:focus:border-[#a86a43]"
                     />
                   </div>
                   <div>
-                    <label className="text-[10px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] block mb-0.5">投资态度与顾虑</label>
+                    <label className="text-[10px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a] block mb-0.5">投资态度与顾虑</label>
                     <input
                       type="text"
                       value={editInvestmentAttitude}
                       onChange={(e) => setEditInvestmentAttitude(e.target.value)}
                       placeholder="如: 想找副业但怕亏本"
-                      className="w-full bg-white dark:bg-[#08101a] aurora:bg-[#081014] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] rounded-lg px-2.5 py-1.5 text-xs text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] placeholder-[#94a3b8] dark:placeholder-[#4e657e] aurora:placeholder-[#5a7782] focus:outline-none focus:border-[#2481cc] dark:focus:border-[#2ba0ff] aurora:focus:border-[#2dd4bf]"
+                      className="w-full bg-white dark:bg-[#08101a] aurora:bg-[#081014] linen:bg-[#faf5ec] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] linen:border-[#cbbba2] rounded-lg px-2.5 py-1.5 text-xs text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118] placeholder-[#94a3b8] dark:placeholder-[#4e657e] aurora:placeholder-[#5a7782] linen:placeholder-[#8f7e6c] focus:outline-none focus:border-[#2481cc] dark:focus:border-[#2ba0ff] aurora:focus:border-[#2dd4bf] linen:focus:border-[#a86a43]"
                     />
                   </div>
                 </div>
                 <div>
-                  <label className="text-[10px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] block mb-0.5">经济实力与资金线索</label>
+                  <label className="text-[10px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a] block mb-0.5">经济实力与资金线索</label>
                   <input
                     type="text"
                     value={editFinancialProfile}
                     onChange={(e) => setEditFinancialProfile(e.target.value)}
                     placeholder="如: 月薪普通有房贷压力，渴望稳定额外收入"
-                    className="w-full bg-white dark:bg-[#08101a] aurora:bg-[#081014] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] rounded-lg px-2.5 py-1.5 text-xs text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] placeholder-[#94a3b8] dark:placeholder-[#4e657e] aurora:placeholder-[#5a7782] focus:outline-none focus:border-[#2481cc] dark:focus:border-[#2ba0ff] aurora:focus:border-[#2dd4bf]"
+                    className="w-full bg-white dark:bg-[#08101a] aurora:bg-[#081014] linen:bg-[#faf5ec] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] linen:border-[#cbbba2] rounded-lg px-2.5 py-1.5 text-xs text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118] placeholder-[#94a3b8] dark:placeholder-[#4e657e] aurora:placeholder-[#5a7782] linen:placeholder-[#8f7e6c] focus:outline-none focus:border-[#2481cc] dark:focus:border-[#2ba0ff] aurora:focus:border-[#2dd4bf] linen:focus:border-[#a86a43]"
                   />
                 </div>
                 <div>
-                  <label className="text-[10px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] block mb-0.5">下一步推进策略建议</label>
+                  <label className="text-[10px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a] block mb-0.5">下一步推进策略建议</label>
                   <textarea
                     rows={2}
                     value={editNextStepStrategy}
                     onChange={(e) => setEditNextStepStrategy(e.target.value)}
                     placeholder="如: 先关心工作辛苦与家庭近况巩固情感链接，待对方主动问副业后再轻聊思路"
-                    className="w-full bg-white dark:bg-[#08101a] aurora:bg-[#081014] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] rounded-lg px-2.5 py-1.5 text-xs text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] placeholder-[#94a3b8] dark:placeholder-[#4e657e] aurora:placeholder-[#5a7782] focus:outline-none focus:border-[#2481cc] dark:focus:border-[#2ba0ff] aurora:focus:border-[#2dd4bf] resize-none"
+                    className="w-full bg-white dark:bg-[#08101a] aurora:bg-[#081014] linen:bg-[#faf5ec] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] linen:border-[#cbbba2] rounded-lg px-2.5 py-1.5 text-xs text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118] placeholder-[#94a3b8] dark:placeholder-[#4e657e] aurora:placeholder-[#5a7782] linen:placeholder-[#8f7e6c] focus:outline-none focus:border-[#2481cc] dark:focus:border-[#2ba0ff] aurora:focus:border-[#2dd4bf] linen:focus:border-[#a86a43] resize-none"
                   />
                 </div>
                 <div className="flex justify-end pt-1">
                   <button
                     onClick={handleSaveStrategy}
                     disabled={isSavingProfile}
-                    className="px-3 py-1.5 bg-[#2481cc] hover:bg-[#1d6fb3] dark:bg-[#2ba0ff] dark:hover:bg-[#1e8ee8] aurora:bg-[#0d9488] aurora:hover:bg-[#0f766e] text-white rounded-lg text-xs font-medium cursor-pointer transition-colors disabled:opacity-50"
+                    className="px-3 py-1.5 bg-[#2481cc] hover:bg-[#1d6fb3] dark:bg-[#2ba0ff] dark:hover:bg-[#1e8ee8] aurora:bg-[#0d9488] aurora:hover:bg-[#0f766e] linen:bg-[#a86a43] linen:hover:bg-[#8f5734] text-white rounded-lg text-xs font-medium cursor-pointer transition-colors disabled:opacity-50"
                   >
                     {isSavingProfile ? '保存中...' : '保存推进策略'}
                   </button>
@@ -972,27 +978,27 @@ export const CustomerMemoryDrawer: React.FC<CustomerMemoryDrawerProps> = ({
               <div className="space-y-2 pt-0.5 text-xs">
                 <div className="grid grid-cols-2 gap-3">
                   <div className="col-span-2">
-                    <span className="text-[10px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] block">当前信任度</span>
-                    <span className="font-medium text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] text-xs mt-0.5 block">
+                    <span className="text-[10px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a] block">当前信任度</span>
+                    <span className="font-medium text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118] text-xs mt-0.5 block">
                       {currentProfile.trustLevel || '低（初识）'}
                     </span>
                   </div>
-                  <div className="col-span-2 pt-1.5 border-t border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34]">
-                    <span className="text-[10px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] block">投资态度与顾虑</span>
-                    <p className="text-xs text-[#475569] dark:text-[#b4c6d8] aurora:text-[#b7d0d8] leading-relaxed mt-0.5">
+                  <div className="col-span-2 pt-1.5 border-t border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] linen:border-[#dfd2bc]">
+                    <span className="text-[10px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a] block">投资态度与顾虑</span>
+                    <p className="text-xs text-[#475569] dark:text-[#b4c6d8] aurora:text-[#b7d0d8] linen:text-[#4e3f32] leading-relaxed mt-0.5">
                       {currentProfile.investmentAttitude || '待观察'}
                     </p>
                   </div>
-                  <div className="col-span-2 pt-1.5 border-t border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34]">
-                    <span className="text-[10px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] block">经济实力与资金线索</span>
-                    <p className="text-xs text-[#475569] dark:text-[#b4c6d8] aurora:text-[#b7d0d8] leading-relaxed mt-0.5">
+                  <div className="col-span-2 pt-1.5 border-t border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] linen:border-[#dfd2bc]">
+                    <span className="text-[10px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a] block">经济实力与资金线索</span>
+                    <p className="text-xs text-[#475569] dark:text-[#b4c6d8] aurora:text-[#b7d0d8] linen:text-[#4e3f32] leading-relaxed mt-0.5">
                       {currentProfile.financialProfile || '待进一步了解'}
                     </p>
                   </div>
                 </div>
-                <div className="pt-1.5 border-t border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34]">
-                  <span className="text-[10px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] block mb-0.5">AI / 运营下一步推进建议</span>
-                  <p className="text-xs text-[#475569] dark:text-[#b4c6d8] aurora:text-[#b7d0d8] bg-white dark:bg-[#08101a] aurora:bg-[#081014] p-2.5 rounded-lg border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] leading-relaxed">
+                <div className="pt-1.5 border-t border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] linen:border-[#dfd2bc]">
+                  <span className="text-[10px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a] block mb-0.5">AI / 运营下一步推进建议</span>
+                  <p className="text-xs text-[#475569] dark:text-[#b4c6d8] aurora:text-[#b7d0d8] linen:text-[#4e3f32] bg-white dark:bg-[#08101a] aurora:bg-[#081014] linen:bg-[#faf5ec] p-2.5 rounded-lg border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] linen:border-[#dfd2bc] leading-relaxed">
                     {currentProfile.nextStepStrategy || '自然破冰与日常共情，暂不提及投资'}
                   </p>
                 </div>
@@ -1001,15 +1007,15 @@ export const CustomerMemoryDrawer: React.FC<CustomerMemoryDrawerProps> = ({
           </div>
 
           {/* 5. Key Shared Memories */}
-          <div className="bg-[#f8fafc] dark:bg-[#0e1726]/85 aurora:bg-[#101c23]/90 p-3.5 rounded-xl border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] space-y-2.5">
-            <div className="flex items-center justify-between text-xs font-semibold text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8]">
+          <div className="bg-[#f8fafc] dark:bg-[#0e1726]/85 aurora:bg-[#101c23]/90 linen:bg-[#efe6d6]/90 p-3.5 rounded-xl border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] linen:border-[#cbbba2] space-y-2.5">
+            <div className="flex items-center justify-between text-xs font-semibold text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118]">
               <span className="flex items-center gap-1.5">
-                <Calendar className="w-3.5 h-3.5 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf]" />
+                <Calendar className="w-3.5 h-3.5 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf] linen:text-[#8c522d]" />
                 <span className="tabular-nums">重要约定与关键事件 ({currentProfile.keyMemories.length})</span>
               </span>
               <button
                 onClick={() => setIsAddingMemory(!isAddingMemory)}
-                className="text-[11px] text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf] hover:underline flex items-center gap-1 cursor-pointer"
+                className="text-[11px] text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf] linen:text-[#8c522d] hover:underline flex items-center gap-1 cursor-pointer"
               >
                 <Plus className="w-3 h-3" />
                 <span>{isAddingMemory ? '收起' : '手动补录'}</span>
@@ -1017,20 +1023,20 @@ export const CustomerMemoryDrawer: React.FC<CustomerMemoryDrawerProps> = ({
             </div>
 
             {isAddingMemory && (
-              <div className="p-3 bg-white dark:bg-[#08101a] aurora:bg-[#081014] rounded-lg border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] space-y-2">
+              <div className="p-3 bg-white dark:bg-[#08101a] aurora:bg-[#081014] linen:bg-[#faf5ec] rounded-lg border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] linen:border-[#dfd2bc] space-y-2">
                 <div className="grid grid-cols-2 gap-2">
                   <input
                     type="date"
                     value={memDate}
                     onChange={(e) => setMemDate(e.target.value)}
-                    className="bg-[#f8fafc] dark:bg-[#0e1726] aurora:bg-[#101c23] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] rounded-lg px-2 py-1.5 text-xs text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8]"
+                    className="bg-[#f8fafc] dark:bg-[#0e1726] aurora:bg-[#101c23] linen:bg-[#f8f2e7] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] linen:border-[#cbbba2] rounded-lg px-2 py-1.5 text-xs text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118]"
                   />
                   <input
                     type="text"
                     value={memTopic}
                     onChange={(e) => setMemTopic(e.target.value)}
                     placeholder="事件主题 (如: 方案交付约定)"
-                    className="bg-[#f8fafc] dark:bg-[#0e1726] aurora:bg-[#101c23] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] rounded-lg px-2 py-1.5 text-xs text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] placeholder-[#94a3b8] dark:placeholder-[#4e657e] aurora:placeholder-[#5a7782]"
+                    className="bg-[#f8fafc] dark:bg-[#0e1726] aurora:bg-[#101c23] linen:bg-[#f8f2e7] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] linen:border-[#cbbba2] rounded-lg px-2 py-1.5 text-xs text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118] placeholder-[#94a3b8] dark:placeholder-[#4e657e] aurora:placeholder-[#5a7782] linen:placeholder-[#8f7e6c]"
                   />
                 </div>
                 <textarea
@@ -1038,18 +1044,18 @@ export const CustomerMemoryDrawer: React.FC<CustomerMemoryDrawerProps> = ({
                   onChange={(e) => setMemSummary(e.target.value)}
                   placeholder="详情与约定事项..."
                   rows={2}
-                  className="w-full bg-[#f8fafc] dark:bg-[#0e1726] aurora:bg-[#101c23] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] focus:border-[#2481cc] dark:focus:border-[#2ba0ff] aurora:focus:border-[#2dd4bf] rounded-lg p-2 text-xs text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] placeholder-[#94a3b8] dark:placeholder-[#4e657e] aurora:placeholder-[#5a7782] focus:outline-none resize-none"
+                  className="w-full bg-[#f8fafc] dark:bg-[#0e1726] aurora:bg-[#101c23] linen:bg-[#f8f2e7] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] linen:border-[#cbbba2] focus:border-[#2481cc] dark:focus:border-[#2ba0ff] aurora:focus:border-[#2dd4bf] linen:focus:border-[#a86a43] rounded-lg p-2 text-xs text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118] placeholder-[#94a3b8] dark:placeholder-[#4e657e] aurora:placeholder-[#5a7782] linen:placeholder-[#8f7e6c] focus:outline-none resize-none"
                 />
                 <div className="flex justify-end gap-2 pt-1">
                   <button
                     onClick={() => setIsAddingMemory(false)}
-                    className="px-2.5 py-1 text-xs text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] hover:text-[#0f172a] dark:hover:text-[#eef4fb] aurora:hover:text-[#ecf6f8] cursor-pointer"
+                    className="px-2.5 py-1 text-xs text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a] hover:text-[#0f172a] dark:hover:text-[#eef4fb] aurora:hover:text-[#ecf6f8] linen:hover:text-[#2b2118] cursor-pointer"
                   >
                     取消
                   </button>
                   <button
                     onClick={handleSaveNewMemory}
-                    className="px-3 py-1 bg-[#2481cc] hover:bg-[#1d6fb3] dark:bg-[#2ba0ff] dark:hover:bg-[#1e8ee8] aurora:bg-[#0d9488] aurora:hover:bg-[#0f766e] text-white rounded-lg text-xs font-medium cursor-pointer transition-colors"
+                    className="px-3 py-1 bg-[#2481cc] hover:bg-[#1d6fb3] dark:bg-[#2ba0ff] dark:hover:bg-[#1e8ee8] aurora:bg-[#0d9488] aurora:hover:bg-[#0f766e] linen:bg-[#a86a43] linen:hover:bg-[#8f5734] text-white rounded-lg text-xs font-medium cursor-pointer transition-colors"
                   >
                     保存记忆
                   </button>
@@ -1059,35 +1065,35 @@ export const CustomerMemoryDrawer: React.FC<CustomerMemoryDrawerProps> = ({
 
             <div className="space-y-2">
               {currentProfile.keyMemories.length === 0 ? (
-                <div className="text-center py-3 text-xs text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5]">
+                <div className="text-center py-3 text-xs text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a]">
                   暂无事件记录
                 </div>
               ) : (
                 currentProfile.keyMemories.map((mem) => (
                   <div
                     key={mem.id}
-                    className="p-2.5 bg-white dark:bg-[#08101a] aurora:bg-[#081014] rounded-lg border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] hover:border-[#2481cc]/40 dark:hover:border-[#2ba0ff]/40 aurora:hover:border-[#2dd4bf]/40 transition-colors relative group"
+                    className="p-2.5 bg-white dark:bg-[#08101a] aurora:bg-[#081014] linen:bg-[#faf5ec] rounded-lg border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] linen:border-[#dfd2bc] hover:border-[#2481cc]/40 dark:hover:border-[#2ba0ff]/40 aurora:hover:border-[#2dd4bf]/40 linen:hover:border-[#a86a43]/50 transition-colors relative group"
                   >
                     <div className="flex items-center justify-between mb-1">
                       <div className="flex items-center gap-2">
-                        <span className="font-medium text-xs text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8]">{mem.topic}</span>
+                        <span className="font-medium text-xs text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118]">{mem.topic}</span>
                         {mem.emotion && (
-                          <span className="text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] text-[10px]">
+                          <span className="text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a] text-[10px]">
                             · {mem.emotion}
                           </span>
                         )}
                       </div>
                       <div className="flex items-center gap-2">
-                        <span className="text-[10px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] font-mono tabular-nums">{mem.date}</span>
+                        <span className="text-[10px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a] font-mono tabular-nums">{mem.date}</span>
                         <button
                           onClick={() => handleRemoveMemory(mem.id)}
-                          className="opacity-0 group-hover:opacity-100 text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] hover:text-rose-600 dark:hover:text-rose-400 p-0.5 cursor-pointer transition-opacity"
+                          className="opacity-0 group-hover:opacity-100 text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a] hover:text-rose-600 dark:hover:text-rose-400 p-0.5 cursor-pointer transition-opacity"
                         >
                           <Trash2 className="w-3 h-3" />
                         </button>
                       </div>
                     </div>
-                    <p className="text-xs text-[#475569] dark:text-[#b4c6d8] aurora:text-[#b7d0d8] leading-relaxed">{mem.summary}</p>
+                    <p className="text-xs text-[#475569] dark:text-[#b4c6d8] aurora:text-[#b7d0d8] linen:text-[#4e3f32] leading-relaxed">{mem.summary}</p>
                   </div>
                 ))
               )}
@@ -1096,17 +1102,17 @@ export const CustomerMemoryDrawer: React.FC<CustomerMemoryDrawerProps> = ({
         </div>
 
         {/* Footer */}
-        <div className="px-4 py-3 border-t border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] bg-[#f8fafc]/90 dark:bg-[#0d1726]/90 aurora:bg-[#0e1920]/90 flex items-center justify-between shrink-0">
+        <div className="px-4 py-3 border-t border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] linen:border-[#dfd2bc] bg-[#f8fafc]/90 dark:bg-[#0d1726]/90 aurora:bg-[#0e1920]/90 linen:bg-[#f0e6d5]/90 flex items-center justify-between shrink-0">
           <button
             onClick={handleExportData}
-            className="flex items-center gap-1.5 text-xs text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] hover:text-[#0f172a] dark:hover:text-[#eef4fb] aurora:hover:text-[#ecf6f8] transition-colors cursor-pointer"
+            className="flex items-center gap-1.5 text-xs text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a] hover:text-[#0f172a] dark:hover:text-[#eef4fb] aurora:hover:text-[#ecf6f8] linen:hover:text-[#2b2118] transition-colors cursor-pointer"
           >
             <Download className="w-3.5 h-3.5" />
             <span>导出 JSON 档案</span>
           </button>
           <button
             onClick={onClose}
-            className="px-4 py-1.5 rounded-lg bg-[#2481cc] hover:bg-[#1d6fb3] dark:bg-[#2ba0ff] dark:hover:bg-[#1e8ee8] aurora:bg-[#0d9488] aurora:hover:bg-[#0f766e] text-white text-xs font-medium shadow-xs cursor-pointer transition-colors"
+            className="px-4 py-1.5 rounded-lg bg-[#2481cc] hover:bg-[#1d6fb3] dark:bg-[#2ba0ff] dark:hover:bg-[#1e8ee8] aurora:bg-[#0d9488] aurora:hover:bg-[#0f766e] linen:bg-[#a86a43] linen:hover:bg-[#8f5734] text-white text-xs font-medium shadow-xs cursor-pointer transition-colors"
           >
             {embedded ? '收起面板' : '完成'}
           </button>
@@ -1116,7 +1122,7 @@ export const CustomerMemoryDrawer: React.FC<CustomerMemoryDrawerProps> = ({
 
   if (embedded) {
     return (
-      <div className="flex-1 flex flex-col min-h-0 overflow-hidden text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8]">
+      <div className="flex-1 flex flex-col min-h-0 overflow-hidden text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118]">
         {bodyContent}
       </div>
     );
@@ -1132,7 +1138,7 @@ export const CustomerMemoryDrawer: React.FC<CustomerMemoryDrawerProps> = ({
         />
         <aside
           aria-label={`${chatTitle || '当前联系人'} · 全息记忆`}
-          className="fixed inset-y-0 right-0 z-40 w-full max-w-[400px] lg:static lg:z-20 lg:w-[400px] lg:shrink-0 h-full flex flex-col overflow-hidden bg-white dark:bg-[#0b131f] aurora:bg-[#0c151b] border-l border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] shadow-2xl lg:shadow-none text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] select-none animate-in slide-in-from-right duration-200"
+          className="fixed inset-y-0 right-0 z-40 w-full max-w-[400px] lg:static lg:z-20 lg:w-[400px] lg:shrink-0 h-full flex flex-col overflow-hidden bg-white dark:bg-[#0b131f] aurora:bg-[#0c151b] linen:bg-[#f8f2e7] border-l border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] linen:border-[#cbbba2] shadow-2xl lg:shadow-none text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118] select-none animate-in slide-in-from-right duration-200"
         >
           {bodyContent}
         </aside>
@@ -1141,8 +1147,8 @@ export const CustomerMemoryDrawer: React.FC<CustomerMemoryDrawerProps> = ({
   }
 
   return (
-    <div className="fixed inset-0 bg-black/55 dark:bg-black/75 aurora:bg-black/80 backdrop-blur-xs flex justify-end z-50 select-none">
-      <div className="bg-white dark:bg-[#0b131f] aurora:bg-[#0c151b] border-l border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] w-full max-w-md h-full shadow-2xl flex flex-col overflow-hidden animate-in slide-in-from-right duration-200 text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8]">
+    <div className="fixed inset-0 bg-black/55 dark:bg-black/75 aurora:bg-black/80 linen:bg-black/40 backdrop-blur-xs flex justify-end z-50 select-none">
+      <div className="bg-white dark:bg-[#0b131f] aurora:bg-[#0c151b] linen:bg-[#f8f2e7] border-l border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] linen:border-[#cbbba2] w-full max-w-md h-full shadow-2xl flex flex-col overflow-hidden animate-in slide-in-from-right duration-200 text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118]">
         {bodyContent}
       </div>
     </div>

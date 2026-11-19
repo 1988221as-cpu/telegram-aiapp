@@ -10,11 +10,13 @@ import {
   Languages,
   ChevronDown,
   MoreVertical,
+  MoreHorizontal,
   Paperclip,
   Search,
   Play,
   Pause,
   RotateCw,
+  Settings,
   X,
   Volume2,
   Sparkles,
@@ -627,7 +629,7 @@ const LEGACY_PLACEHOLDER_SENDER_NAMES = new Set(['客户', '对方', '我方', '
 
 function computeAnchoredPopupPos(
   anchorEl: HTMLElement | null,
-  options: { width: number; maxHeight: number; preferAbove?: boolean; gap?: number }
+  options: { width: number; maxHeight: number; preferAbove?: boolean; gap?: number; alignRight?: boolean }
 ): { top: number; left: number; maxHeight: number } | null {
   if (!anchorEl || typeof window === 'undefined') return null;
   const rect = anchorEl.getBoundingClientRect();
@@ -636,7 +638,8 @@ function computeAnchoredPopupPos(
   const vw = window.innerWidth;
   const vh = window.innerHeight;
   const width = Math.min(options.width, vw - margin * 2);
-  const left = Math.max(margin, Math.min(rect.left, vw - width - margin));
+  const desiredLeft = options.alignRight ? rect.right - width : rect.left;
+  const left = Math.max(margin, Math.min(desiredLeft, vw - width - margin));
   const spaceBelow = vh - rect.bottom - gap - margin;
   const spaceAbove = rect.top - gap - margin;
   const openAbove = options.preferAbove
@@ -831,7 +834,9 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
   const [showOriginalMsgIds, setShowOriginalMsgIds] = useState<Set<string>>(new Set());
   const [isTranslateBarVisible, setIsTranslateBarVisible] = useState(true);
   const [isLangMenuOpen, setIsLangMenuOpen] = useState(false);
+  const [langMenuAnchor, setLangMenuAnchor] = useState<'top' | 'bottom'>('top');
   const [langMenuSearch, setLangMenuSearch] = useState('');
+  const [isHeaderMoreMenuOpen, setIsHeaderMoreMenuOpen] = useState(false);
   const [showEmojiPicker, setShowEmojiPicker] = useState(false);
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [playingAudioId, setPlayingAudioId] = useState<string | null>(null);
@@ -1165,8 +1170,8 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
               }}
               className={`inline underline underline-offset-2 font-medium cursor-pointer break-all text-left transition-opacity hover:opacity-80 ${
                 isOwnBubble
-                  ? 'text-[#bae6fd] dark:text-[#bfdbfe] aurora:text-[#a5f3fc]'
-                  : 'text-[#2481cc] dark:text-[#38bdf8] aurora:text-[#5eead4]'
+                  ? 'text-[#bae6fd] dark:text-[#bfdbfe] aurora:text-[#a5f3fc] linen:text-[#fde68a]'
+                  : 'text-[#2481cc] dark:text-[#38bdf8] aurora:text-[#5eead4] linen:text-[#8c522d]'
               }`}
               title="点击预览并加入群组 / 频道"
             >
@@ -1186,8 +1191,8 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                 onClick={(e) => e.stopPropagation()}
                 className={`underline underline-offset-2 font-medium break-all transition-opacity hover:opacity-80 ${
                   isOwnBubble
-                    ? 'text-[#bae6fd] dark:text-[#bfdbfe] aurora:text-[#a5f3fc]'
-                    : 'text-[#2481cc] dark:text-[#38bdf8] aurora:text-[#5eead4]'
+                    ? 'text-[#bae6fd] dark:text-[#bfdbfe] aurora:text-[#a5f3fc] linen:text-[#fde68a]'
+                    : 'text-[#2481cc] dark:text-[#38bdf8] aurora:text-[#5eead4] linen:text-[#8c522d]'
                 }`}
               >
                 {rawMatched}
@@ -1466,8 +1471,12 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
 
   const langMenuRef = useRef<HTMLDivElement>(null);
   const langButtonRef = useRef<HTMLButtonElement>(null);
+  const composerLangButtonRef = useRef<HTMLButtonElement>(null);
   const langDropdownRef = useRef<HTMLDivElement>(null);
   const [langMenuPos, setLangMenuPos] = useState<{ top: number; left: number; maxHeight: number } | null>(null);
+  const headerMoreButtonRef = useRef<HTMLButtonElement>(null);
+  const headerMoreMenuRef = useRef<HTMLDivElement>(null);
+  const [headerMoreMenuPos, setHeaderMoreMenuPos] = useState<{ top: number; left: number; maxHeight: number } | null>(null);
   const attachmentButtonRef = useRef<HTMLButtonElement>(null);
   const attachmentMenuRef = useRef<HTMLDivElement>(null);
   const [attachmentMenuPos, setAttachmentMenuPos] = useState<{ top: number; left: number; maxHeight: number } | null>(null);
@@ -1796,8 +1805,8 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
     const handleOutsideClick = (e: MouseEvent) => {
       const target = e.target as Node;
       if (
-        langMenuRef.current &&
-        !langMenuRef.current.contains(target) &&
+        (!langMenuRef.current || !langMenuRef.current.contains(target)) &&
+        (!composerLangButtonRef.current || !composerLangButtonRef.current.contains(target)) &&
         (!langDropdownRef.current || !langDropdownRef.current.contains(target))
       ) {
         setIsLangMenuOpen(false);
@@ -1815,7 +1824,15 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
       return;
     }
     const updatePos = () => {
-      setLangMenuPos(computeAnchoredPopupPos(langButtonRef.current, { width: 256, maxHeight: 320, preferAbove: false }));
+      const anchor = langMenuAnchor === 'bottom' ? composerLangButtonRef.current : langButtonRef.current;
+      setLangMenuPos(
+        computeAnchoredPopupPos(anchor, {
+          width: 256,
+          maxHeight: 320,
+          preferAbove: langMenuAnchor === 'bottom',
+          alignRight: langMenuAnchor === 'bottom',
+        })
+      );
     };
     updatePos();
     window.addEventListener('resize', updatePos);
@@ -1824,7 +1841,47 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
       window.removeEventListener('resize', updatePos);
       window.removeEventListener('scroll', updatePos, true);
     };
-  }, [isLangMenuOpen]);
+  }, [isLangMenuOpen, langMenuAnchor]);
+
+  useEffect(() => {
+    if (!isHeaderMoreMenuOpen) return;
+    const handleOutsideClick = (e: MouseEvent) => {
+      const target = e.target as Node;
+      if (
+        (!headerMoreButtonRef.current || !headerMoreButtonRef.current.contains(target)) &&
+        (!headerMoreMenuRef.current || !headerMoreMenuRef.current.contains(target))
+      ) {
+        setIsHeaderMoreMenuOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', handleOutsideClick);
+    return () => document.removeEventListener('mousedown', handleOutsideClick);
+  }, [isHeaderMoreMenuOpen]);
+
+  useLayoutEffect(() => {
+    if (!isHeaderMoreMenuOpen) {
+      setHeaderMoreMenuPos(null);
+      return;
+    }
+    const updatePos = () => {
+      setHeaderMoreMenuPos(
+        computeAnchoredPopupPos(headerMoreButtonRef.current, {
+          width: 196,
+          maxHeight: 160,
+          preferAbove: false,
+          alignRight: true,
+          gap: 6,
+        })
+      );
+    };
+    updatePos();
+    window.addEventListener('resize', updatePos);
+    window.addEventListener('scroll', updatePos, true);
+    return () => {
+      window.removeEventListener('resize', updatePos);
+      window.removeEventListener('scroll', updatePos, true);
+    };
+  }, [isHeaderMoreMenuOpen]);
 
   useEffect(() => {
     if (!isAttachmentMenuOpen) return;
@@ -1938,6 +1995,11 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
           setIsAttachmentMenuOpen(false);
           return;
         }
+        if (isHeaderMoreMenuOpen) {
+          e.preventDefault();
+          setIsHeaderMoreMenuOpen(false);
+          return;
+        }
         if (isLangMenuOpen) {
           e.preventDefault();
           setIsLangMenuOpen(false);
@@ -1992,6 +2054,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
     replyingTo,
     showEmojiPicker,
     isAttachmentMenuOpen,
+    isHeaderMoreMenuOpen,
     isLangMenuOpen,
     isSearchingInChat,
     isChatInfoOpen,
@@ -3601,15 +3664,15 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
 
   if (!chat) {
     return (
-      <div className="flex-1 min-w-0 bg-[#f4f7fb] dark:bg-[#060b12] aurora:bg-[#081116] tg-chat-pattern flex flex-col items-center justify-center select-none text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] transition-colors px-6">
-        <div className="flex flex-col items-center text-center max-w-xs space-y-2.5 px-6 py-5 rounded-2xl bg-white/80 dark:bg-[#0a1320]/80 aurora:bg-[#0e1b23]/82 backdrop-blur-md border border-[#e2e8f0] dark:border-[#162436] aurora:border-[#2dd4bf]/35 shadow-xs aurora:shadow-[0_0_28px_rgba(34,211,238,0.12)]">
-          <div className="w-10 h-10 rounded-xl bg-[#e8f3ff] dark:bg-[#2ba0ff]/12 aurora:bg-[#112d36] border border-[#bfdbfe] dark:border-[#2ba0ff]/25 aurora:border-[#2dd4bf]/35 flex items-center justify-center text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#5eead4]">
+      <div className="flex-1 min-w-0 bg-[#f4f7fb] dark:bg-[#060b12] aurora:bg-[#081116] linen:bg-[#ddd2bc] tg-chat-pattern flex flex-col items-center justify-center select-none text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6f5d4b] transition-colors px-6">
+        <div className="flex flex-col items-center text-center max-w-xs space-y-2.5 px-6 py-5 rounded-2xl bg-white/80 dark:bg-[#0a1320]/80 aurora:bg-[#0e1b23]/82 linen:bg-[#f7f1e5]/92 backdrop-blur-md border border-[#e2e8f0] dark:border-[#162436] aurora:border-[#2dd4bf]/35 linen:border-[#cbbba2] shadow-xs aurora:shadow-[0_0_28px_rgba(34,211,238,0.12)]">
+          <div className="w-10 h-10 rounded-xl bg-[#e8f3ff] dark:bg-[#2ba0ff]/12 aurora:bg-[#112d36] linen:bg-[#efe2ce] border border-[#bfdbfe] dark:border-[#2ba0ff]/25 aurora:border-[#2dd4bf]/35 linen:border-[#d4bc9c] flex items-center justify-center text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#5eead4] linen:text-[#a86a43]">
             <Sparkles className="w-5 h-5" />
           </div>
-          <div className="text-[13px] font-semibold text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8]">
+          <div className="text-[13px] font-semibold text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118]">
             选择左侧会话开始协同
           </div>
-          <p className="text-[11.5px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#86a4b0] leading-relaxed">
+          <p className="text-[11.5px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#86a4b0] linen:text-[#72604e] leading-relaxed">
             可随时点击最左侧导航栏弹出独立的记忆、大模型、翻译、音色与人设配置页。
           </p>
         </div>
@@ -3679,9 +3742,9 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
       : 'HumanSense 云端引擎';
 
   return (
-    <div className="flex-1 min-w-0 bg-[#f4f7fb] dark:bg-[#060b12] aurora:bg-[#081116] flex flex-col h-full relative overflow-hidden transition-colors">
-      {/* 1. Official Telegram Top Bar Header */}
-      <header className="h-[56px] bg-white/90 dark:bg-[#09111d]/90 aurora:bg-[#0d171d]/92 backdrop-blur-md border-b border-[#e2e8f0] dark:border-[#162436] aurora:border-[#182b34] flex items-center justify-between px-4 shrink-0 z-10 transition-colors">
+    <div className="flex-1 min-w-0 bg-[#f4f7fb] dark:bg-[#060b12] aurora:bg-[#081116] linen:bg-[#ddd2bc] flex flex-col h-full relative overflow-hidden transition-colors">
+      {/* 1. Official Telegram Top Bar Header (Image 2 Layout) */}
+      <header className="h-[56px] bg-white/90 dark:bg-[#09111d]/90 aurora:bg-[#0d171d]/92 linen:bg-[#f2e8d9]/95 backdrop-blur-md border-b border-[#e2e8f0] dark:border-[#162436] aurora:border-[#182b34] linen:border-[#cbbba2] flex items-center justify-between px-4 shrink-0 z-10 transition-colors">
         {/* Left: Contact Info (Click to view Profile & Shared Media) */}
         <div
           onClick={() => setChatInfoOpen(true)}
@@ -3713,7 +3776,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
               />
             )}
             {chat.isVerified && (
-              <div className="absolute inset-0 bg-[#2481cc] dark:bg-[#2ba0ff] aurora:bg-[#14b8a6] flex items-center justify-center text-white">
+              <div className="absolute inset-0 bg-[#2481cc] dark:bg-[#2ba0ff] aurora:bg-[#14b8a6] linen:bg-[#a86a43] flex items-center justify-center text-white">
                 <Check className="w-4 h-4 stroke-[2.5]" />
               </div>
             )}
@@ -3721,7 +3784,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
 
           <div className="min-w-0">
             <div className="flex items-center gap-1.5">
-              <span className="font-semibold text-[14px] text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] truncate leading-tight">
+              <span className="font-semibold text-[14px] text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118] truncate leading-tight">
                 {chat.title}
               </span>
               {!chat.isGroup && !chat.isChannel && (
@@ -3732,13 +3795,13 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                     setChatInfoOpen(true);
                   }}
                   title="设置/修改好友备注"
-                  className="p-0.5 text-[#64748b] hover:text-[#2481cc] dark:text-[#7b93ad] dark:hover:text-[#2ba0ff] aurora:text-[#7e9aa5] aurora:hover:text-[#5eead4] rounded-sm transition-colors cursor-pointer"
+                  className="p-0.5 text-[#64748b] hover:text-[#2481cc] dark:text-[#7b93ad] dark:hover:text-[#2ba0ff] aurora:text-[#7e9aa5] aurora:hover:text-[#5eead4] linen:text-[#a86a43] linen:hover:text-[#7e4d2e] rounded-sm transition-colors cursor-pointer"
                 >
                   <Edit2 className="w-3 h-3" />
                 </button>
               )}
               {chat.isVerified && (
-                <span className="w-3.5 h-3.5 bg-[#2481cc] dark:bg-[#2ba0ff] aurora:bg-[#14b8a6] rounded-full flex items-center justify-center text-white shrink-0">
+                <span className="w-3.5 h-3.5 bg-[#2481cc] dark:bg-[#2ba0ff] aurora:bg-[#14b8a6] linen:bg-[#a86a43] rounded-full flex items-center justify-center text-white shrink-0">
                   <Check className="w-2.5 h-2.5 stroke-[3]" />
                 </span>
               )}
@@ -3746,10 +3809,10 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
             <div
               className={`text-[11.5px] leading-none mt-0.5 tabular-nums ${
                 chat.isOnline
-                  ? 'text-emerald-600 dark:text-emerald-400 aurora:text-emerald-400 font-medium'
+                  ? 'text-emerald-600 dark:text-emerald-400 aurora:text-emerald-400 linen:text-[#3a6652] font-medium'
                   : chat.isGroup || chat.isChannel
-                  ? 'text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#5eead4]'
-                  : 'text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5]'
+                  ? 'text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#5eead4] linen:text-[#8c5a37]'
+                  : 'text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#7a6957]'
               }`}
             >
               {chat.isChannel
@@ -3771,43 +3834,41 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
           </div>
         </div>
 
-        {/* Right: Translation Bar Toggle + Real Actions */}
-        <div className="flex items-center gap-1.5 shrink-0 text-[#64748b] dark:text-[#9bb3c9] aurora:text-[#7e9aa5]">
+        {/* Right: Image 2 Header Actions ([私聊翻译] [全息记忆] [Search] [···] [⋮] [×]) */}
+        <div className="flex items-center gap-1.5 shrink-0 text-[#64748b] dark:text-[#9bb3c9] aurora:text-[#7e9aa5] linen:text-[#5f4d3b]">
           {/* Bidirectional Translation Bar Toggle */}
           <button
             type="button"
             onClick={() => setIsTranslateBarVisible(!isTranslateBarVisible)}
             title={isChatTransEnabled ? '展开或收起实时翻译栏' : '当前会话翻译已关闭（点击展开配置或重新开启）'}
-            className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[11.5px] font-medium border transition-colors cursor-pointer ${
+            className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11.5px] font-medium border transition-colors cursor-pointer ${
               !isChatTransEnabled
-                ? 'bg-slate-100 border-slate-300 text-slate-500 hover:text-slate-800 dark:bg-[#0e1726] dark:border-[#1e3148] dark:text-[#7b93ad] dark:hover:text-white aurora:bg-[#0e1920] aurora:border-[#1e343e] aurora:text-[#7e9aa5] aurora:hover:text-[#ecf6f8]'
+                ? 'bg-slate-100 border-slate-300 text-slate-500 hover:text-slate-800 dark:bg-[#0e1726] dark:border-[#1e3148] dark:text-[#7b93ad] dark:hover:text-white aurora:bg-[#0e1920] aurora:border-[#1e343e] aurora:text-[#7e9aa5] aurora:hover:text-[#ecf6f8] linen:bg-[#e5d9c5] linen:border-[#cbbba2] linen:text-[#6f5d4b] linen:hover:text-[#2b2118]'
                 : isTranslateBarVisible
-                  ? 'bg-[#e8f3ff] border-[#bfdbfe] text-[#2481cc] dark:bg-[#132234] dark:border-[#2ba0ff]/40 dark:text-[#2ba0ff] aurora:bg-[#112e37] aurora:border-[#2dd4bf]/45 aurora:text-[#5eead4]'
-                  : 'bg-[#f8fafc] border-[#e2e8f0] text-[#64748b] hover:text-[#0f172a] dark:bg-[#0e1726] dark:border-[#1a2b40] dark:text-[#8aa0b8] dark:hover:text-white aurora:bg-[#101c23] aurora:border-[#1e343e] aurora:text-[#7e9aa5] aurora:hover:text-[#ecf6f8]'
+                  ? 'bg-[#e8f3ff] border-[#bfdbfe] text-[#2481cc] dark:bg-[#132234] dark:border-[#2ba0ff]/40 dark:text-[#2ba0ff] aurora:bg-[#112e37] aurora:border-[#2dd4bf]/45 aurora:text-[#5eead4] linen:bg-[#a86a43] linen:border-[#935a36] linen:text-white linen:hover:bg-[#935a36] linen:shadow-xs'
+                  : 'bg-[#f8fafc] border-[#e2e8f0] text-[#64748b] hover:text-[#0f172a] dark:bg-[#0e1726] dark:border-[#1a2b40] dark:text-[#8aa0b8] dark:hover:text-white aurora:bg-[#101c23] aurora:border-[#1e343e] aurora:text-[#7e9aa5] aurora:hover:text-[#ecf6f8] linen:bg-[#e9decb] linen:border-[#cbbba2] linen:text-[#5f4d3b] linen:hover:text-[#2b2118]'
             }`}
           >
             <Languages className="w-3.5 h-3.5" />
             <span className="hidden sm:inline">
-              {chatTransScopeLabel}: {isChatTransEnabled ? (isTranslateBarVisible ? '开启' : '开启') : '已关闭'}
+              {chatTransScopeLabel}: {isChatTransEnabled ? '开启' : '已关闭'}
             </span>
           </button>
 
-          {/* Telegram Cloud History Sync Button */}
-          {chat.id.startsWith('tg_') && (
-            <button
-              type="button"
-              onClick={handleSyncCloudMessages}
-              disabled={isSyncingCloud}
-              title="同步云端消息"
-              className={`w-8 h-8 rounded-lg flex items-center justify-center transition-colors cursor-pointer ${
-                isSyncingCloud
-                  ? 'bg-[#e8f3ff] text-[#2481cc] dark:bg-[#2481cc]/20 dark:text-[#2ba0ff] aurora:bg-[#112e37] aurora:text-[#5eead4]'
-                  : 'hover:bg-[#f1f5f9] dark:hover:bg-[#142236] aurora:hover:bg-[#15252e] text-[#64748b] dark:text-[#9bb3c9] aurora:text-[#7e9aa5] hover:text-[#2481cc] dark:hover:text-white aurora:hover:text-[#5eead4]'
-              }`}
-            >
-              <RotateCw className={`w-4 h-4 ${isSyncingCloud ? 'animate-spin text-[#2481cc] aurora:text-[#2dd4bf]' : ''}`} />
-            </button>
-          )}
+          {/* 当前联系人全息记忆按钮 */}
+          <button
+            type="button"
+            onClick={onOpenCustomerMemory || onOpenKnowledgeEvolution}
+            title="全息记忆"
+            className={`flex items-center gap-1 px-2.5 py-1 rounded-full text-[11.5px] font-medium border transition-colors cursor-pointer ${
+              isCustomerMemoryOpen
+                ? 'bg-[#2481cc] border-[#2481cc] text-white dark:bg-[#2ba0ff]/20 dark:border-[#2ba0ff]/50 dark:text-[#2ba0ff] aurora:bg-[#112e37] aurora:border-[#2dd4bf]/55 aurora:text-[#5eead4] linen:bg-[#826832] linen:border-[#6f5828] linen:text-white linen:shadow-xs'
+                : 'bg-[#f0f7ff] hover:bg-[#e0efff] dark:bg-[#102033] dark:hover:bg-[#142840] aurora:bg-[#10242b] aurora:hover:bg-[#132d36] border-[#dbeafe] dark:border-[#2ba0ff]/25 aurora:border-[#2dd4bf]/30 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#5eead4] linen:bg-[#9e8244] linen:hover:bg-[#8a7039] linen:border-[#8a7039] linen:text-white linen:shadow-xs'
+            }`}
+          >
+            <Brain className="w-3.5 h-3.5" />
+            <span className="hidden lg:inline font-semibold">全息记忆</span>
+          </button>
 
           {/* In-Chat Search Button */}
           <button
@@ -3816,65 +3877,89 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
             title="搜索消息"
             className={`w-8 h-8 rounded-lg flex items-center justify-center transition-colors cursor-pointer ${
               isSearchingInChat
-                ? 'bg-[#e8f3ff] text-[#2481cc] dark:bg-[#2481cc]/20 dark:text-[#2ba0ff] aurora:bg-[#112e37] aurora:text-[#5eead4]'
-                : 'hover:bg-[#f1f5f9] dark:hover:bg-[#142236] aurora:hover:bg-[#15252e] text-[#64748b] dark:text-[#9bb3c9] aurora:text-[#7e9aa5] hover:text-[#0f172a] dark:hover:text-white aurora:hover:text-[#ecf6f8]'
+                ? 'bg-[#e8f3ff] text-[#2481cc] dark:bg-[#2481cc]/20 dark:text-[#2ba0ff] aurora:bg-[#112e37] aurora:text-[#5eead4] linen:bg-[#e5d6be] linen:text-[#a86a43]'
+                : 'hover:bg-[#f1f5f9] dark:hover:bg-[#142236] aurora:hover:bg-[#15252e] linen:hover:bg-[#e7dac5] text-[#64748b] dark:text-[#9bb3c9] aurora:text-[#7e9aa5] linen:text-[#5f4d3b] hover:text-[#0f172a] dark:hover:text-white aurora:hover:text-[#ecf6f8] linen:hover:text-[#2b2118]'
             }`}
           >
             <Search className="w-4 h-4" />
           </button>
 
-          {/* Chat Text Zoom Controls */}
-          <div
-            className="flex items-center rounded-lg border border-[#e2e8f0] dark:border-[#1a2b40] aurora:border-[#1e343e] bg-[#f8fafc] dark:bg-[#0e1726] aurora:bg-[#101c23] p-0.5 shrink-0 select-none"
-            title={`调节聊天文字大小（当前 ${Math.round(chatFontScale * 100)}%，快捷键 Ctrl/Cmd + / - / 0）`}
-          >
-            <button
-              type="button"
-              onClick={() => stepChatFontScale(-1)}
-              disabled={chatFontScaleIndex <= 0}
-              title={`缩小聊天文字 · 当前 ${Math.round(chatFontScale * 100)}% (Ctrl/Cmd + -)`}
-              className="px-1 h-6 rounded-md text-[11px] font-semibold transition-colors cursor-pointer disabled:opacity-35 disabled:cursor-not-allowed hover:bg-[#e2e8f0]/70 dark:hover:bg-[#152438] aurora:hover:bg-[#152934] hover:text-[#2481cc] dark:hover:text-[#2ba0ff] aurora:hover:text-[#5eead4]"
-            >
-              A-
-            </button>
-            <button
-              type="button"
-              onClick={resetChatFontScale}
-              disabled={chatFontScale === 1}
-              title={chatFontScale === 1 ? '当前默认字号 100%' : '点击恢复默认字号 100% (Ctrl/Cmd + 0)'}
-              className={`hidden md:inline-flex items-center justify-center px-1 h-6 rounded-md text-[11px] font-medium tabular-nums transition-colors ${
-                chatFontScale === 1
-                  ? 'text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] cursor-default'
-                  : 'text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#5eead4] hover:bg-[#e8f3ff] dark:hover:bg-[#132234] aurora:hover:bg-[#112e37] cursor-pointer'
-              }`}
-            >
-              {Math.round(chatFontScale * 100)}%
-            </button>
-            <button
-              type="button"
-              onClick={() => stepChatFontScale(1)}
-              disabled={chatFontScaleIndex >= CHAT_FONT_SCALE_STEPS.length - 1}
-              title={`放大聊天文字 · 当前 ${Math.round(chatFontScale * 100)}% (Ctrl/Cmd + +)`}
-              className="px-1 h-6 rounded-md text-[11px] font-semibold transition-colors cursor-pointer disabled:opacity-35 disabled:cursor-not-allowed hover:bg-[#e2e8f0]/70 dark:hover:bg-[#152438] aurora:hover:bg-[#152934] hover:text-[#2481cc] dark:hover:text-[#2ba0ff] aurora:hover:text-[#5eead4]"
-            >
-              A+
-            </button>
-          </div>
-
-          {/* 当前联系人全息记忆按钮 */}
+          {/* Header More Actions Popover Button (··· for Refresh + Font Scale, Image 2) */}
           <button
+            ref={headerMoreButtonRef}
             type="button"
-            onClick={onOpenCustomerMemory || onOpenKnowledgeEvolution}
-            title="全息记忆"
-            className={`flex items-center gap-1 px-2.5 py-1 rounded-lg text-[11.5px] font-medium border transition-colors cursor-pointer ${
-              isCustomerMemoryOpen
-                ? 'bg-[#2481cc] border-[#2481cc] text-white dark:bg-[#2ba0ff]/20 dark:border-[#2ba0ff]/50 dark:text-[#2ba0ff] aurora:bg-[#112e37] aurora:border-[#2dd4bf]/55 aurora:text-[#5eead4]'
-                : 'bg-[#f0f7ff] hover:bg-[#e0efff] dark:bg-[#102033] dark:hover:bg-[#142840] aurora:bg-[#10242b] aurora:hover:bg-[#132d36] border-[#dbeafe] dark:border-[#2ba0ff]/25 aurora:border-[#2dd4bf]/30 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#5eead4]'
+            onClick={() => setIsHeaderMoreMenuOpen((v) => !v)}
+            title="刷新当前对话与字体大小调节"
+            className={`w-9 h-7 rounded-lg flex items-center justify-center transition-colors cursor-pointer ${
+              isHeaderMoreMenuOpen || isSyncingCloud || chatFontScale !== 1
+                ? 'bg-[#e8f3ff] text-[#2481cc] dark:bg-[#2481cc]/20 dark:text-[#2ba0ff] aurora:bg-[#112e37] aurora:text-[#5eead4] linen:bg-[#b57a54] linen:text-white linen:shadow-xs'
+                : 'hover:bg-[#f1f5f9] dark:hover:bg-[#142236] aurora:hover:bg-[#15252e] linen:bg-[#b57a54]/85 linen:hover:bg-[#a86a43] linen:text-white text-[#64748b] dark:text-[#9bb3c9] aurora:text-[#7e9aa5] hover:text-[#0f172a] dark:hover:text-white aurora:hover:text-[#ecf6f8]'
             }`}
           >
-            <Brain className="w-3.5 h-3.5" />
-            <span className="hidden lg:inline font-semibold">全息记忆</span>
+            <MoreHorizontal className={`w-4 h-4 ${isSyncingCloud ? 'animate-pulse' : ''}`} />
           </button>
+
+          {/* Header More Actions Portal Popover */}
+          {isHeaderMoreMenuOpen && headerMoreMenuPos && typeof document !== 'undefined' && createPortal(
+            <div
+              ref={headerMoreMenuRef}
+              style={{ top: `${headerMoreMenuPos.top}px`, left: `${headerMoreMenuPos.left}px` }}
+              className="fixed z-[9990] w-[196px] bg-white dark:bg-[#0b131f] aurora:bg-[#0c151b] linen:bg-[#f8f2e7] border border-[#e2e8f0] dark:border-[#1e3148] aurora:border-[#203742] linen:border-[#cbbba2] rounded-xl shadow-xl p-1.5 flex flex-col gap-1 text-xs animate-in fade-in zoom-in-95 duration-150 select-none"
+            >
+              <button
+                type="button"
+                onClick={() => {
+                  setIsHeaderMoreMenuOpen(false);
+                  void handleSyncCloudMessages();
+                }}
+                disabled={!chat.id.startsWith('tg_') || isSyncingCloud}
+                title={chat.id.startsWith('tg_') ? '从 Telegram 云端同步当前对话最新消息' : '当前本地演示会话不支持云端同步'}
+                className="w-full flex items-center justify-center gap-2 px-2.5 py-1.5 rounded-lg text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118] hover:bg-[#f1f5f9] dark:hover:bg-[#152438] aurora:hover:bg-[#152934] linen:hover:bg-[#ede2d0] disabled:opacity-45 disabled:cursor-not-allowed cursor-pointer transition-colors"
+              >
+                <RotateCw className={`w-3.5 h-3.5 shrink-0 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#5eead4] linen:text-[#6f5d4b] ${isSyncingCloud ? 'animate-spin' : ''}`} />
+                <span className="font-medium">{isSyncingCloud ? '正在刷新对话...' : '刷新当前对话'}</span>
+              </button>
+
+              <div className="h-px bg-[#e2e8f0] dark:bg-[#18273a] aurora:bg-[#182b34] linen:bg-[#dfd2bc] mx-1" />
+
+              <div
+                className="flex items-center justify-between gap-1 px-2 py-1 text-[11.5px] text-[#475569] dark:text-[#b4c6d8] aurora:text-[#b7d0d8] linen:text-[#4e3e2f]"
+                title={`调节聊天文字大小（当前 ${Math.round(chatFontScale * 100)}%，快捷键 Ctrl/Cmd + / - / 0）`}
+              >
+                <span className="font-medium shrink-0 whitespace-nowrap">字体大小:</span>
+                <div className="flex items-center gap-1">
+                  <button
+                    type="button"
+                    onClick={() => stepChatFontScale(-1)}
+                    disabled={chatFontScaleIndex <= 0}
+                    title={`缩小聊天文字 (Ctrl/Cmd + -)`}
+                    className="px-1.5 h-6 rounded-md border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] linen:border-[#cbbba2] bg-[#f8fafc] dark:bg-[#0e1726] aurora:bg-[#101c23] linen:bg-[#fdfaf3] text-[11px] font-semibold cursor-pointer disabled:opacity-35 disabled:cursor-not-allowed hover:border-[#2481cc] dark:hover:border-[#2ba0ff] aurora:hover:border-[#2dd4bf] linen:hover:border-[#a86a43]"
+                  >
+                    A-
+                  </button>
+                  <button
+                    type="button"
+                    onClick={resetChatFontScale}
+                    disabled={chatFontScale === 1}
+                    title={chatFontScale === 1 ? '当前默认字号 100%' : '点击恢复默认字号 100% (Ctrl/Cmd + 0)'}
+                    className="px-1 h-6 rounded text-[11px] font-medium tabular-nums cursor-pointer disabled:cursor-default text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118] hover:text-[#2481cc] dark:hover:text-[#2ba0ff] aurora:hover:text-[#5eead4] linen:hover:text-[#a86a43]"
+                  >
+                    {Math.round(chatFontScale * 100)}%
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => stepChatFontScale(1)}
+                    disabled={chatFontScaleIndex >= CHAT_FONT_SCALE_STEPS.length - 1}
+                    title={`放大聊天文字 (Ctrl/Cmd + +)`}
+                    className="px-1.5 h-6 rounded-md border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] linen:border-[#cbbba2] bg-[#f8fafc] dark:bg-[#0e1726] aurora:bg-[#101c23] linen:bg-[#fdfaf3] text-[11px] font-semibold cursor-pointer disabled:opacity-35 disabled:cursor-not-allowed hover:border-[#2481cc] dark:hover:border-[#2ba0ff] aurora:hover:border-[#2dd4bf] linen:hover:border-[#a86a43]"
+                  >
+                    A+
+                  </button>
+                </div>
+              </div>
+            </div>,
+            document.body
+          )}
 
           {/* More Options / Chat Info Drawer */}
           <button
@@ -3883,8 +3968,8 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
             title="更多与联系人资料"
             className={`w-8 h-8 rounded-lg flex items-center justify-center transition-colors cursor-pointer ${
               isChatInfoOpen
-                ? 'bg-[#e8f3ff] text-[#2481cc] dark:bg-[#132234] dark:text-[#2ba0ff] aurora:bg-[#112e37] aurora:text-[#5eead4]'
-                : 'hover:bg-[#f1f5f9] dark:hover:bg-[#142236] aurora:hover:bg-[#15252e] hover:text-[#0f172a] dark:hover:text-white aurora:hover:text-[#ecf6f8]'
+                ? 'bg-[#e8f3ff] text-[#2481cc] dark:bg-[#132234] dark:text-[#2ba0ff] aurora:bg-[#112e37] aurora:text-[#5eead4] linen:bg-[#e5d6be] linen:text-[#a86a43]'
+                : 'hover:bg-[#f1f5f9] dark:hover:bg-[#142236] aurora:hover:bg-[#15252e] linen:hover:bg-[#e7dac5] hover:text-[#0f172a] dark:hover:text-white aurora:hover:text-[#ecf6f8] linen:hover:text-[#2b2118]'
             }`}
           >
             <MoreVertical className="w-4 h-4" />
@@ -3896,7 +3981,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
               type="button"
               onClick={onCloseChat}
               title="关闭 (Esc)"
-              className="w-8 h-8 rounded-lg hover:bg-[#f1f5f9] dark:hover:bg-[#142236] aurora:hover:bg-[#15252e] flex items-center justify-center hover:text-[#0f172a] dark:hover:text-white aurora:hover:text-[#ecf6f8] transition-colors cursor-pointer text-[#64748b] dark:text-[#9bb3c9] aurora:text-[#7e9aa5]"
+              className="w-8 h-8 rounded-lg hover:bg-[#f1f5f9] dark:hover:bg-[#142236] aurora:hover:bg-[#15252e] linen:hover:bg-[#e7dac5] flex items-center justify-center hover:text-[#0f172a] dark:hover:text-white aurora:hover:text-[#ecf6f8] linen:hover:text-[#2b2118] transition-colors cursor-pointer text-[#64748b] dark:text-[#9bb3c9] aurora:text-[#7e9aa5] linen:text-[#5f4d3b]"
             >
               <X className="w-4 h-4" />
             </button>
@@ -3906,8 +3991,8 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
 
       {/* In-Chat Search Bar */}
       {isSearchingInChat && (
-        <div className="bg-white dark:bg-[#0b131f] aurora:bg-[#0c151b] border-b border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] px-4 py-2 flex items-center gap-2 text-xs animate-in fade-in duration-150">
-          <Search className="w-4 h-4 text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] shrink-0" />
+        <div className="bg-white dark:bg-[#0b131f] aurora:bg-[#0c151b] linen:bg-[#f5ecde] border-b border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] linen:border-[#cbbba2] px-4 py-2 flex items-center gap-2 text-xs animate-in fade-in duration-150">
+          <Search className="w-4 h-4 text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#7a6957] shrink-0" />
           <input
             type="text"
             value={chatSearchQuery}
@@ -3922,7 +4007,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
               }
             }}
             placeholder={chat.isChannel ? '搜索频道帖子 (Enter 搜云端)...' : '搜索消息 (Enter 搜云端历史)...'}
-            className="flex-1 bg-[#f1f5f9] dark:bg-[#08101a] aurora:bg-[#081014] px-3 py-1.5 rounded-lg text-xs text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] border border-[#e2e8f0] dark:border-[#1e3148] aurora:border-[#203742] focus:border-[#2ba0ff] aurora:focus:border-[#2dd4bf] focus:outline-none placeholder-[#94a3b8] dark:placeholder-[#4e657e] aurora:placeholder-[#5a7782]"
+            className="flex-1 bg-[#f1f5f9] dark:bg-[#08101a] aurora:bg-[#081014] linen:bg-[#fdfaf4] px-3 py-1.5 rounded-lg text-xs text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118] border border-[#e2e8f0] dark:border-[#1e3148] aurora:border-[#203742] linen:border-[#cbbba2] focus:border-[#2ba0ff] aurora:focus:border-[#2dd4bf] linen:focus:border-[#a86a43] focus:outline-none placeholder-[#94a3b8] dark:placeholder-[#4e657e] aurora:placeholder-[#5a7782] linen:placeholder-[#9c8c7a]"
             autoFocus
           />
           {chat.id.startsWith('tg_') && currentAccountId !== 'acc_telegram_bot' && chatSearchQuery.trim() && (
@@ -3930,7 +4015,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
               type="button"
               disabled={isCloudSearching}
               onClick={() => void handleCloudSearch()}
-              className="px-2.5 py-1 rounded-lg bg-[#2481cc] hover:bg-[#1d6fb3] dark:bg-[#2ba0ff] dark:hover:bg-[#1e8ee8] aurora:bg-[#0d9488] aurora:hover:bg-[#0f766e] disabled:opacity-50 text-white font-medium text-[11px] shrink-0 cursor-pointer transition-colors"
+              className="px-2.5 py-1 rounded-lg bg-[#2481cc] hover:bg-[#1d6fb3] dark:bg-[#2ba0ff] dark:hover:bg-[#1e8ee8] aurora:bg-[#0d9488] aurora:hover:bg-[#0f766e] linen:bg-[#a86a43] linen:hover:bg-[#935a36] disabled:opacity-50 text-white font-medium text-[11px] shrink-0 cursor-pointer transition-colors"
             >
               {isCloudSearching ? '检索中...' : '云端全文搜索'}
             </button>
@@ -3939,13 +4024,13 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
             <button
               type="button"
               onClick={() => setCloudSearchResults(null)}
-              className="px-2 py-1 rounded-lg bg-[#f1f5f9] dark:bg-[#152438] aurora:bg-[#152934] text-[#64748b] dark:text-[#b4c6d8] aurora:text-[#b7d0d8] hover:text-[#0f172a] dark:hover:text-white aurora:hover:text-[#ecf6f8] text-[11px] shrink-0 cursor-pointer"
+              className="px-2 py-1 rounded-lg bg-[#f1f5f9] dark:bg-[#152438] aurora:bg-[#152934] linen:bg-[#e9decb] text-[#64748b] dark:text-[#b4c6d8] aurora:text-[#b7d0d8] linen:text-[#5f4d3b] hover:text-[#0f172a] dark:hover:text-white aurora:hover:text-[#ecf6f8] linen:hover:text-[#2b2118] text-[11px] shrink-0 cursor-pointer"
             >
               返回列表
             </button>
           )}
           {chatSearchQuery && (
-            <span className="text-[11px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] whitespace-nowrap tabular-nums">
+            <span className="text-[11px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#7a6957] whitespace-nowrap tabular-nums">
               {cloudSearchResults !== null ? `云端 ${displayedMessages.length} 条` : `匹配 ${displayedMessages.length} 条`}
             </span>
           )}
@@ -3955,7 +4040,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
               setChatSearchQuery('');
               setCloudSearchResults(null);
             }}
-            className="p-1 text-[#64748b] hover:text-[#0f172a] dark:text-[#7b93ad] dark:hover:text-white aurora:text-[#7e9aa5] aurora:hover:text-[#ecf6f8] cursor-pointer"
+            className="p-1 text-[#64748b] hover:text-[#0f172a] dark:text-[#7b93ad] dark:hover:text-white aurora:text-[#7e9aa5] aurora:hover:text-[#ecf6f8] linen:text-[#7a6957] linen:hover:text-[#2b2118] cursor-pointer"
           >
             <X className="w-4 h-4" />
           </button>
@@ -3964,7 +4049,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
 
       {/* Telegram Pinned Message Top Banner */}
       {activePinnedMessage && (
-        <div className="bg-[#f0f7ff] dark:bg-[#0d1929] aurora:bg-[#0f1d24] border-b border-[#dbeafe] dark:border-[#18273a] aurora:border-[#182b34] px-4 py-2 flex items-center justify-between text-xs animate-in fade-in duration-150">
+        <div className="bg-[#f0f7ff] dark:bg-[#0d1929] aurora:bg-[#0f1d24] linen:bg-[#f4ebd9] border-b border-[#dbeafe] dark:border-[#18273a] aurora:border-[#182b34] linen:border-[#cbbba2] px-4 py-2 flex items-center justify-between text-xs animate-in fade-in duration-150">
           <button
             type="button"
             onClick={() => {
@@ -3982,12 +4067,12 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
             className="flex items-center gap-2 min-w-0 flex-1 text-left cursor-pointer hover:opacity-85 transition-opacity"
             title="点击定位到当前置顶消息"
           >
-            <Pin className="w-3.5 h-3.5 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf] shrink-0 fill-current" />
+            <Pin className="w-3.5 h-3.5 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf] linen:text-[#a86a43] shrink-0 fill-current" />
             <div className="min-w-0 truncate">
-              <span className="font-semibold text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#5eead4] mr-1.5">
+              <span className="font-semibold text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#5eead4] linen:text-[#a86a43] mr-1.5">
                 置顶消息{pinnedMessages.length > 1 ? ` (${safePinnedIndex + 1}/${pinnedMessages.length})` : ''}:
               </span>
-              <span className="text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8]">
+              <span className="text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118]">
                 {activePinnedMessage.text ||
                   (activePinnedMessage.isImage ? '🖼️ [图片]' : activePinnedMessage.isAudio ? '🎤 [语音]' : '消息')}
               </span>
@@ -3997,7 +4082,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
             <button
               type="button"
               onClick={() => setPinnedBannerIndex((i) => (i + 1) % pinnedMessages.length)}
-              className="text-xs text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#5eead4] p-1 cursor-pointer shrink-0 ml-1"
+              className="text-xs text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#5eead4] linen:text-[#a86a43] p-1 cursor-pointer shrink-0 ml-1"
               title="下一条置顶消息"
             >
               <ChevronUp className="w-3.5 h-3.5" />
@@ -4006,7 +4091,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
           <button
             type="button"
             onClick={() => onTogglePinMessage?.(activePinnedMessage.id)}
-            className="text-xs text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] hover:text-[#0f172a] dark:hover:text-white aurora:hover:text-[#ecf6f8] p-1 cursor-pointer shrink-0 ml-1"
+            className="text-xs text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#7a6957] hover:text-[#0f172a] dark:hover:text-white aurora:hover:text-[#ecf6f8] linen:hover:text-[#2b2118] p-1 cursor-pointer shrink-0 ml-1"
             title="取消置顶"
           >
             <X className="w-3.5 h-3.5" />
@@ -4021,8 +4106,8 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
           <div
             className={`border-b px-4 py-2 text-xs flex items-center justify-between animate-in fade-in duration-150 ${
               isAlertNotice
-                ? 'bg-amber-500/15 border-amber-500/30 text-amber-700 dark:text-amber-300 aurora:text-amber-300'
-                : 'bg-[#e8f3ff] border-[#bfdbfe] text-[#2481cc] dark:bg-[#2ba0ff]/15 dark:border-[#2ba0ff]/30 dark:text-[#2ba0ff] aurora:bg-[#112d36] aurora:border-[#2dd4bf]/35 aurora:text-[#5eead4]'
+                ? 'bg-amber-500/15 border-amber-500/30 text-amber-700 dark:text-amber-300 aurora:text-amber-300 linen:text-[#8c4b1e]'
+                : 'bg-[#e8f3ff] border-[#bfdbfe] text-[#2481cc] dark:bg-[#2ba0ff]/15 dark:border-[#2ba0ff]/30 dark:text-[#2ba0ff] aurora:bg-[#112d36] aurora:border-[#2dd4bf]/35 aurora:text-[#5eead4] linen:bg-[#efe2ce] linen:border-[#d3bc9a] linen:text-[#8c522d]'
             }`}
           >
             <div className="flex items-center gap-2">
@@ -4040,136 +4125,147 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
         );
       })()}
 
-      {/* 2. Official Telegram Native Translate Bar (Telegram 8.4+ Style) */}
+      {/* 2. Official Telegram Native Translate Bar (Image 2 Layout) */}
       {isTranslateBarVisible && (
-        <div className="bg-[#f8fafc]/90 dark:bg-[#0c1624]/90 aurora:bg-[#0c171d]/92 backdrop-blur-xs border-b border-[#e2e8f0] dark:border-[#162436] aurora:border-[#182b34] px-4 py-1.5 flex flex-wrap items-center justify-between gap-x-2 gap-y-1 text-xs text-[#0f172a] dark:text-[#d3e2ef] aurora:text-[#d5ebee] transition-colors shrink-0 min-w-0">
-          <div className="flex items-center gap-2 min-w-0 flex-1">
-            <Languages className={`w-3.5 h-3.5 shrink-0 ${isChatTransEnabled ? 'text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf]' : 'text-[#94a3b8] dark:text-[#64748b]'}`} />
+        <div className="bg-[#f8fafc]/90 dark:bg-[#0c1624]/90 aurora:bg-[#0c171d]/92 linen:bg-[#ede3d2]/95 backdrop-blur-xs border-b border-[#e2e8f0] dark:border-[#162436] aurora:border-[#182b34] linen:border-[#cbbba2] px-4 py-1.5 flex flex-wrap items-center justify-between gap-x-2 gap-y-1 text-xs text-[#0f172a] dark:text-[#d3e2ef] aurora:text-[#d5ebee] linen:text-[#3d2e20] transition-colors shrink-0 min-w-0">
+          <div className="flex items-center gap-1.5 min-w-0 flex-1">
+            <Languages className={`w-3.5 h-3.5 shrink-0 ${isChatTransEnabled ? 'text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf] linen:text-[#7c5838]' : 'text-[#94a3b8] dark:text-[#64748b] linen:text-[#9c8c7a]'}`} />
             {isChatTransEnabled ? (
-              <span className="font-medium truncate text-[#334155] dark:text-[#d3e2ef] aurora:text-[#d5ebee]">
-                自动翻译为{getLanguageDisplayName(inboundTargetLang)}
+              <span className="font-medium truncate text-[#334155] dark:text-[#d3e2ef] aurora:text-[#d5ebee] linen:text-[#3d2e20]">
+                译文: {getLanguageDisplayName(inboundTargetLang)}
               </span>
             ) : (
-              <span className="font-medium truncate text-[#64748b] dark:text-[#8aa0b8] aurora:text-[#7e9aa5]">
-                {chatTransScopeLabel}已关闭（消息仅展示原文）
+              <span className="font-medium truncate text-[#64748b] dark:text-[#8aa0b8] aurora:text-[#7e9aa5] linen:text-[#7a6957]">
+                {chatTransScopeLabel}已关闭
               </span>
             )}
-            <span className="text-[#94a3b8] dark:text-[#7b93ad] aurora:text-[#7e9aa5]">·</span>
+            <span className="text-[#94a3b8] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#8c7a65] text-[11px] select-none">↔</span>
 
             {/* Quick Target Language Selector */}
             <div className="relative inline-flex items-center" ref={langMenuRef}>
               <button
                 ref={langButtonRef}
                 type="button"
-                onClick={() => setIsLangMenuOpen(!isLangMenuOpen)}
-                className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-white dark:bg-[#0e1726] aurora:bg-[#101c23] hover:bg-[#f1f5f9] dark:hover:bg-[#152438] aurora:hover:bg-[#152934] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#5eead4] cursor-pointer transition-colors font-medium text-[11px]"
+                onClick={() => {
+                  if (isLangMenuOpen && langMenuAnchor === 'top') {
+                    setIsLangMenuOpen(false);
+                  } else {
+                    setLangMenuAnchor('top');
+                    setIsLangMenuOpen(true);
+                  }
+                }}
+                className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md hover:bg-[#e8f3ff]/70 dark:hover:bg-[#152438] aurora:hover:bg-[#152934] linen:hover:bg-[#e2d3bd] text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#5eead4] linen:text-[#3d2e20] cursor-pointer transition-colors font-medium text-[11.5px]"
               >
                 <span>发信目标: {getLanguageDisplayName(outboundTargetLang)}</span>
-                <ChevronDown className="w-3 h-3 opacity-70" />
+                <ChevronDown className="w-3 h-3 opacity-75" />
               </button>
-
-              {isLangMenuOpen && langMenuPos && typeof document !== 'undefined' && createPortal(
-                <div
-                  ref={langDropdownRef}
-                  style={{
-                    top: `${langMenuPos.top}px`,
-                    left: `${langMenuPos.left}px`,
-                    maxHeight: `${langMenuPos.maxHeight}px`,
-                  }}
-                  className="fixed z-[9990] w-64 flex flex-col bg-white dark:bg-[#0b131f] aurora:bg-[#0c151b] border border-[#e2e8f0] dark:border-[#1e3148] aurora:border-[#203742] rounded-xl shadow-2xl p-1.5 animate-in fade-in duration-150"
-                >
-                  <div className="px-2 py-1 text-[10px] font-semibold text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] uppercase tracking-wider border-b border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] pb-1 mb-1 shrink-0">
-                    选择联系人语言 (全球 {SUPPORTED_LANGUAGES.length - 1} 种)
-                  </div>
-                  <div className="px-1 pb-1.5 shrink-0">
-                    <input
-                      type="text"
-                      value={langMenuSearch}
-                      onChange={(e) => setLangMenuSearch(e.target.value)}
-                      placeholder="搜索语言名称或代码..."
-                      className="w-full px-2 py-1 text-[11px] rounded-md bg-[#f1f5f9] dark:bg-[#08101a] aurora:bg-[#081014] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] placeholder-[#94a3b8] dark:placeholder-[#4e657e] aurora:placeholder-[#5a7782] focus:outline-none focus:border-[#2ba0ff] aurora:focus:border-[#2dd4bf]"
-                    />
-                  </div>
-                  <div className="flex-1 min-h-0 overflow-y-auto space-y-0.5">
-                    {SUPPORTED_LANGUAGES.filter((l) => {
-                      const q = langMenuSearch.trim().toLowerCase();
-                      if (!q) return true;
-                      return l.code.toLowerCase().includes(q) || l.name.toLowerCase().includes(q);
-                    }).map((lang) => {
-                      const isAutoSelected =
-                        lang.code === 'Auto' &&
-                        (!chat.sourceLang || chat.sourceLang === 'Auto');
-                      const isLangSelected =
-                        lang.code !== 'Auto' &&
-                        Boolean(chat.sourceLang && chat.sourceLang !== 'Auto') &&
-                        normalizeChatLangCode(outboundTargetLang) === normalizeChatLangCode(lang.code);
-                      const isSelected = isAutoSelected || isLangSelected;
-                      return (
-                        <button
-                          key={lang.code}
-                          type="button"
-                          onClick={() => {
-                            if (lang.code === 'Auto') {
-                              onUpdateChatLanguage?.(chat.id, 'Auto', chat.targetLang || 'Auto');
-                            } else {
-                              onUpdateChatLanguage?.(chat.id, lang.code, chat.targetLang || 'Auto');
-                            }
-                            setIsLangMenuOpen(false);
-                            setLangMenuSearch('');
-                          }}
-                          className={`w-full flex items-center justify-between px-2.5 py-1.5 rounded-lg text-xs cursor-pointer transition-colors ${
-                            isSelected
-                              ? 'bg-[#2481cc] dark:bg-[#2ba0ff] aurora:bg-[#0d9488] text-white font-medium'
-                              : 'text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] hover:bg-[#f1f5f9] dark:hover:bg-[#152438] aurora:hover:bg-[#152934]'
-                          }`}
-                        >
-                          <span className="truncate text-left">
-                            {lang.code === 'Auto' ? '恢复全局默认 (Auto)' : lang.name}
-                          </span>
-                          {isSelected && <Check className="w-3.5 h-3.5 text-white shrink-0 ml-1" />}
-                        </button>
-                      );
-                    })}
-                  </div>
-                </div>,
-                document.body
-              )}
             </div>
           </div>
 
-          <div className="flex items-center gap-2.5 shrink-0">
+          <div className="flex items-center gap-2 shrink-0">
             <button
               type="button"
               onClick={() => onToggleChatTranslation?.(chat.id, !isChatTransEnabled)}
               title={isChatTransEnabled ? `点击关闭当前${chatTransScopeLabel}` : `点击开启当前${chatTransScopeLabel}`}
-              className={`inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-[11px] font-medium border transition-colors cursor-pointer ${
+              className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10.5px] font-medium border transition-colors cursor-pointer ${
                 isChatTransEnabled
-                  ? 'bg-emerald-500/12 border-emerald-500/35 text-emerald-700 dark:text-emerald-300 aurora:text-emerald-300 hover:bg-emerald-500/20'
-                  : 'bg-slate-200/80 border-slate-300 text-slate-600 dark:bg-[#132234] dark:border-[#1e3148] dark:text-[#94a3b8] aurora:bg-[#10242b] aurora:border-[#1e343e] aurora:text-[#8eb2bd] hover:bg-slate-300/70 dark:hover:bg-[#1a2e45]'
+                  ? 'bg-emerald-500/12 border-emerald-500/35 text-emerald-700 dark:text-emerald-300 aurora:text-emerald-300 linen:bg-[#3a6652]/12 linen:border-[#3a6652]/35 linen:text-[#3a6652] hover:bg-emerald-500/20 linen:hover:bg-[#3a6652]/20'
+                  : 'bg-slate-200/80 border-slate-300 text-slate-600 dark:bg-[#132234] dark:border-[#1e3148] dark:text-[#94a3b8] aurora:bg-[#10242b] aurora:border-[#1e343e] aurora:text-[#8eb2bd] linen:bg-[#e2d5c1] linen:border-[#cbbba2] linen:text-[#6f5d4b]'
               }`}
             >
               <span
                 className={`w-1.5 h-1.5 rounded-full ${
-                  isChatTransEnabled ? 'bg-emerald-500' : 'bg-slate-400 dark:bg-slate-500'
+                  isChatTransEnabled ? 'bg-emerald-500 linen:bg-[#3a6652]' : 'bg-slate-400 dark:bg-slate-500 linen:bg-[#9c8c7a]'
                 }`}
               />
-              <span>{isChatTransEnabled ? '已开启 · 点击关闭' : '已关闭 · 点击开启'}</span>
+              <span>{isChatTransEnabled ? '开启' : '关闭'}</span>
             </button>
             <button
+              type="button"
               onClick={onOpenTranslation}
-              className="text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#5eead4] hover:underline font-medium cursor-pointer"
+              className="inline-flex items-center gap-1 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#5eead4] linen:text-[#5f4d3b] linen:hover:text-[#2b2118] hover:underline font-medium cursor-pointer"
             >
-              设置
+              <Settings className="w-3.5 h-3.5" />
+              <span>设置</span>
             </button>
             <button
+              type="button"
               onClick={() => setIsTranslateBarVisible(false)}
-              className="p-1 text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] hover:text-[#0f172a] dark:hover:text-white aurora:hover:text-[#ecf6f8] transition-colors cursor-pointer"
+              className="p-0.5 text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#7a6957] hover:text-[#0f172a] dark:hover:text-white aurora:hover:text-[#ecf6f8] linen:hover:text-[#2b2118] transition-colors cursor-pointer"
               title="收起翻译栏"
             >
               <X className="w-3.5 h-3.5" />
             </button>
           </div>
         </div>
+      )}
+
+      {/* Shared Target Language Dropdown Portal (Anchored to Top Bar or Bottom Composer) */}
+      {isLangMenuOpen && langMenuPos && typeof document !== 'undefined' && createPortal(
+        <div
+          ref={langDropdownRef}
+          style={{
+            top: `${langMenuPos.top}px`,
+            left: `${langMenuPos.left}px`,
+            maxHeight: `${langMenuPos.maxHeight}px`,
+          }}
+          className="fixed z-[9990] w-64 flex flex-col bg-white dark:bg-[#0b131f] aurora:bg-[#0c151b] linen:bg-[#f8f2e7] border border-[#e2e8f0] dark:border-[#1e3148] aurora:border-[#203742] linen:border-[#cbbba2] rounded-xl shadow-2xl p-1.5 animate-in fade-in duration-150"
+        >
+          <div className="px-2 py-1 text-[10px] font-semibold text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#7a6957] uppercase tracking-wider border-b border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] linen:border-[#dfd2bc] pb-1 mb-1 shrink-0">
+            选择联系人语言 (全球 {SUPPORTED_LANGUAGES.length - 1} 种)
+          </div>
+          <div className="px-1 pb-1.5 shrink-0">
+            <input
+              type="text"
+              value={langMenuSearch}
+              onChange={(e) => setLangMenuSearch(e.target.value)}
+              placeholder="搜索语言名称或代码..."
+              className="w-full px-2 py-1 text-[11px] rounded-md bg-[#f1f5f9] dark:bg-[#08101a] aurora:bg-[#081014] linen:bg-[#fdfaf4] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] linen:border-[#cbbba2] text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118] placeholder-[#94a3b8] dark:placeholder-[#4e657e] aurora:placeholder-[#5a7782] linen:placeholder-[#9c8c7a] focus:outline-none focus:border-[#2ba0ff] aurora:focus:border-[#2dd4bf] linen:focus:border-[#a86a43]"
+            />
+          </div>
+          <div className="flex-1 min-h-0 overflow-y-auto space-y-0.5">
+            {SUPPORTED_LANGUAGES.filter((l) => {
+              const q = langMenuSearch.trim().toLowerCase();
+              if (!q) return true;
+              return l.code.toLowerCase().includes(q) || l.name.toLowerCase().includes(q);
+            }).map((lang) => {
+              const isAutoSelected =
+                lang.code === 'Auto' &&
+                (!chat.sourceLang || chat.sourceLang === 'Auto');
+              const isLangSelected =
+                lang.code !== 'Auto' &&
+                Boolean(chat.sourceLang && chat.sourceLang !== 'Auto') &&
+                normalizeChatLangCode(outboundTargetLang) === normalizeChatLangCode(lang.code);
+              const isSelected = isAutoSelected || isLangSelected;
+              return (
+                <button
+                  key={lang.code}
+                  type="button"
+                  onClick={() => {
+                    if (lang.code === 'Auto') {
+                      onUpdateChatLanguage?.(chat.id, 'Auto', chat.targetLang || 'Auto');
+                    } else {
+                      onUpdateChatLanguage?.(chat.id, lang.code, chat.targetLang || 'Auto');
+                    }
+                    setIsLangMenuOpen(false);
+                    setLangMenuSearch('');
+                  }}
+                  className={`w-full flex items-center justify-between px-2.5 py-1.5 rounded-lg text-xs cursor-pointer transition-colors ${
+                    isSelected
+                      ? 'bg-[#2481cc] dark:bg-[#2ba0ff] aurora:bg-[#0d9488] linen:bg-[#a86a43] text-white font-medium'
+                      : 'text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118] hover:bg-[#f1f5f9] dark:hover:bg-[#152438] aurora:hover:bg-[#152934] linen:hover:bg-[#ede2d0]'
+                  }`}
+                >
+                  <span className="truncate text-left">
+                    {lang.code === 'Auto' ? '恢复全局默认 (Auto)' : lang.name}
+                  </span>
+                  {isSelected && <Check className="w-3.5 h-3.5 text-white shrink-0 ml-1" />}
+                </button>
+              );
+            })}
+          </div>
+        </div>,
+        document.body
       )}
 
       {/* 3. Messages Stream Viewport with Official Telegram Wallpaper Pattern */}
@@ -4188,7 +4284,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
               type="button"
               disabled={isLoadingOlder}
               onClick={() => void handleLoadOlderClick()}
-              className="px-3.5 py-1 rounded-full bg-white/90 dark:bg-[#0e1726]/90 aurora:bg-[#101c23]/90 hover:bg-[#e8f3ff] dark:hover:bg-[#142336] aurora:hover:bg-[#112e37] border border-[#e2e8f0] dark:border-[#1e3148] aurora:border-[#203742] text-[11px] font-medium text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#5eead4] shadow-xs flex items-center gap-1.5 cursor-pointer disabled:opacity-50 transition-colors"
+              className="px-3.5 py-1 rounded-full bg-white/90 dark:bg-[#0e1726]/90 aurora:bg-[#101c23]/90 linen:bg-[#f6efe2]/95 hover:bg-[#e8f3ff] dark:hover:bg-[#142336] aurora:hover:bg-[#112e37] linen:hover:bg-[#efe2ce] border border-[#e2e8f0] dark:border-[#1e3148] aurora:border-[#203742] linen:border-[#cbbba2] text-[11px] font-medium text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#5eead4] linen:text-[#8c522d] shadow-xs flex items-center gap-1.5 cursor-pointer disabled:opacity-50 transition-colors"
             >
               <History className={`w-3.5 h-3.5 ${isLoadingOlder ? 'animate-spin' : ''}`} />
               <span>{isLoadingOlder ? '正在加载更早消息...' : '加载更早历史消息'}</span>
@@ -4248,7 +4344,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
             <React.Fragment key={msg.id}>
               {showDayDivider && (
                 <div className="flex items-center justify-center my-1">
-                  <span className="px-3 py-0.5 rounded-full bg-white/90 dark:bg-[#0e1726]/80 aurora:bg-[#101c23]/85 border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#1c323c] text-[11px] font-medium text-[#64748b] dark:text-[#b4c6d8] aurora:text-[#b7d0d8] shadow-xs">
+                  <span className="px-3 py-0.5 rounded-full bg-white/90 dark:bg-[#0e1726]/80 aurora:bg-[#101c23]/85 linen:bg-[#f6efe2]/95 border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#1c323c] linen:border-[#cbbba2] text-[11px] font-medium text-[#64748b] dark:text-[#b4c6d8] aurora:text-[#b7d0d8] linen:text-[#5c4a38] shadow-xs">
                     {formatMessageDayLabel(dayKey)}
                   </span>
                 </div>
@@ -4263,7 +4359,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                 onMouseLeave={() => {
                   setHoveredMessageId((prev) => (prev === msg.id ? null : prev));
                 }}
-                className={`w-full min-w-0 flex ${isMultiSelectMode ? 'items-center gap-2.5 cursor-pointer rounded-xl px-1.5 py-0.5 transition-colors ' + (isSelectedMulti ? 'bg-[#2481cc]/10 dark:bg-[#2ba0ff]/15 aurora:bg-[#14b8a6]/15' : 'hover:bg-black/5 dark:hover:bg-white/5 aurora:hover:bg-white/5') : 'flex-col'} ${
+                className={`w-full min-w-0 flex ${isMultiSelectMode ? 'items-center gap-2.5 cursor-pointer rounded-xl px-1.5 py-0.5 transition-colors ' + (isSelectedMulti ? 'bg-[#2481cc]/10 dark:bg-[#2ba0ff]/15 aurora:bg-[#14b8a6]/15 linen:bg-[#a86a43]/15' : 'hover:bg-black/5 dark:hover:bg-white/5 aurora:hover:bg-white/5') : 'flex-col'} ${
                   isMe ? (isMultiSelectMode ? 'justify-end' : 'items-end') : (isMultiSelectMode ? 'justify-start' : 'items-start')
                 } group relative ${hoveredMessageId === msg.id ? 'z-30' : ''} ${isSameSenderAsPrev ? 'mt-0.5' : 'mt-1'} ${isSameSenderAsNext ? 'mb-0.5' : 'mb-1'}`}
                 onContextMenu={(e) => {
@@ -4279,8 +4375,8 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                     }}
                     className={`shrink-0 p-1 rounded-lg transition-colors cursor-pointer ${
                       isSelectedMulti
-                        ? 'text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#5eead4]'
-                        : 'text-[#94a3b8] dark:text-[#64748b] aurora:text-[#5a7782]'
+                        ? 'text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#5eead4] linen:text-[#a86a43]'
+                        : 'text-[#94a3b8] dark:text-[#64748b] aurora:text-[#5a7782] linen:text-[#8f7e6c]'
                     }`}
                   >
                     {isSelectedMulti ? <CheckSquare className="w-4 h-4" /> : <Square className="w-4 h-4" />}
@@ -4290,12 +4386,12 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                 {/* Telegram Floating Quick Action Menu on Hover */}
                 {!isMultiSelectMode && hoveredMessageId === msg.id && (
                   <div
-                    className={`absolute ${idx === 0 ? 'top-1' : '-top-4'} z-40 max-w-full overflow-x-auto no-scrollbar flex items-center gap-0.5 bg-white dark:bg-[#0e1726] aurora:bg-[#101c23] border border-[#e2e8f0] dark:border-[#1e3148] aurora:border-[#203742] rounded-full px-1.5 py-0.5 shadow-lg animate-in fade-in zoom-in-95 duration-100 ${
+                    className={`absolute ${idx === 0 ? 'top-1' : '-top-4'} z-40 max-w-full overflow-x-auto no-scrollbar flex items-center gap-0.5 bg-white dark:bg-[#0e1726] aurora:bg-[#101c23] linen:bg-[#faf5ec] border border-[#e2e8f0] dark:border-[#1e3148] aurora:border-[#203742] linen:border-[#cbbba2] rounded-full px-1.5 py-0.5 shadow-lg animate-in fade-in zoom-in-95 duration-100 ${
                       isMe ? 'right-2' : isGroupPeer ? 'left-10' : 'left-2'
                     }`}
                   >
                     {/* Quick Reactions Bar */}
-                    <div className="flex items-center gap-0.5 pr-1 border-r border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34]">
+                    <div className="flex items-center gap-0.5 pr-1 border-r border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] linen:border-[#dfd2bc]">
                       {['👍', '❤️', '🔥', '🎉'].map((emoji) => (
                         <button
                           key={emoji}
@@ -4316,7 +4412,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                         setReplyingTo(msg);
                         setEditingMessage(null);
                       }}
-                      className="p-1 text-[#64748b] hover:text-[#2481cc] dark:text-[#7b93ad] dark:hover:text-[#2ba0ff] aurora:text-[#7e9aa5] aurora:hover:text-[#5eead4] cursor-pointer"
+                      className="p-1 text-[#64748b] hover:text-[#2481cc] dark:text-[#7b93ad] dark:hover:text-[#2ba0ff] aurora:text-[#7e9aa5] aurora:hover:text-[#5eead4] linen:text-[#7a6957] linen:hover:text-[#a86a43] cursor-pointer"
                       title="回复消息"
                     >
                       <Reply className="w-3.5 h-3.5" />
@@ -4326,7 +4422,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                     <button
                       type="button"
                       onClick={() => handleOpenForwardModal([msg])}
-                      className="p-1 text-[#64748b] hover:text-[#2481cc] dark:text-[#7b93ad] dark:hover:text-[#2ba0ff] aurora:text-[#7e9aa5] aurora:hover:text-[#5eead4] cursor-pointer"
+                      className="p-1 text-[#64748b] hover:text-[#2481cc] dark:text-[#7b93ad] dark:hover:text-[#2ba0ff] aurora:text-[#7e9aa5] aurora:hover:text-[#5eead4] linen:text-[#7a6957] linen:hover:text-[#a86a43] cursor-pointer"
                       title="转发消息"
                     >
                       <Forward className="w-3.5 h-3.5" />
@@ -4341,11 +4437,11 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                         type="button"
                         disabled={Boolean(msg.isTranslating)}
                         onClick={() => void triggerManualTranslate(msg)}
-                        className="p-1 text-[#64748b] hover:text-[#2481cc] dark:text-[#7b93ad] dark:hover:text-[#2ba0ff] aurora:text-[#7e9aa5] aurora:hover:text-[#5eead4] cursor-pointer disabled:opacity-50"
+                        className="p-1 text-[#64748b] hover:text-[#2481cc] dark:text-[#7b93ad] dark:hover:text-[#2ba0ff] aurora:text-[#7e9aa5] aurora:hover:text-[#5eead4] linen:text-[#7a6957] linen:hover:text-[#a86a43] cursor-pointer disabled:opacity-50"
                         title={msg.translatedText ? '重新翻译' : '翻译此消息'}
                       >
                         {msg.isTranslating ? (
-                          <RotateCw className="w-3.5 h-3.5 animate-spin text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf]" />
+                          <RotateCw className="w-3.5 h-3.5 animate-spin text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf] linen:text-[#a86a43]" />
                         ) : (
                           <Languages className="w-3.5 h-3.5" />
                         )}
@@ -4356,10 +4452,10 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                     <button
                       type="button"
                       onClick={() => onTogglePinMessage?.(msg.id)}
-                      className="p-1 text-[#64748b] hover:text-[#2481cc] dark:text-[#7b93ad] dark:hover:text-[#2ba0ff] aurora:text-[#7e9aa5] aurora:hover:text-[#5eead4] cursor-pointer"
+                      className="p-1 text-[#64748b] hover:text-[#2481cc] dark:text-[#7b93ad] dark:hover:text-[#2ba0ff] aurora:text-[#7e9aa5] aurora:hover:text-[#5eead4] linen:text-[#7a6957] linen:hover:text-[#a86a43] cursor-pointer"
                       title={msg.isPinned ? '取消置顶' : '置顶此消息'}
                     >
-                      <Pin className={`w-3.5 h-3.5 ${msg.isPinned ? 'text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf] fill-current' : ''}`} />
+                      <Pin className={`w-3.5 h-3.5 ${msg.isPinned ? 'text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf] linen:text-[#a86a43] fill-current' : ''}`} />
                     </button>
 
                     {/* Edit Button (For delivered non-audio sent messages) */}
@@ -4377,7 +4473,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                           setInputText(msg.text);
                           setReplyingTo(null);
                         }}
-                        className="p-1 text-[#64748b] hover:text-[#2481cc] dark:text-[#7b93ad] dark:hover:text-[#2ba0ff] aurora:text-[#7e9aa5] aurora:hover:text-[#5eead4] cursor-pointer"
+                        className="p-1 text-[#64748b] hover:text-[#2481cc] dark:text-[#7b93ad] dark:hover:text-[#2ba0ff] aurora:text-[#7e9aa5] aurora:hover:text-[#5eead4] linen:text-[#7a6957] linen:hover:text-[#a86a43] cursor-pointer"
                         title="编辑消息"
                       >
                         <Edit2 className="w-3.5 h-3.5" />
@@ -4394,7 +4490,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                           copyToClipboard(msg.text, msg.id);
                         }
                       }}
-                      className="p-1 text-[#64748b] hover:text-[#2481cc] dark:text-[#7b93ad] dark:hover:text-[#2ba0ff] aurora:text-[#7e9aa5] aurora:hover:text-[#5eead4] cursor-pointer"
+                      className="p-1 text-[#64748b] hover:text-[#2481cc] dark:text-[#7b93ad] dark:hover:text-[#2ba0ff] aurora:text-[#7e9aa5] aurora:hover:text-[#5eead4] linen:text-[#7a6957] linen:hover:text-[#a86a43] cursor-pointer"
                       title={msg.isImage ? '复制照片到剪贴板' : '复制消息内容'}
                     >
                       {copiedId === msg.id ? (
@@ -4474,8 +4570,8 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                       highlightedMsgId === msg.id ? 'ring-2 ring-amber-400 shadow-lg' : ''
                     } ${
                       isMe
-                        ? 'bg-[#1e88e5] text-white dark:bg-[#1b4975] dark:text-white aurora:bg-[#11434d] aurora:border aurora:border-[#2dd4bf]/25 rounded-br-xs shadow-[0_1px_3px_rgba(30,136,229,0.22)]'
-                        : 'bg-white text-[#0f172a] border border-[#e2e8f0] dark:bg-[#101b2a] dark:text-[#eef4fb] dark:border-[#1a2b40] aurora:bg-[#101c23] aurora:text-[#ecf6f8] aurora:border-[#1c323c] rounded-bl-xs shadow-[0_1px_2px_rgba(15,23,42,0.04)]'
+                        ? 'bg-[#1e88e5] text-white dark:bg-[#1b4975] dark:text-white aurora:bg-[#11434d] aurora:border aurora:border-[#2dd4bf]/25 linen:bg-[#3a6652] linen:text-white linen:border linen:border-[#2d5241] rounded-br-xs shadow-[0_1px_3px_rgba(30,136,229,0.22)] linen:shadow-[0_1px_4px_rgba(43,33,24,0.16)]'
+                        : 'bg-white text-[#0f172a] border border-[#e2e8f0] dark:bg-[#101b2a] dark:text-[#eef4fb] dark:border-[#1a2b40] aurora:bg-[#101c23] aurora:text-[#ecf6f8] aurora:border-[#1c323c] linen:bg-[#faf6ee] linen:text-[#2b2118] linen:border-[#d5c6b0] rounded-bl-xs shadow-[0_1px_2px_rgba(15,23,42,0.04)] linen:shadow-[0_1px_3px_rgba(43,33,24,0.08)]'
                     }`}
                   >
                     {/* Official Telegram Group Member Name */}
@@ -4502,7 +4598,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                   {msg.forwardFrom && (
                     <div
                       className={`mb-1 ${hasMediaBubble ? 'px-1.5 pt-0.5' : ''} flex items-center gap-1 text-[10.5px] font-medium ${
-                        isMe ? 'text-white/85' : 'text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#5eead4]'
+                        isMe ? 'text-white/85' : 'text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#5eead4] linen:text-[#8c522d]'
                       }`}
                     >
                       <Forward className="w-3 h-3 shrink-0" />
@@ -4516,12 +4612,12 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                       className={`mb-2 pl-2.5 py-1 border-l-2 rounded-r ${chatFontClasses.replySender} select-none ${
                         isMe
                           ? 'border-white/70 bg-white/12 text-white'
-                          : 'border-[#2481cc] dark:border-[#2ba0ff] aurora:border-[#2dd4bf] bg-[#f8fafc] dark:bg-white/5 aurora:bg-[#081014]/60 text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8]'
+                          : 'border-[#2481cc] dark:border-[#2ba0ff] aurora:border-[#2dd4bf] linen:border-[#a86a43] bg-[#f8fafc] dark:bg-white/5 aurora:bg-[#081014]/60 linen:bg-[#f2e9da] text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118]'
                       }`}
                     >
                       <div
                         className={`font-semibold truncate ${
-                          isMe ? 'text-white' : 'text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#5eead4]'
+                          isMe ? 'text-white' : 'text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#5eead4] linen:text-[#8c522d]'
                         }`}
                       >
                         {msg.replyTo.senderName || '回复消息'}
@@ -4752,9 +4848,9 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                 {msg.isFile && (() => {
                   const safeFileHref = resolveDisplayUrl(msg.fileUrl);
                   return (
-                    <div className={`p-2.5 rounded-xl flex items-center justify-between gap-3 ${chatFontClasses.secondary} mb-1.5 ${isMe ? 'bg-white/12' : 'bg-black/5 dark:bg-white/10 aurora:bg-[#15252e]'}`}>
+                    <div className={`p-2.5 rounded-xl flex items-center justify-between gap-3 ${chatFontClasses.secondary} mb-1.5 ${isMe ? 'bg-white/12' : 'bg-black/5 dark:bg-white/10 aurora:bg-[#15252e] linen:bg-[#f2e8d7]'}`}>
                       <div className="flex items-center gap-2 min-w-0">
-                        <FileText className={`w-6 h-6 shrink-0 ${isMe ? 'text-white/90' : 'text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#5eead4]'}`} />
+                        <FileText className={`w-6 h-6 shrink-0 ${isMe ? 'text-white/90' : 'text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#5eead4] linen:text-[#a86a43]'}`} />
                         <div className="min-w-0">
                           <div className="font-semibold truncate">{msg.fileName || '文档附件'}</div>
                           <div className="text-[10px] opacity-70">{msg.fileSize || '128 KB'}</div>
@@ -4784,7 +4880,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                               });
                             }
                           }}
-                          className={`p-1.5 rounded-lg cursor-pointer ${isMe ? 'text-white hover:bg-white/15' : 'text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#5eead4] hover:bg-[#2481cc]/10 aurora:hover:bg-[#14b8a6]/15'}`}
+                          className={`p-1.5 rounded-lg cursor-pointer ${isMe ? 'text-white hover:bg-white/15' : 'text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#5eead4] linen:text-[#a86a43] hover:bg-[#2481cc]/10 aurora:hover:bg-[#14b8a6]/15 linen:hover:bg-[#a86a43]/12'}`}
                           title="下载附件"
                         >
                           <Download className="w-4 h-4" />
@@ -4807,7 +4903,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                         className={`w-9 h-9 rounded-full flex items-center justify-center cursor-pointer transition-transform hover:scale-105 shrink-0 ${
                           isMe
                             ? 'bg-white/20 hover:bg-white/30 text-white'
-                            : 'bg-[#2481cc] dark:bg-[#2ba0ff] aurora:bg-[#0d9488] text-white'
+                            : 'bg-[#2481cc] dark:bg-[#2ba0ff] aurora:bg-[#0d9488] linen:bg-[#a86a43] text-white'
                         }`}
                       >
                         {playingAudioId === msg.id ? (
@@ -4819,10 +4915,10 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
 
                       {/* Waveform progress bar */}
                       <div className="flex-1">
-                        <div className={`h-1.5 w-full rounded-full overflow-hidden ${isMe ? 'bg-white/25' : 'bg-black/10 dark:bg-white/20 aurora:bg-white/15'}`}>
+                        <div className={`h-1.5 w-full rounded-full overflow-hidden ${isMe ? 'bg-white/25' : 'bg-black/10 dark:bg-white/20 aurora:bg-white/15 linen:bg-[#e5d6be]'}`}>
                           <div
                             className={`h-full transition-all duration-100 ${
-                              isMe ? 'bg-white' : 'bg-[#2481cc] dark:bg-[#2ba0ff] aurora:bg-[#2dd4bf]'
+                              isMe ? 'bg-white' : 'bg-[#2481cc] dark:bg-[#2ba0ff] aurora:bg-[#2dd4bf] linen:bg-[#a86a43]'
                             }`}
                             style={{ width: `${audioProgress[msg.id] || 0}%` }}
                           />
@@ -4834,7 +4930,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                               : '--'}
                           </span>
                           {msg.voiceName && (
-                            <span className={`text-[10px] ${isMe ? 'text-white/90' : 'text-[#2481cc] dark:text-[#7cc4ff] aurora:text-[#5eead4]'}`}>
+                            <span className={`text-[10px] ${isMe ? 'text-white/90' : 'text-[#2481cc] dark:text-[#7cc4ff] aurora:text-[#5eead4] linen:text-[#8c522d]'}`}>
                               🎙️ {msg.voiceName}
                             </span>
                           )}
@@ -4844,11 +4940,11 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
 
                     {/* Speech to Text Transcribe toggle */}
                     {msg.sttText ? (
-                      <div className={`mt-1 pt-1.5 border-t ${chatFontClasses.secondary} ${isMe ? 'border-white/20' : 'border-black/10 dark:border-white/10 aurora:border-white/10'}`}>
+                      <div className={`mt-1 pt-1.5 border-t ${chatFontClasses.secondary} ${isMe ? 'border-white/20' : 'border-black/10 dark:border-white/10 aurora:border-white/10 linen:border-[#dfd2bc]'}`}>
                         <div className="text-[11px] opacity-70 mb-0.5 select-none">转文字:</div>
                         <p className="select-text cursor-text">{msg.sttText}</p>
                         {msg.translatedText ? (
-                          <p className={`mt-1 font-medium select-text cursor-text ${isMe ? 'text-white/95' : 'text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#5eead4]'}`}>
+                          <p className={`mt-1 font-medium select-text cursor-text ${isMe ? 'text-white/95' : 'text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#5eead4] linen:text-[#8c522d]'}`}>
                             译文: {msg.translatedText}
                           </p>
                         ) : msg.translationError ? (
@@ -5010,7 +5106,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                               className={`mt-1.5 px-2 py-1 rounded-lg border text-[10.5px] flex items-center gap-1.5 ${
                                 isMe
                                   ? 'bg-white/10 border-white/20 text-white/85'
-                                  : 'bg-[#f8fafc] dark:bg-[#0b131f]/80 aurora:bg-[#0c161c]/85 border-[#e2e8f0] dark:border-[#1e3148] aurora:border-[#1e343e] text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#5eead4]'
+                                  : 'bg-[#f8fafc] dark:bg-[#0b131f]/80 aurora:bg-[#0c161c]/85 linen:bg-[#f3eadc] border-[#e2e8f0] dark:border-[#1e3148] aurora:border-[#1e343e] linen:border-[#d5c6b0] text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#5eead4] linen:text-[#8c522d]'
                               }`}
                             >
                               <RotateCw className="w-3 h-3 animate-spin shrink-0" />
@@ -5020,14 +5116,14 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                             <div
                               className={`mt-1.5 px-2 py-1.5 rounded-lg border ${chatFontClasses.translation} select-text cursor-text ${
                                 isMe
-                                  ? 'bg-white/12 border-white/20 text-white/95'
-                                  : 'bg-[#f8fafc] dark:bg-[#0b131f]/80 aurora:bg-[#0c161c]/85 border-[#e2e8f0] dark:border-[#1e3148] aurora:border-[#1e343e] text-[#1e293b] dark:text-[#eef4fb] aurora:text-[#ecf6f8]'
+                                  ? 'bg-white/12 border-white/20 linen:bg-black/15 linen:border-white/15 text-white/95'
+                                  : 'bg-[#f8fafc] dark:bg-[#0b131f]/80 aurora:bg-[#0c161c]/85 linen:bg-[#f4ecdf] border-[#e2e8f0] dark:border-[#1e3148] aurora:border-[#1e343e] linen:border-[#dccdb8] text-[#1e293b] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118]'
                               }`}
                             >
                               <div className="flex items-center justify-between gap-2 mb-0.5 select-none">
                                 <span
                                   className={`inline-flex items-center gap-1 text-[10px] font-medium ${
-                                    isMe ? 'text-white/85' : 'text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#5eead4]'
+                                    isMe ? 'text-white/85' : 'text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#5eead4] linen:text-[#7c5838]'
                                   }`}
                                 >
                                   <Languages className="w-3 h-3" />
@@ -5145,7 +5241,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                 {!hasOverlayImageTimestamp && (
                   <div
                     className={`flex items-center justify-end gap-1 ${hasMediaBubble ? 'mt-0.5 px-1.5 pb-0.5' : 'mt-1'} text-[10px] select-none tabular-nums ${
-                      isMe ? 'text-white/80' : 'text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5]'
+                      isMe ? 'text-white/80' : 'text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#84725e]'
                     }`}
                   >
                     {onRetranslateMessage &&
@@ -5168,7 +5264,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                         className={`inline-flex items-center gap-0.5 px-1.5 py-[1px] rounded text-[10px] font-medium transition-colors cursor-pointer disabled:opacity-60 mr-1 ${
                           isMe
                             ? 'bg-white/15 hover:bg-white/25 text-white/95'
-                            : 'bg-[#2481cc]/10 hover:bg-[#2481cc]/20 text-[#2481cc] dark:bg-[#2ba0ff]/15 dark:hover:bg-[#2ba0ff]/25 dark:text-[#7cc4ff] aurora:bg-[#2dd4bf]/12 aurora:hover:bg-[#2dd4bf]/22 aurora:text-[#5eead4]'
+                            : 'bg-[#2481cc]/10 hover:bg-[#2481cc]/20 text-[#2481cc] dark:bg-[#2ba0ff]/15 dark:hover:bg-[#2ba0ff]/25 dark:text-[#7cc4ff] aurora:bg-[#2dd4bf]/12 aurora:hover:bg-[#2dd4bf]/22 aurora:text-[#5eead4] linen:bg-[#a86a43]/12 linen:hover:bg-[#a86a43]/22 linen:text-[#8c522d]'
                         }`}
                       >
                         {msg.isTranslating ? (
@@ -5182,7 +5278,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                     {msg.isPinned && (
                       <Pin
                         className={`w-3 h-3 fill-current mr-0.5 ${
-                          isMe ? 'text-white/90' : 'text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf]'
+                          isMe ? 'text-white/90' : 'text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf] linen:text-[#a86a43]'
                         }`}
                       />
                     )}
@@ -5266,9 +5362,9 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
 
       {/* Multi-Select Batch Operations Bar */}
       {isMultiSelectMode && (
-        <div className="bg-[#f0f7ff] dark:bg-[#0d1929] aurora:bg-[#0f1d24] border-t border-[#bfdbfe] dark:border-[#1e3148] aurora:border-[#1f3b45] px-4 py-2.5 flex items-center justify-between gap-2 text-xs shrink-0 animate-in fade-in duration-150">
+        <div className="bg-[#f0f7ff] dark:bg-[#0d1929] aurora:bg-[#0f1d24] linen:bg-[#f2e8d9] border-t border-[#bfdbfe] dark:border-[#1e3148] aurora:border-[#1f3b45] linen:border-[#cbbba2] px-4 py-2.5 flex items-center justify-between gap-2 text-xs shrink-0 animate-in fade-in duration-150">
           <div className="flex items-center gap-2.5">
-            <span className="font-semibold text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#5eead4] tabular-nums">
+            <span className="font-semibold text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#5eead4] linen:text-[#8c522d] tabular-nums">
               已选择 {selectedMessageIds.size} 条消息
             </span>
             <button
@@ -5280,7 +5376,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                   setSelectedMessageIds(new Set(displayedMessages.map((m) => m.id)));
                 }
               }}
-              className="px-2 py-1 rounded-lg bg-white dark:bg-[#0e1726] aurora:bg-[#101c23] border border-[#dbeafe] dark:border-[#1e3148] aurora:border-[#203742] text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] hover:bg-[#e8f3ff] dark:hover:bg-[#152438] aurora:hover:bg-[#152934] cursor-pointer text-[11px]"
+              className="px-2 py-1 rounded-lg bg-white dark:bg-[#0e1726] aurora:bg-[#101c23] linen:bg-[#faf5ec] border border-[#dbeafe] dark:border-[#1e3148] aurora:border-[#203742] linen:border-[#cbbba2] text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118] hover:bg-[#e8f3ff] dark:hover:bg-[#152438] aurora:hover:bg-[#152934] linen:hover:bg-[#efe4d3] cursor-pointer text-[11px]"
             >
               {selectedMessageIds.size === displayedMessages.length && displayedMessages.length > 0 ? '取消全选' : '全选当前'}
             </button>
@@ -5293,7 +5389,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                 const picked = messages.filter((m) => selectedMessageIds.has(m.id));
                 handleOpenForwardModal(picked);
               }}
-              className="px-3 py-1.5 rounded-lg bg-[#2481cc] hover:bg-[#1d6fb3] dark:bg-[#2ba0ff] dark:hover:bg-[#1e8ee8] aurora:bg-[#0d9488] aurora:hover:bg-[#0f766e] disabled:opacity-40 text-white font-medium flex items-center gap-1.5 cursor-pointer"
+              className="px-3 py-1.5 rounded-lg bg-[#2481cc] hover:bg-[#1d6fb3] dark:bg-[#2ba0ff] dark:hover:bg-[#1e8ee8] aurora:bg-[#0d9488] aurora:hover:bg-[#0f766e] linen:bg-[#a86a43] linen:hover:bg-[#935a36] disabled:opacity-40 text-white font-medium flex items-center gap-1.5 cursor-pointer"
             >
               <Forward className="w-3.5 h-3.5" />
               <span>转发</span>
@@ -5316,7 +5412,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                 setIsMultiSelectMode(false);
                 setSelectedMessageIds(new Set());
               }}
-              className="px-2.5 py-1.5 rounded-lg text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] hover:bg-black/5 dark:hover:bg-white/10 aurora:hover:bg-[#152934] cursor-pointer"
+              className="px-2.5 py-1.5 rounded-lg text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#7a6957] hover:bg-black/5 dark:hover:bg-white/10 aurora:hover:bg-[#152934] linen:hover:bg-[#e7dac4] cursor-pointer"
             >
               退出多选
             </button>
@@ -5324,22 +5420,22 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
         </div>
       )}
 
-      {/* 4. Official Telegram Composer (Structured Dual-Layer Input Area) */}
-      <footer onPaste={handlePaste} className="bg-white/95 dark:bg-[#09111d]/95 aurora:bg-[#0d171d]/95 backdrop-blur-md border-t border-[#e2e8f0] dark:border-[#162436] aurora:border-[#182b34] px-4 py-2.5 shrink-0 transition-colors">
+      {/* 4. Official Telegram Composer (Image 1 Structured Layout) */}
+      <footer onPaste={handlePaste} className="bg-white/95 dark:bg-[#09111d]/95 aurora:bg-[#0d171d]/95 linen:bg-[#f2e8d9]/95 backdrop-blur-md border-t border-[#e2e8f0] dark:border-[#162436] aurora:border-[#182b34] linen:border-[#cbbba2] px-4 py-2.5 shrink-0 transition-colors">
         {/* AI Generating Indicator */}
         {isGeneratingAi && (
-          <div className="mb-2 px-3 py-2 bg-[#e8f3ff] dark:bg-[#2ba0ff]/12 aurora:bg-[#112d36] border border-[#bfdbfe] dark:border-[#2ba0ff]/35 aurora:border-[#2dd4bf]/35 rounded-xl flex items-center gap-2 text-xs text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#5eead4] animate-pulse">
-            <Sparkles className="w-4 h-4 animate-spin text-amber-500" />
+          <div className="mb-2 px-3 py-2 bg-[#e8f3ff] dark:bg-[#2ba0ff]/12 aurora:bg-[#112d36] linen:bg-[#efe2ce] border border-[#bfdbfe] dark:border-[#2ba0ff]/35 aurora:border-[#2dd4bf]/35 linen:border-[#cbbba2] rounded-xl flex items-center gap-2 text-xs text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#5eead4] linen:text-[#8c522d] animate-pulse">
+            <Sparkles className="w-4 h-4 animate-spin text-amber-500 linen:text-[#a86a43]" />
             <span>AI 正在深度检索该客户全息画像与过往约定，生成真人拟真回复...</span>
           </div>
         )}
 
         {/* AI Holographic Memory Suggestion Card */}
         {aiSuggestion && (
-          <div className="mb-2.5 p-3.5 bg-gradient-to-r from-[#eff6ff] via-[#f8fafc] to-transparent dark:from-[#2ba0ff]/12 dark:via-[#101c2d]/80 dark:to-transparent aurora:from-[#112d36]/90 aurora:via-[#0d1e25]/80 aurora:to-transparent border border-[#bfdbfe] dark:border-[#2ba0ff]/35 aurora:border-[#2dd4bf]/35 rounded-xl flex flex-col gap-2.5 animate-in fade-in slide-in-from-bottom-2 duration-200 shadow-xs">
+          <div className="mb-2.5 p-3.5 bg-gradient-to-r from-[#eff6ff] via-[#f8fafc] to-transparent dark:from-[#2ba0ff]/12 dark:via-[#101c2d]/80 dark:to-transparent aurora:from-[#112d36]/90 aurora:via-[#0d1e25]/80 aurora:to-transparent linen:from-[#f7efe0] linen:via-[#f3e9d8] linen:to-[#efe3cf]/60 border border-[#bfdbfe] dark:border-[#2ba0ff]/35 aurora:border-[#2dd4bf]/35 linen:border-[#cbbba2] rounded-xl flex flex-col gap-2.5 animate-in fade-in slide-in-from-bottom-2 duration-200 shadow-xs">
             <div className="flex items-center justify-between">
-              <div className="flex items-center gap-1.5 text-xs font-semibold text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#5eead4]">
-                <Sparkles className="w-3.5 h-3.5 text-amber-500 shrink-0" />
+              <div className="flex items-center gap-1.5 text-xs font-semibold text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#5eead4] linen:text-[#8c522d]">
+                <Sparkles className="w-3.5 h-3.5 text-amber-500 linen:text-[#a86a43] shrink-0" />
                 <span>AI 回复建议</span>
               </div>
               <button
@@ -5348,7 +5444,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                   setAiSuggestion(null);
                   setAiSuggestionTranslation(null);
                 }}
-                className="text-[#64748b] hover:text-[#0f172a] dark:text-[#7b93ad] dark:hover:text-white aurora:text-[#7e9aa5] aurora:hover:text-[#ecf6f8] p-0.5 cursor-pointer"
+                className="text-[#64748b] hover:text-[#0f172a] dark:text-[#7b93ad] dark:hover:text-white aurora:text-[#7e9aa5] aurora:hover:text-[#ecf6f8] linen:text-[#7a6957] linen:hover:text-[#2b2118] p-0.5 cursor-pointer"
                 title="关闭建议"
               >
                 <X className="w-3.5 h-3.5" />
@@ -5356,32 +5452,32 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
             </div>
 
             {/* Bilingual Content Box */}
-            <div className="bg-white dark:bg-[#0e1726]/95 aurora:bg-[#101c23]/95 p-3 rounded-lg border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] select-text space-y-2.5">
+            <div className="bg-white dark:bg-[#0e1726]/95 aurora:bg-[#101c23]/95 linen:bg-[#fdfaf3] p-3 rounded-lg border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] linen:border-[#d5c6b0] select-text space-y-2.5">
               {/* 1. Foreign Outbound Text */}
               <div>
-                <span className="text-[10px] font-semibold text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] block mb-1">
+                <span className="text-[10px] font-semibold text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#7a6957] block mb-1">
                   外文译稿：
                 </span>
-                <div className="text-xs text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] leading-relaxed font-sans">
+                <div className="text-xs text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118] leading-relaxed font-sans">
                   {aiSuggestion}
                 </div>
               </div>
 
               {/* 2. Chinese Meaning Translation */}
               {aiSuggestionTranslation ? (
-                <div className="pt-2 border-t border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] text-xs text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#5eead4] flex items-start gap-1.5">
+                <div className="pt-2 border-t border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] linen:border-[#e6dac6] text-xs text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#5eead4] linen:text-[#8c522d] flex items-start gap-1.5">
                   <Languages className="w-3.5 h-3.5 mt-0.5 shrink-0 opacity-80" />
                   <div className="flex-1">
-                    <span className="text-[10px] font-semibold text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] block mb-0.5">
+                    <span className="text-[10px] font-semibold text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#7a6957] block mb-0.5">
                       {getLanguageDisplayName(inboundTargetLang)}对照：
                     </span>
-                    <span className="leading-relaxed font-sans text-[#1e293b] dark:text-[#b4c6d8] aurora:text-[#b7d0d8]">
+                    <span className="leading-relaxed font-sans text-[#1e293b] dark:text-[#b4c6d8] aurora:text-[#b7d0d8] linen:text-[#4e3e30]">
                       {aiSuggestionTranslation}
                     </span>
                   </div>
                 </div>
               ) : isTranslatingSuggestion ? (
-                <div className="pt-2 border-t border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] text-[11px] text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#5eead4] flex items-center gap-1.5 animate-pulse">
+                <div className="pt-2 border-t border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] linen:border-[#e6dac6] text-[11px] text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#5eead4] linen:text-[#8c522d] flex items-center gap-1.5 animate-pulse">
                   <Languages className="w-3 h-3 animate-spin shrink-0" />
                   <span>正在获取{getLanguageDisplayName(inboundTargetLang)}含义翻译...</span>
                 </div>
@@ -5391,7 +5487,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                 const replyLangNorm = normalizeChatLangCode(detectClientLangCode(aiSuggestion));
                 if (refTargetNorm === 'auto' || replyLangNorm === refTargetNorm) return null;
                 return (
-                  <div className="pt-2 border-t border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] text-[11px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] flex items-center justify-between gap-2">
+                  <div className="pt-2 border-t border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] linen:border-[#e6dac6] text-[11px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#7a6957] flex items-center justify-between gap-2">
                     <span className="inline-flex items-center gap-1.5">
                       <Languages className="w-3 h-3 shrink-0 opacity-80" />
                       <span>暂未获取{getLanguageDisplayName(refTargetLang)}对照</span>
@@ -5421,7 +5517,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                           setIsTranslatingSuggestion(false);
                         }
                       }}
-                      className="px-2 py-0.5 rounded bg-[#2481cc]/10 hover:bg-[#2481cc]/20 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#5eead4] font-semibold cursor-pointer transition-colors"
+                      className="px-2 py-0.5 rounded bg-[#2481cc]/10 hover:bg-[#2481cc]/20 linen:bg-[#a86a43]/12 linen:hover:bg-[#a86a43]/22 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#5eead4] linen:text-[#8c522d] font-semibold cursor-pointer transition-colors"
                     >
                       重试对照翻译
                     </button>
@@ -5438,7 +5534,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                   setAiSuggestion(null);
                   setAiSuggestionTranslation(null);
                 }}
-                className="px-2.5 py-1 rounded-lg bg-[#f1f5f9] dark:bg-[#152438] aurora:bg-[#152934] hover:bg-[#e2e8f0] dark:hover:bg-[#1b2f48] aurora:hover:bg-[#1b3441] text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] font-medium text-[11px] cursor-pointer transition-colors"
+                className="px-2.5 py-1 rounded-lg bg-[#f1f5f9] dark:bg-[#152438] aurora:bg-[#152934] linen:bg-[#eadcc6] hover:bg-[#e2e8f0] dark:hover:bg-[#1b2f48] aurora:hover:bg-[#1b3441] linen:hover:bg-[#dfd0b8] text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118] font-medium text-[11px] cursor-pointer transition-colors"
               >
                 填入输入框
               </button>
@@ -5513,7 +5609,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                     setIsSending(false);
                   }
                 }}
-                className={`px-3 py-1 rounded-lg bg-[#2481cc] hover:bg-[#1d6fb3] dark:bg-[#2ba0ff] dark:hover:bg-[#1e8ee8] aurora:bg-[#0d9488] aurora:hover:bg-[#0f766e] text-white font-medium text-[11px] cursor-pointer flex items-center gap-1 shadow-xs transition-all ${
+                className={`px-3 py-1 rounded-lg bg-[#2481cc] hover:bg-[#1d6fb3] dark:bg-[#2ba0ff] dark:hover:bg-[#1e8ee8] aurora:bg-[#0d9488] aurora:hover:bg-[#0f766e] linen:bg-[#a86a43] linen:hover:bg-[#935a36] text-white font-medium text-[11px] cursor-pointer flex items-center gap-1 shadow-xs transition-all ${
                   isSending ? 'opacity-50 pointer-events-none' : ''
                 }`}
               >
@@ -5561,20 +5657,20 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
               </div>
             </div>
           ) : (
-            <div className="mb-2 px-3 py-1.5 bg-[#f0f7ff] dark:bg-[#0e1928] aurora:bg-[#102229] border border-[#dbeafe] dark:border-[#1e3148] aurora:border-[#1f3b45] rounded-xl flex items-center justify-between text-xs animate-in fade-in duration-150">
+            <div className="mb-2 px-3 py-1.5 bg-[#f0f7ff] dark:bg-[#0e1928] aurora:bg-[#102229] linen:bg-[#f7f0e4] border border-[#dbeafe] dark:border-[#1e3148] aurora:border-[#1f3b45] linen:border-[#d4c3aa] rounded-xl flex items-center justify-between text-xs animate-in fade-in duration-150">
               <div className="flex items-center gap-2 min-w-0">
-                <Languages className="w-3.5 h-3.5 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf] shrink-0" />
-                <div className="min-w-0">
-                  <span className="text-[10px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] block">
+                <Languages className="w-3.5 h-3.5 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf] linen:text-[#7c5838] shrink-0" />
+                <div className="min-w-0 flex items-center gap-1.5">
+                  <span className="text-[11px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#7a6957] shrink-0">
                     译文预览：
                   </span>
-                  <span className={`${chatFontClasses.secondary} font-medium text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] truncate block`}>
+                  <span className={`${chatFontClasses.secondary} font-medium text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118] truncate`}>
                     {translatedPreview}
                   </span>
                 </div>
               </div>
               <div className="flex items-center gap-1.5 shrink-0 ml-2">
-                <span className="text-[10px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5]">
+                <span className="text-[10.5px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#8c522d] font-medium">
                   {sendWithEnter ? 'Enter' : 'Ctrl+Enter'} 发送
                 </span>
                 <button
@@ -5584,7 +5680,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                     setTranslatedPreviewSource('');
                     setPreviewError('');
                   }}
-                  className="p-1 text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] hover:text-[#0f172a] dark:hover:text-white aurora:hover:text-[#ecf6f8] rounded hover:bg-black/5 dark:hover:bg-white/10 aurora:hover:bg-[#152934] cursor-pointer transition-colors"
+                  className="p-0.5 text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#8c522d] hover:text-[#0f172a] dark:hover:text-white aurora:hover:text-[#ecf6f8] linen:hover:text-[#2b2118] rounded hover:bg-black/5 dark:hover:bg-white/10 aurora:hover:bg-[#152934] linen:hover:bg-[#e5d6be] cursor-pointer transition-colors"
                   title="取消此译文预览 (Esc)"
                 >
                   <X className="w-3.5 h-3.5" />
@@ -5611,10 +5707,10 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
             !previewError;
           if (!shouldShowLlmManualBar) return null;
           return (
-            <div className="mb-2 px-3 py-1.5 bg-[#f8fafc] dark:bg-[#0e1928] aurora:bg-[#102229] border border-[#e2e8f0] dark:border-[#1e3148] aurora:border-[#1f3b45] rounded-xl flex items-center justify-between gap-2 text-xs animate-in fade-in duration-150">
+            <div className="mb-2 px-3 py-1.5 bg-[#f8fafc] dark:bg-[#0e1928] aurora:bg-[#102229] linen:bg-[#f7f0e4] border border-[#e2e8f0] dark:border-[#1e3148] aurora:border-[#1f3b45] linen:border-[#d4c3aa] rounded-xl flex items-center justify-between gap-2 text-xs animate-in fade-in duration-150">
               <div className="flex items-center gap-2 min-w-0">
-                <Sparkles className="w-3.5 h-3.5 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf] shrink-0" />
-                <span className="text-[11px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] truncate">
+                <Sparkles className="w-3.5 h-3.5 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf] linen:text-[#a86a43] shrink-0" />
+                <span className="text-[11px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#5c4a38] truncate">
                   大模型翻译已开启（打字不耗额度，发送或点击右侧按钮译为 {getLanguageDisplayName(outboundTargetLang)}）
                 </span>
               </div>
@@ -5622,7 +5718,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                 type="button"
                 disabled={isTranslatingPreview}
                 onClick={() => void handleManualLlmPreview()}
-                className="shrink-0 inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-[#2481cc]/10 hover:bg-[#2481cc]/20 dark:bg-[#2ba0ff]/15 dark:hover:bg-[#2ba0ff]/25 aurora:bg-[#14b8a6]/15 aurora:hover:bg-[#14b8a6]/25 border border-[#2481cc]/25 dark:border-[#2ba0ff]/30 aurora:border-[#2dd4bf]/30 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#5eead4] text-[11px] font-semibold cursor-pointer disabled:opacity-60 transition-colors"
+                className="shrink-0 inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-[#2481cc]/10 hover:bg-[#2481cc]/20 dark:bg-[#2ba0ff]/15 dark:hover:bg-[#2ba0ff]/25 aurora:bg-[#14b8a6]/15 aurora:hover:bg-[#14b8a6]/25 linen:bg-[#a86a43]/12 linen:hover:bg-[#a86a43]/22 border border-[#2481cc]/25 dark:border-[#2ba0ff]/30 aurora:border-[#2dd4bf]/30 linen:border-[#a86a43]/30 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#5eead4] linen:text-[#8c522d] text-[11px] font-semibold cursor-pointer disabled:opacity-60 transition-colors"
               >
                 <RotateCw className={`w-3 h-3 ${isTranslatingPreview ? 'animate-spin' : ''}`} />
                 <span>{isTranslatingPreview ? '生成中...' : '预览AI翻译'}</span>
@@ -5633,20 +5729,20 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
 
         {/* Reply Quote Banner above Input */}
         {replyingTo && (
-          <div className="mb-2 p-2 px-3 bg-[#f0f7ff] dark:bg-[#0e1928] aurora:bg-[#102229] border border-[#bfdbfe] dark:border-[#2ba0ff]/35 aurora:border-[#2dd4bf]/35 rounded-xl flex items-center justify-between text-xs animate-in fade-in duration-150">
+          <div className="mb-2 p-2 px-3 bg-[#f0f7ff] dark:bg-[#0e1928] aurora:bg-[#102229] linen:bg-[#f7f0e4] border border-[#bfdbfe] dark:border-[#2ba0ff]/35 aurora:border-[#2dd4bf]/35 linen:border-[#cbbba2] rounded-xl flex items-center justify-between text-xs animate-in fade-in duration-150">
             <div className="min-w-0 pr-2">
-              <div className="font-semibold text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#5eead4] flex items-center gap-1.5">
+              <div className="font-semibold text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#5eead4] linen:text-[#8c522d] flex items-center gap-1.5">
                 <Reply className="w-3.5 h-3.5" />
                 <span>回复 {replyingTo.sender === 'me' ? '我' : (chat.title || '对方')}</span>
               </div>
-              <div className="text-[11px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] truncate mt-0.5">
+              <div className="text-[11px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6f5d4b] truncate mt-0.5">
                 {replyingTo.text}
               </div>
             </div>
             <button
               type="button"
               onClick={() => setReplyingTo(null)}
-              className="p-1 text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] hover:text-[#0f172a] dark:hover:text-white aurora:hover:text-[#ecf6f8] cursor-pointer shrink-0"
+              className="p-1 text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#7a6957] hover:text-[#0f172a] dark:hover:text-white aurora:hover:text-[#ecf6f8] linen:hover:text-[#2b2118] cursor-pointer shrink-0"
               title="取消回复"
             >
               <X className="w-3.5 h-3.5" />
@@ -5656,26 +5752,26 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
 
         {/* Edit Message Banner above Input */}
         {editingMessage && (
-          <div className="mb-2 p-2 px-3 bg-amber-50 dark:bg-amber-500/12 aurora:bg-amber-500/12 border border-amber-300/70 dark:border-amber-500/35 aurora:border-amber-500/35 rounded-xl flex items-center justify-between gap-2 text-xs animate-in fade-in duration-150">
+          <div className="mb-2 p-2 px-3 bg-amber-50 dark:bg-amber-500/12 aurora:bg-amber-500/12 linen:bg-[#f4e8d3] border border-amber-300/70 dark:border-amber-500/35 aurora:border-amber-500/35 linen:border-[#c9a977] rounded-xl flex items-center justify-between gap-2 text-xs animate-in fade-in duration-150">
             <div className="min-w-0 pr-2 flex-1">
-              <div className="font-semibold text-amber-700 dark:text-amber-400 flex items-center gap-2 flex-wrap">
+              <div className="font-semibold text-amber-700 dark:text-amber-400 linen:text-[#8c522d] flex items-center gap-2 flex-wrap">
                 <span className="inline-flex items-center gap-1.5">
                   <Edit2 className="w-3.5 h-3.5" />
                   <span>正在编辑消息</span>
                 </span>
                 {isChatTransEnabled && translationSettings?.autoTranslateOutbound !== false && (
-                  <label className="inline-flex items-center gap-1 text-[11px] font-normal text-[#475569] dark:text-[#b4c6d8] aurora:text-[#b7d0d8] cursor-pointer select-none">
+                  <label className="inline-flex items-center gap-1 text-[11px] font-normal text-[#475569] dark:text-[#b4c6d8] aurora:text-[#b7d0d8] linen:text-[#5c4a38] cursor-pointer select-none">
                     <input
                       type="checkbox"
                       checked={translateOnEdit}
                       onChange={(e) => setTranslateOnEdit(e.target.checked)}
-                      className="rounded border-amber-400 text-[#2481cc] aurora:text-[#14b8a6] focus:ring-[#2481cc] aurora:focus:ring-[#2dd4bf]"
+                      className="rounded border-amber-400 text-[#2481cc] aurora:text-[#14b8a6] linen:text-[#a86a43] focus:ring-[#2481cc] aurora:focus:ring-[#2dd4bf] linen:focus:ring-[#a86a43]"
                     />
                     <span>重新翻译为外文</span>
                   </label>
                 )}
               </div>
-              <div className="text-[11px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] truncate mt-0.5">
+              <div className="text-[11px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6f5d4b] truncate mt-0.5">
                 原消息: {editingMessage.text}
               </div>
             </div>
@@ -5686,7 +5782,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                 setTranslateOnEdit(false);
                 setInputText('');
               }}
-              className="p-1 text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] hover:text-[#0f172a] dark:hover:text-white aurora:hover:text-[#ecf6f8] cursor-pointer shrink-0"
+              className="p-1 text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#7a6957] hover:text-[#0f172a] dark:hover:text-white aurora:hover:text-[#ecf6f8] linen:hover:text-[#2b2118] cursor-pointer shrink-0"
               title="取消编辑"
             >
               <X className="w-3.5 h-3.5" />
@@ -5699,7 +5795,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
           <div
             ref={attachmentMenuRef}
             style={{ top: `${attachmentMenuPos.top}px`, left: `${attachmentMenuPos.left}px` }}
-            className="fixed z-[9990] w-44 bg-white dark:bg-[#0e1726] aurora:bg-[#101c23] rounded-2xl shadow-2xl border border-[#e2e8f0] dark:border-[#1e3148] aurora:border-[#203742] p-2 flex flex-col gap-1 animate-in fade-in zoom-in-95 duration-150 text-xs select-none"
+            className="fixed z-[9990] w-44 bg-white dark:bg-[#0e1726] aurora:bg-[#101c23] linen:bg-[#f8f2e7] rounded-2xl shadow-2xl border border-[#e2e8f0] dark:border-[#1e3148] aurora:border-[#203742] linen:border-[#cbbba2] p-2 flex flex-col gap-1 animate-in fade-in zoom-in-95 duration-150 text-xs select-none"
           >
             <button
               type="button"
@@ -5707,9 +5803,9 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                 imageInputRef.current?.click();
                 setIsAttachmentMenuOpen(false);
               }}
-              className="flex items-center gap-3 px-3 py-2 rounded-xl hover:bg-[#f1f5f9] dark:hover:bg-[#152438] aurora:hover:bg-[#152934] text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] cursor-pointer font-medium"
+              className="flex items-center gap-3 px-3 py-2 rounded-xl hover:bg-[#f1f5f9] dark:hover:bg-[#152438] aurora:hover:bg-[#152934] linen:hover:bg-[#efe4d3] text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118] cursor-pointer font-medium"
             >
-              <ImageIcon className="w-4 h-4 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#5eead4]" />
+              <ImageIcon className="w-4 h-4 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#5eead4] linen:text-[#a86a43]" />
               <span>照片或图片</span>
             </button>
             <button
@@ -5718,9 +5814,9 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                 videoInputRef.current?.click();
                 setIsAttachmentMenuOpen(false);
               }}
-              className="flex items-center gap-3 px-3 py-2 rounded-xl hover:bg-[#f1f5f9] dark:hover:bg-[#152438] aurora:hover:bg-[#152934] text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] cursor-pointer font-medium"
+              className="flex items-center gap-3 px-3 py-2 rounded-xl hover:bg-[#f1f5f9] dark:hover:bg-[#152438] aurora:hover:bg-[#152934] linen:hover:bg-[#efe4d3] text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118] cursor-pointer font-medium"
             >
-              <Video className="w-4 h-4 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#5eead4]" />
+              <Video className="w-4 h-4 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#5eead4] linen:text-[#a86a43]" />
               <span>视频消息</span>
             </button>
             <button
@@ -5729,9 +5825,9 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                 audioInputRef.current?.click();
                 setIsAttachmentMenuOpen(false);
               }}
-              className="flex items-center gap-3 px-3 py-2 rounded-xl hover:bg-[#f1f5f9] dark:hover:bg-[#152438] aurora:hover:bg-[#152934] text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] cursor-pointer font-medium"
+              className="flex items-center gap-3 px-3 py-2 rounded-xl hover:bg-[#f1f5f9] dark:hover:bg-[#152438] aurora:hover:bg-[#152934] linen:hover:bg-[#efe4d3] text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118] cursor-pointer font-medium"
             >
-              <Music className="w-4 h-4 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#5eead4]" />
+              <Music className="w-4 h-4 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#5eead4] linen:text-[#a86a43]" />
               <span>音频与语音</span>
             </button>
             <button
@@ -5740,9 +5836,9 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                 fileInputRef.current?.click();
                 setIsAttachmentMenuOpen(false);
               }}
-              className="flex items-center gap-3 px-3 py-2 rounded-xl hover:bg-[#f1f5f9] dark:hover:bg-[#152438] aurora:hover:bg-[#152934] text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] cursor-pointer font-medium"
+              className="flex items-center gap-3 px-3 py-2 rounded-xl hover:bg-[#f1f5f9] dark:hover:bg-[#152438] aurora:hover:bg-[#152934] linen:hover:bg-[#efe4d3] text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118] cursor-pointer font-medium"
             >
-              <FileText className="w-4 h-4 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#5eead4]" />
+              <FileText className="w-4 h-4 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#5eead4] linen:text-[#a86a43]" />
               <span>文档与文件</span>
             </button>
           </div>,
@@ -5780,9 +5876,9 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
 
         {/* Pasted Image Pending Send Strip */}
         {pastedImage && (
-          <div className="mb-2.5 p-2.5 bg-[#f0f7ff] dark:bg-[#0e1928] aurora:bg-[#102229] border border-[#2481cc]/40 aurora:border-[#2dd4bf]/40 rounded-xl flex items-center justify-between gap-3 animate-in fade-in slide-in-from-bottom-2 duration-150 shadow-xs">
+          <div className="mb-2.5 p-2.5 bg-[#f0f7ff] dark:bg-[#0e1928] aurora:bg-[#102229] linen:bg-[#f7f0e4] border border-[#2481cc]/40 aurora:border-[#2dd4bf]/40 linen:border-[#a86a43]/40 rounded-xl flex items-center justify-between gap-3 animate-in fade-in slide-in-from-bottom-2 duration-150 shadow-xs">
             <div className="flex items-center gap-3 min-w-0">
-              <div className="relative w-12 h-12 rounded-lg overflow-hidden shrink-0 border border-black/10 dark:border-white/10 aurora:border-white/10 bg-black/5">
+              <div className="relative w-12 h-12 rounded-lg overflow-hidden shrink-0 border border-black/10 dark:border-white/10 aurora:border-white/10 linen:border-[#cbbba2] bg-black/5">
                 <img
                   src={pastedImage.dataUrl}
                   alt="pasted preview"
@@ -5790,14 +5886,14 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                 />
               </div>
               <div className="min-w-0">
-                <div className="text-xs font-semibold text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#5eead4] flex items-center gap-1.5">
+                <div className="text-xs font-semibold text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#5eead4] linen:text-[#8c522d] flex items-center gap-1.5">
                   <ImageIcon className="w-3.5 h-3.5" />
                   <span>已捕获剪贴板照片</span>
-                  <span className="text-[10px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] font-normal">
+                  <span className="text-[10px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#7a6957] font-normal">
                     ({(pastedImage.file.size / 1024).toFixed(0)} KB)
                   </span>
                 </div>
-                <div className="text-[11px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] truncate mt-0.5">
+                <div className="text-[11px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6f5d4b] truncate mt-0.5">
                   {inputText.trim() ? `配文: ${inputText}` : `可在输入框输入配文，或直接点击发送 (${sendWithEnter ? 'Enter' : 'Ctrl+Enter'})`}
                 </div>
               </div>
@@ -5806,7 +5902,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
               <button
                 type="button"
                 onClick={() => clearPastedImage(true)}
-                className="p-1.5 text-[#64748b] hover:text-[#0f172a] dark:text-[#7b93ad] dark:hover:text-white aurora:text-[#7e9aa5] aurora:hover:text-[#ecf6f8] rounded-lg hover:bg-black/5 dark:hover:bg-white/10 aurora:hover:bg-[#152934] cursor-pointer"
+                className="p-1.5 text-[#64748b] hover:text-[#0f172a] dark:text-[#7b93ad] dark:hover:text-white aurora:text-[#7e9aa5] aurora:hover:text-[#ecf6f8] linen:text-[#7a6957] linen:hover:text-[#2b2118] rounded-lg hover:bg-black/5 dark:hover:bg-white/10 aurora:hover:bg-[#152934] linen:hover:bg-[#e5d6be] cursor-pointer"
                 title="取消发送此图片 (Esc)"
               >
                 <X className="w-4 h-4" />
@@ -5814,7 +5910,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
               <button
                 type="button"
                 onClick={handleSendPastedImage}
-                className="px-3 py-1.5 rounded-lg bg-[#2481cc] hover:bg-[#1d6fb3] dark:bg-[#2ba0ff] dark:hover:bg-[#1e8ee8] aurora:bg-[#0d9488] aurora:hover:bg-[#0f766e] text-white font-medium text-xs cursor-pointer flex items-center gap-1.5 shadow-xs"
+                className="px-3 py-1.5 rounded-lg bg-[#2481cc] hover:bg-[#1d6fb3] dark:bg-[#2ba0ff] dark:hover:bg-[#1e8ee8] aurora:bg-[#0d9488] aurora:hover:bg-[#0f766e] linen:bg-[#3a6652] linen:hover:bg-[#2f5544] text-white font-medium text-xs cursor-pointer flex items-center gap-1.5 shadow-xs"
                 title={`立即发送照片 (${sendWithEnter ? 'Enter' : 'Ctrl+Enter'})`}
               >
                 <Send className="w-3 h-3" />
@@ -5824,41 +5920,75 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
           </div>
         )}
 
-        {/* Composer Top Utility Strip: Outbound Auto-Translate Target */}
+        {/* Composer Action Row Above Input Box (Image 1 Layout) */}
         <div className="flex items-center justify-between gap-2 mb-2 text-[11.5px]">
-          <div className="flex items-center gap-2 min-w-0 overflow-x-auto no-scrollbar">
-            <div
-              className={`inline-flex items-center gap-1 px-2 py-1 rounded-lg border border-transparent select-none pointer-events-none cursor-default shrink-0 ${
-                !isChatTransEnabled
-                  ? 'text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5]'
-                  : 'text-[#475569] dark:text-[#94a3b8] aurora:text-[#7e9aa5]'
+          <div className="flex items-center gap-2 min-w-0">
+            <button
+              type="button"
+              onClick={handleGenerateAiSuggestion}
+              disabled={isGeneratingAi}
+              title={
+                aiCooldownSeconds > 0
+                  ? `大模型冷却中（剩余 ${aiCooldownSeconds} 秒）`
+                  : '基于人设与最近30条对话生成 AI 拟真回复'
+              }
+              className={`inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-[11.5px] font-medium transition-all cursor-pointer shrink-0 shadow-xs ${
+                isGeneratingAi
+                  ? 'bg-[#e8f3ff] text-[#2481cc] dark:bg-[#2ba0ff]/20 dark:text-[#2ba0ff] aurora:bg-[#112e37] aurora:text-[#5eead4] linen:bg-[#b87b53] linen:text-white'
+                  : aiCooldownSeconds > 0
+                  ? 'bg-[#f1f5f9] text-[#64748b] hover:bg-[#e2e8f0]/80 dark:bg-[#152438] dark:text-[#7b93ad] dark:hover:bg-[#1b2f48] aurora:bg-[#13252e] aurora:text-[#7e9aa5] aurora:hover:bg-[#18303b] linen:bg-[#c9b399] linen:text-[#5c4836] linen:hover:bg-[#bfa68a]'
+                  : 'bg-[#2481cc] hover:bg-[#1d6fb3] text-white dark:bg-[#2ba0ff] dark:hover:bg-[#1e8ee8] aurora:bg-[#0d9488] aurora:hover:bg-[#0f766e] linen:bg-[#a86a43] linen:hover:bg-[#935a36] linen:text-white'
               }`}
             >
-              <Languages className={`w-3.5 h-3.5 ${isChatTransEnabled ? 'text-[#16a34a] dark:text-emerald-400' : 'text-[#94a3b8] dark:text-[#64748b]'}`} />
+              <Sparkles className={`w-3.5 h-3.5 ${isGeneratingAi ? 'animate-spin' : ''}`} />
               <span>
-                {isChatTransEnabled
-                  ? `发送时自动译为: ${getLanguageDisplayName(outboundTargetLang)}`
-                  : `${chatTransScopeLabel}已关闭 · 直接发送原文`}
+                {isGeneratingAi
+                  ? '生成中...'
+                  : aiCooldownSeconds > 0
+                  ? `AI 建议回复 (${aiCooldownSeconds}s)`
+                  : 'AI 建议回复'}
               </span>
-            </div>
+            </button>
+
+            <button
+              type="button"
+              disabled={isSynthesizingVoice}
+              onClick={() => void handleDirectVoiceSynthesis()}
+              title="使用已保存声纹直接将当前文本合成为语音发送"
+              className={`inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-[11.5px] font-medium transition-all cursor-pointer shrink-0 shadow-xs bg-[#0f766e] hover:bg-[#115e59] text-white dark:bg-[#174857] dark:hover:bg-[#1c596b] aurora:bg-[#11434d] aurora:hover:bg-[#165562] linen:bg-[#3a6652] linen:hover:bg-[#2f5544] linen:text-white ${
+                isSynthesizingVoice ? 'opacity-65 pointer-events-none' : ''
+              }`}
+            >
+              <Mic className={`w-3.5 h-3.5 ${isSynthesizingVoice ? 'animate-pulse' : ''}`} />
+              <span>{isSynthesizingVoice ? '合成中...' : '音色合成'}</span>
+            </button>
           </div>
 
           <button
+            ref={composerLangButtonRef}
             type="button"
-            disabled={isSynthesizingVoice}
-            onClick={() => void handleDirectVoiceSynthesis()}
-            title="使用已保存声纹直接将当前文本合成为语音发送"
-            className={`inline-flex items-center gap-1 px-2 py-1 rounded-lg text-[#64748b] hover:text-[#2481cc] hover:bg-[#f1f5f9] dark:text-[#94a3b8] dark:hover:text-[#2ba0ff] dark:hover:bg-[#101c2d] aurora:text-[#7e9aa5] aurora:hover:text-[#5eead4] aurora:hover:bg-[#12222a] transition-colors cursor-pointer shrink-0 ${
-              isSynthesizingVoice ? 'opacity-60 pointer-events-none' : ''
-            }`}
+            onClick={() => {
+              if (isLangMenuOpen && langMenuAnchor === 'bottom') {
+                setIsLangMenuOpen(false);
+              } else {
+                setLangMenuAnchor('bottom');
+                setIsLangMenuOpen(true);
+              }
+            }}
+            title={
+              isChatTransEnabled
+                ? `点击切换发信目标语言（当前：${getLanguageDisplayName(outboundTargetLang)}）`
+                : `${chatTransScopeLabel}已关闭（点击仍可预设目标语言）`
+            }
+            className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] linen:border-[#cbbba2] bg-white dark:bg-[#0e1726] aurora:bg-[#101c23] linen:bg-[#faf5ec] hover:bg-[#f1f5f9] dark:hover:bg-[#152438] aurora:hover:bg-[#152934] linen:hover:bg-[#efe4d3] text-[#334155] dark:text-[#d3e2ef] aurora:text-[#d5ebee] linen:text-[#3d2e20] text-[11.5px] font-medium cursor-pointer transition-colors shrink-0 shadow-2xs"
           >
-            <AudioWaveform className={`w-3.5 h-3.5 ${isSynthesizingVoice ? 'animate-pulse text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf]' : ''}`} />
-            <span className="hidden sm:inline">{isSynthesizingVoice ? '合成中...' : '音色合成'}</span>
+            <span className="truncate max-w-[140px]">目标语言: {getLanguageDisplayName(outboundTargetLang)}</span>
+            <ChevronDown className="w-3.5 h-3.5 opacity-75 shrink-0" />
           </button>
         </div>
 
         {/* Main Input Container + Bottom Compact Action Row */}
-        <div className="rounded-xl border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#1e343e] bg-[#f8fafc] dark:bg-[#0e1726] aurora:bg-[#111d24] focus-within:bg-white dark:focus-within:bg-[#101b2c] aurora:focus-within:bg-[#13222b] focus-within:border-[#2481cc] dark:focus-within:border-[#2ba0ff] aurora:focus-within:border-[#2dd4bf] transition-all">
+        <div className="rounded-xl border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#1e343e] linen:border-[#cbbba2] bg-[#f8fafc] dark:bg-[#0e1726] aurora:bg-[#111d24] linen:bg-[#fdfaf4] focus-within:bg-white dark:focus-within:bg-[#101b2c] aurora:focus-within:bg-[#13222b] linen:focus-within:bg-[#fffdf9] focus-within:border-[#2481cc] dark:focus-within:border-[#2ba0ff] aurora:focus-within:border-[#2dd4bf] linen:focus-within:border-[#a86a43] transition-all">
           <textarea
             ref={textareaRef}
             rows={1}
@@ -5871,12 +6001,12 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                 ? '修改消息...'
                 : pastedImage
                 ? '添加图片说明（可选）...'
-                : '输入消息（支持自动翻译、Shift+Enter 换行与 Ctrl+V 粘贴图片）...'
+                : '输入消息...'
             }
-            className={`w-full max-h-36 resize-none bg-transparent text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] ${chatFontClasses.composer} leading-relaxed px-3.5 pt-2.5 pb-1.5 focus:outline-none placeholder-[#94a3b8] dark:placeholder-[#566d85] aurora:placeholder-[#5a7782] overflow-y-hidden`}
+            className={`w-full max-h-36 resize-none bg-transparent text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118] ${chatFontClasses.composer} leading-relaxed px-3.5 pt-2.5 pb-1.5 focus:outline-none placeholder-[#94a3b8] dark:placeholder-[#566d85] aurora:placeholder-[#5a7782] linen:placeholder-[#9c8c7a] overflow-y-hidden`}
           />
 
-          <div className="px-2.5 pb-2 pt-1 flex items-center justify-between border-t border-[#e2e8f0]/60 dark:border-white/5 aurora:border-[#182b34]">
+          <div className="px-2.5 pb-2 pt-1 flex items-center justify-between border-t border-[#e2e8f0]/60 dark:border-white/5 aurora:border-[#182b34] linen:border-[#e6dac6]">
             {/* Left Tools */}
             <div className="flex items-center gap-1">
               <button
@@ -5886,8 +6016,8 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                 title="附加文件、图片或文档"
                 className={`w-8 h-8 rounded-lg flex items-center justify-center transition-colors cursor-pointer ${
                   isAttachmentMenuOpen
-                    ? 'bg-[#e8f3ff] text-[#2481cc] dark:bg-[#2ba0ff]/20 dark:text-[#2ba0ff] aurora:bg-[#112e37] aurora:text-[#5eead4]'
-                    : 'hover:bg-[#e2e8f0]/60 dark:hover:bg-[#152438] aurora:hover:bg-[#152934] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] hover:text-[#2481cc] dark:hover:text-[#2ba0ff] aurora:hover:text-[#5eead4]'
+                    ? 'bg-[#e8f3ff] text-[#2481cc] dark:bg-[#2ba0ff]/20 dark:text-[#2ba0ff] aurora:bg-[#112e37] aurora:text-[#5eead4] linen:bg-[#eadcc6] linen:text-[#a86a43]'
+                    : 'hover:bg-[#e2e8f0]/60 dark:hover:bg-[#152438] aurora:hover:bg-[#152934] linen:hover:bg-[#eee2cf] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#7a6957] hover:text-[#2481cc] dark:hover:text-[#2ba0ff] aurora:hover:text-[#5eead4] linen:hover:text-[#a86a43]'
                 }`}
               >
                 <Paperclip className="w-4 h-4 -rotate-45" />
@@ -5900,8 +6030,8 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                 title="表情与贴纸"
                 className={`w-8 h-8 rounded-lg flex items-center justify-center transition-colors cursor-pointer ${
                   showEmojiPicker
-                    ? 'bg-[#e8f3ff] text-[#2481cc] dark:bg-[#2ba0ff]/20 dark:text-[#2ba0ff] aurora:bg-[#112e37] aurora:text-[#5eead4]'
-                    : 'hover:bg-[#e2e8f0]/60 dark:hover:bg-[#152438] aurora:hover:bg-[#152934] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] hover:text-[#2481cc] dark:hover:text-[#2ba0ff] aurora:hover:text-[#5eead4]'
+                    ? 'bg-[#e8f3ff] text-[#2481cc] dark:bg-[#2ba0ff]/20 dark:text-[#2ba0ff] aurora:bg-[#112e37] aurora:text-[#5eead4] linen:bg-[#eadcc6] linen:text-[#a86a43]'
+                    : 'hover:bg-[#e2e8f0]/60 dark:hover:bg-[#152438] aurora:hover:bg-[#152934] linen:hover:bg-[#eee2cf] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#7a6957] hover:text-[#2481cc] dark:hover:text-[#2ba0ff] aurora:hover:text-[#5eead4] linen:hover:text-[#a86a43]'
                 }`}
               >
                 <Smile className="w-4 h-4" />
@@ -5917,73 +6047,42 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                   }
                 }}
                 title="真人声纹样本克隆"
-                className="w-8 h-8 rounded-lg flex items-center justify-center text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] hover:text-[#2481cc] dark:hover:text-[#2ba0ff] aurora:hover:text-[#5eead4] hover:bg-[#e2e8f0]/60 dark:hover:bg-[#152438] aurora:hover:bg-[#152934] transition-colors cursor-pointer"
+                className="w-8 h-8 rounded-lg flex items-center justify-center text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#7a6957] hover:text-[#2481cc] dark:hover:text-[#2ba0ff] aurora:hover:text-[#5eead4] linen:hover:text-[#a86a43] hover:bg-[#e2e8f0]/60 dark:hover:bg-[#152438] aurora:hover:bg-[#152934] linen:hover:bg-[#eee2cf] transition-colors cursor-pointer"
               >
                 <AudioWaveform className="w-4 h-4" />
               </button>
 
               <button
                 type="button"
-                onClick={handleGenerateAiSuggestion}
-                disabled={isGeneratingAi}
-                title={
-                  aiCooldownSeconds > 0
-                    ? `大模型冷却中（剩余 ${aiCooldownSeconds} 秒）`
-                    : '基于人设与最近30条对话生成 AI 拟真回复'
-                }
-                className={`flex items-center gap-1 px-2.5 h-8 rounded-lg text-xs font-medium transition-all cursor-pointer ${
-                  isGeneratingAi
-                    ? 'bg-[#e8f3ff] text-[#2481cc] dark:bg-[#2ba0ff]/20 dark:text-[#2ba0ff] aurora:bg-[#112e37] aurora:text-[#5eead4]'
-                    : aiCooldownSeconds > 0
-                    ? 'bg-[#f1f5f9] text-[#64748b] hover:bg-[#e2e8f0]/80 dark:bg-[#152438] dark:text-[#7b93ad] dark:hover:bg-[#1b2f48] aurora:bg-[#13252e] aurora:text-[#7e9aa5] aurora:hover:bg-[#18303b]'
-                    : 'hover:bg-[#e8f3ff] text-[#2481cc] dark:text-[#2ba0ff] dark:hover:bg-[#2ba0ff]/15 aurora:text-[#5eead4] aurora:hover:bg-[#112e37]'
+                onClick={handleToggleRecordMic}
+                title={isRecordingMic ? '点击停止录音并发送' : '点击录制语音消息'}
+                className={`h-8 px-2 rounded-lg flex items-center gap-1 text-xs font-medium transition-colors cursor-pointer ${
+                  isRecordingMic
+                    ? 'bg-rose-500 text-white animate-pulse'
+                    : 'hover:bg-[#e2e8f0]/60 dark:hover:bg-[#152438] aurora:hover:bg-[#152934] linen:hover:bg-[#eee2cf] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#7a6957] hover:text-[#2481cc] dark:hover:text-[#2ba0ff] aurora:hover:text-[#5eead4] linen:hover:text-[#a86a43]'
                 }`}
               >
-                <Sparkles className={`w-3.5 h-3.5 ${isGeneratingAi ? 'animate-spin' : ''}`} />
-                <span>
-                  {isGeneratingAi
-                    ? '生成中...'
-                    : aiCooldownSeconds > 0
-                    ? `AI 建议回复 (${aiCooldownSeconds}s)`
-                    : 'AI 建议回复'}
-                </span>
+                <Volume2 className="w-4 h-4" />
+                {isRecordingMic && <span className="tabular-nums">{recordDuration}s</span>}
               </button>
             </div>
 
-            {/* Right Actions: Shortcut hint + Mic / Send Button */}
-            <div className="flex items-center gap-2">
-              <span className="hidden sm:inline text-[11px] text-[#94a3b8] dark:text-[#7b93ad] aurora:text-[#7e9aa5] select-none">
+            {/* Right Actions: Shortcut hint + Send Button */}
+            <div className="flex items-center gap-2.5">
+              <span className="hidden sm:inline text-[11px] text-[#94a3b8] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#84725e] select-none">
                 {sendWithEnter ? 'Enter 发送 · Shift+Enter 换行' : 'Ctrl+Enter 发送 · Enter 换行'}
               </span>
 
-              {inputText.trim() || pastedImage ? (
-                <button
-                  type="button"
-                  disabled={isSending}
-                  onClick={pastedImage ? handleSendPastedImage : () => void handleSendText()}
-                  title={editingMessage ? '保存修改' : pastedImage ? '发送照片' : '发送消息'}
-                  className={`h-8 px-3.5 rounded-lg bg-[#2481cc] hover:bg-[#1d6fb3] dark:bg-[#2ba0ff] dark:hover:bg-[#1e8ee8] aurora:bg-[#0d9488] aurora:hover:bg-[#0f766e] text-white text-xs font-medium flex items-center gap-1.5 transition-all cursor-pointer shadow-xs shrink-0 ${
-                    isSending ? 'opacity-50 pointer-events-none' : ''
-                  }`}
-                >
-                  <span>{editingMessage ? '保存' : pastedImage ? '发送照片' : '发送'}</span>
-                  {editingMessage ? <Check className="w-3.5 h-3.5" /> : <Send className="w-3.5 h-3.5" />}
-                </button>
-              ) : (
-                <button
-                  type="button"
-                  onClick={handleToggleRecordMic}
-                  title={isRecordingMic ? '点击停止录音并发送' : '点击录制语音消息'}
-                  className={`h-8 px-3 rounded-lg flex items-center gap-1.5 text-xs font-medium transition-all cursor-pointer shrink-0 ${
-                    isRecordingMic
-                      ? 'bg-rose-500 text-white animate-pulse'
-                      : 'bg-[#f1f5f9] hover:bg-[#e8f3ff] text-[#475569] hover:text-[#2481cc] dark:bg-[#152438] dark:text-[#b4c6d8] dark:hover:text-[#2ba0ff] aurora:bg-[#152934] aurora:text-[#b7d0d8] aurora:hover:text-[#5eead4]'
-                  }`}
-                >
-                  <Mic className="w-3.5 h-3.5" />
-                  <span>{isRecordingMic ? `${recordDuration}s` : '语音'}</span>
-                </button>
-              )}
+              <button
+                type="button"
+                disabled={isSending || (!inputText.trim() && !pastedImage && !editingMessage)}
+                onClick={pastedImage ? handleSendPastedImage : () => void handleSendText()}
+                title={editingMessage ? '保存修改' : pastedImage ? '发送照片' : '发送消息'}
+                className={`h-8 px-4 rounded-full bg-[#2481cc] hover:bg-[#1d6fb3] dark:bg-[#2ba0ff] dark:hover:bg-[#1e8ee8] aurora:bg-[#0d9488] aurora:hover:bg-[#0f766e] linen:bg-[#3a6652] linen:hover:bg-[#2f5544] text-white text-xs font-medium flex items-center gap-1.5 transition-all cursor-pointer shadow-xs shrink-0 disabled:opacity-55 disabled:cursor-default`}
+              >
+                {editingMessage ? <Check className="w-3.5 h-3.5" /> : <Send className="w-3.5 h-3.5" />}
+                <span>{editingMessage ? '保存' : pastedImage ? '发送照片' : '发送'}</span>
+              </button>
             </div>
           </div>
         </div>
@@ -6050,7 +6149,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
       {/* Telegram Message Context Menu Popup (Right-Click) */}
       {messageContextMenu && typeof document !== 'undefined' && createPortal(
         <div
-          className="fixed z-[9995] bg-white dark:bg-[#0e1726] aurora:bg-[#101c23] border border-[#e2e8f0] dark:border-[#1e3148] aurora:border-[#203742] rounded-2xl p-1.5 shadow-2xl min-w-[170px] text-xs select-none animate-in fade-in zoom-in-95 duration-100"
+          className="fixed z-[9995] bg-white dark:bg-[#0e1726] aurora:bg-[#101c23] linen:bg-[#f8f2e7] border border-[#e2e8f0] dark:border-[#1e3148] aurora:border-[#203742] linen:border-[#cbbba2] rounded-2xl p-1.5 shadow-2xl min-w-[170px] text-xs select-none animate-in fade-in zoom-in-95 duration-100"
           style={{
             left: `${messageContextMenu.x}px`,
             top: `${messageContextMenu.y}px`,
@@ -6058,7 +6157,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
           onClick={(e) => e.stopPropagation()}
         >
           {/* Quick Reaction Bar in Context Menu */}
-          <div className="flex items-center justify-between px-2 py-1 mb-1 border-b border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34]">
+          <div className="flex items-center justify-between px-2 py-1 mb-1 border-b border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] linen:border-[#e6dac6]">
             {['👍', '❤️', '🔥', '🎉'].map((emoji) => (
               <button
                 key={emoji}
@@ -6082,9 +6181,9 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
               setEditingMessage(null);
               setMessageContextMenu(null);
             }}
-            className="w-full flex items-center gap-2.5 px-3 py-2 rounded-xl hover:bg-[#f1f5f9] dark:hover:bg-[#152438] aurora:hover:bg-[#152934] text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] cursor-pointer font-medium"
+            className="w-full flex items-center gap-2.5 px-3 py-2 rounded-xl hover:bg-[#f1f5f9] dark:hover:bg-[#152438] aurora:hover:bg-[#152934] linen:hover:bg-[#efe4d3] text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118] cursor-pointer font-medium"
           >
-            <Reply className="w-4 h-4 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#5eead4]" />
+            <Reply className="w-4 h-4 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#5eead4] linen:text-[#a86a43]" />
             <span>回复消息</span>
           </button>
 
@@ -6095,9 +6194,9 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
               setMessageContextMenu(null);
               handleOpenForwardModal([target]);
             }}
-            className="w-full flex items-center gap-2.5 px-3 py-2 rounded-xl hover:bg-[#f1f5f9] dark:hover:bg-[#152438] aurora:hover:bg-[#152934] text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] cursor-pointer font-medium"
+            className="w-full flex items-center gap-2.5 px-3 py-2 rounded-xl hover:bg-[#f1f5f9] dark:hover:bg-[#152438] aurora:hover:bg-[#152934] linen:hover:bg-[#efe4d3] text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118] cursor-pointer font-medium"
           >
-            <Forward className="w-4 h-4 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#5eead4]" />
+            <Forward className="w-4 h-4 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#5eead4] linen:text-[#a86a43]" />
             <span>转发消息</span>
           </button>
 
@@ -6109,9 +6208,9 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
               setIsMultiSelectMode(true);
               setSelectedMessageIds(new Set([target.id]));
             }}
-            className="w-full flex items-center gap-2.5 px-3 py-2 rounded-xl hover:bg-[#f1f5f9] dark:hover:bg-[#152438] aurora:hover:bg-[#152934] text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] cursor-pointer font-medium"
+            className="w-full flex items-center gap-2.5 px-3 py-2 rounded-xl hover:bg-[#f1f5f9] dark:hover:bg-[#152438] aurora:hover:bg-[#152934] linen:hover:bg-[#efe4d3] text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118] cursor-pointer font-medium"
           >
-            <CheckSquare className="w-4 h-4 text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5]" />
+            <CheckSquare className="w-4 h-4 text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#7a6957]" />
             <span>多选消息</span>
           </button>
 
@@ -6125,9 +6224,9 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
               }
               setMessageContextMenu(null);
             }}
-            className="w-full flex items-center gap-2.5 px-3 py-2 rounded-xl hover:bg-[#f1f5f9] dark:hover:bg-[#152438] aurora:hover:bg-[#152934] text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] cursor-pointer font-medium"
+            className="w-full flex items-center gap-2.5 px-3 py-2 rounded-xl hover:bg-[#f1f5f9] dark:hover:bg-[#152438] aurora:hover:bg-[#152934] linen:hover:bg-[#efe4d3] text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118] cursor-pointer font-medium"
           >
-            <Copy className="w-4 h-4 text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5]" />
+            <Copy className="w-4 h-4 text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#7a6957]" />
             <span>{messageContextMenu.message.isImage ? '复制照片' : messageContextMenu.message.isVideo ? '复制视频说明' : '复制文字'}</span>
           </button>
 
@@ -6148,9 +6247,9 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                 setMessageContextMenu(null);
                 void triggerManualTranslate(target);
               }}
-              className="w-full flex items-center gap-2.5 px-3 py-2 rounded-xl hover:bg-[#f1f5f9] dark:hover:bg-[#152438] aurora:hover:bg-[#152934] text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] cursor-pointer font-medium"
+              className="w-full flex items-center gap-2.5 px-3 py-2 rounded-xl hover:bg-[#f1f5f9] dark:hover:bg-[#152438] aurora:hover:bg-[#152934] linen:hover:bg-[#efe4d3] text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118] cursor-pointer font-medium"
             >
-              <Languages className="w-4 h-4 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#5eead4]" />
+              <Languages className="w-4 h-4 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#5eead4] linen:text-[#a86a43]" />
               <span>{messageContextMenu.message.translatedText ? '重新翻译' : '翻译此消息'}</span>
             </button>
           )}
@@ -6161,9 +6260,9 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
               onTogglePinMessage?.(messageContextMenu.message.id);
               setMessageContextMenu(null);
             }}
-            className="w-full flex items-center gap-2.5 px-3 py-2 rounded-xl hover:bg-[#f1f5f9] dark:hover:bg-[#152438] aurora:hover:bg-[#152934] text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] cursor-pointer font-medium"
+            className="w-full flex items-center gap-2.5 px-3 py-2 rounded-xl hover:bg-[#f1f5f9] dark:hover:bg-[#152438] aurora:hover:bg-[#152934] linen:hover:bg-[#efe4d3] text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118] cursor-pointer font-medium"
           >
-            <Pin className="w-4 h-4 text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5]" />
+            <Pin className="w-4 h-4 text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#7a6957]" />
             <span>{messageContextMenu.message.isPinned ? '取消置顶' : '置顶消息'}</span>
           </button>
 
@@ -6182,9 +6281,9 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                 setMessageContextMenu(null);
                 void handleOpenReadReceipts(target);
               }}
-              className="w-full flex items-center gap-2.5 px-3 py-2 rounded-xl hover:bg-[#f1f5f9] dark:hover:bg-[#152438] aurora:hover:bg-[#152934] text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] cursor-pointer font-medium"
+              className="w-full flex items-center gap-2.5 px-3 py-2 rounded-xl hover:bg-[#f1f5f9] dark:hover:bg-[#152438] aurora:hover:bg-[#152934] linen:hover:bg-[#efe4d3] text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118] cursor-pointer font-medium"
             >
-              <Eye className="w-4 h-4 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#5eead4]" />
+              <Eye className="w-4 h-4 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#5eead4] linen:text-[#a86a43]" />
               <span>查看已读成员</span>
             </button>
           )}
@@ -6203,14 +6302,14 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                 setReplyingTo(null);
                 setMessageContextMenu(null);
               }}
-              className="w-full flex items-center gap-2.5 px-3 py-2 rounded-xl hover:bg-[#f1f5f9] dark:hover:bg-[#152438] aurora:hover:bg-[#152934] text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] cursor-pointer font-medium"
+              className="w-full flex items-center gap-2.5 px-3 py-2 rounded-xl hover:bg-[#f1f5f9] dark:hover:bg-[#152438] aurora:hover:bg-[#152934] linen:hover:bg-[#efe4d3] text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118] cursor-pointer font-medium"
             >
-              <Edit2 className="w-4 h-4 text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5]" />
+              <Edit2 className="w-4 h-4 text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#7a6957]" />
               <span>编辑消息</span>
             </button>
           )}
 
-          <div className="my-1 border-t border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34]" />
+          <div className="my-1 border-t border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] linen:border-[#e6dac6]" />
 
           <button
             type="button"
@@ -6242,16 +6341,16 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
         const showPeerGroupHint = !isLocalOnly && isTgUserChat && messageToDelete.sender === 'peer' && (chat.isGroup || chat.isChannel);
         return (
           <div className="fixed inset-0 bg-black/55 dark:bg-black/75 aurora:bg-black/80 backdrop-blur-xs flex items-center justify-center z-50 p-4 animate-in fade-in duration-150">
-            <div className="bg-white dark:bg-[#0b131f] aurora:bg-[#0c151b] border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] rounded-2xl p-5 max-w-sm w-full shadow-2xl space-y-4">
+            <div className="bg-white dark:bg-[#0b131f] aurora:bg-[#0c151b] linen:bg-[#f8f2e7] border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] linen:border-[#cbbba2] rounded-2xl p-5 max-w-sm w-full shadow-2xl space-y-4">
               <div className="flex items-center gap-3">
                 <div className="w-10 h-10 rounded-full bg-rose-500/10 dark:bg-rose-500/20 text-rose-500 flex items-center justify-center shrink-0">
                   <Trash2 className="w-5 h-5" />
                 </div>
                 <div className="min-w-0">
-                  <h3 className="text-sm font-semibold text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8]">
+                  <h3 className="text-sm font-semibold text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118]">
                     删除此条消息？
                   </h3>
-                  <p className="text-xs text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] mt-0.5">
+                  <p className="text-xs text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a] mt-0.5">
                     {isLocalOnly
                       ? '该消息未送达 Telegram 云端，确认后将仅从本地列表移除。'
                       : messageToDelete.sender === 'me'
@@ -6261,26 +6360,26 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                 </div>
               </div>
 
-              <div className="p-2.5 rounded-xl bg-[#f8fafc] dark:bg-[#08101a] aurora:bg-[#081014] text-xs text-[#475569] dark:text-[#b4c6d8] aurora:text-[#b7d0d8] truncate border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34]">
+              <div className="p-2.5 rounded-xl bg-[#f8fafc] dark:bg-[#08101a] aurora:bg-[#081014] linen:bg-[#efe6d6] text-xs text-[#475569] dark:text-[#b4c6d8] aurora:text-[#b7d0d8] linen:text-[#4e3f32] truncate border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] linen:border-[#d5c6ae]">
                 “{messageToDelete.text || (messageToDelete.isAudio ? '🎤 语音消息' : messageToDelete.isVideo ? '🎬 视频消息' : messageToDelete.isImage ? '🖼️ 图片消息' : '消息内容')}”
               </div>
 
               {showRevokeOption && (
-                <label className="flex items-start gap-2.5 p-2.5 rounded-xl bg-[#f8fafc] dark:bg-[#0e1726] aurora:bg-[#101c23] border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] cursor-pointer text-xs">
+                <label className="flex items-start gap-2.5 p-2.5 rounded-xl bg-[#f8fafc] dark:bg-[#0e1726] aurora:bg-[#101c23] linen:bg-[#efe6d6] border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] linen:border-[#d5c6ae] cursor-pointer text-xs">
                   <input
                     type="checkbox"
                     checked={revokeSingleDelete}
                     onChange={(e) => setRevokeSingleDelete(e.target.checked)}
-                    className="mt-0.5 rounded border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] text-[#2481cc] aurora:text-[#14b8a6] focus:ring-[#2481cc] aurora:focus:ring-[#2dd4bf]"
+                    className="mt-0.5 rounded border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] linen:border-[#bfa98c] text-[#2481cc] aurora:text-[#14b8a6] linen:text-[#a86a43] focus:ring-[#2481cc] aurora:focus:ring-[#2dd4bf] linen:focus:ring-[#a86a43]"
                   />
-                  <span className="text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] leading-snug">
+                  <span className="text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118] leading-snug">
                     同时为对方删除 / 双向撤回
                   </span>
                 </label>
               )}
 
               {showSupergroupHint && !showPeerGroupHint && (
-                <p className="text-[11px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] leading-snug">
+                <p className="text-[11px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a] leading-snug">
                   提示：在超级群组/频道中删除消息将直接从云端对所有成员删除。
                 </p>
               )}
@@ -6295,7 +6394,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                 <button
                   type="button"
                   onClick={() => setMessageToDelete(null)}
-                  className="px-4 py-2 rounded-xl text-xs font-medium text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] hover:bg-[#f1f5f9] dark:hover:bg-[#152438] aurora:hover:bg-[#152934] transition-colors cursor-pointer"
+                  className="px-4 py-2 rounded-xl text-xs font-medium text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a] hover:bg-[#f1f5f9] dark:hover:bg-[#152438] aurora:hover:bg-[#152934] linen:hover:bg-[#e9decb] transition-colors cursor-pointer"
                 >
                   取消
                 </button>
@@ -6319,30 +6418,30 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
         const isSupergroupOrChannel = chat.id.startsWith('tg_-100') || Boolean(chat.isChannel);
         return (
         <div className="fixed inset-0 bg-black/55 dark:bg-black/75 aurora:bg-black/80 backdrop-blur-xs flex items-center justify-center z-50 p-4 animate-in fade-in duration-150">
-          <div className="bg-white dark:bg-[#0b131f] aurora:bg-[#0c151b] border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] rounded-2xl p-5 max-w-sm w-full shadow-2xl space-y-4">
+          <div className="bg-white dark:bg-[#0b131f] aurora:bg-[#0c151b] linen:bg-[#f8f2e7] border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] linen:border-[#cbbba2] rounded-2xl p-5 max-w-sm w-full shadow-2xl space-y-4">
             <div className="flex items-center gap-3">
               <div className="w-10 h-10 rounded-full bg-rose-500/10 dark:bg-rose-500/20 text-rose-500 flex items-center justify-center shrink-0">
                 <Trash2 className="w-5 h-5" />
               </div>
               <div className="min-w-0">
-                <h3 className="text-sm font-semibold text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8]">
+                <h3 className="text-sm font-semibold text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118]">
                   批量删除 {selectedMessageIds.size} 条消息？
                 </h3>
-                <p className="text-xs text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] mt-0.5">
+                <p className="text-xs text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a] mt-0.5">
                   删除操作将同步到 Telegram 云端及本地记录，不可恢复。
                 </p>
               </div>
             </div>
 
             {isTgUserChat && !isSupergroupOrChannel && (
-              <label className="flex items-start gap-2.5 p-2.5 rounded-xl bg-[#f8fafc] dark:bg-[#0e1726] aurora:bg-[#101c23] border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] cursor-pointer text-xs">
+              <label className="flex items-start gap-2.5 p-2.5 rounded-xl bg-[#f8fafc] dark:bg-[#0e1726] aurora:bg-[#101c23] linen:bg-[#efe6d6] border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] linen:border-[#d5c6ae] cursor-pointer text-xs">
                 <input
                   type="checkbox"
                   checked={revokeBatchDelete}
                   onChange={(e) => setRevokeBatchDelete(e.target.checked)}
-                  className="mt-0.5 rounded border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] text-[#2481cc] aurora:text-[#14b8a6] focus:ring-[#2481cc] aurora:focus:ring-[#2dd4bf]"
+                  className="mt-0.5 rounded border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] linen:border-[#bfa98c] text-[#2481cc] aurora:text-[#14b8a6] linen:text-[#a86a43] focus:ring-[#2481cc] aurora:focus:ring-[#2dd4bf] linen:focus:ring-[#a86a43]"
                 />
-                <span className="text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] leading-snug">
+                <span className="text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118] leading-snug">
                   同时为对方删除 / 双向撤回
                 </span>
               </label>
@@ -6359,7 +6458,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                 type="button"
                 disabled={isBatchDeleting}
                 onClick={() => setShowBatchDeleteModal(false)}
-                className="px-4 py-2 rounded-xl text-xs font-medium text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] hover:bg-[#f1f5f9] dark:hover:bg-[#152438] aurora:hover:bg-[#152934] transition-colors cursor-pointer"
+                className="px-4 py-2 rounded-xl text-xs font-medium text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a] hover:bg-[#f1f5f9] dark:hover:bg-[#152438] aurora:hover:bg-[#152934] linen:hover:bg-[#e9decb] transition-colors cursor-pointer"
               >
                 取消
               </button>
@@ -6381,41 +6480,41 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
       {/* Forward Messages Target Picker Modal */}
       {forwardModalMessages && (
         <div className="fixed inset-0 bg-black/55 dark:bg-black/75 aurora:bg-black/80 backdrop-blur-xs flex items-center justify-center z-50 p-4 animate-in fade-in duration-150">
-          <div className="bg-white dark:bg-[#0b131f] aurora:bg-[#0c151b] border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] rounded-2xl w-full max-w-md shadow-2xl overflow-hidden flex flex-col max-h-[80vh]">
-            <div className="px-4 py-3 border-b border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] bg-[#f8fafc] dark:bg-[#0d1726] aurora:bg-[#0e1920] flex items-center justify-between">
+          <div className="bg-white dark:bg-[#0b131f] aurora:bg-[#0c151b] linen:bg-[#f8f2e7] border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] linen:border-[#cbbba2] rounded-2xl w-full max-w-md shadow-2xl overflow-hidden flex flex-col max-h-[80vh]">
+            <div className="px-4 py-3 border-b border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] linen:border-[#e6dac6] bg-[#f8fafc] dark:bg-[#0d1726] aurora:bg-[#0e1920] linen:bg-[#f0e6d5] flex items-center justify-between">
               <div className="flex items-center gap-2">
-                <Forward className="w-4 h-4 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#5eead4]" />
-                <span className="font-semibold text-sm text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8]">
+                <Forward className="w-4 h-4 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#5eead4] linen:text-[#a86a43]" />
+                <span className="font-semibold text-sm text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118]">
                   转发 {forwardModalMessages.length} 条消息至...
                 </span>
               </div>
               <button
                 type="button"
                 onClick={() => setForwardModalMessages(null)}
-                className="p-1 text-[#64748b] hover:text-[#0f172a] dark:text-[#7b93ad] dark:hover:text-white aurora:text-[#7e9aa5] aurora:hover:text-[#ecf6f8] cursor-pointer"
+                className="p-1 text-[#64748b] hover:text-[#0f172a] dark:text-[#7b93ad] dark:hover:text-white aurora:text-[#7e9aa5] aurora:hover:text-[#ecf6f8] linen:text-[#6e5c4a] linen:hover:text-[#2b2118] cursor-pointer"
               >
                 <X className="w-4 h-4" />
               </button>
             </div>
 
-            <div className="p-3 border-b border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] space-y-2">
+            <div className="p-3 border-b border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] linen:border-[#e6dac6] space-y-2">
               <div className="relative">
-                <Search className="w-3.5 h-3.5 text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] absolute left-3 top-1/2 -translate-y-1/2" />
+                <Search className="w-3.5 h-3.5 text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#7a6957] absolute left-3 top-1/2 -translate-y-1/2" />
                 <input
                   type="text"
                   value={forwardSearch}
                   onChange={(e) => setForwardSearch(e.target.value)}
                   placeholder="搜索目标会话、联系人或群组..."
                   autoFocus
-                  className="w-full bg-[#f1f5f9] dark:bg-[#08101a] aurora:bg-[#081014] pl-8 pr-3 py-1.5 rounded-lg text-xs text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] placeholder-[#94a3b8] dark:placeholder-[#4e657e] aurora:placeholder-[#5a7782] focus:outline-none border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] focus:border-[#2ba0ff] aurora:focus:border-[#2dd4bf]"
+                  className="w-full bg-[#f1f5f9] dark:bg-[#08101a] aurora:bg-[#081014] linen:bg-[#efe6d6] pl-8 pr-3 py-1.5 rounded-lg text-xs text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118] placeholder-[#94a3b8] dark:placeholder-[#4e657e] aurora:placeholder-[#5a7782] linen:placeholder-[#8f7e6c] focus:outline-none border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] linen:border-[#cbbba2] focus:border-[#2ba0ff] aurora:focus:border-[#2dd4bf] linen:focus:border-[#a86a43]"
                 />
               </div>
-              <label className="flex items-center gap-2 text-[11.5px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] cursor-pointer select-none">
+              <label className="flex items-center gap-2 text-[11.5px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a] cursor-pointer select-none">
                 <input
                   type="checkbox"
                   checked={forwardDropAuthor}
                   onChange={(e) => setForwardDropAuthor(e.target.checked)}
-                  className="rounded border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] text-[#2481cc] aurora:text-[#14b8a6] focus:ring-[#2481cc] aurora:focus:ring-[#2dd4bf]"
+                  className="rounded border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] linen:border-[#bfa98c] text-[#2481cc] aurora:text-[#14b8a6] linen:text-[#a86a43] focus:ring-[#2481cc] aurora:focus:ring-[#2dd4bf] linen:focus:ring-[#a86a43]"
                 />
                 <span>隐藏原发送者名称（不附带转发来源）</span>
               </label>
@@ -6437,7 +6536,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                     type="button"
                     disabled={isForwarding}
                     onClick={() => void handleConfirmForward(targetChat.id)}
-                    className="w-full flex items-center gap-3 p-2.5 rounded-xl hover:bg-[#f0f7ff] dark:hover:bg-[#132234] aurora:hover:bg-[#112d36] transition-colors text-left cursor-pointer disabled:opacity-50"
+                    className="w-full flex items-center gap-3 p-2.5 rounded-xl hover:bg-[#f0f7ff] dark:hover:bg-[#132234] aurora:hover:bg-[#112d36] linen:hover:bg-[#efe4d3] transition-colors text-left cursor-pointer disabled:opacity-50"
                   >
                     <div
                       className="w-9 h-9 rounded-full flex items-center justify-center text-white text-xs font-bold shrink-0 overflow-hidden relative"
@@ -6464,14 +6563,14 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                       )}
                     </div>
                     <div className="flex-1 min-w-0">
-                      <div className="text-xs font-semibold text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] truncate">
+                      <div className="text-xs font-semibold text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118] truncate">
                         {targetChat.title}
                       </div>
-                      <div className="text-[11px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] truncate">
+                      <div className="text-[11px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a] truncate">
                         {targetChat.username || (targetChat.isGroup ? '群组' : targetChat.isChannel ? '频道' : '私聊对话')}
                       </div>
                     </div>
-                    <Forward className="w-3.5 h-3.5 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#5eead4] shrink-0" />
+                    <Forward className="w-3.5 h-3.5 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#5eead4] linen:text-[#a86a43] shrink-0" />
                   </button>
                 ))}
             </div>
@@ -6487,22 +6586,22 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
             onClick={() => !inviteModalState.joining && setInviteModalState(null)}
           >
             <div
-              className="w-full max-w-sm rounded-2xl border border-[#e2e8f0] dark:border-[#1e3148] aurora:border-[#1f3b44] bg-white dark:bg-[#0f172a] aurora:bg-[#0d1c22] shadow-2xl overflow-hidden"
+              className="w-full max-w-sm rounded-2xl border border-[#e2e8f0] dark:border-[#1e3148] aurora:border-[#1f3b44] linen:border-[#cbbba2] bg-white dark:bg-[#0f172a] aurora:bg-[#0d1c22] linen:bg-[#f8f2e7] shadow-2xl overflow-hidden"
               onClick={(e) => e.stopPropagation()}
             >
-              <div className="flex items-center justify-between px-4 py-3 border-b border-[#e2e8f0] dark:border-[#1e3148] aurora:border-[#1c353d]">
-                <div className="flex items-center gap-2 text-sm font-semibold text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8]">
+              <div className="flex items-center justify-between px-4 py-3 border-b border-[#e2e8f0] dark:border-[#1e3148] aurora:border-[#1c353d] linen:border-[#e6dac6]">
+                <div className="flex items-center gap-2 text-sm font-semibold text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118]">
                   {inviteModalState.preview?.isChannel ? (
-                    <Megaphone className="w-4 h-4 text-[#2481cc] dark:text-[#38bdf8] aurora:text-[#5eead4]" />
+                    <Megaphone className="w-4 h-4 text-[#2481cc] dark:text-[#38bdf8] aurora:text-[#5eead4] linen:text-[#a86a43]" />
                   ) : (
-                    <Users className="w-4 h-4 text-[#2481cc] dark:text-[#38bdf8] aurora:text-[#5eead4]" />
+                    <Users className="w-4 h-4 text-[#2481cc] dark:text-[#38bdf8] aurora:text-[#5eead4] linen:text-[#a86a43]" />
                   )}
                   <span>{inviteModalState.preview?.isChannel ? '频道邀请' : '群组邀请'}</span>
                 </div>
                 <button
                   type="button"
                   onClick={() => !inviteModalState.joining && setInviteModalState(null)}
-                  className="p-1 rounded-lg text-[#64748b] dark:text-[#94a3b8] hover:bg-black/5 dark:hover:bg-white/10 transition-colors cursor-pointer"
+                  className="p-1 rounded-lg text-[#64748b] dark:text-[#94a3b8] linen:text-[#6e5c4a] hover:bg-black/5 dark:hover:bg-white/10 linen:hover:bg-[#e9decb] transition-colors cursor-pointer"
                   aria-label="关闭"
                 >
                   <X className="w-4 h-4" />
@@ -6511,14 +6610,14 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
 
               <div className="p-5">
                 {inviteModalState.loading ? (
-                  <div className="py-8 flex flex-col items-center justify-center gap-2.5 text-[#64748b] dark:text-[#94a3b8] aurora:text-[#8eb2bd]">
-                    <RotateCw className="w-6 h-6 animate-spin text-[#2481cc] dark:text-[#38bdf8] aurora:text-[#5eead4]" />
+                  <div className="py-8 flex flex-col items-center justify-center gap-2.5 text-[#64748b] dark:text-[#94a3b8] aurora:text-[#8eb2bd] linen:text-[#6e5c4a]">
+                    <RotateCw className="w-6 h-6 animate-spin text-[#2481cc] dark:text-[#38bdf8] aurora:text-[#5eead4] linen:text-[#a86a43]" />
                     <span className="text-xs">正在读取 Telegram 群组/频道信息...</span>
                   </div>
                 ) : inviteModalState.error && !inviteModalState.preview ? (
                   <div className="py-4 flex flex-col items-center text-center gap-2.5">
                     <ShieldAlert className="w-8 h-8 text-rose-500" />
-                    <p className="text-xs leading-relaxed text-[#475569] dark:text-[#cbd5e1] aurora:text-[#b7d0d8]">
+                    <p className="text-xs leading-relaxed text-[#475569] dark:text-[#cbd5e1] aurora:text-[#b7d0d8] linen:text-[#4e3f32]">
                       {inviteModalState.error}
                     </p>
                   </div>
@@ -6540,17 +6639,17 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                         />
                       )}
                     </div>
-                    <h3 className="text-base font-bold text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] break-words">
+                    <h3 className="text-base font-bold text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118] break-words">
                       {inviteModalState.preview?.title || 'Telegram 群组'}
                     </h3>
-                    <div className="mt-1 text-xs text-[#64748b] dark:text-[#94a3b8] aurora:text-[#8eb2bd]">
+                    <div className="mt-1 text-xs text-[#64748b] dark:text-[#94a3b8] aurora:text-[#8eb2bd] linen:text-[#6e5c4a]">
                       {inviteModalState.preview?.isChannel ? '频道' : '群组'}
                       {typeof inviteModalState.preview?.participantsCount === 'number'
                         ? ` · ${inviteModalState.preview.participantsCount.toLocaleString()} 位成员`
                         : ''}
                     </div>
                     {inviteModalState.preview?.about && (
-                      <p className="mt-3 text-xs leading-relaxed text-[#475569] dark:text-[#cbd5e1] aurora:text-[#b7d0d8] bg-[#f8fafc] dark:bg-[#132234] aurora:bg-[#10262d] px-3 py-2 rounded-xl w-full text-left whitespace-pre-wrap break-words max-h-28 overflow-y-auto">
+                      <p className="mt-3 text-xs leading-relaxed text-[#475569] dark:text-[#cbd5e1] aurora:text-[#b7d0d8] linen:text-[#4e3f32] bg-[#f8fafc] dark:bg-[#132234] aurora:bg-[#10262d] linen:bg-[#efe6d6] px-3 py-2 rounded-xl w-full text-left whitespace-pre-wrap break-words max-h-28 overflow-y-auto">
                         {inviteModalState.preview.about}
                       </p>
                     )}
@@ -6577,7 +6676,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                     type="button"
                     disabled={inviteModalState.joining}
                     onClick={() => setInviteModalState(null)}
-                    className="px-3.5 py-2 rounded-xl text-xs font-medium text-[#475569] dark:text-[#cbd5e1] aurora:text-[#b7d0d8] hover:bg-black/5 dark:hover:bg-white/10 transition-colors cursor-pointer disabled:opacity-50"
+                    className="px-3.5 py-2 rounded-xl text-xs font-medium text-[#475569] dark:text-[#cbd5e1] aurora:text-[#b7d0d8] linen:text-[#6e5c4a] hover:bg-black/5 dark:hover:bg-white/10 linen:hover:bg-[#e9decb] transition-colors cursor-pointer disabled:opacity-50"
                   >
                     {inviteModalState.preview?.requestSent ? '关闭' : '取消'}
                   </button>
@@ -6586,7 +6685,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                       type="button"
                       disabled={inviteModalState.joining}
                       onClick={() => void handleConfirmJoinInvite()}
-                      className="px-4 py-2 rounded-xl text-xs font-semibold text-white bg-[#2481cc] hover:bg-[#1e6eb0] dark:bg-[#0284c7] dark:hover:bg-[#0369a1] aurora:bg-[#0d9488] aurora:hover:bg-[#0f766e] transition-colors cursor-pointer disabled:opacity-60 flex items-center gap-1.5"
+                      className="px-4 py-2 rounded-xl text-xs font-semibold text-white bg-[#2481cc] hover:bg-[#1e6eb0] dark:bg-[#0284c7] dark:hover:bg-[#0369a1] aurora:bg-[#0d9488] aurora:hover:bg-[#0f766e] linen:bg-[#a86a43] linen:hover:bg-[#8f5734] transition-colors cursor-pointer disabled:opacity-60 flex items-center gap-1.5"
                     >
                       {inviteModalState.joining ? (
                         <>
@@ -6620,16 +6719,16 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
             onClick={() => setMemberProfileModal(null)}
           >
             <div
-              className="w-full max-w-sm rounded-2xl bg-white dark:bg-[#0e1726] aurora:bg-[#0d181e] border border-[#e2e8f0] dark:border-[#1e3148] aurora:border-[#1d343d] shadow-2xl overflow-hidden text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8]"
+              className="w-full max-w-sm rounded-2xl bg-white dark:bg-[#0e1726] aurora:bg-[#0d181e] linen:bg-[#f8f2e7] border border-[#e2e8f0] dark:border-[#1e3148] aurora:border-[#1d343d] linen:border-[#cbbba2] shadow-2xl overflow-hidden text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118]"
               onClick={(e) => e.stopPropagation()}
             >
               {/* Header */}
-              <div className="px-4 py-3 border-b border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] flex items-center justify-between">
+              <div className="px-4 py-3 border-b border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] linen:border-[#e6dac6] flex items-center justify-between">
                 <span className="text-xs font-semibold">成员个人资料</span>
                 <button
                   type="button"
                   onClick={() => setMemberProfileModal(null)}
-                  className="p-1 rounded-lg hover:bg-[#f1f5f9] dark:hover:bg-[#132234] aurora:hover:bg-[#13252e] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] cursor-pointer"
+                  className="p-1 rounded-lg hover:bg-[#f1f5f9] dark:hover:bg-[#132234] aurora:hover:bg-[#13252e] linen:hover:bg-[#e9decb] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a] cursor-pointer"
                 >
                   <X className="w-4 h-4" />
                 </button>
@@ -6676,7 +6775,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                     <div className="flex items-center gap-1.5">
                       <span className="text-sm font-semibold truncate">{memberProfileModal.name}</span>
                       {memberProfileModal.info?.isVerified && (
-                        <span className="px-1.5 py-0.5 rounded bg-[#2481cc]/15 text-[#2481cc] dark:text-[#7cc4ff] aurora:text-[#5eead4] text-[10px] font-medium shrink-0">
+                        <span className="px-1.5 py-0.5 rounded bg-[#2481cc]/15 linen:bg-[#a86a43]/15 text-[#2481cc] dark:text-[#7cc4ff] aurora:text-[#5eead4] linen:text-[#8c522d] text-[10px] font-medium shrink-0">
                           已认证
                         </span>
                       )}
@@ -6690,7 +6789,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                       className={`text-[11px] mt-0.5 ${
                         memberProfileModal.info?.isOnline ?? memberProfileModal.isOnline
                           ? 'text-emerald-600 dark:text-emerald-400 font-medium'
-                          : 'text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5]'
+                          : 'text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a]'
                       }`}
                     >
                       {memberProfileModal.loading
@@ -6701,8 +6800,8 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                 </div>
 
                 {memberProfileModal.loading && (
-                  <div className="flex items-center gap-2 text-xs text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] py-1">
-                    <Loader2 className="w-3.5 h-3.5 animate-spin text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf]" />
+                  <div className="flex items-center gap-2 text-xs text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a] py-1">
+                    <Loader2 className="w-3.5 h-3.5 animate-spin text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf] linen:text-[#a86a43]" />
                     <span>正在读取用户名、简介与联系人状态...</span>
                   </div>
                 )}
@@ -6714,12 +6813,12 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                 )}
 
                 {/* Metadata Rows */}
-                <div className="rounded-xl bg-[#f8fafc] dark:bg-[#08101a] aurora:bg-[#081014] border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] divide-y divide-[#e2e8f0] dark:divide-[#18273a] aurora:divide-[#182b34] text-xs">
+                <div className="rounded-xl bg-[#f8fafc] dark:bg-[#08101a] aurora:bg-[#081014] linen:bg-[#efe6d6] border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] linen:border-[#d5c6ae] divide-y divide-[#e2e8f0] dark:divide-[#18273a] aurora:divide-[#182b34] linen:divide-[#dfd2bc] text-xs">
                   {(memberProfileModal.info?.username || memberProfileModal.username) && (
                     <div className="px-3 py-2 flex items-center justify-between gap-2">
-                      <div className="flex items-center gap-2 text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] min-w-0">
+                      <div className="flex items-center gap-2 text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a] min-w-0">
                         <AtSign className="w-3.5 h-3.5 shrink-0" />
-                        <span className="truncate text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8]">
+                        <span className="truncate text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118]">
                           {(() => {
                             const u = memberProfileModal.info?.username || memberProfileModal.username || '';
                             return u.startsWith('@') ? u : `@${u}`;
@@ -6735,7 +6834,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                           setCopiedId(`member_un_${memberProfileModal.targetChatId}`);
                           setTimeout(() => setCopiedId((c) => (c === `member_un_${memberProfileModal.targetChatId}` ? null : c)), 1500);
                         }}
-                        className="text-[11px] text-[#2481cc] dark:text-[#7cc4ff] aurora:text-[#5eead4] hover:underline shrink-0 cursor-pointer"
+                        className="text-[11px] text-[#2481cc] dark:text-[#7cc4ff] aurora:text-[#5eead4] linen:text-[#8c522d] hover:underline shrink-0 cursor-pointer"
                       >
                         {copiedId === `member_un_${memberProfileModal.targetChatId}` ? '已复制' : '复制'}
                       </button>
@@ -6744,9 +6843,9 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
 
                   {memberProfileModal.info?.phone && (
                     <div className="px-3 py-2 flex items-center justify-between gap-2">
-                      <div className="flex items-center gap-2 text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] min-w-0">
+                      <div className="flex items-center gap-2 text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a] min-w-0">
                         <Phone className="w-3.5 h-3.5 shrink-0" />
-                        <span className="truncate text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8]">{memberProfileModal.info.phone}</span>
+                        <span className="truncate text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118]">{memberProfileModal.info.phone}</span>
                       </div>
                       <button
                         type="button"
@@ -6755,17 +6854,17 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                           setCopiedId(`member_ph_${memberProfileModal.targetChatId}`);
                           setTimeout(() => setCopiedId((c) => (c === `member_ph_${memberProfileModal.targetChatId}` ? null : c)), 1500);
                         }}
-                        className="text-[11px] text-[#2481cc] dark:text-[#7cc4ff] aurora:text-[#5eead4] hover:underline shrink-0 cursor-pointer"
+                        className="text-[11px] text-[#2481cc] dark:text-[#7cc4ff] aurora:text-[#5eead4] linen:text-[#8c522d] hover:underline shrink-0 cursor-pointer"
                       >
                         {copiedId === `member_ph_${memberProfileModal.targetChatId}` ? '已复制' : '复制'}
                       </button>
                     </div>
                   )}
 
-                  <div className="px-3 py-2 flex items-center justify-between gap-2 text-[11px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5]">
+                  <div className="px-3 py-2 flex items-center justify-between gap-2 text-[11px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a]">
                     <div className="flex items-center gap-2 min-w-0">
                       <span className="shrink-0">ID</span>
-                      <span className="font-mono truncate select-all text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8]">
+                      <span className="font-mono truncate select-all text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118]">
                         {memberProfileModal.senderId}
                       </span>
                     </div>
@@ -6776,14 +6875,14 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                         setCopiedId(`member_id_${memberProfileModal.targetChatId}`);
                         setTimeout(() => setCopiedId((c) => (c === `member_id_${memberProfileModal.targetChatId}` ? null : c)), 1500);
                       }}
-                      className="text-[11px] text-[#2481cc] dark:text-[#7cc4ff] aurora:text-[#5eead4] hover:underline shrink-0 cursor-pointer"
+                      className="text-[11px] text-[#2481cc] dark:text-[#7cc4ff] aurora:text-[#5eead4] linen:text-[#8c522d] hover:underline shrink-0 cursor-pointer"
                     >
                       {copiedId === `member_id_${memberProfileModal.targetChatId}` ? '已复制' : '复制'}
                     </button>
                   </div>
 
                   {memberProfileModal.info?.description && (
-                    <div className="px-3 py-2 text-[11.5px] leading-relaxed text-[#475569] dark:text-[#b4c6d8] aurora:text-[#b7d0d8] whitespace-pre-wrap break-words">
+                    <div className="px-3 py-2 text-[11.5px] leading-relaxed text-[#475569] dark:text-[#b4c6d8] aurora:text-[#b7d0d8] linen:text-[#4e3f32] whitespace-pre-wrap break-words">
                       {memberProfileModal.info.description}
                     </div>
                   )}
@@ -6859,7 +6958,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                             setChatInfoOpen(false);
                             setMemberProfileModal(null);
                           }}
-                          className="flex-1 min-w-[110px] py-2 px-3 rounded-xl bg-[#2481cc] hover:bg-[#1d6fb3] dark:bg-[#2ba0ff] dark:hover:bg-[#1e8ee8] aurora:bg-[#0d9488] aurora:hover:bg-[#0f766e] text-white text-xs font-medium flex items-center justify-center gap-1.5 cursor-pointer transition-colors"
+                          className="flex-1 min-w-[110px] py-2 px-3 rounded-xl bg-[#2481cc] hover:bg-[#1d6fb3] dark:bg-[#2ba0ff] dark:hover:bg-[#1e8ee8] aurora:bg-[#0d9488] aurora:hover:bg-[#0f766e] linen:bg-[#a86a43] linen:hover:bg-[#8f5734] text-white text-xs font-medium flex items-center justify-center gap-1.5 cursor-pointer transition-colors"
                         >
                           <MessageCircle className="w-3.5 h-3.5" />
                           <span>{isChannelOrGroupIdentity ? '打开会话' : isSelfMember ? '收藏夹' : '发私信'}</span>
@@ -6893,9 +6992,9 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                               onAddContact?.(res.contact);
                             }
                           }}
-                          className="py-2 px-3 rounded-xl bg-[#f1f5f9] hover:bg-[#e2e8f0] dark:bg-[#132234] dark:hover:bg-[#192c44] aurora:bg-[#13252e] aurora:hover:bg-[#19333e] text-xs font-medium flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-50 transition-colors"
+                          className="py-2 px-3 rounded-xl bg-[#f1f5f9] hover:bg-[#e2e8f0] dark:bg-[#132234] dark:hover:bg-[#192c44] aurora:bg-[#13252e] aurora:hover:bg-[#19333e] linen:bg-[#efe6d6] linen:hover:bg-[#e6d9c4] text-xs font-medium flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-50 transition-colors"
                         >
-                          <UserPlus className="w-3.5 h-3.5 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf]" />
+                          <UserPlus className="w-3.5 h-3.5 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf] linen:text-[#a86a43]" />
                           <span>{memberProfileModal.isAddingContact ? '添加中' : '加好友'}</span>
                         </button>
                       )}
@@ -6952,13 +7051,13 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
             onClick={() => setReadReceiptsModal(null)}
           >
             <div
-              className="w-full max-w-sm rounded-2xl bg-white dark:bg-[#0e1726] aurora:bg-[#0d181e] border border-[#e2e8f0] dark:border-[#1e3148] aurora:border-[#1d343d] shadow-2xl overflow-hidden text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8]"
+              className="w-full max-w-sm rounded-2xl bg-white dark:bg-[#0e1726] aurora:bg-[#0d181e] linen:bg-[#f8f2e7] border border-[#e2e8f0] dark:border-[#1e3148] aurora:border-[#1d343d] linen:border-[#cbbba2] shadow-2xl overflow-hidden text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118]"
               onClick={(e) => e.stopPropagation()}
             >
               {/* Header */}
-              <div className="px-4 py-3 border-b border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] flex items-center justify-between gap-2">
+              <div className="px-4 py-3 border-b border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] linen:border-[#e6dac6] flex items-center justify-between gap-2">
                 <div className="flex items-center gap-2 min-w-0">
-                  <CheckCheck className="w-4 h-4 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#5eead4] shrink-0" />
+                  <CheckCheck className="w-4 h-4 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#5eead4] linen:text-[#a86a43] shrink-0" />
                   <span className="text-xs font-semibold truncate">
                     {readReceiptsModal.loading
                       ? '消息已读成员'
@@ -6971,14 +7070,14 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                     disabled={readReceiptsModal.loading}
                     onClick={() => void handleOpenReadReceipts(readReceiptsModal.message)}
                     title="刷新已读状态"
-                    className="p-1 rounded-lg hover:bg-[#f1f5f9] dark:hover:bg-[#132234] aurora:hover:bg-[#13252e] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] disabled:opacity-40 cursor-pointer"
+                    className="p-1 rounded-lg hover:bg-[#f1f5f9] dark:hover:bg-[#132234] aurora:hover:bg-[#13252e] linen:hover:bg-[#e9decb] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a] disabled:opacity-40 cursor-pointer"
                   >
                     <RotateCw className={`w-3.5 h-3.5 ${readReceiptsModal.loading ? 'animate-spin' : ''}`} />
                   </button>
                   <button
                     type="button"
                     onClick={() => setReadReceiptsModal(null)}
-                    className="p-1 rounded-lg hover:bg-[#f1f5f9] dark:hover:bg-[#132234] aurora:hover:bg-[#13252e] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] cursor-pointer"
+                    className="p-1 rounded-lg hover:bg-[#f1f5f9] dark:hover:bg-[#132234] aurora:hover:bg-[#13252e] linen:hover:bg-[#e9decb] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a] cursor-pointer"
                   >
                     <X className="w-4 h-4" />
                   </button>
@@ -6987,7 +7086,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
 
               {/* Message Preview Snippet */}
               <div className="px-4 pt-3 pb-1">
-                <div className="px-2.5 py-1.5 rounded-xl bg-[#f8fafc] dark:bg-[#08101a] aurora:bg-[#081014] border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] text-[11px] text-[#475569] dark:text-[#b4c6d8] aurora:text-[#b7d0d8] truncate">
+                <div className="px-2.5 py-1.5 rounded-xl bg-[#f8fafc] dark:bg-[#08101a] aurora:bg-[#081014] linen:bg-[#efe6d6] border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] linen:border-[#d5c6ae] text-[11px] text-[#475569] dark:text-[#b4c6d8] aurora:text-[#b7d0d8] linen:text-[#4e3f32] truncate">
                   {readReceiptsModal.message.text?.trim() ||
                     (readReceiptsModal.message.isImage
                       ? '🖼️ 图片消息'
@@ -7002,8 +7101,8 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
               {/* Body */}
               <div className="p-4 pt-2 max-h-[55vh] overflow-y-auto space-y-2">
                 {readReceiptsModal.loading ? (
-                  <div className="py-8 flex flex-col items-center justify-center gap-2 text-xs text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5]">
-                    <Loader2 className="w-5 h-5 animate-spin text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#5eead4]" />
+                  <div className="py-8 flex flex-col items-center justify-center gap-2 text-xs text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a]">
+                    <Loader2 className="w-5 h-5 animate-spin text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#5eead4] linen:text-[#a86a43]" />
                     <span>正在查询云端已读成员...</span>
                   </div>
                 ) : readReceiptsModal.error ? (
@@ -7012,22 +7111,22 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                     <button
                       type="button"
                       onClick={() => void handleOpenReadReceipts(readReceiptsModal.message)}
-                      className="px-3 py-1.5 rounded-lg bg-[#f1f5f9] dark:bg-[#132234] aurora:bg-[#13252e] text-xs font-medium cursor-pointer hover:opacity-85"
+                      className="px-3 py-1.5 rounded-lg bg-[#f1f5f9] dark:bg-[#132234] aurora:bg-[#13252e] linen:bg-[#efe6d6] text-xs font-medium cursor-pointer hover:opacity-85"
                     >
                       重试
                     </button>
                   </div>
                 ) : readReceiptsModal.participants.length === 0 ? (
                   <div className="py-6 text-center space-y-1.5">
-                    <p className="text-xs font-medium text-[#475569] dark:text-[#cbd5e1] aurora:text-[#b7d0d8]">
+                    <p className="text-xs font-medium text-[#475569] dark:text-[#cbd5e1] aurora:text-[#b7d0d8] linen:text-[#4e3f32]">
                       暂无已读记录
                     </p>
-                    <p className="text-[11px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] leading-relaxed">
+                    <p className="text-[11px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a] leading-relaxed">
                       {readReceiptsModal.hint || '成员可能尚未查看此消息，或群规模超过约 100 人 / 消息已超过 7 天（Telegram 官方不返回明细）。'}
                     </p>
                   </div>
                 ) : (
-                  <div className="divide-y divide-[#f1f5f9] dark:divide-[#152336] aurora:divide-[#162933]">
+                  <div className="divide-y divide-[#f1f5f9] dark:divide-[#152336] aurora:divide-[#162933] linen:divide-[#e6dac6]">
                     {readReceiptsModal.participants.map((reader) => {
                       const safeAvatar = reader.avatarUrl ? resolveDisplayUrl(reader.avatarUrl) || '' : '';
                       const readTimeText = reader.readAt
@@ -7044,7 +7143,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                         : '已读';
                       return (
                         <div key={reader.id} className="py-2 flex items-center gap-2.5">
-                          <div className="relative w-8 h-8 rounded-full bg-[#2481cc] dark:bg-[#2ba0ff] aurora:bg-[#14b8a6] flex items-center justify-center text-white text-xs font-semibold shrink-0 overflow-hidden">
+                          <div className="relative w-8 h-8 rounded-full bg-[#2481cc] dark:bg-[#2ba0ff] aurora:bg-[#14b8a6] linen:bg-[#a86a43] flex items-center justify-center text-white text-xs font-semibold shrink-0 overflow-hidden">
                             {safeAvatar ? (
                               <img
                                 src={safeAvatar}
@@ -7068,7 +7167,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                               <span>{getSenderAvatarInitial(reader.name, reader.id)}</span>
                             )}
                             {reader.isOnline && (
-                              <span className="absolute bottom-0 right-0 w-2 h-2 rounded-full bg-emerald-500 ring-1 ring-white dark:ring-[#0e1726]" />
+                              <span className="absolute bottom-0 right-0 w-2 h-2 rounded-full bg-emerald-500 ring-1 ring-white dark:ring-[#0e1726] linen:ring-[#f8f2e7]" />
                             )}
                           </div>
                           <div className="flex-1 min-w-0">
