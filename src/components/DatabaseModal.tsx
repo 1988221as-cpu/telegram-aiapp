@@ -422,20 +422,20 @@ export const DatabaseModal: React.FC<DatabaseModalProps> = ({ isOpen, onClose, o
 
   return (
     <div className="fixed inset-0 bg-black/55 dark:bg-black/75 aurora:bg-black/80 backdrop-blur-xs flex items-center justify-center z-50 p-4 select-none">
-      <div className="bg-white dark:bg-[#0b131f] aurora:bg-[#0c151b] border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] w-full max-w-xl rounded-2xl shadow-2xl flex flex-col overflow-hidden max-h-[90vh]">
+      <div className="bg-white dark:bg-[#0b131f] aurora:bg-[#0c151b] linen:bg-[#f8f2e7] border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] linen:border-[#d5c6ae] text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118] w-full max-w-xl rounded-2xl shadow-2xl linen:shadow-sm flex flex-col overflow-hidden max-h-[90vh]">
         {/* Header */}
-        <div className="px-5 py-4 border-b border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] flex items-center justify-between bg-[#f8fafc] dark:bg-[#0d1726] aurora:bg-[#0e1920]">
+        <div className="px-5 py-4 border-b border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] linen:border-[#dfd2bc] flex items-center justify-between bg-[#f8fafc] dark:bg-[#0d1726] aurora:bg-[#0e1920] linen:bg-[#f0e6d5]">
           <div className="flex items-center gap-2.5">
             <div className="w-8 h-8 rounded-lg bg-emerald-500/15 border border-emerald-500/25 flex items-center justify-center text-emerald-600 dark:text-emerald-400">
               <ShieldCheck className="w-5 h-5" />
             </div>
             <div>
-              <h2 className="text-sm font-bold text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8]">本地数据库与安全备份中心</h2>
+              <h2 className="text-sm font-bold text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118]">本地数据库与安全备份中心</h2>
             </div>
           </div>
           <button
             onClick={onClose}
-            className="w-8 h-8 rounded-lg text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] hover:text-[#0f172a] dark:hover:text-white aurora:hover:text-[#ecf6f8] hover:bg-[#e2e8f0] dark:hover:bg-[#152438] aurora:hover:bg-[#152934] flex items-center justify-center cursor-pointer transition-colors"
+            className="w-8 h-8 rounded-lg text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a] hover:text-[#0f172a] dark:hover:text-white aurora:hover:text-[#ecf6f8] linen:hover:text-[#2b2118] hover:bg-[#e2e8f0] dark:hover:bg-[#152438] aurora:hover:bg-[#152934] linen:hover:bg-[#e7dccb] flex items-center justify-center cursor-pointer transition-colors"
           >
             <X className="w-4 h-4" />
           </button>
@@ -445,44 +445,44 @@ export const DatabaseModal: React.FC<DatabaseModalProps> = ({ isOpen, onClose, o
         <div className="p-6 overflow-y-auto space-y-4">
           {/* Storage KPI Cards */}
           <div className="grid grid-cols-3 gap-3">
-            <div className="bg-[#f8fafc] dark:bg-[#0e1726]/85 aurora:bg-[#101c23]/90 p-3.5 rounded-xl border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34]">
-              <span className="text-[11px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] block">本地数据库引擎</span>
-              <div className="text-xs font-bold text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] mt-1.5 flex items-center gap-1.5">
+            <div className="bg-[#f8fafc] dark:bg-[#0e1726]/85 aurora:bg-[#101c23]/90 linen:bg-[#efe6d6]/90 p-3.5 rounded-xl border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] linen:border-[#dfd2bc]">
+              <span className="text-[11px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a] block">本地数据库引擎</span>
+              <div className="text-xs font-bold text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118] mt-1.5 flex items-center gap-1.5">
                 <Database className="w-3.5 h-3.5 text-emerald-600 dark:text-emerald-400 shrink-0" />
                 <span className="truncate">{dbStatus?.dbType || 'SQLite (Local)'}</span>
               </div>
-              <div className="text-[10px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] mt-1 tabular-nums">
+              <div className="text-[10px] text-[#64748b] dark:text-[#7b93ad] linen:text-[#6e5c4a] aurora:text-[#7e9aa5] linen:text-[#6e5c4a] mt-1 tabular-nums">
                 库容 {totalSqliteKb !== null ? `${totalSqliteKb} KB` : '--'} · 缓存 {totalLocalKb} KB
               </div>
             </div>
 
-            <div className="bg-[#f8fafc] dark:bg-[#0e1726]/85 aurora:bg-[#101c23]/90 p-3.5 rounded-xl border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34]">
-              <span className="text-[11px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] block">全库持久化消息</span>
-              <div className="text-lg font-bold text-[#0284c7] dark:text-[#2ba0ff] aurora:text-[#2dd4bf] mt-1 tabular-nums font-mono">
+            <div className="bg-[#f8fafc] dark:bg-[#0e1726]/85 aurora:bg-[#101c23]/90 linen:bg-[#efe6d6]/90 p-3.5 rounded-xl border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] linen:border-[#dfd2bc]">
+              <span className="text-[11px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a] block">全库持久化消息</span>
+              <div className="text-lg font-bold text-[#0284c7] dark:text-[#2ba0ff] aurora:text-[#2dd4bf] linen:text-[#8c522d] mt-1 tabular-nums font-mono">
                 {dbStatus ? dbStatus.totalMessages : localMetrics.totalMessages}{' '}
-                <span className="text-xs font-normal text-[#475569] dark:text-[#eef4fb] aurora:text-[#ecf6f8]">条</span>
+                <span className="text-xs font-normal text-[#475569] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118]">条</span>
               </div>
-              <div className="text-[10px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] mt-0.5 tabular-nums">
+              <div className="text-[10px] text-[#64748b] dark:text-[#7b93ad] linen:text-[#6e5c4a] aurora:text-[#7e9aa5] linen:text-[#6e5c4a] mt-0.5 tabular-nums">
                 本地活跃窗口 {localMetrics.totalMessages} 条
               </div>
             </div>
 
-            <div className="bg-[#f8fafc] dark:bg-[#0e1726]/85 aurora:bg-[#101c23]/90 p-3.5 rounded-xl border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34]">
-              <span className="text-[11px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] block">全息客户档案</span>
+            <div className="bg-[#f8fafc] dark:bg-[#0e1726]/85 aurora:bg-[#101c23]/90 linen:bg-[#efe6d6]/90 p-3.5 rounded-xl border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] linen:border-[#dfd2bc]">
+              <span className="text-[11px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a] block">全息客户档案</span>
               <div className="text-lg font-bold text-purple-600 dark:text-purple-400 mt-1 tabular-nums font-mono">
                 {dbStatus ? dbStatus.totalProfiles : '--'}{' '}
-                <span className="text-xs font-normal text-[#475569] dark:text-[#eef4fb] aurora:text-[#ecf6f8]">份</span>
+                <span className="text-xs font-normal text-[#475569] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118]">份</span>
               </div>
-              <div className="text-[10px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] mt-0.5 tabular-nums">
+              <div className="text-[10px] text-[#64748b] dark:text-[#7b93ad] linen:text-[#6e5c4a] aurora:text-[#7e9aa5] linen:text-[#6e5c4a] mt-0.5 tabular-nums">
                 活跃会话 {localMetrics.totalChats} 个
               </div>
             </div>
           </div>
 
           {/* Full Backup & Privacy Shredder Action Area */}
-          <div className="p-4 bg-[#f8fafc] dark:bg-[#0e1726]/85 aurora:bg-[#101c23]/90 rounded-xl border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] space-y-3">
-            <div className="text-xs font-bold text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8]">全量加密备份、原子事务还原与彻底粉碎</div>
-            <p className="text-[11px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] leading-relaxed">
+          <div className="p-4 bg-[#f8fafc] dark:bg-[#0e1726]/85 aurora:bg-[#101c23]/90 linen:bg-[#efe6d6]/90 rounded-xl border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] linen:border-[#dfd2bc] space-y-3">
+            <div className="text-xs font-bold text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118]">全量加密备份、原子事务还原与彻底粉碎</div>
+            <p className="text-[11px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a] leading-relaxed">
               导出文件使用 PBKDF2-SHA256 + AES-256-GCM 口令加密与 HMAC-SHA256 完整性签名打包本地知识库、人设、客户记忆、消息与声纹缓存，不导出 Telegram 登录会话与 API 密钥。
             </p>
 
@@ -494,7 +494,7 @@ export const DatabaseModal: React.FC<DatabaseModalProps> = ({ isOpen, onClose, o
                   setShowExportPanel((v) => !v);
                 }}
                 disabled={backupLoading || restoreLoading || purgeLoading}
-                className="flex-1 py-2 px-3 rounded-lg bg-white hover:bg-[#f1f5f9] dark:bg-[#132234] dark:hover:bg-[#1b2f47] aurora:bg-[#13252e] aurora:hover:bg-[#1a3340] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] disabled:opacity-50 text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] text-xs font-medium flex items-center justify-center gap-1.5 cursor-pointer transition-colors"
+                className="flex-1 py-2 px-3 rounded-lg bg-white hover:bg-[#f1f5f9] dark:bg-[#132234] dark:hover:bg-[#1b2f47] aurora:bg-[#13252e] linen:bg-[#e7dccb] aurora:hover:bg-[#1a3340] linen:hover:bg-[#dfd2bc] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] linen:border-[#cbbba2] disabled:opacity-50 text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118] text-xs font-medium flex items-center justify-center gap-1.5 cursor-pointer transition-colors"
               >
                 <Download className="w-3.5 h-3.5 text-emerald-600 dark:text-emerald-400" />
                 <span>{backupLoading ? '正在加密打包...' : '导出加密备份'}</span>
@@ -510,9 +510,9 @@ export const DatabaseModal: React.FC<DatabaseModalProps> = ({ isOpen, onClose, o
               <button
                 onClick={() => fileInputRef.current?.click()}
                 disabled={backupLoading || restoreLoading || purgeLoading}
-                className="flex-1 py-2 px-3 rounded-lg bg-white hover:bg-[#f1f5f9] dark:bg-[#132234] dark:hover:bg-[#1b2f47] aurora:bg-[#13252e] aurora:hover:bg-[#1a3340] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] disabled:opacity-50 text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] text-xs font-medium flex items-center justify-center gap-1.5 cursor-pointer transition-colors"
+                className="flex-1 py-2 px-3 rounded-lg bg-white hover:bg-[#f1f5f9] dark:bg-[#132234] dark:hover:bg-[#1b2f47] aurora:bg-[#13252e] linen:bg-[#e7dccb] aurora:hover:bg-[#1a3340] linen:hover:bg-[#dfd2bc] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] linen:border-[#cbbba2] disabled:opacity-50 text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118] text-xs font-medium flex items-center justify-center gap-1.5 cursor-pointer transition-colors"
               >
-                <Upload className="w-3.5 h-3.5 text-[#0284c7] dark:text-[#2ba0ff] aurora:text-[#2dd4bf]" />
+                <Upload className="w-3.5 h-3.5 text-[#0284c7] dark:text-[#2ba0ff] aurora:text-[#2dd4bf] linen:text-[#8c522d]" />
                 <span>{restoreLoading ? '正在解密还原...' : '导入备份还原'}</span>
               </button>
 
@@ -541,7 +541,7 @@ export const DatabaseModal: React.FC<DatabaseModalProps> = ({ isOpen, onClose, o
                   <button
                     type="button"
                     onClick={() => setShowExportSecret((v) => !v)}
-                    className="text-[11px] text-[#64748b] dark:text-[#7b93ad] hover:text-[#0f172a] dark:hover:text-white flex items-center gap-1 cursor-pointer"
+                    className="text-[11px] text-[#64748b] dark:text-[#7b93ad] linen:text-[#6e5c4a] hover:text-[#0f172a] dark:hover:text-white linen:hover:text-[#2b2118] flex items-center gap-1 cursor-pointer"
                   >
                     {showExportSecret ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
                     <span>{showExportSecret ? '隐藏' : '显示'}</span>
@@ -553,17 +553,17 @@ export const DatabaseModal: React.FC<DatabaseModalProps> = ({ isOpen, onClose, o
                     value={exportPassphrase}
                     onChange={(e) => setExportPassphrase(e.target.value)}
                     placeholder={`加密口令（至少 ${BACKUP_MIN_PASSPHRASE_LENGTH} 位）`}
-                    className="w-full px-2.5 py-1.5 rounded-lg bg-white dark:bg-[#0b131f] aurora:bg-[#0c151b] border border-[#cbd5e1] dark:border-[#1e3148] text-xs outline-none focus:border-emerald-500"
+                    className="w-full px-2.5 py-1.5 rounded-lg bg-white dark:bg-[#0b131f] aurora:bg-[#0c151b] linen:bg-[#f8f2e7] linen:border-[#cbbba2] linen:text-[#2b2118] linen:placeholder-[#8f7e6c] border border-[#cbd5e1] dark:border-[#1e3148] text-xs outline-none focus:border-emerald-500"
                   />
                   <input
                     type={showExportSecret ? 'text' : 'password'}
                     value={exportPassphraseConfirm}
                     onChange={(e) => setExportPassphraseConfirm(e.target.value)}
                     placeholder="再次输入确认口令"
-                    className="w-full px-2.5 py-1.5 rounded-lg bg-white dark:bg-[#0b131f] aurora:bg-[#0c151b] border border-[#cbd5e1] dark:border-[#1e3148] text-xs outline-none focus:border-emerald-500"
+                    className="w-full px-2.5 py-1.5 rounded-lg bg-white dark:bg-[#0b131f] aurora:bg-[#0c151b] linen:bg-[#f8f2e7] linen:border-[#cbbba2] linen:text-[#2b2118] linen:placeholder-[#8f7e6c] border border-[#cbd5e1] dark:border-[#1e3148] text-xs outline-none focus:border-emerald-500"
                   />
                 </div>
-                <p className="text-[10px] text-[#64748b] dark:text-[#7b93ad]">
+                <p className="text-[10px] text-[#64748b] dark:text-[#7b93ad] linen:text-[#6e5c4a]">
                   请牢记此加密口令；备份文件不含明文，丢失口令将无法解密还原。
                 </p>
                 <div className="flex items-center justify-end gap-2">
@@ -575,7 +575,7 @@ export const DatabaseModal: React.FC<DatabaseModalProps> = ({ isOpen, onClose, o
                       setExportPassphrase('');
                       setExportPassphraseConfirm('');
                     }}
-                    className="px-3 py-1.5 rounded-lg bg-white hover:bg-[#f1f5f9] dark:bg-[#132234] dark:hover:bg-[#1b2f47] border border-[#cbd5e1] dark:border-[#1e3148] text-xs text-[#334155] dark:text-[#b4c6d8] cursor-pointer"
+                    className="px-3 py-1.5 rounded-lg bg-white hover:bg-[#f1f5f9] dark:bg-[#132234] dark:hover:bg-[#1b2f47] linen:bg-[#faf5ec] linen:hover:bg-[#efe6d6] border border-[#cbd5e1] dark:border-[#1e3148] linen:border-[#cbbba2] text-xs text-[#334155] dark:text-[#b4c6d8] linen:text-[#4e3f32] cursor-pointer"
                   >
                     取消
                   </button>
@@ -592,9 +592,9 @@ export const DatabaseModal: React.FC<DatabaseModalProps> = ({ isOpen, onClose, o
             )}
 
             {pendingRestore && (
-              <div className="p-3.5 rounded-xl bg-sky-500/8 border border-sky-500/30 space-y-2.5">
+              <div className="p-3.5 rounded-xl bg-sky-500/8 linen:bg-[#a86a43]/10 border border-sky-500/30 linen:border-[#a86a43]/35 space-y-2.5">
                 <div className="flex items-center justify-between">
-                  <div className="text-xs font-semibold text-[#0369a1] dark:text-[#38bdf8] flex items-center gap-1.5">
+                  <div className="text-xs font-semibold text-[#0369a1] dark:text-[#38bdf8] linen:text-[#8c522d] flex items-center gap-1.5">
                     <Lock className="w-3.5 h-3.5" />
                     <span>恢复鉴权二次确认：{pendingRestore.fileName}</span>
                   </div>
@@ -622,12 +622,12 @@ export const DatabaseModal: React.FC<DatabaseModalProps> = ({ isOpen, onClose, o
                       value={restorePassphrase}
                       onChange={(e) => setRestorePassphrase(e.target.value)}
                       placeholder="请输入导出时设置的备份解密口令"
-                      className="flex-1 px-2.5 py-1.5 rounded-lg bg-white dark:bg-[#0b131f] aurora:bg-[#0c151b] border border-[#cbd5e1] dark:border-[#1e3148] text-xs outline-none focus:border-sky-500"
+                      className="flex-1 px-2.5 py-1.5 rounded-lg bg-white dark:bg-[#0b131f] aurora:bg-[#0c151b] linen:bg-[#f8f2e7] linen:border-[#cbbba2] linen:text-[#2b2118] linen:placeholder-[#8f7e6c] border border-[#cbd5e1] dark:border-[#1e3148] text-xs outline-none focus:border-sky-500 linen:focus:border-[#a86a43]"
                     />
                     <button
                       type="button"
                       onClick={() => setShowRestoreSecret((v) => !v)}
-                      className="px-2 py-1.5 rounded-lg border border-[#cbd5e1] dark:border-[#1e3148] text-[11px] text-[#64748b] dark:text-[#7b93ad] cursor-pointer"
+                      className="px-2 py-1.5 rounded-lg border border-[#cbd5e1] dark:border-[#1e3148] linen:border-[#cbbba2] text-[11px] text-[#64748b] dark:text-[#7b93ad] linen:text-[#6e5c4a] cursor-pointer"
                     >
                       {showRestoreSecret ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
                     </button>
@@ -640,7 +640,7 @@ export const DatabaseModal: React.FC<DatabaseModalProps> = ({ isOpen, onClose, o
                     value={restoreConfirmText}
                     onChange={(e) => setRestoreConfirmText(e.target.value)}
                     placeholder="二次确认：请输入 RESTORE（或 确认恢复）以授权覆盖还原"
-                    className="w-full px-2.5 py-1.5 rounded-lg bg-white dark:bg-[#0b131f] aurora:bg-[#0c151b] border border-[#cbd5e1] dark:border-[#1e3148] text-xs outline-none focus:border-sky-500"
+                    className="w-full px-2.5 py-1.5 rounded-lg bg-white dark:bg-[#0b131f] aurora:bg-[#0c151b] linen:bg-[#f8f2e7] linen:border-[#cbbba2] linen:text-[#2b2118] linen:placeholder-[#8f7e6c] border border-[#cbd5e1] dark:border-[#1e3148] text-xs outline-none focus:border-sky-500 linen:focus:border-[#a86a43]"
                   />
                 </div>
 
@@ -653,7 +653,7 @@ export const DatabaseModal: React.FC<DatabaseModalProps> = ({ isOpen, onClose, o
                       setRestorePassphrase('');
                       setRestoreConfirmText('');
                     }}
-                    className="px-3 py-1.5 rounded-lg bg-white hover:bg-[#f1f5f9] dark:bg-[#132234] dark:hover:bg-[#1b2f47] border border-[#cbd5e1] dark:border-[#1e3148] text-xs text-[#334155] dark:text-[#b4c6d8] cursor-pointer"
+                    className="px-3 py-1.5 rounded-lg bg-white hover:bg-[#f1f5f9] dark:bg-[#132234] dark:hover:bg-[#1b2f47] linen:bg-[#faf5ec] linen:hover:bg-[#efe6d6] border border-[#cbd5e1] dark:border-[#1e3148] linen:border-[#cbbba2] text-xs text-[#334155] dark:text-[#b4c6d8] linen:text-[#4e3f32] cursor-pointer"
                   >
                     取消
                   </button>
@@ -661,7 +661,7 @@ export const DatabaseModal: React.FC<DatabaseModalProps> = ({ isOpen, onClose, o
                     type="button"
                     disabled={restoreLoading}
                     onClick={handleConfirmRestore}
-                    className="px-3 py-1.5 rounded-lg bg-[#0284c7] hover:bg-[#0369a1] disabled:opacity-50 text-xs text-white font-semibold cursor-pointer"
+                    className="px-3 py-1.5 rounded-lg bg-[#0284c7] hover:bg-[#0369a1] linen:bg-[#a86a43] linen:hover:bg-[#8f5734] disabled:opacity-50 text-xs text-white font-semibold cursor-pointer"
                   >
                     {restoreLoading ? '正在校验并还原...' : '确认解密并原子还原'}
                   </button>
@@ -682,7 +682,7 @@ export const DatabaseModal: React.FC<DatabaseModalProps> = ({ isOpen, onClose, o
                     type="button"
                     disabled={purgeLoading}
                     onClick={() => setShowPurgeConfirm(false)}
-                    className="px-3 py-1.5 rounded-lg bg-white hover:bg-[#f1f5f9] dark:bg-[#132234] dark:hover:bg-[#1b2f47] aurora:bg-[#13252e] aurora:hover:bg-[#1a3340] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] text-xs text-[#334155] dark:text-[#b4c6d8] aurora:text-[#b7d0d8] cursor-pointer transition-colors"
+                    className="px-3 py-1.5 rounded-lg bg-white hover:bg-[#f1f5f9] dark:bg-[#132234] dark:hover:bg-[#1b2f47] aurora:bg-[#13252e] linen:bg-[#e7dccb] aurora:hover:bg-[#1a3340] linen:hover:bg-[#dfd2bc] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] linen:border-[#cbbba2] text-xs text-[#334155] dark:text-[#b4c6d8] aurora:text-[#b7d0d8] linen:text-[#4e3f32] cursor-pointer transition-colors"
                   >
                     取消
                   </button>
@@ -713,18 +713,18 @@ export const DatabaseModal: React.FC<DatabaseModalProps> = ({ isOpen, onClose, o
         </div>
 
         {/* Footer */}
-        <div className="px-5 py-3 border-t border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] bg-[#f8fafc] dark:bg-[#0d1726] aurora:bg-[#0e1920] flex items-center justify-between">
+        <div className="px-5 py-3 border-t border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] linen:border-[#dfd2bc] bg-[#f8fafc] dark:bg-[#0d1726] aurora:bg-[#0e1920] linen:bg-[#f0e6d5] flex items-center justify-between">
           <button
             onClick={() => void loadStats()}
             disabled={loading}
-            className="flex items-center gap-1.5 text-xs text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] hover:text-[#0f172a] dark:hover:text-white aurora:hover:text-[#ecf6f8] cursor-pointer transition-colors"
+            className="flex items-center gap-1.5 text-xs text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a] hover:text-[#0f172a] dark:hover:text-white aurora:hover:text-[#ecf6f8] linen:hover:text-[#2b2118] cursor-pointer transition-colors"
           >
             <RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} />
             <span>刷新状态</span>
           </button>
           <button
             onClick={onClose}
-            className="px-4 py-1.5 rounded-lg bg-[#2481cc] hover:bg-[#1d6fb3] dark:bg-[#2ba0ff] dark:hover:bg-[#1e8ee8] aurora:bg-[#0d9488] aurora:hover:bg-[#0f766e] text-white text-xs font-semibold shadow-sm cursor-pointer transition-colors"
+            className="px-4 py-1.5 rounded-lg bg-[#2481cc] hover:bg-[#1d6fb3] dark:bg-[#2ba0ff] dark:hover:bg-[#1e8ee8] aurora:bg-[#0d9488] linen:bg-[#a86a43] aurora:hover:bg-[#0f766e] linen:hover:bg-[#8f5734] text-white text-xs font-semibold shadow-sm cursor-pointer transition-colors"
           >
             完成
           </button>

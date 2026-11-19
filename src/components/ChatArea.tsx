@@ -3904,7 +3904,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
             <div
               ref={headerMoreMenuRef}
               style={{ top: `${headerMoreMenuPos.top}px`, left: `${headerMoreMenuPos.left}px` }}
-              className="fixed z-[9990] w-[196px] bg-white dark:bg-[#0b131f] aurora:bg-[#0c151b] linen:bg-[#f8f2e7] border border-[#e2e8f0] dark:border-[#1e3148] aurora:border-[#203742] linen:border-[#cbbba2] rounded-xl shadow-xl p-1.5 flex flex-col gap-1 text-xs animate-in fade-in zoom-in-95 duration-150 select-none"
+              className="fixed z-[9990] w-[196px] bg-white dark:bg-[#0b131f] aurora:bg-[#0c151b] linen:bg-[#f8f2e7] border border-[#e2e8f0] dark:border-[#1e3148] aurora:border-[#203742] linen:border-[#d5c6ae] rounded-xl shadow-xl linen:shadow-sm p-1.5 flex flex-col gap-1 text-xs animate-in fade-in zoom-in-95 duration-150 select-none"
             >
               <button
                 type="button"
@@ -4209,7 +4209,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
             left: `${langMenuPos.left}px`,
             maxHeight: `${langMenuPos.maxHeight}px`,
           }}
-          className="fixed z-[9990] w-64 flex flex-col bg-white dark:bg-[#0b131f] aurora:bg-[#0c151b] linen:bg-[#f8f2e7] border border-[#e2e8f0] dark:border-[#1e3148] aurora:border-[#203742] linen:border-[#cbbba2] rounded-xl shadow-2xl p-1.5 animate-in fade-in duration-150"
+          className="fixed z-[9990] w-64 flex flex-col bg-white dark:bg-[#0b131f] aurora:bg-[#0c151b] linen:bg-[#f8f2e7] border border-[#e2e8f0] dark:border-[#1e3148] aurora:border-[#203742] linen:border-[#d5c6ae] rounded-xl shadow-2xl linen:shadow-sm p-1.5 animate-in fade-in duration-150"
         >
           <div className="px-2 py-1 text-[10px] font-semibold text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#7a6957] uppercase tracking-wider border-b border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] linen:border-[#dfd2bc] pb-1 mb-1 shrink-0">
             选择联系人语言 (全球 {SUPPORTED_LANGUAGES.length - 1} 种)
@@ -4975,7 +4975,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                       <button
                         onClick={() => handleTranscribeAudio(msg)}
                         disabled={transcribingMap[msg.id]}
-                        className={`text-[11px] hover:underline self-start cursor-pointer mt-0.5 ${isMe ? 'text-white/90' : 'text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#5eead4]'}`}
+                        className={`text-[11px] hover:underline self-start cursor-pointer mt-0.5 ${isMe ? 'text-white/90' : 'text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#5eead4] linen:text-[#8c522d]'}`}
                       >
                         {transcribingMap[msg.id] ? '正在转文字中...' : '转为文字'}
                       </button>
@@ -5005,7 +5005,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                               {msg.translatedText}
                             </p>
                             <div className="mt-1.5 flex items-center gap-2 select-none">
-                              <span className="inline-flex items-center gap-1 text-[10px] font-medium text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#5eead4]">
+                              <span className="inline-flex items-center gap-1 text-[10px] font-medium text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#5eead4] linen:text-[#8c522d]">
                                 <Languages className="w-3 h-3" />
                                 <span>仅显示译文</span>
                               </span>
@@ -5020,13 +5020,13 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                                     return next;
                                   });
                                 }}
-                                className="text-[10.5px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] hover:text-[#2481cc] dark:hover:text-[#2ba0ff] aurora:hover:text-[#5eead4] hover:underline cursor-pointer"
+                                className="text-[10.5px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a] hover:text-[#2481cc] dark:hover:text-[#2ba0ff] aurora:hover:text-[#5eead4] linen:hover:text-[#8c522d] hover:underline cursor-pointer"
                               >
                                 {isShowingOriginalOverlay ? '收起原文' : '查看原文'}
                               </button>
                             </div>
                             {isShowingOriginalOverlay && msg.text && (
-                              <div className={`mt-1.5 p-2 rounded-lg bg-[#f8fafc] dark:bg-[#0b131f]/80 aurora:bg-[#0c161c]/85 border border-[#e2e8f0] dark:border-[#1e3148] aurora:border-[#1e343e] ${chatFontClasses.secondary} text-[#475569] dark:text-[#cbd5e1] aurora:text-[#b7d0d8] select-text`}>
+                              <div className={`mt-1.5 p-2 rounded-lg bg-[#f8fafc] dark:bg-[#0b131f]/80 aurora:bg-[#0c161c]/85 linen:bg-[#f4ecdf] border border-[#e2e8f0] dark:border-[#1e3148] aurora:border-[#1e343e] linen:border-[#dccdb8] ${chatFontClasses.secondary} text-[#475569] dark:text-[#cbd5e1] aurora:text-[#b7d0d8] linen:text-[#4e3f32] select-text`}>
                                 <div className="text-[10px] opacity-70 mb-0.5 select-none">原文：</div>
                                 <p className="whitespace-pre-wrap break-words [overflow-wrap:anywhere]">{renderMessageTextWithLinks(msg.text, false)}</p>
                               </div>
@@ -5045,7 +5045,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                                     ? 'bg-rose-500/15 text-rose-500 dark:text-rose-400'
                                     : isMe
                                       ? 'bg-white/20 text-white'
-                                      : 'bg-[#2481cc]/12 text-[#2481cc] dark:bg-[#2ba0ff]/15 dark:text-[#7cc4ff] aurora:bg-[#2dd4bf]/15 aurora:text-[#5eead4]'
+                                      : 'bg-[#2481cc]/12 text-[#2481cc] dark:bg-[#2ba0ff]/15 dark:text-[#7cc4ff] aurora:bg-[#2dd4bf]/15 aurora:text-[#5eead4] linen:bg-[#a86a43]/15 linen:text-[#8c522d]'
                                 }`}
                               >
                                 {msg.isVideoCall ? <Video className="w-4 h-4" /> : <Phone className="w-4 h-4" />}
@@ -5141,7 +5141,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                                       className={`p-0.5 rounded transition-colors cursor-pointer ${
                                         isMe
                                           ? 'text-white/75 hover:text-white hover:bg-white/10'
-                                          : 'text-[#64748b] hover:text-[#2481cc] hover:bg-black/5 dark:text-[#7b93ad] dark:hover:text-white aurora:text-[#7e9aa5] aurora:hover:text-[#5eead4]'
+                                          : 'text-[#64748b] hover:text-[#2481cc] hover:bg-black/5 dark:text-[#7b93ad] dark:hover:text-white aurora:text-[#7e9aa5] aurora:hover:text-[#5eead4] linen:text-[#6e5c4a] linen:hover:text-[#8c522d] linen:hover:bg-[#a86a43]/10'
                                       }`}
                                     >
                                       <RotateCw className="w-3 h-3" />
@@ -5157,7 +5157,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                                     className={`p-0.5 rounded transition-colors cursor-pointer ${
                                       isMe
                                         ? 'text-white/75 hover:text-white hover:bg-white/10'
-                                        : 'text-[#64748b] hover:text-[#2481cc] hover:bg-black/5 dark:text-[#7b93ad] dark:hover:text-white aurora:text-[#7e9aa5] aurora:hover:text-[#5eead4]'
+                                        : 'text-[#64748b] hover:text-[#2481cc] hover:bg-black/5 dark:text-[#7b93ad] dark:hover:text-white aurora:text-[#7e9aa5] aurora:hover:text-[#5eead4] linen:text-[#6e5c4a] linen:hover:text-[#8c522d] linen:hover:bg-[#a86a43]/10'
                                     }`}
                                   >
                                     {copiedId === `${msg.id}_tr` ? (
@@ -5209,7 +5209,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                 {msg.reactions && Object.keys(msg.reactions).length > 0 && (
                   <div
                     className={`flex flex-wrap items-center gap-1 mt-1 pt-1 border-t ${
-                      isMe ? 'border-white/15' : 'border-black/5 dark:border-white/10 aurora:border-white/10'
+                      isMe ? 'border-white/15' : 'border-black/5 dark:border-white/10 aurora:border-white/10 linen:border-[#cbbba2]/50'
                     }`}
                   >
                     {Object.entries(msg.reactions).map(([emoji, count]) => {
@@ -5225,8 +5225,8 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                                 ? 'bg-white/25 border-white/50 text-white'
                                 : 'bg-white/10 border-transparent text-white/90 hover:bg-white/20'
                               : isMine
-                              ? 'bg-[#e8f3ff] border-[#2481cc] text-[#2481cc] dark:bg-[#2ba0ff]/20 dark:border-[#2ba0ff]/60 dark:text-[#2ba0ff] aurora:bg-[#112d36] aurora:border-[#2dd4bf] aurora:text-[#5eead4]'
-                              : 'bg-[#f1f5f9] dark:bg-white/10 aurora:bg-[#13252e] border-transparent text-[#0f172a] dark:text-white/90 aurora:text-[#ecf6f8] hover:bg-[#e2e8f0] dark:hover:bg-white/15 aurora:hover:bg-[#18303b]'
+                              ? 'bg-[#e8f3ff] border-[#2481cc] text-[#2481cc] dark:bg-[#2ba0ff]/20 dark:border-[#2ba0ff]/60 dark:text-[#2ba0ff] aurora:bg-[#112d36] aurora:border-[#2dd4bf] aurora:text-[#5eead4] linen:bg-[#a86a43]/15 linen:border-[#a86a43] linen:text-[#8c522d]'
+                              : 'bg-[#f1f5f9] dark:bg-white/10 aurora:bg-[#13252e] linen:bg-[#efe6d6] border-transparent text-[#0f172a] dark:text-white/90 aurora:text-[#ecf6f8] linen:text-[#4e3f32] hover:bg-[#e2e8f0] dark:hover:bg-white/15 aurora:hover:bg-[#18303b] linen:hover:bg-[#e5d9c5]'
                           }`}
                         >
                           <span>{emoji}</span>
@@ -5795,7 +5795,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
           <div
             ref={attachmentMenuRef}
             style={{ top: `${attachmentMenuPos.top}px`, left: `${attachmentMenuPos.left}px` }}
-            className="fixed z-[9990] w-44 bg-white dark:bg-[#0e1726] aurora:bg-[#101c23] linen:bg-[#f8f2e7] rounded-2xl shadow-2xl border border-[#e2e8f0] dark:border-[#1e3148] aurora:border-[#203742] linen:border-[#cbbba2] p-2 flex flex-col gap-1 animate-in fade-in zoom-in-95 duration-150 text-xs select-none"
+            className="fixed z-[9990] w-44 bg-white dark:bg-[#0e1726] aurora:bg-[#101c23] linen:bg-[#f8f2e7] rounded-2xl shadow-2xl linen:shadow-sm border border-[#e2e8f0] dark:border-[#1e3148] aurora:border-[#203742] linen:border-[#d5c6ae] p-2 flex flex-col gap-1 animate-in fade-in zoom-in-95 duration-150 text-xs select-none"
           >
             <button
               type="button"
@@ -6149,7 +6149,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
       {/* Telegram Message Context Menu Popup (Right-Click) */}
       {messageContextMenu && typeof document !== 'undefined' && createPortal(
         <div
-          className="fixed z-[9995] bg-white dark:bg-[#0e1726] aurora:bg-[#101c23] linen:bg-[#f8f2e7] border border-[#e2e8f0] dark:border-[#1e3148] aurora:border-[#203742] linen:border-[#cbbba2] rounded-2xl p-1.5 shadow-2xl min-w-[170px] text-xs select-none animate-in fade-in zoom-in-95 duration-100"
+          className="fixed z-[9995] bg-white dark:bg-[#0e1726] aurora:bg-[#101c23] linen:bg-[#f8f2e7] border border-[#e2e8f0] dark:border-[#1e3148] aurora:border-[#203742] linen:border-[#d5c6ae] rounded-2xl p-1.5 shadow-2xl linen:shadow-sm min-w-[170px] text-xs select-none animate-in fade-in zoom-in-95 duration-100"
           style={{
             left: `${messageContextMenu.x}px`,
             top: `${messageContextMenu.y}px`,
@@ -6341,7 +6341,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
         const showPeerGroupHint = !isLocalOnly && isTgUserChat && messageToDelete.sender === 'peer' && (chat.isGroup || chat.isChannel);
         return (
           <div className="fixed inset-0 bg-black/55 dark:bg-black/75 aurora:bg-black/80 backdrop-blur-xs flex items-center justify-center z-50 p-4 animate-in fade-in duration-150">
-            <div className="bg-white dark:bg-[#0b131f] aurora:bg-[#0c151b] linen:bg-[#f8f2e7] border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] linen:border-[#cbbba2] rounded-2xl p-5 max-w-sm w-full shadow-2xl space-y-4">
+            <div className="bg-white dark:bg-[#0b131f] aurora:bg-[#0c151b] linen:bg-[#f8f2e7] border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] linen:border-[#d5c6ae] rounded-2xl p-5 max-w-sm w-full shadow-2xl linen:shadow-sm space-y-4">
               <div className="flex items-center gap-3">
                 <div className="w-10 h-10 rounded-full bg-rose-500/10 dark:bg-rose-500/20 text-rose-500 flex items-center justify-center shrink-0">
                   <Trash2 className="w-5 h-5" />
@@ -6418,7 +6418,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
         const isSupergroupOrChannel = chat.id.startsWith('tg_-100') || Boolean(chat.isChannel);
         return (
         <div className="fixed inset-0 bg-black/55 dark:bg-black/75 aurora:bg-black/80 backdrop-blur-xs flex items-center justify-center z-50 p-4 animate-in fade-in duration-150">
-          <div className="bg-white dark:bg-[#0b131f] aurora:bg-[#0c151b] linen:bg-[#f8f2e7] border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] linen:border-[#cbbba2] rounded-2xl p-5 max-w-sm w-full shadow-2xl space-y-4">
+          <div className="bg-white dark:bg-[#0b131f] aurora:bg-[#0c151b] linen:bg-[#f8f2e7] border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] linen:border-[#d5c6ae] rounded-2xl p-5 max-w-sm w-full shadow-2xl linen:shadow-sm space-y-4">
             <div className="flex items-center gap-3">
               <div className="w-10 h-10 rounded-full bg-rose-500/10 dark:bg-rose-500/20 text-rose-500 flex items-center justify-center shrink-0">
                 <Trash2 className="w-5 h-5" />
@@ -6480,7 +6480,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
       {/* Forward Messages Target Picker Modal */}
       {forwardModalMessages && (
         <div className="fixed inset-0 bg-black/55 dark:bg-black/75 aurora:bg-black/80 backdrop-blur-xs flex items-center justify-center z-50 p-4 animate-in fade-in duration-150">
-          <div className="bg-white dark:bg-[#0b131f] aurora:bg-[#0c151b] linen:bg-[#f8f2e7] border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] linen:border-[#cbbba2] rounded-2xl w-full max-w-md shadow-2xl overflow-hidden flex flex-col max-h-[80vh]">
+          <div className="bg-white dark:bg-[#0b131f] aurora:bg-[#0c151b] linen:bg-[#f8f2e7] border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] linen:border-[#d5c6ae] rounded-2xl w-full max-w-md shadow-2xl linen:shadow-sm overflow-hidden flex flex-col max-h-[80vh]">
             <div className="px-4 py-3 border-b border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] linen:border-[#e6dac6] bg-[#f8fafc] dark:bg-[#0d1726] aurora:bg-[#0e1920] linen:bg-[#f0e6d5] flex items-center justify-between">
               <div className="flex items-center gap-2">
                 <Forward className="w-4 h-4 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#5eead4] linen:text-[#a86a43]" />
@@ -6586,7 +6586,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
             onClick={() => !inviteModalState.joining && setInviteModalState(null)}
           >
             <div
-              className="w-full max-w-sm rounded-2xl border border-[#e2e8f0] dark:border-[#1e3148] aurora:border-[#1f3b44] linen:border-[#cbbba2] bg-white dark:bg-[#0f172a] aurora:bg-[#0d1c22] linen:bg-[#f8f2e7] shadow-2xl overflow-hidden"
+              className="w-full max-w-sm rounded-2xl border border-[#e2e8f0] dark:border-[#1e3148] aurora:border-[#1f3b44] linen:border-[#d5c6ae] bg-white dark:bg-[#0f172a] aurora:bg-[#0d1c22] linen:bg-[#f8f2e7] shadow-2xl linen:shadow-sm overflow-hidden"
               onClick={(e) => e.stopPropagation()}
             >
               <div className="flex items-center justify-between px-4 py-3 border-b border-[#e2e8f0] dark:border-[#1e3148] aurora:border-[#1c353d] linen:border-[#e6dac6]">
@@ -6719,7 +6719,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
             onClick={() => setMemberProfileModal(null)}
           >
             <div
-              className="w-full max-w-sm rounded-2xl bg-white dark:bg-[#0e1726] aurora:bg-[#0d181e] linen:bg-[#f8f2e7] border border-[#e2e8f0] dark:border-[#1e3148] aurora:border-[#1d343d] linen:border-[#cbbba2] shadow-2xl overflow-hidden text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118]"
+              className="w-full max-w-sm rounded-2xl bg-white dark:bg-[#0e1726] aurora:bg-[#0d181e] linen:bg-[#f8f2e7] border border-[#e2e8f0] dark:border-[#1e3148] aurora:border-[#1d343d] linen:border-[#d5c6ae] shadow-2xl linen:shadow-sm overflow-hidden text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118]"
               onClick={(e) => e.stopPropagation()}
             >
               {/* Header */}
@@ -7051,7 +7051,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
             onClick={() => setReadReceiptsModal(null)}
           >
             <div
-              className="w-full max-w-sm rounded-2xl bg-white dark:bg-[#0e1726] aurora:bg-[#0d181e] linen:bg-[#f8f2e7] border border-[#e2e8f0] dark:border-[#1e3148] aurora:border-[#1d343d] linen:border-[#cbbba2] shadow-2xl overflow-hidden text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118]"
+              className="w-full max-w-sm rounded-2xl bg-white dark:bg-[#0e1726] aurora:bg-[#0d181e] linen:bg-[#f8f2e7] border border-[#e2e8f0] dark:border-[#1e3148] aurora:border-[#1d343d] linen:border-[#d5c6ae] shadow-2xl linen:shadow-sm overflow-hidden text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118]"
               onClick={(e) => e.stopPropagation()}
             >
               {/* Header */}

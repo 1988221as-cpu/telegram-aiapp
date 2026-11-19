@@ -406,18 +406,18 @@ export const CustomLLMModal: React.FC<CustomLLMModalProps> = ({
   const panelBody = (
     <>
       {!embedded && (
-        <div className="px-5 py-4 border-b border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] flex items-center justify-between shrink-0 bg-[#f8fafc] dark:bg-[#0d1726] aurora:bg-[#0e1920]">
+        <div className="px-5 py-4 border-b border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] linen:border-[#dfd2bc] flex items-center justify-between shrink-0 bg-[#f8fafc] dark:bg-[#0d1726] aurora:bg-[#0e1920] linen:bg-[#f0e6d5]">
           <div className="flex items-center gap-2.5">
-            <div className="w-8 h-8 rounded-lg bg-[#2481cc]/12 dark:bg-[#2ba0ff]/12 aurora:bg-[#14b8a6]/15 border border-[#2481cc]/25 dark:border-[#2ba0ff]/25 aurora:border-[#2dd4bf]/30 flex items-center justify-center text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf]">
+            <div className="w-8 h-8 rounded-lg bg-[#2481cc]/12 dark:bg-[#2ba0ff]/12 aurora:bg-[#14b8a6]/15 linen:bg-[#a86a43]/15 border border-[#2481cc]/25 dark:border-[#2ba0ff]/25 aurora:border-[#2dd4bf]/30 linen:border-[#a86a43]/30 flex items-center justify-center text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf] linen:text-[#8c522d]">
               <Cpu className="w-5 h-5" />
             </div>
             <div>
-              <h2 className="text-sm font-bold text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8]">HumanSense · 智能大模型与自有网关</h2>
+              <h2 className="text-sm font-bold text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118]">HumanSense · 智能大模型与自有网关</h2>
             </div>
           </div>
           <button
             onClick={onClose}
-            className="w-8 h-8 rounded-lg text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] hover:text-[#0f172a] dark:hover:text-[#eef4fb] aurora:hover:text-[#ecf6f8] hover:bg-black/5 dark:hover:bg-[#152438] aurora:hover:bg-[#152934] flex items-center justify-center cursor-pointer transition-colors"
+            className="w-8 h-8 rounded-lg text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a] hover:text-[#0f172a] dark:hover:text-[#eef4fb] aurora:hover:text-[#ecf6f8] linen:hover:text-[#2b2118] hover:bg-black/5 dark:hover:bg-[#152438] aurora:hover:bg-[#152934] linen:hover:bg-[#e7dccb] flex items-center justify-center cursor-pointer transition-colors"
           >
             <X className="w-4 h-4" />
           </button>
@@ -443,13 +443,13 @@ export const CustomLLMModal: React.FC<CustomLLMModalProps> = ({
             }}
             className={`p-3 rounded-xl border text-left transition-all cursor-pointer ${
               isCloudTab
-                ? 'border-[#2481cc] dark:border-[#2ba0ff] aurora:border-[#2dd4bf] bg-[#e8f3ff] dark:bg-[#2ba0ff]/12 aurora:bg-[#112d36] text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] shadow-xs'
-                : 'border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] bg-[#f8fafc] dark:bg-[#0e1726]/85 aurora:bg-[#101c23]/90 text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] hover:text-[#0f172a] dark:hover:text-[#eef4fb] aurora:hover:text-[#ecf6f8]'
+                ? 'border-[#2481cc] dark:border-[#2ba0ff] aurora:border-[#2dd4bf] linen:border-[#a86a43] bg-[#e8f3ff] dark:bg-[#2ba0ff]/12 aurora:bg-[#112d36] linen:bg-[#a86a43]/15 text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118] shadow-xs'
+                : 'border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] linen:border-[#dfd2bc] bg-[#f8fafc] dark:bg-[#0e1726]/85 aurora:bg-[#101c23]/90 linen:bg-[#efe6d6]/90 text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a] hover:text-[#0f172a] dark:hover:text-[#eef4fb] aurora:hover:text-[#ecf6f8] linen:hover:text-[#2b2118]'
             }`}
           >
             <div className="flex items-center justify-between gap-1.5 text-xs font-semibold">
               <span className="flex items-center gap-1.5 min-w-0">
-                <Lock className="w-3.5 h-3.5 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf] shrink-0" />
+                <Lock className="w-3.5 h-3.5 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf] linen:text-[#8c522d] shrink-0" />
                 <span className="truncate">HumanSense 云端引擎</span>
               </span>
               {isCloudModeEnabled && (
@@ -466,8 +466,8 @@ export const CustomLLMModal: React.FC<CustomLLMModalProps> = ({
             }}
             className={`p-3 rounded-xl border text-left transition-all cursor-pointer ${
               !isCloudTab
-                ? 'border-[#2481cc] dark:border-[#2ba0ff] aurora:border-[#2dd4bf] bg-[#e8f3ff] dark:bg-[#2ba0ff]/12 aurora:bg-[#112d36] text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] shadow-xs'
-                : 'border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] bg-[#f8fafc] dark:bg-[#0e1726]/85 aurora:bg-[#101c23]/90 text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] hover:text-[#0f172a] dark:hover:text-[#eef4fb] aurora:hover:text-[#ecf6f8]'
+                ? 'border-[#2481cc] dark:border-[#2ba0ff] aurora:border-[#2dd4bf] linen:border-[#a86a43] bg-[#e8f3ff] dark:bg-[#2ba0ff]/12 aurora:bg-[#112d36] linen:bg-[#a86a43]/15 text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118] shadow-xs'
+                : 'border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] linen:border-[#dfd2bc] bg-[#f8fafc] dark:bg-[#0e1726]/85 aurora:bg-[#101c23]/90 linen:bg-[#efe6d6]/90 text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a] hover:text-[#0f172a] dark:hover:text-[#eef4fb] aurora:hover:text-[#ecf6f8] linen:hover:text-[#2b2118]'
             }`}
           >
             <div className="flex items-center justify-between gap-1.5 text-xs font-semibold">
@@ -485,11 +485,11 @@ export const CustomLLMModal: React.FC<CustomLLMModalProps> = ({
         {isCloudTab ? (
           /* 图2：HumanSense 云端引擎与话术检索开关（与图1 优先自有密钥回复严格互斥） */
           <>
-            <div className="bg-[#f8fafc] dark:bg-[#0e1726]/85 aurora:bg-[#101c23]/90 p-3.5 rounded-xl border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] space-y-3">
+            <div className="bg-[#f8fafc] dark:bg-[#0e1726]/85 aurora:bg-[#101c23]/90 linen:bg-[#efe6d6]/90 p-3.5 rounded-xl border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] linen:border-[#dfd2bc] space-y-3">
               <div className="flex items-center justify-between gap-3">
                 <div className="flex items-center gap-2 min-w-0">
-                  <Database className="w-4 h-4 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf] shrink-0" />
-                  <span className="text-xs font-bold text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] truncate">
+                  <Database className="w-4 h-4 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf] linen:text-[#8c522d] shrink-0" />
+                  <span className="text-xs font-bold text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118] truncate">
                     启用 HumanSense 官方大模型
                   </span>
                 </div>
@@ -513,7 +513,7 @@ export const CustomLLMModal: React.FC<CustomLLMModalProps> = ({
                     }}
                     className="sr-only peer"
                   />
-                  <div className="w-11 h-6 bg-[#cbd5e1] dark:bg-[#1e3148] aurora:bg-[#203742] peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-[#cbd5e1] after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-[#2481cc] dark:peer-checked:bg-[#2ba0ff] aurora:peer-checked:bg-[#0d9488]"></div>
+                  <div className="w-11 h-6 bg-[#cbd5e1] dark:bg-[#1e3148] aurora:bg-[#203742] linen:bg-[#d7c8b0] peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-[#cbd5e1] after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-[#2481cc] dark:peer-checked:bg-[#2ba0ff] aurora:peer-checked:bg-[#0d9488]"></div>
                 </label>
               </div>
 
@@ -524,24 +524,24 @@ export const CustomLLMModal: React.FC<CustomLLMModalProps> = ({
               )}
 
               {!isCloudModeEnabled && !isCustomPriorityEnabled && (
-                <div className="p-2.5 rounded-lg bg-slate-500/10 border border-slate-400/30 text-[11px] text-slate-700 dark:text-slate-300 aurora:text-[#b7d0d8] leading-relaxed">
+                <div className="p-2.5 rounded-lg bg-slate-500/10 linen:bg-[#a86a43]/10 border border-slate-400/30 text-[11px] text-slate-700 dark:text-slate-300 aurora:text-[#b7d0d8] linen:text-[#4e3f32] leading-relaxed">
                   当前处于「双关状态」（官方大模型与优先自有密钥均已关闭）：AI 自动回复、客户全息记忆提炼与角色试聊已暂停，聊天翻译仅支持「谷歌机翻」；如需恢复，请开启云端引擎或优先自有密钥。
                 </div>
               )}
 
-              <div className="p-2.5 rounded-lg bg-white dark:bg-[#08101a] aurora:bg-[#081014] border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] text-[11px] text-[#475569] dark:text-[#b4c6d8] aurora:text-[#b7d0d8] leading-relaxed">
-                <div>云端引擎模式负责：<span className="font-medium text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8]">官方大模型智能回复（使用云端自建知识库 Cloud RAG）、云端大模型多通道智能翻译、客户全息记忆提炼</span>。</div>
-                <div className="mt-1 text-[10.5px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5]">
+              <div className="p-2.5 rounded-lg bg-white dark:bg-[#08101a] aurora:bg-[#081014] linen:bg-[#faf5ec] border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] linen:border-[#dfd2bc] text-[11px] text-[#475569] dark:text-[#b4c6d8] aurora:text-[#b7d0d8] linen:text-[#4e3f32] leading-relaxed">
+                <div>云端引擎模式负责：<span className="font-medium text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118]">官方大模型智能回复（使用云端自建知识库 Cloud RAG）、云端大模型多通道智能翻译、客户全息记忆提炼</span>。</div>
+                <div className="mt-1 text-[10.5px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a]">
                   提示：官方大模型只结合个人资料、客户全息记忆与云端自建知识库，不读取软件本地知识库与整文范本库；如需使用软件本地知识库或自定义翻译模型，请前往「接入自有模型网关」开启「启用优先自有密钥回复」。
                 </div>
               </div>
             </div>
 
             {/* Temperature */}
-            <div className="space-y-1.5 bg-[#f8fafc] dark:bg-[#0e1726]/85 aurora:bg-[#101c23]/90 p-3 rounded-xl border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34]">
-              <div className="flex items-center justify-between text-xs text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8]">
+            <div className="space-y-1.5 bg-[#f8fafc] dark:bg-[#0e1726]/85 aurora:bg-[#101c23]/90 linen:bg-[#efe6d6]/90 p-3 rounded-xl border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] linen:border-[#dfd2bc]">
+              <div className="flex items-center justify-between text-xs text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118]">
                 <span>模型发散度 / 随机性 (Temperature)</span>
-                <span className="font-mono tabular-nums text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf] font-semibold">
+                <span className="font-mono tabular-nums text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf] linen:text-[#8c522d] font-semibold">
                   {formData.temperature}
                 </span>
               </div>
@@ -552,9 +552,9 @@ export const CustomLLMModal: React.FC<CustomLLMModalProps> = ({
                 step="0.05"
                 value={formData.temperature}
                 onChange={(e) => setFormData({ ...formData, temperature: parseFloat(e.target.value) })}
-                className="w-full accent-[#2481cc] dark:accent-[#2ba0ff] aurora:accent-[#14b8a6] cursor-pointer"
+                className="w-full accent-[#2481cc] dark:accent-[#2ba0ff] aurora:accent-[#14b8a6] linen:accent-[#a86a43] cursor-pointer"
               />
-              <div className="flex justify-between text-[10px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5]">
+              <div className="flex justify-between text-[10px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a]">
                 <span>严谨准确 (0.0)</span>
                 <span>自然多情 (0.7)</span>
                 <span>天马行空 (1.5)</span>
@@ -567,11 +567,11 @@ export const CustomLLMModal: React.FC<CustomLLMModalProps> = ({
                 type="button"
                 onClick={handleTestCloudEngineAndRag}
                 disabled={isTesting}
-                className="w-full py-2.5 rounded-xl bg-[#f1f5f9] hover:bg-[#e2e8f0] dark:bg-[#132234] dark:hover:bg-[#1a2e45] aurora:bg-[#13252e] aurora:hover:bg-[#18303b] text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] text-xs font-semibold flex items-center justify-center gap-2 cursor-pointer transition-colors disabled:opacity-50"
+                className="w-full py-2.5 rounded-xl bg-[#f1f5f9] hover:bg-[#e2e8f0] dark:bg-[#132234] dark:hover:bg-[#1a2e45] aurora:bg-[#13252e] linen:bg-[#e7dccb] aurora:hover:bg-[#18303b] linen:hover:bg-[#dfd2bc] text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] linen:border-[#cbbba2] text-xs font-semibold flex items-center justify-center gap-2 cursor-pointer transition-colors disabled:opacity-50"
               >
                 {isTesting ? (
                   <>
-                    <RefreshCw className="w-4 h-4 animate-spin text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf]" />
+                    <RefreshCw className="w-4 h-4 animate-spin text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf] linen:text-[#8c522d]" />
                     <span>正在检测云端引擎与话术检索连通性...</span>
                   </>
                 ) : (
@@ -587,11 +587,11 @@ export const CustomLLMModal: React.FC<CustomLLMModalProps> = ({
           /* 图1：接入自有模型网关（新增 启用优先自有密钥回复 开关 + 统一 Base URL / Key + 对话记忆模型型号） */
           <>
             {/* Priority Custom Key Switch (Mutually Exclusive with 图2 Cloud RAG) */}
-            <div className="bg-[#f8fafc] dark:bg-[#0e1726]/85 aurora:bg-[#101c23]/90 p-3.5 rounded-xl border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] space-y-2.5">
+            <div className="bg-[#f8fafc] dark:bg-[#0e1726]/85 aurora:bg-[#101c23]/90 linen:bg-[#efe6d6]/90 p-3.5 rounded-xl border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] linen:border-[#dfd2bc] space-y-2.5">
               <div className="flex items-center justify-between gap-3">
                 <div className="flex items-center gap-2 min-w-0">
                   <Cpu className="w-4 h-4 text-amber-500 dark:text-amber-400 shrink-0" />
-                  <span className="text-xs font-bold text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] truncate">
+                  <span className="text-xs font-bold text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118] truncate">
                     启用优先自有密钥回复
                   </span>
                 </div>
@@ -655,28 +655,28 @@ export const CustomLLMModal: React.FC<CustomLLMModalProps> = ({
                     }}
                     className="sr-only peer"
                   />
-                  <div className="w-11 h-6 bg-[#cbd5e1] dark:bg-[#1e3148] aurora:bg-[#203742] peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-[#cbd5e1] after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-amber-500"></div>
+                  <div className="w-11 h-6 bg-[#cbd5e1] dark:bg-[#1e3148] aurora:bg-[#203742] linen:bg-[#d7c8b0] peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-[#cbd5e1] after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-amber-500"></div>
                 </label>
               </div>
-              <p className="text-[11px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] leading-relaxed">
-                开启后将自动关闭官方云端自建知识库，专属启用软件<span className="font-medium text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8]">「本地知识库」与「整文范本库」</span>，并将<span className="font-medium text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8]">聊天 AI 回复（含人设/个人资料/客户记忆）、记忆提炼及聊天翻译</span>统一改走下方自有密钥；开启云端开关则自动切回官方云端引擎。
+              <p className="text-[11px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a] leading-relaxed">
+                开启后将自动关闭官方云端自建知识库，专属启用软件<span className="font-medium text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118]">「本地知识库」与「整文范本库」</span>，并将<span className="font-medium text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118]">聊天 AI 回复（含人设/个人资料/客户记忆）、记忆提炼及聊天翻译</span>统一改走下方自有密钥；开启云端开关则自动切回官方云端引擎。
               </p>
               {!isCloudModeEnabled && !isCustomPriorityEnabled && (
-                <div className="p-2.5 rounded-lg bg-slate-500/10 border border-slate-400/30 text-[11px] text-slate-700 dark:text-slate-300 aurora:text-[#b7d0d8] leading-relaxed">
+                <div className="p-2.5 rounded-lg bg-slate-500/10 linen:bg-[#a86a43]/10 border border-slate-400/30 text-[11px] text-slate-700 dark:text-slate-300 aurora:text-[#b7d0d8] linen:text-[#4e3f32] leading-relaxed">
                   当前处于「双关状态」：官方大模型与优先自有密钥均已关闭，翻译仅支持「谷歌机翻」。
                 </div>
               )}
             </div>
 
-            <div className="bg-[#f8fafc] dark:bg-[#0e1726]/85 aurora:bg-[#101c23]/90 rounded-xl border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] p-3.5 space-y-3.5">
-              <div className="flex items-center justify-between gap-2 pb-2 border-b border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34]">
+            <div className="bg-[#f8fafc] dark:bg-[#0e1726]/85 aurora:bg-[#101c23]/90 linen:bg-[#efe6d6]/90 rounded-xl border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] linen:border-[#dfd2bc] p-3.5 space-y-3.5">
+              <div className="flex items-center justify-between gap-2 pb-2 border-b border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] linen:border-[#dfd2bc]">
                 <div className="flex items-center gap-2 min-w-0">
-                  <Globe className="w-4 h-4 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf] shrink-0" />
-                  <span className="text-xs font-bold text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] truncate">
+                  <Globe className="w-4 h-4 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf] linen:text-[#8c522d] shrink-0" />
+                  <span className="text-xs font-bold text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118] truncate">
                     自定义大模型网站接入地址连接
                   </span>
                 </div>
-                <span className="text-[10.5px] font-medium text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] shrink-0">
+                <span className="text-[10.5px] font-medium text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a] shrink-0">
                   {isCustomPriorityEnabled ? '全链路统一入口' : '翻译 / 音色统一入口'}
                 </span>
               </div>
@@ -684,14 +684,14 @@ export const CustomLLMModal: React.FC<CustomLLMModalProps> = ({
               {/* Base URL */}
               <div className="space-y-1.5">
                 <div className="flex items-center justify-between flex-wrap gap-1">
-                  <label className="text-xs font-semibold text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8]">
+                  <label className="text-xs font-semibold text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118]">
                     大模型接入网址 (Base URL)
                   </label>
                   <div className="flex items-center gap-2">
                     <button
                       type="button"
                       onClick={() => setFormData({ ...formData, baseUrl: 'https://api.openai.com/v1' })}
-                      className="text-[11px] text-[#0284c7] dark:text-[#2ba0ff] aurora:text-[#2dd4bf] hover:underline cursor-pointer font-medium"
+                      className="text-[11px] text-[#0284c7] dark:text-[#2ba0ff] aurora:text-[#2dd4bf] linen:text-[#8c522d] hover:underline cursor-pointer font-medium"
                     >
                       OpenAI
                     </button>
@@ -718,9 +718,9 @@ export const CustomLLMModal: React.FC<CustomLLMModalProps> = ({
                   value={formData.baseUrl}
                   onChange={(e) => setFormData({ ...formData, baseUrl: e.target.value })}
                   placeholder="输入自定义大模型网站/API 地址，如 https://api.openai.com/v1"
-                  className="w-full bg-white dark:bg-[#08101a] aurora:bg-[#081014] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] rounded-lg px-3 py-2 text-xs font-mono text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] placeholder-[#94a3b8] dark:placeholder-[#4e657e] aurora:placeholder-[#5a7782] focus:outline-none focus:border-[#2481cc] dark:focus:border-[#2ba0ff] aurora:focus:border-[#2dd4bf]"
+                  className="w-full bg-white dark:bg-[#08101a] aurora:bg-[#081014] linen:bg-[#faf5ec] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] linen:border-[#cbbba2] rounded-lg px-3 py-2 text-xs font-mono text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118] placeholder-[#94a3b8] dark:placeholder-[#4e657e] aurora:placeholder-[#5a7782] linen:placeholder-[#8f7e6c] focus:outline-none focus:border-[#2481cc] dark:focus:border-[#2ba0ff] aurora:focus:border-[#2dd4bf] linen:focus:border-[#a86a43]"
                 />
-                <p className="text-[10.5px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] leading-snug">
+                <p className="text-[10.5px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a] leading-snug">
                   支持 OneAPI / NewAPI / OpenRouter / 自建反代或官方端点。
                 </p>
               </div>
@@ -728,11 +728,11 @@ export const CustomLLMModal: React.FC<CustomLLMModalProps> = ({
               {/* API Key */}
               <div className="space-y-1.5">
                 <div className="flex items-center justify-between">
-                  <label className="text-xs font-semibold text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8]">API 密钥 (Key)</label>
+                  <label className="text-xs font-semibold text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118]">API 密钥 (Key)</label>
                   <button
                     type="button"
                     onClick={() => setShowKey(!showKey)}
-                    className="text-[10.5px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] hover:text-[#0f172a] dark:hover:text-[#eef4fb] aurora:hover:text-[#ecf6f8] flex items-center gap-1 cursor-pointer"
+                    className="text-[10.5px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a] hover:text-[#0f172a] dark:hover:text-[#eef4fb] aurora:hover:text-[#ecf6f8] linen:hover:text-[#2b2118] flex items-center gap-1 cursor-pointer"
                   >
                     {showKey ? <EyeOff className="w-3 h-3" /> : <Eye className="w-3 h-3" />}
                     <span>{showKey ? '隐藏' : '显示'}</span>
@@ -748,7 +748,7 @@ export const CustomLLMModal: React.FC<CustomLLMModalProps> = ({
                     setFormData({ ...formData, apiKey: cleaned, hasApiKey: false });
                   }}
                   placeholder="sk-... 密钥安全直传"
-                  className="w-full bg-white dark:bg-[#08101a] aurora:bg-[#081014] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] rounded-lg px-3 py-2 text-xs font-mono text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] placeholder-[#94a3b8] dark:placeholder-[#4e657e] aurora:placeholder-[#5a7782] focus:outline-none focus:border-[#2481cc] dark:focus:border-[#2ba0ff] aurora:focus:border-[#2dd4bf]"
+                  className="w-full bg-white dark:bg-[#08101a] aurora:bg-[#081014] linen:bg-[#faf5ec] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] linen:border-[#cbbba2] rounded-lg px-3 py-2 text-xs font-mono text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118] placeholder-[#94a3b8] dark:placeholder-[#4e657e] aurora:placeholder-[#5a7782] linen:placeholder-[#8f7e6c] focus:outline-none focus:border-[#2481cc] dark:focus:border-[#2ba0ff] aurora:focus:border-[#2dd4bf] linen:focus:border-[#a86a43]"
                 />
                 {(formData.hasApiKey || /^[^*\s]{1,4}\*{4,}[^*\s]{1,4}$/.test((formData.apiKey || '').trim())) && (
                   <p className="text-[10.5px] text-emerald-700 dark:text-emerald-400 leading-snug">
@@ -760,10 +760,10 @@ export const CustomLLMModal: React.FC<CustomLLMModalProps> = ({
               {/* Protocol Selector (Auto / OpenAI / Anthropic / Gemini) */}
               <div className="space-y-1.5">
                 <div className="flex items-center justify-between gap-2">
-                  <label className="text-xs font-semibold text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8]">
+                  <label className="text-xs font-semibold text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118]">
                     接口协议 (Protocol)
                   </label>
-                  <span className="text-[10.5px] font-mono text-[#0284c7] dark:text-[#2ba0ff] aurora:text-[#2dd4bf]">
+                  <span className="text-[10.5px] font-mono text-[#0284c7] dark:text-[#2ba0ff] aurora:text-[#2dd4bf] linen:text-[#8c522d]">
                     {selectedUiProtocol === 'auto'
                       ? `自动识别 → ${
                           detectedEffectiveProtocol === 'gemini'
@@ -788,21 +788,21 @@ export const CustomLLMModal: React.FC<CustomLLMModalProps> = ({
                     setFormData({ ...formData, protocol: nextProto });
                     setTestResult(null);
                   }}
-                  className="w-full bg-white dark:bg-[#08101a] aurora:bg-[#081014] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] rounded-lg px-3 py-1.5 text-xs text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] focus:outline-none focus:border-[#2481cc] dark:focus:border-[#2ba0ff] aurora:focus:border-[#2dd4bf]"
+                  className="w-full bg-white dark:bg-[#08101a] aurora:bg-[#081014] linen:bg-[#faf5ec] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] linen:border-[#cbbba2] rounded-lg px-3 py-1.5 text-xs text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118] focus:outline-none focus:border-[#2481cc] dark:focus:border-[#2ba0ff] aurora:focus:border-[#2dd4bf] linen:focus:border-[#a86a43]"
                 >
                   <option value="auto">自动识别 (Auto · 按地址默认兼容)</option>
                   <option value="openai">OpenAI 兼容 (/v1/chat/completions · OneAPI/NewAPI)</option>
                   <option value="anthropic">Anthropic 协议 (/v1/messages · Claude 原生)</option>
                   <option value="gemini">Google Gemini 协议 (:generateContent · 原生)</option>
                 </select>
-                <p className="text-[10.5px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] leading-snug">
+                <p className="text-[10.5px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a] leading-snug">
                   中转站（OneAPI / NewAPI / OpenRouter）通常使用 OpenAI 协议；如使用原生反代，请手动选择对应协议。
                 </p>
               </div>
 
               {/* Chat & Memory Model Selector (always accessible in Custom Gateway tab so model handshake can be tested directly) */}
-              <div className="space-y-1.5 pt-2 border-t border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34]">
-                <label className="text-xs font-semibold text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] block">
+              <div className="space-y-1.5 pt-2 border-t border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] linen:border-[#dfd2bc]">
+                <label className="text-xs font-semibold text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118] block">
                   对话与记忆模型型号 (Model Name · 支持自由输入)
                 </label>
                 <select
@@ -814,7 +814,7 @@ export const CustomLLMModal: React.FC<CustomLLMModalProps> = ({
                       setFormData({ ...formData, modelName: '' });
                     }
                   }}
-                  className="w-full bg-white dark:bg-[#08101a] aurora:bg-[#081014] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] rounded-lg px-3 py-1.5 text-xs text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] focus:outline-none focus:border-[#2481cc] dark:focus:border-[#2ba0ff] aurora:focus:border-[#2dd4bf]"
+                  className="w-full bg-white dark:bg-[#08101a] aurora:bg-[#081014] linen:bg-[#faf5ec] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] linen:border-[#cbbba2] rounded-lg px-3 py-1.5 text-xs text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118] focus:outline-none focus:border-[#2481cc] dark:focus:border-[#2ba0ff] aurora:focus:border-[#2dd4bf] linen:focus:border-[#a86a43]"
                 >
                   {CHAT_MEMORY_MODEL_PRESETS.map((m) => (
                     <option key={m.value} value={m.value}>
@@ -834,21 +834,21 @@ export const CustomLLMModal: React.FC<CustomLLMModalProps> = ({
                       ? '输入 Claude 模型型号，如 claude-3-5-sonnet-20241022'
                       : '输入模型型号（填写后测试将真实发起推理握手校验），如 gpt-4o-mini'
                   }
-                  className="w-full bg-white dark:bg-[#08101a] aurora:bg-[#081014] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] rounded-lg px-3 py-2 text-xs font-mono text-[#0284c7] dark:text-[#7cc4ff] aurora:text-[#5eead4] placeholder-[#94a3b8] dark:placeholder-[#4e657e] aurora:placeholder-[#5a7782] focus:outline-none focus:border-[#2481cc] dark:focus:border-[#2ba0ff] aurora:focus:border-[#2dd4bf]"
+                  className="w-full bg-white dark:bg-[#08101a] aurora:bg-[#081014] linen:bg-[#faf5ec] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] linen:border-[#cbbba2] rounded-lg px-3 py-2 text-xs font-mono text-[#0284c7] dark:text-[#7cc4ff] aurora:text-[#5eead4] linen:text-[#8c522d] placeholder-[#94a3b8] dark:placeholder-[#4e657e] aurora:placeholder-[#5a7782] linen:placeholder-[#8f7e6c] focus:outline-none focus:border-[#2481cc] dark:focus:border-[#2ba0ff] aurora:focus:border-[#2dd4bf] linen:focus:border-[#a86a43]"
                 />
                 {(() => {
                   const rawTyped = (formData.modelName || '').trim();
                   const normTyped = normalizeCustomModelIdInput(rawTyped, detectedEffectiveProtocol);
                   if (rawTyped && normTyped !== rawTyped) {
                     return (
-                      <div className="flex items-center justify-between gap-2 text-[10.5px] text-sky-700 dark:text-sky-300 bg-sky-500/10 border border-sky-500/25 rounded-md px-2 py-1">
+                      <div className="flex items-center justify-between gap-2 text-[10.5px] text-sky-700 dark:text-sky-300 linen:text-[#8c522d] bg-sky-500/10 linen:bg-[#a86a43]/12 border border-sky-500/25 linen:border-[#a86a43]/30 rounded-md px-2 py-1">
                         <span className="truncate">
                           已自动兼容识别为：<code className="font-mono font-semibold">{normTyped}</code>
                         </span>
                         <button
                           type="button"
                           onClick={() => setFormData({ ...formData, modelName: normTyped })}
-                          className="px-1.5 py-0.5 rounded bg-sky-500/20 hover:bg-sky-500/30 font-semibold cursor-pointer shrink-0 transition-colors"
+                          className="px-1.5 py-0.5 rounded bg-sky-500/20 hover:bg-sky-500/30 linen:bg-[#a86a43]/20 linen:hover:bg-[#a86a43]/30 font-semibold cursor-pointer shrink-0 transition-colors"
                         >
                           替换为标准 ID
                         </button>
@@ -865,12 +865,12 @@ export const CustomLLMModal: React.FC<CustomLLMModalProps> = ({
                   return null;
                 })()}
                 {!(/\s/.test(normalizeCustomModelIdInput(formData.modelName, detectedEffectiveProtocol))) && currentModelUsage ? (
-                  <div className="flex flex-wrap items-center gap-1.5 text-[10.5px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] pt-0.5">
-                    <span className="px-1.5 py-0.5 rounded bg-[#2481cc]/10 dark:bg-[#2ba0ff]/15 aurora:bg-[#14b8a6]/15 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf] font-medium">
+                  <div className="flex flex-wrap items-center gap-1.5 text-[10.5px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a] pt-0.5">
+                    <span className="px-1.5 py-0.5 rounded bg-[#2481cc]/10 dark:bg-[#2ba0ff]/15 aurora:bg-[#14b8a6]/15 linen:bg-[#a86a43]/15 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf] linen:text-[#8c522d] font-medium">
                       {currentModelUsage.tierTag}
                     </span>
                     <span>
-                      今日已用 <span className="font-mono font-semibold text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8]">{currentModelUsage.todayCount}</span> 次
+                      今日已用 <span className="font-mono font-semibold text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118]">{currentModelUsage.todayCount}</span> 次
                     </span>
                     {currentModelUsage.rateLimitRemaining && (
                       <span className="text-emerald-700 dark:text-emerald-400">
@@ -889,11 +889,11 @@ export const CustomLLMModal: React.FC<CustomLLMModalProps> = ({
                 type="button"
                 onClick={handleTestCustomGateway}
                 disabled={isTesting || !formData.baseUrl}
-                className="w-full py-2.5 rounded-xl bg-[#f1f5f9] hover:bg-[#e2e8f0] dark:bg-[#132234] dark:hover:bg-[#1a2e45] aurora:bg-[#13252e] aurora:hover:bg-[#18303b] text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] text-xs font-semibold flex items-center justify-center gap-2 cursor-pointer transition-colors disabled:opacity-50"
+                className="w-full py-2.5 rounded-xl bg-[#f1f5f9] hover:bg-[#e2e8f0] dark:bg-[#132234] dark:hover:bg-[#1a2e45] aurora:bg-[#13252e] linen:bg-[#e7dccb] aurora:hover:bg-[#18303b] linen:hover:bg-[#dfd2bc] text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] linen:border-[#cbbba2] text-xs font-semibold flex items-center justify-center gap-2 cursor-pointer transition-colors disabled:opacity-50"
               >
                 {isTesting ? (
                   <>
-                    <RefreshCw className="w-4 h-4 animate-spin text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf]" />
+                    <RefreshCw className="w-4 h-4 animate-spin text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf] linen:text-[#8c522d]" />
                     <span>正在握手连通性与密钥校验...</span>
                   </>
                 ) : (
@@ -953,11 +953,11 @@ export const CustomLLMModal: React.FC<CustomLLMModalProps> = ({
                             message: `已填入可用模型「${item.id}」，请再次点击「一键连通性测试」或直接「保存配置」。`,
                           });
                         }}
-                        className="px-2 py-1 rounded-md text-[11px] bg-white/85 dark:bg-[#08101a]/90 aurora:bg-[#081014]/90 border border-current/25 hover:border-[#2481cc] dark:hover:border-[#2ba0ff] aurora:hover:border-[#2dd4bf] hover:text-[#2481cc] dark:hover:text-[#2ba0ff] aurora:hover:text-[#2dd4bf] cursor-pointer transition-colors flex items-center gap-1.5"
+                        className="px-2 py-1 rounded-md text-[11px] bg-white/85 dark:bg-[#08101a]/90 aurora:bg-[#081014]/90 linen:bg-[#faf5ec]/90 border border-current/25 hover:border-[#2481cc] dark:hover:border-[#2ba0ff] aurora:hover:border-[#2dd4bf] hover:text-[#2481cc] dark:hover:text-[#2ba0ff] aurora:hover:text-[#2dd4bf] cursor-pointer transition-colors flex items-center gap-1.5"
                       >
                         <span className="font-mono">{item.id}</span>
                         {item.tierTag && (
-                          <span className="px-1 py-0.2 rounded text-[9.5px] bg-[#2481cc]/10 dark:bg-[#2ba0ff]/15 aurora:bg-[#14b8a6]/15 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf] font-sans">
+                          <span className="px-1 py-0.2 rounded text-[9.5px] bg-[#2481cc]/10 dark:bg-[#2ba0ff]/15 aurora:bg-[#14b8a6]/15 linen:bg-[#a86a43]/15 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf] linen:text-[#8c522d] font-sans">
                             {item.tierTag}
                           </span>
                         )}
@@ -980,16 +980,16 @@ export const CustomLLMModal: React.FC<CustomLLMModalProps> = ({
       </div>
 
       {/* Footer */}
-      <div className="px-4 py-3 border-t border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] bg-[#f8fafc]/90 dark:bg-[#0d1726]/90 aurora:bg-[#0e1920]/90 flex items-center justify-end gap-2 shrink-0">
+      <div className="px-4 py-3 border-t border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] linen:border-[#dfd2bc] bg-[#f8fafc]/90 dark:bg-[#0d1726]/90 aurora:bg-[#0e1920]/90 linen:bg-[#f0e6d5]/90 flex items-center justify-end gap-2 shrink-0">
         <button
           onClick={onClose}
-          className="px-3.5 py-2 rounded-lg text-xs text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] hover:text-[#0f172a] dark:hover:text-[#eef4fb] aurora:hover:text-[#ecf6f8] hover:bg-black/5 dark:hover:bg-[#152438] aurora:hover:bg-[#152934] cursor-pointer transition-colors"
+          className="px-3.5 py-2 rounded-lg text-xs text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a] hover:text-[#0f172a] dark:hover:text-[#eef4fb] aurora:hover:text-[#ecf6f8] linen:hover:text-[#2b2118] hover:bg-black/5 dark:hover:bg-[#152438] aurora:hover:bg-[#152934] linen:hover:bg-[#e7dccb] cursor-pointer transition-colors"
         >
           {embedded ? '收起' : '取消'}
         </button>
         <button
           onClick={handleSave}
-          className="px-4 py-2 rounded-lg bg-[#2481cc] hover:bg-[#1d6fb3] dark:bg-[#2ba0ff] dark:hover:bg-[#1e8ee8] aurora:bg-[#0d9488] aurora:hover:bg-[#0f766e] text-white text-xs font-semibold shadow-xs cursor-pointer transition-colors"
+          className="px-4 py-2 rounded-lg bg-[#2481cc] hover:bg-[#1d6fb3] dark:bg-[#2ba0ff] dark:hover:bg-[#1e8ee8] aurora:bg-[#0d9488] linen:bg-[#a86a43] aurora:hover:bg-[#0f766e] linen:hover:bg-[#8f5734] text-white text-xs font-semibold shadow-xs cursor-pointer transition-colors"
         >
           保存配置
         </button>
@@ -999,7 +999,7 @@ export const CustomLLMModal: React.FC<CustomLLMModalProps> = ({
 
   if (embedded) {
     return (
-      <div className="flex-1 flex flex-col min-h-0 overflow-hidden text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8]">
+      <div className="flex-1 flex flex-col min-h-0 overflow-hidden text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118]">
         {panelBody}
       </div>
     );
@@ -1007,7 +1007,7 @@ export const CustomLLMModal: React.FC<CustomLLMModalProps> = ({
 
   return (
     <div className="fixed inset-0 bg-black/55 dark:bg-black/75 aurora:bg-black/80 backdrop-blur-xs flex items-center justify-center z-50 p-4 select-none">
-      <div className="bg-white dark:bg-[#0b131f] aurora:bg-[#0c151b] border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] w-full max-w-xl rounded-2xl shadow-2xl flex flex-col overflow-hidden max-h-[92vh] text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8]">
+      <div className="bg-white dark:bg-[#0b131f] aurora:bg-[#0c151b] linen:bg-[#f8f2e7] border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] linen:border-[#d5c6ae] w-full max-w-xl rounded-2xl shadow-2xl linen:shadow-sm flex flex-col overflow-hidden max-h-[92vh] text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118]">
         {panelBody}
       </div>
     </div>

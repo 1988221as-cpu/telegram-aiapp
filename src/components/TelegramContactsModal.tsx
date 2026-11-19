@@ -373,19 +373,19 @@ export const TelegramContactsModal: React.FC<TelegramContactsModalProps> = ({
         )}
       </div>
       {contact.status === 'online' && !contact.isBlocked && (
-        <span className="absolute bottom-0 right-0 w-2.5 h-2.5 rounded-full bg-emerald-500 border-2 border-white dark:border-[#0b131f] aurora:border-[#0c151b]" />
+        <span className="absolute bottom-0 right-0 w-2.5 h-2.5 rounded-full bg-emerald-500 border-2 border-white dark:border-[#0b131f] aurora:border-[#0c151b] linen:border-[#f8f2e7]" />
       )}
     </div>
   );
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/55 dark:bg-black/75 aurora:bg-black/80 backdrop-blur-xs select-none">
-      <div className="relative w-full max-w-lg bg-white dark:bg-[#0b131f] aurora:bg-[#0c151b] rounded-2xl shadow-2xl border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] overflow-hidden flex flex-col max-h-[85vh]">
+      <div className="relative w-full max-w-lg bg-white dark:bg-[#0b131f] aurora:bg-[#0c151b] linen:bg-[#f8f2e7] rounded-2xl shadow-2xl linen:shadow-sm border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] linen:border-[#d5c6ae] overflow-hidden flex flex-col max-h-[85vh]">
         {/* Header */}
-        <div className="flex items-center justify-between px-5 py-3.5 bg-[#f8fafc] dark:bg-[#0d1726] aurora:bg-[#0e1920] border-b border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34]">
+        <div className="flex items-center justify-between px-5 py-3.5 bg-[#f8fafc] dark:bg-[#0d1726] aurora:bg-[#0e1920] linen:bg-[#f0e6d5] border-b border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] linen:border-[#dfd2bc]">
           <div className="flex items-center gap-2">
-            <User className="w-5 h-5 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf]" />
-            <h3 className="text-base font-semibold text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8]">
+            <User className="w-5 h-5 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf] linen:text-[#8c522d]" />
+            <h3 className="text-base font-semibold text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118]">
               好友与联系人管理
             </h3>
           </div>
@@ -398,15 +398,15 @@ export const TelegramContactsModal: React.FC<TelegramContactsModalProps> = ({
                   void handleLoadBlockedUsers();
                 }}
                 disabled={isSyncing || isLoadingBlocked}
-                className="p-1.5 rounded-lg text-[#64748b] hover:text-[#2481cc] dark:text-[#7b93ad] dark:hover:text-[#7cc4ff] aurora:text-[#7e9aa5] aurora:hover:text-[#5eead4] hover:bg-[#e2e8f0]/60 dark:hover:bg-[#132234] aurora:hover:bg-[#13252e] transition-colors cursor-pointer"
+                className="p-1.5 rounded-lg text-[#64748b] hover:text-[#2481cc] dark:text-[#7b93ad] dark:hover:text-[#7cc4ff] aurora:text-[#7e9aa5] linen:text-[#6e5c4a] aurora:hover:text-[#5eead4] linen:hover:text-[#8c522d] hover:bg-[#e2e8f0]/60 dark:hover:bg-[#132234] aurora:hover:bg-[#13252e] linen:hover:bg-[#efe6d6] transition-colors cursor-pointer"
                 title="从 Telegram 云端刷新通讯录与黑名单"
               >
-                <RefreshCw className={`w-4 h-4 ${isSyncing || isLoadingBlocked ? 'animate-spin text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf]' : ''}`} />
+                <RefreshCw className={`w-4 h-4 ${isSyncing || isLoadingBlocked ? 'animate-spin text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf] linen:text-[#8c522d]' : ''}`} />
               </button>
             )}
             <button
               onClick={onClose}
-              className="p-1.5 rounded-lg text-[#64748b] hover:text-[#0f172a] dark:text-[#7b93ad] dark:hover:text-[#eef4fb] aurora:text-[#7e9aa5] aurora:hover:text-[#ecf6f8] hover:bg-[#e2e8f0]/60 dark:hover:bg-[#132234] aurora:hover:bg-[#13252e] transition-colors cursor-pointer"
+              className="p-1.5 rounded-lg text-[#64748b] hover:text-[#0f172a] dark:text-[#7b93ad] dark:hover:text-[#eef4fb] aurora:text-[#7e9aa5] linen:text-[#6e5c4a] aurora:hover:text-[#ecf6f8] linen:hover:text-[#2b2118] hover:bg-[#e2e8f0]/60 dark:hover:bg-[#132234] aurora:hover:bg-[#13252e] linen:hover:bg-[#efe6d6] transition-colors cursor-pointer"
             >
               <X className="w-5 h-5" />
             </button>
@@ -414,7 +414,7 @@ export const TelegramContactsModal: React.FC<TelegramContactsModalProps> = ({
         </div>
 
         {/* Sub-Tabs: Contacts vs Blacklist */}
-        <div className="px-4 pt-2 bg-[#f8fafc]/60 dark:bg-[#0d1726]/60 aurora:bg-[#0e1920]/60 border-b border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] flex items-center gap-4 text-xs font-medium">
+        <div className="px-4 pt-2 bg-[#f8fafc]/60 dark:bg-[#0d1726]/60 aurora:bg-[#0e1920]/60 linen:bg-[#f0e6d5]/65 border-b border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] linen:border-[#dfd2bc] flex items-center gap-4 text-xs font-medium">
           <button
             type="button"
             onClick={() => {
@@ -423,8 +423,8 @@ export const TelegramContactsModal: React.FC<TelegramContactsModalProps> = ({
             }}
             className={`pb-2.5 border-b-2 transition-colors cursor-pointer tabular-nums ${
               activeTab === 'contacts'
-                ? 'border-[#2481cc] dark:border-[#2ba0ff] aurora:border-[#2dd4bf] text-[#2481cc] dark:text-[#7cc4ff] aurora:text-[#5eead4] font-semibold'
-                : 'border-transparent text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] hover:text-[#0f172a] dark:hover:text-[#eef4fb] aurora:hover:text-[#ecf6f8]'
+                ? 'border-[#2481cc] dark:border-[#2ba0ff] aurora:border-[#2dd4bf] linen:border-[#a86a43] text-[#2481cc] dark:text-[#7cc4ff] aurora:text-[#5eead4] linen:text-[#8c522d] font-semibold'
+                : 'border-transparent text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a] hover:text-[#0f172a] dark:hover:text-[#eef4fb] aurora:hover:text-[#ecf6f8] linen:hover:text-[#2b2118]'
             }`}
           >
             全部联系人 ({contacts.length})
@@ -439,7 +439,7 @@ export const TelegramContactsModal: React.FC<TelegramContactsModalProps> = ({
             className={`pb-2.5 border-b-2 transition-colors cursor-pointer flex items-center gap-1.5 tabular-nums ${
               activeTab === 'blocked'
                 ? 'border-amber-600 dark:border-amber-400 aurora:border-amber-400 text-amber-700 dark:text-amber-300 aurora:text-amber-300 font-semibold'
-                : 'border-transparent text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] hover:text-[#0f172a] dark:hover:text-[#eef4fb] aurora:hover:text-[#ecf6f8]'
+                : 'border-transparent text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a] hover:text-[#0f172a] dark:hover:text-[#eef4fb] aurora:hover:text-[#ecf6f8] linen:hover:text-[#2b2118]'
             }`}
           >
             <ShieldAlert className="w-3.5 h-3.5" />
@@ -448,9 +448,9 @@ export const TelegramContactsModal: React.FC<TelegramContactsModalProps> = ({
         </div>
 
         {/* Search & Add New Toggle */}
-        <div className="p-3 border-b border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] flex items-center gap-2">
+        <div className="p-3 border-b border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] linen:border-[#dfd2bc] flex items-center gap-2">
           <div className="relative flex-1 flex items-center">
-            <Search className="w-4 h-4 text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] absolute left-3 pointer-events-none" />
+            <Search className="w-4 h-4 text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a] absolute left-3 pointer-events-none" />
             <input
               type="text"
               value={search}
@@ -472,7 +472,7 @@ export const TelegramContactsModal: React.FC<TelegramContactsModalProps> = ({
                   ? '搜索姓名、+区号手机号或 @用户名 (Enter 搜全网用户)...'
                   : '筛选黑名单用户...'
               }
-              className="w-full bg-[#f8fafc] dark:bg-[#08101a] aurora:bg-[#081014] text-xs pl-9 pr-3 py-2 rounded-xl text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] placeholder-[#94a3b8] dark:placeholder-[#4e657e] aurora:placeholder-[#5a7782] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] focus:border-[#2481cc] dark:focus:border-[#2ba0ff] aurora:focus:border-[#2dd4bf] focus:outline-none transition-colors"
+              className="w-full bg-[#f8fafc] dark:bg-[#08101a] aurora:bg-[#081014] linen:bg-[#faf5ec] text-xs pl-9 pr-3 py-2 rounded-xl text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118] placeholder-[#94a3b8] dark:placeholder-[#4e657e] aurora:placeholder-[#5a7782] linen:placeholder-[#8f7e6c] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] linen:border-[#cbbba2] focus:border-[#2481cc] dark:focus:border-[#2ba0ff] aurora:focus:border-[#2dd4bf] linen:focus:border-[#a86a43] focus:outline-none transition-colors"
             />
           </div>
           {activeTab === 'contacts' && trimmedQuery && canUseMtprotoContacts && (
@@ -480,7 +480,7 @@ export const TelegramContactsModal: React.FC<TelegramContactsModalProps> = ({
               type="button"
               onClick={() => void handleSearchGlobal()}
               disabled={isSearchingGlobal}
-              className="px-2.5 py-2 rounded-xl bg-[#f1f5f9] hover:bg-[#e2e8f0] dark:bg-[#132234] dark:hover:bg-[#1b2f47] aurora:bg-[#13252e] aurora:hover:bg-[#1a3340] border border-[#e2e8f0] dark:border-[#1e3148] aurora:border-[#203742] text-[#2481cc] dark:text-[#7cc4ff] aurora:text-[#5eead4] text-xs font-medium flex items-center gap-1 shrink-0 cursor-pointer transition-colors"
+              className="px-2.5 py-2 rounded-xl bg-[#f1f5f9] hover:bg-[#e2e8f0] dark:bg-[#132234] dark:hover:bg-[#1b2f47] aurora:bg-[#13252e] linen:bg-[#e7dccb] aurora:hover:bg-[#1a3340] linen:hover:bg-[#dfd2bc] border border-[#e2e8f0] dark:border-[#1e3148] aurora:border-[#203742] linen:border-[#cbbba2] text-[#2481cc] dark:text-[#7cc4ff] aurora:text-[#5eead4] linen:text-[#8c522d] text-xs font-medium flex items-center gap-1 shrink-0 cursor-pointer transition-colors"
               title="调用 Telegram 官方全网用户搜索"
             >
               <Globe className={`w-3.5 h-3.5 ${isSearchingGlobal ? 'animate-spin' : ''}`} />
@@ -496,7 +496,7 @@ export const TelegramContactsModal: React.FC<TelegramContactsModalProps> = ({
                 setErrorMsg('');
                 setStatusMsg('');
               }}
-              className="px-3 py-2 rounded-xl bg-[#2481cc] hover:bg-[#1d6fb3] dark:bg-[#2ba0ff] dark:hover:bg-[#1e8ee8] aurora:bg-[#0d9488] aurora:hover:bg-[#0f766e] disabled:opacity-50 text-white text-xs font-medium flex items-center gap-1.5 shrink-0 cursor-pointer shadow-xs transition-colors"
+              className="px-3 py-2 rounded-xl bg-[#2481cc] hover:bg-[#1d6fb3] dark:bg-[#2ba0ff] dark:hover:bg-[#1e8ee8] aurora:bg-[#0d9488] linen:bg-[#a86a43] aurora:hover:bg-[#0f766e] linen:hover:bg-[#8f5734] disabled:opacity-50 text-white text-xs font-medium flex items-center gap-1.5 shrink-0 cursor-pointer shadow-xs transition-colors"
             >
               <UserPlus className="w-4 h-4" />
               <span>添加好友</span>
@@ -527,38 +527,38 @@ export const TelegramContactsModal: React.FC<TelegramContactsModalProps> = ({
 
         {/* Add Contact Inline Form */}
         {activeTab === 'contacts' && isAdding && (
-          <form onSubmit={handleCreate} className="p-4 bg-[#f8fafc] dark:bg-[#0e1726]/85 aurora:bg-[#101c23]/90 border-b border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] space-y-3 animate-in fade-in duration-150">
-            <div className="text-xs font-semibold text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8]">添加联系人到 Telegram 云端</div>
+          <form onSubmit={handleCreate} className="p-4 bg-[#f8fafc] dark:bg-[#0e1726]/85 aurora:bg-[#101c23]/90 linen:bg-[#efe6d6]/90 border-b border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] linen:border-[#dfd2bc] space-y-3 animate-in fade-in duration-150">
+            <div className="text-xs font-semibold text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118]">添加联系人到 Telegram 云端</div>
             <div>
-              <label className="block text-[11px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] mb-1">姓名 / 备注名</label>
+              <label className="block text-[11px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a] mb-1">姓名 / 备注名</label>
               <input
                 type="text"
                 required
                 value={newName}
                 onChange={(e) => setNewName(e.target.value)}
                 placeholder="例如: Alex Turner"
-                className="w-full px-3 py-1.5 text-xs rounded-lg bg-white dark:bg-[#08101a] aurora:bg-[#081014] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] placeholder-[#94a3b8] dark:placeholder-[#4e657e] aurora:placeholder-[#5a7782] focus:outline-none focus:border-[#2481cc] dark:focus:border-[#2ba0ff] aurora:focus:border-[#2dd4bf]"
+                className="w-full px-3 py-1.5 text-xs rounded-lg bg-white dark:bg-[#08101a] aurora:bg-[#081014] linen:bg-[#faf5ec] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] linen:border-[#cbbba2] text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118] placeholder-[#94a3b8] dark:placeholder-[#4e657e] aurora:placeholder-[#5a7782] linen:placeholder-[#8f7e6c] focus:outline-none focus:border-[#2481cc] dark:focus:border-[#2ba0ff] aurora:focus:border-[#2dd4bf] linen:focus:border-[#a86a43]"
               />
             </div>
             <div className="grid grid-cols-2 gap-2">
               <div>
-                <label className="block text-[11px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] mb-1">国际手机号</label>
+                <label className="block text-[11px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a] mb-1">国际手机号</label>
                 <input
                   type="text"
                   value={newPhone}
                   onChange={(e) => setNewPhone(e.target.value)}
                   placeholder="+8613800000000"
-                  className="w-full px-3 py-1.5 text-xs rounded-lg bg-white dark:bg-[#08101a] aurora:bg-[#081014] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] placeholder-[#94a3b8] dark:placeholder-[#4e657e] aurora:placeholder-[#5a7782] focus:outline-none focus:border-[#2481cc] dark:focus:border-[#2ba0ff] aurora:focus:border-[#2dd4bf]"
+                  className="w-full px-3 py-1.5 text-xs rounded-lg bg-white dark:bg-[#08101a] aurora:bg-[#081014] linen:bg-[#faf5ec] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] linen:border-[#cbbba2] text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118] placeholder-[#94a3b8] dark:placeholder-[#4e657e] aurora:placeholder-[#5a7782] linen:placeholder-[#8f7e6c] focus:outline-none focus:border-[#2481cc] dark:focus:border-[#2ba0ff] aurora:focus:border-[#2dd4bf] linen:focus:border-[#a86a43]"
                 />
               </div>
               <div>
-                <label className="block text-[11px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] mb-1">Telegram 用户名</label>
+                <label className="block text-[11px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a] mb-1">Telegram 用户名</label>
                 <input
                   type="text"
                   value={newUsername}
                   onChange={(e) => setNewUsername(e.target.value)}
                   placeholder="@username"
-                  className="w-full px-3 py-1.5 text-xs rounded-lg bg-white dark:bg-[#08101a] aurora:bg-[#081014] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] placeholder-[#94a3b8] dark:placeholder-[#4e657e] aurora:placeholder-[#5a7782] focus:outline-none focus:border-[#2481cc] dark:focus:border-[#2ba0ff] aurora:focus:border-[#2dd4bf]"
+                  className="w-full px-3 py-1.5 text-xs rounded-lg bg-white dark:bg-[#08101a] aurora:bg-[#081014] linen:bg-[#faf5ec] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] linen:border-[#cbbba2] text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118] placeholder-[#94a3b8] dark:placeholder-[#4e657e] aurora:placeholder-[#5a7782] linen:placeholder-[#8f7e6c] focus:outline-none focus:border-[#2481cc] dark:focus:border-[#2ba0ff] aurora:focus:border-[#2dd4bf] linen:focus:border-[#a86a43]"
                 />
               </div>
             </div>
@@ -566,14 +566,14 @@ export const TelegramContactsModal: React.FC<TelegramContactsModalProps> = ({
               <button
                 type="button"
                 onClick={() => setIsAdding(false)}
-                className="px-3 py-1.5 rounded-lg text-xs text-[#475569] hover:bg-[#e2e8f0]/60 dark:text-[#b4c6d8] dark:hover:bg-[#132234] aurora:text-[#b7d0d8] aurora:hover:bg-[#13252e] cursor-pointer transition-colors"
+                className="px-3 py-1.5 rounded-lg text-xs text-[#475569] hover:bg-[#e2e8f0]/60 dark:text-[#b4c6d8] dark:hover:bg-[#132234] aurora:text-[#b7d0d8] linen:text-[#4e3f32] aurora:hover:bg-[#13252e] linen:hover:bg-[#efe6d6] cursor-pointer transition-colors"
               >
                 取消
               </button>
               <button
                 type="submit"
                 disabled={isSaving}
-                className="px-3 py-1.5 rounded-lg bg-[#2481cc] hover:bg-[#1d6fb3] dark:bg-[#2ba0ff] dark:hover:bg-[#1e8ee8] aurora:bg-[#0d9488] aurora:hover:bg-[#0f766e] disabled:opacity-50 text-white text-xs font-medium cursor-pointer flex items-center gap-1 transition-colors"
+                className="px-3 py-1.5 rounded-lg bg-[#2481cc] hover:bg-[#1d6fb3] dark:bg-[#2ba0ff] dark:hover:bg-[#1e8ee8] aurora:bg-[#0d9488] linen:bg-[#a86a43] aurora:hover:bg-[#0f766e] linen:hover:bg-[#8f5734] disabled:opacity-50 text-white text-xs font-medium cursor-pointer flex items-center gap-1 transition-colors"
               >
                 {isSaving && <RefreshCw className="w-3 h-3 animate-spin" />}
                 <span>{isSaving ? '同步云端中...' : '同步保存联系人'}</span>
@@ -583,11 +583,11 @@ export const TelegramContactsModal: React.FC<TelegramContactsModalProps> = ({
         )}
 
         {/* List Content */}
-        <div className="flex-1 overflow-y-auto divide-y divide-[#e2e8f0] dark:divide-[#18273a] aurora:divide-[#182b34]">
+        <div className="flex-1 overflow-y-auto divide-y divide-[#e2e8f0] dark:divide-[#18273a] aurora:divide-[#182b34] linen:divide-[#dfd2bc]">
           {activeTab === 'contacts' ? (
             <>
               {filteredContacts.length === 0 && !hasSearchedGlobal ? (
-                <div className="p-8 text-center text-xs text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] space-y-2">
+                <div className="p-8 text-center text-xs text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a] space-y-2">
                   <div>
                     {contacts.length === 0
                       ? '暂无联系人，请先点击上方「添加好友」或右上角刷新云端通讯录'
@@ -597,7 +597,7 @@ export const TelegramContactsModal: React.FC<TelegramContactsModalProps> = ({
                     <button
                       type="button"
                       onClick={() => void handleSearchGlobal()}
-                      className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-[#e8f3ff] border border-[#bfdbfe] text-[#0284c7] hover:bg-[#dbeafe] dark:bg-[#2ba0ff]/15 dark:border-[#2ba0ff]/35 dark:text-[#7cc4ff] dark:hover:bg-[#2ba0ff]/25 aurora:bg-[#112d36] aurora:border-[#2dd4bf]/35 aurora:text-[#5eead4] aurora:hover:bg-[#153944] font-medium cursor-pointer transition-colors"
+                      className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-[#e8f3ff] border border-[#bfdbfe] text-[#0284c7] hover:bg-[#dbeafe] dark:bg-[#2ba0ff]/15 dark:border-[#2ba0ff]/35 dark:text-[#7cc4ff] dark:hover:bg-[#2ba0ff]/25 aurora:bg-[#112d36] linen:bg-[#a86a43]/15 aurora:border-[#2dd4bf]/35 linen:border-[#a86a43]/40 aurora:text-[#5eead4] linen:text-[#8c522d] aurora:hover:bg-[#153944] linen:hover:bg-[#e5d9c5] font-medium cursor-pointer transition-colors"
                     >
                       <Globe className="w-3.5 h-3.5" />
                       <span>在 Telegram 全网搜索「{trimmedQuery}」</span>
@@ -615,7 +615,7 @@ export const TelegramContactsModal: React.FC<TelegramContactsModalProps> = ({
                   return (
                     <div
                       key={contact.id}
-                      className="flex items-center justify-between p-3.5 hover:bg-[#f1f5f9] dark:hover:bg-[#132234] aurora:hover:bg-[#13252e] transition-colors gap-2"
+                      className="flex items-center justify-between p-3.5 hover:bg-[#f1f5f9] dark:hover:bg-[#132234] aurora:hover:bg-[#13252e] linen:hover:bg-[#efe6d6] transition-colors gap-2"
                     >
                       <div className="flex items-center gap-3 min-w-0 flex-1">
                         {renderAvatar(contact)}
@@ -636,13 +636,13 @@ export const TelegramContactsModal: React.FC<TelegramContactsModalProps> = ({
                                     setEditingContactId(null);
                                   }
                                 }}
-                                className="flex-1 min-w-0 px-2 py-0.5 text-xs rounded-md bg-white dark:bg-[#08101a] aurora:bg-[#081014] border border-[#2481cc] dark:border-[#2ba0ff] aurora:border-[#2dd4bf] text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] focus:outline-none"
+                                className="flex-1 min-w-0 px-2 py-0.5 text-xs rounded-md bg-white dark:bg-[#08101a] aurora:bg-[#081014] linen:bg-[#faf5ec] border border-[#2481cc] dark:border-[#2ba0ff] aurora:border-[#2dd4bf] linen:border-[#a86a43] text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118] focus:outline-none"
                               />
                               <button
                                 type="button"
                                 disabled={isSavingRemark}
                                 onClick={() => void handleSaveRemark(contact)}
-                                className="p-1 rounded bg-[#2481cc] hover:bg-[#1d6fb3] dark:bg-[#2ba0ff] dark:hover:bg-[#1e8ee8] aurora:bg-[#0d9488] aurora:hover:bg-[#0f766e] text-white cursor-pointer disabled:opacity-50"
+                                className="p-1 rounded bg-[#2481cc] hover:bg-[#1d6fb3] dark:bg-[#2ba0ff] dark:hover:bg-[#1e8ee8] aurora:bg-[#0d9488] linen:bg-[#a86a43] aurora:hover:bg-[#0f766e] linen:hover:bg-[#8f5734] text-white cursor-pointer disabled:opacity-50"
                                 title="保存备注"
                               >
                                 <Check className="w-3 h-3" />
@@ -651,7 +651,7 @@ export const TelegramContactsModal: React.FC<TelegramContactsModalProps> = ({
                                 type="button"
                                 disabled={isSavingRemark}
                                 onClick={() => setEditingContactId(null)}
-                                className="p-1 rounded bg-[#f1f5f9] dark:bg-[#132234] aurora:bg-[#13252e] text-[#64748b] dark:text-[#b4c6d8] aurora:text-[#b7d0d8] cursor-pointer"
+                                className="p-1 rounded bg-[#f1f5f9] dark:bg-[#132234] aurora:bg-[#13252e] linen:bg-[#e7dccb] text-[#64748b] dark:text-[#b4c6d8] aurora:text-[#b7d0d8] linen:text-[#4e3f32] cursor-pointer"
                                 title="取消"
                               >
                                 <X className="w-3 h-3" />
@@ -659,7 +659,7 @@ export const TelegramContactsModal: React.FC<TelegramContactsModalProps> = ({
                             </div>
                           ) : (
                             <div className="flex items-center gap-1.5 min-w-0">
-                              <span className="font-semibold text-xs text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] truncate">
+                              <span className="font-semibold text-xs text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118] truncate">
                                 {contact.name}
                               </span>
                               {contact.isBlocked && (
@@ -670,7 +670,7 @@ export const TelegramContactsModal: React.FC<TelegramContactsModalProps> = ({
                             </div>
                           )}
                           {identityParts.length > 0 && (
-                            <div className="text-[11px] text-[#2481cc] dark:text-[#7cc4ff] aurora:text-[#5eead4] truncate">
+                            <div className="text-[11px] text-[#2481cc] dark:text-[#7cc4ff] aurora:text-[#5eead4] linen:text-[#8c522d] truncate">
                               {identityParts.join(' · ')}
                             </div>
                           )}
@@ -678,7 +678,7 @@ export const TelegramContactsModal: React.FC<TelegramContactsModalProps> = ({
                             className={`text-[10.5px] truncate ${
                               contact.status === 'online' && !contact.isBlocked
                                 ? 'text-emerald-700 dark:text-emerald-400 aurora:text-emerald-400 font-medium'
-                                : 'text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5]'
+                                : 'text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a]'
                             }`}
                           >
                             {statusLabel}
@@ -688,7 +688,7 @@ export const TelegramContactsModal: React.FC<TelegramContactsModalProps> = ({
 
                       {isConfirmingThis ? (
                         <div className="flex items-center gap-1.5 shrink-0">
-                          <span className="text-[11px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5]">
+                          <span className="text-[11px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a]">
                             {confirmAction?.type === 'delete'
                               ? '彻底删除?'
                               : confirmAction?.type === 'block'
@@ -715,7 +715,7 @@ export const TelegramContactsModal: React.FC<TelegramContactsModalProps> = ({
                             type="button"
                             disabled={isBusyThis}
                             onClick={() => setConfirmAction(null)}
-                            className="px-2 py-1 rounded-lg text-[11px] bg-[#e2e8f0] dark:bg-[#132234] aurora:bg-[#13252e] text-[#475569] dark:text-[#b4c6d8] aurora:text-[#b7d0d8] cursor-pointer"
+                            className="px-2 py-1 rounded-lg text-[11px] bg-[#e2e8f0] dark:bg-[#132234] aurora:bg-[#13252e] linen:bg-[#e7dccb] text-[#475569] dark:text-[#b4c6d8] aurora:text-[#b7d0d8] linen:text-[#4e3f32] cursor-pointer"
                           >
                             取消
                           </button>
@@ -728,7 +728,7 @@ export const TelegramContactsModal: React.FC<TelegramContactsModalProps> = ({
                               onStartChatWithContact(contact);
                               onClose();
                             }}
-                            className="px-2.5 py-1.5 rounded-xl bg-[#e8f3ff] border border-[#bfdbfe] hover:bg-[#2481cc] hover:border-[#2481cc] text-[#0284c7] hover:text-white dark:bg-[#2ba0ff]/15 dark:border-[#2ba0ff]/35 dark:hover:bg-[#2ba0ff] dark:text-[#7cc4ff] dark:hover:text-white aurora:bg-[#112d36] aurora:border-[#2dd4bf]/35 aurora:hover:bg-[#0d9488] aurora:text-[#5eead4] aurora:hover:text-white transition-all text-xs font-medium flex items-center gap-1 cursor-pointer"
+                            className="px-2.5 py-1.5 rounded-xl bg-[#e8f3ff] border border-[#bfdbfe] hover:bg-[#2481cc] hover:border-[#2481cc] text-[#0284c7] hover:text-white dark:bg-[#2ba0ff]/15 dark:border-[#2ba0ff]/35 dark:hover:bg-[#2ba0ff] dark:text-[#7cc4ff] dark:hover:text-white aurora:bg-[#112d36] linen:bg-[#a86a43]/15 aurora:border-[#2dd4bf]/35 linen:border-[#a86a43]/40 aurora:hover:bg-[#0d9488] aurora:text-[#5eead4] linen:text-[#8c522d] aurora:hover:text-white transition-all text-xs font-medium flex items-center gap-1 cursor-pointer"
                             title="发消息"
                           >
                             <MessageSquare className="w-3.5 h-3.5" />
@@ -742,7 +742,7 @@ export const TelegramContactsModal: React.FC<TelegramContactsModalProps> = ({
                                 setEditingContactId(contact.id);
                                 setEditingRemark(contact.name);
                               }}
-                              className="p-1.5 rounded-xl text-[#64748b] hover:text-[#2481cc] dark:text-[#7b93ad] dark:hover:text-[#7cc4ff] aurora:text-[#7e9aa5] aurora:hover:text-[#5eead4] hover:bg-[#e2e8f0]/60 dark:hover:bg-[#1b2f47] aurora:hover:bg-[#1a3340] transition-colors cursor-pointer"
+                              className="p-1.5 rounded-xl text-[#64748b] hover:text-[#2481cc] dark:text-[#7b93ad] dark:hover:text-[#7cc4ff] aurora:text-[#7e9aa5] linen:text-[#6e5c4a] aurora:hover:text-[#5eead4] linen:hover:text-[#8c522d] hover:bg-[#e2e8f0]/60 dark:hover:bg-[#1b2f47] aurora:hover:bg-[#1a3340] linen:hover:bg-[#dfd2bc] transition-colors cursor-pointer"
                               title="修改联系人备注"
                             >
                               <Edit3 className="w-3.5 h-3.5" />
@@ -784,26 +784,26 @@ export const TelegramContactsModal: React.FC<TelegramContactsModalProps> = ({
 
               {/* Global Telegram Search Results Section */}
               {hasSearchedGlobal && (
-                <div className="bg-[#f8fafc] dark:bg-[#0e1726]/85 aurora:bg-[#101c23]/90">
-                  <div className="px-3.5 py-2 text-[11px] font-semibold text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] flex items-center gap-1.5">
-                    <Globe className="w-3.5 h-3.5 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf]" />
+                <div className="bg-[#f8fafc] dark:bg-[#0e1726]/85 aurora:bg-[#101c23]/90 linen:bg-[#efe6d6]/90">
+                  <div className="px-3.5 py-2 text-[11px] font-semibold text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a] flex items-center gap-1.5">
+                    <Globe className="w-3.5 h-3.5 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf] linen:text-[#8c522d]" />
                     <span>Telegram 全网搜索结果 ({globalResults.length})</span>
                   </div>
                   {globalResults.length === 0 ? (
-                    <div className="px-4 py-4 text-center text-[11px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5]">
+                    <div className="px-4 py-4 text-center text-[11px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a]">
                       未在 Telegram 全网找到新的匹配用户
                     </div>
                   ) : (
                     globalResults.map((u) => (
                       <div
                         key={u.id}
-                        className="flex items-center justify-between px-3.5 py-3 hover:bg-[#f1f5f9] dark:hover:bg-[#132234] aurora:hover:bg-[#13252e] transition-colors gap-2 border-t border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34]"
+                        className="flex items-center justify-between px-3.5 py-3 hover:bg-[#f1f5f9] dark:hover:bg-[#132234] aurora:hover:bg-[#13252e] linen:hover:bg-[#efe6d6] transition-colors gap-2 border-t border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] linen:border-[#dfd2bc]"
                       >
                         <div className="flex items-center gap-3 min-w-0 flex-1">
                           {renderAvatar(u)}
                           <div className="min-w-0">
                             <div className="flex items-center gap-1.5 min-w-0">
-                              <span className="font-semibold text-xs text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] truncate">
+                              <span className="font-semibold text-xs text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118] truncate">
                                 {u.name}
                               </span>
                               {u.isBlocked && (
@@ -812,7 +812,7 @@ export const TelegramContactsModal: React.FC<TelegramContactsModalProps> = ({
                                 </span>
                               )}
                             </div>
-                            <div className="text-[11px] text-[#2481cc] dark:text-[#7cc4ff] aurora:text-[#5eead4] truncate">
+                            <div className="text-[11px] text-[#2481cc] dark:text-[#7cc4ff] aurora:text-[#5eead4] linen:text-[#8c522d] truncate">
                               {[u.username, u.phone].filter(Boolean).join(' · ') || u.statusText || 'Telegram 用户'}
                             </div>
                           </div>
@@ -835,7 +835,7 @@ export const TelegramContactsModal: React.FC<TelegramContactsModalProps> = ({
                               onStartChatWithContact(u);
                               onClose();
                             }}
-                            className="px-2.5 py-1.5 rounded-xl bg-[#e8f3ff] border border-[#bfdbfe] hover:bg-[#2481cc] hover:border-[#2481cc] text-[#0284c7] hover:text-white dark:bg-[#2ba0ff]/15 dark:border-[#2ba0ff]/35 dark:hover:bg-[#2ba0ff] dark:text-[#7cc4ff] dark:hover:text-white aurora:bg-[#112d36] aurora:border-[#2dd4bf]/35 aurora:hover:bg-[#0d9488] aurora:text-[#5eead4] aurora:hover:text-white text-xs font-medium cursor-pointer flex items-center gap-1 transition-colors"
+                            className="px-2.5 py-1.5 rounded-xl bg-[#e8f3ff] border border-[#bfdbfe] hover:bg-[#2481cc] hover:border-[#2481cc] text-[#0284c7] hover:text-white dark:bg-[#2ba0ff]/15 dark:border-[#2ba0ff]/35 dark:hover:bg-[#2ba0ff] dark:text-[#7cc4ff] dark:hover:text-white aurora:bg-[#112d36] linen:bg-[#a86a43]/15 aurora:border-[#2dd4bf]/35 linen:border-[#a86a43]/40 aurora:hover:bg-[#0d9488] aurora:text-[#5eead4] linen:text-[#8c522d] aurora:hover:text-white text-xs font-medium cursor-pointer flex items-center gap-1 transition-colors"
                           >
                             <MessageSquare className="w-3.5 h-3.5" />
                             <span>私聊</span>
@@ -851,12 +851,12 @@ export const TelegramContactsModal: React.FC<TelegramContactsModalProps> = ({
             /* Blacklist Tab */
             <>
               {isLoadingBlocked && blockedUsers.length === 0 ? (
-                <div className="p-8 text-center text-xs text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] flex flex-col items-center gap-2">
-                  <RefreshCw className="w-5 h-5 animate-spin text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf]" />
+                <div className="p-8 text-center text-xs text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a] flex flex-col items-center gap-2">
+                  <RefreshCw className="w-5 h-5 animate-spin text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf] linen:text-[#8c522d]" />
                   <span>正在从 Telegram 云端同步黑名单...</span>
                 </div>
               ) : filteredBlocked.length === 0 ? (
-                <div className="p-8 text-center text-xs text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5]">
+                <div className="p-8 text-center text-xs text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a]">
                   {blockedUsers.length === 0 ? '当前黑名单为空' : '未匹配到已拉黑用户'}
                 </div>
               ) : (
@@ -865,15 +865,15 @@ export const TelegramContactsModal: React.FC<TelegramContactsModalProps> = ({
                   return (
                     <div
                       key={u.id}
-                      className="flex items-center justify-between p-3.5 hover:bg-[#f1f5f9] dark:hover:bg-[#132234] aurora:hover:bg-[#13252e] transition-colors gap-2"
+                      className="flex items-center justify-between p-3.5 hover:bg-[#f1f5f9] dark:hover:bg-[#132234] aurora:hover:bg-[#13252e] linen:hover:bg-[#efe6d6] transition-colors gap-2"
                     >
                       <div className="flex items-center gap-3 min-w-0 flex-1">
                         {renderAvatar(u)}
                         <div className="min-w-0">
-                          <div className="font-semibold text-xs text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] truncate">
+                          <div className="font-semibold text-xs text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118] truncate">
                             {u.name}
                           </div>
-                          <div className="text-[11px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] truncate">
+                          <div className="text-[11px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a] truncate">
                             {[u.username, u.phone].filter(Boolean).join(' · ') || '已拉黑用户'}
                           </div>
                         </div>

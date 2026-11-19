@@ -109,7 +109,7 @@ export const TelegramMenuDrawer: React.FC<TelegramMenuDrawerProps> = ({
       />
 
       {/* Slide-out Drawer from Left */}
-      <div className="relative w-72 sm:w-80 h-full bg-white text-[#0f172a] dark:bg-[#0b131f] dark:text-[#eef4fb] aurora:bg-[#0c151b] aurora:text-[#ecf6f8] linen:bg-[#f4ede0] linen:text-[#2b2118] flex flex-col shadow-2xl z-10 animate-in slide-in-from-left duration-250 select-none border-r border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] linen:border-[#cbbba2] transition-colors">
+      <div className="relative w-72 sm:w-80 h-full bg-white text-[#0f172a] dark:bg-[#0b131f] dark:text-[#eef4fb] aurora:bg-[#0c151b] aurora:text-[#ecf6f8] linen:bg-[#f4ede0] linen:text-[#2b2118] flex flex-col shadow-2xl linen:shadow-sm z-10 animate-in slide-in-from-left duration-250 select-none border-r border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] linen:border-[#d5c6ae] transition-colors">
         {/* 1. Profile Header */}
         <div className="p-4 bg-[#2481cc] dark:bg-gradient-to-br dark:from-[#122943] dark:to-[#0b1829] aurora:bg-gradient-to-br aurora:from-[#0f3d47] aurora:to-[#0a232b] linen:bg-gradient-to-br linen:from-[#7b6654] linen:to-[#5e4d3e] text-white flex flex-col justify-between shrink-0 relative overflow-hidden border-b border-transparent dark:border-[#18273a] aurora:border-[#182b34] linen:border-[#5d4c3e]">
           <div className="flex items-start justify-between mb-3">

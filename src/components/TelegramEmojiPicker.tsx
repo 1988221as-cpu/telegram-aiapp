@@ -273,8 +273,8 @@ export const TelegramEmojiPicker: React.FC<TelegramEmojiPickerProps> = ({
       }
       className={
         popupPos
-          ? 'fixed z-[9990] bg-white dark:bg-[#0b131f] aurora:bg-[#0c151b] linen:bg-[#f8f2e7] rounded-2xl shadow-2xl border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] linen:border-[#cbbba2] overflow-hidden animate-in fade-in slide-in-from-bottom-2 duration-150 select-none flex flex-col'
-          : 'fixed bottom-16 right-4 z-[9990] w-[340px] sm:w-[380px] bg-white dark:bg-[#0b131f] aurora:bg-[#0c151b] linen:bg-[#f8f2e7] rounded-2xl shadow-2xl border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] linen:border-[#cbbba2] overflow-hidden animate-in fade-in slide-in-from-bottom-2 duration-150 select-none flex flex-col max-h-[460px]'
+          ? 'fixed z-[9990] bg-white dark:bg-[#0b131f] aurora:bg-[#0c151b] linen:bg-[#f8f2e7] rounded-2xl shadow-2xl linen:shadow-sm border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] linen:border-[#d5c6ae] overflow-hidden animate-in fade-in slide-in-from-bottom-2 duration-150 select-none flex flex-col'
+          : 'fixed bottom-16 right-4 z-[9990] w-[340px] sm:w-[380px] bg-white dark:bg-[#0b131f] aurora:bg-[#0c151b] linen:bg-[#f8f2e7] rounded-2xl shadow-2xl linen:shadow-sm border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] linen:border-[#d5c6ae] overflow-hidden animate-in fade-in slide-in-from-bottom-2 duration-150 select-none flex flex-col max-h-[460px]'
       }
     >
       {/* 1. Top Header: Tabs + Close Button */}

@@ -801,13 +801,13 @@ export const KnowledgeEvolutionModal: React.FC<KnowledgeEvolutionModalProps> = (
     <>
       {/* Modal Top Bar (Standalone Modal Mode Only) */}
       {!embedded && (
-        <header className="px-6 py-4 border-b border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] flex items-center justify-between shrink-0 bg-[#f8fafc] dark:bg-[#0d1726] aurora:bg-[#0e1920]">
+        <header className="px-6 py-4 border-b border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] linen:border-[#dfd2bc] flex items-center justify-between shrink-0 bg-[#f8fafc] dark:bg-[#0d1726] aurora:bg-[#0e1920] linen:bg-[#f0e6d5]">
           <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-xl bg-[#2481cc]/12 dark:bg-[#2ba0ff]/12 aurora:bg-[#14b8a6]/15 border border-[#2481cc]/25 dark:border-[#2ba0ff]/25 aurora:border-[#2dd4bf]/30 flex items-center justify-center text-[#0284c7] dark:text-[#2ba0ff] aurora:text-[#2dd4bf]">
+            <div className="w-10 h-10 rounded-xl bg-[#2481cc]/12 dark:bg-[#2ba0ff]/12 aurora:bg-[#14b8a6]/15 linen:bg-[#a86a43]/15 border border-[#2481cc]/25 dark:border-[#2ba0ff]/25 aurora:border-[#2dd4bf]/30 linen:border-[#a86a43]/30 flex items-center justify-center text-[#0284c7] dark:text-[#2ba0ff] aurora:text-[#2dd4bf] linen:text-[#8c522d]">
               <UserCheck className="w-5 h-5" />
             </div>
             <div>
-              <h2 className="text-base sm:text-lg font-bold tracking-tight text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8]">
+              <h2 className="text-base sm:text-lg font-bold tracking-tight text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118]">
                 人设与知识进化中心
               </h2>
             </div>
@@ -816,7 +816,7 @@ export const KnowledgeEvolutionModal: React.FC<KnowledgeEvolutionModalProps> = (
           <button
             type="button"
             onClick={onClose}
-            className="w-8 h-8 rounded-full flex items-center justify-center text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] hover:text-[#0f172a] dark:hover:text-[#eef4fb] aurora:hover:text-[#ecf6f8] hover:bg-black/5 dark:hover:bg-[#152438] aurora:hover:bg-[#152934] transition-colors cursor-pointer"
+            className="w-8 h-8 rounded-full flex items-center justify-center text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a] hover:text-[#0f172a] dark:hover:text-[#eef4fb] aurora:hover:text-[#ecf6f8] linen:hover:text-[#2b2118] hover:bg-black/5 dark:hover:bg-[#152438] aurora:hover:bg-[#152934] linen:hover:bg-[#e7dccb] transition-colors cursor-pointer"
           >
             <X className="w-5 h-5" />
           </button>
@@ -827,7 +827,7 @@ export const KnowledgeEvolutionModal: React.FC<KnowledgeEvolutionModalProps> = (
       <div
         className={`${
           embedded ? 'px-3 pt-2' : 'px-6 pt-3'
-        } pb-0 border-b border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] bg-[#f8fafc]/80 dark:bg-[#0d1726]/80 aurora:bg-[#0e1920]/80 flex items-center justify-between shrink-0 overflow-x-auto`}
+        } pb-0 border-b border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] linen:border-[#dfd2bc] bg-[#f8fafc]/80 dark:bg-[#0d1726]/80 aurora:bg-[#0e1920]/80 linen:bg-[#f0e6d5]/85 flex items-center justify-between shrink-0 overflow-x-auto`}
       >
         <div className="flex items-center gap-1">
           {[
@@ -850,16 +850,16 @@ export const KnowledgeEvolutionModal: React.FC<KnowledgeEvolutionModalProps> = (
                   embedded ? 'px-2.5 py-2 text-[11px]' : 'px-3.5 py-2.5 text-xs sm:text-sm'
                 } font-medium rounded-t-lg transition-all flex items-center gap-1.5 border-b-2 cursor-pointer whitespace-nowrap ${
                   active
-                    ? 'text-[#0284c7] dark:text-[#2ba0ff] aurora:text-[#2dd4bf] border-[#2481cc] dark:border-[#2ba0ff] aurora:border-[#2dd4bf] bg-white dark:bg-[#0b131f] aurora:bg-[#0c151b]'
+                    ? 'text-[#0284c7] dark:text-[#2ba0ff] aurora:text-[#2dd4bf] linen:text-[#8c522d] border-[#2481cc] dark:border-[#2ba0ff] aurora:border-[#2dd4bf] linen:border-[#a86a43] bg-white dark:bg-[#0b131f] aurora:bg-[#0c151b] linen:bg-[#f8f2e7]'
                     : showInactiveTag
-                    ? 'text-[#94a3b8] dark:text-[#5b748f] aurora:text-[#5d7b86] border-transparent hover:text-[#475569] dark:hover:text-[#b4c6d8] aurora:hover:text-[#b7d0d8] hover:bg-black/5 dark:hover:bg-[#152438] aurora:hover:bg-[#152934]'
-                    : 'text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] border-transparent hover:text-[#0f172a] dark:hover:text-[#eef4fb] aurora:hover:text-[#ecf6f8] hover:bg-black/5 dark:hover:bg-[#152438] aurora:hover:bg-[#152934]'
+                    ? 'text-[#94a3b8] dark:text-[#5b748f] aurora:text-[#5d7b86] linen:text-[#8a7662] border-transparent hover:text-[#475569] dark:hover:text-[#b4c6d8] aurora:hover:text-[#b7d0d8] hover:bg-black/5 dark:hover:bg-[#152438] aurora:hover:bg-[#152934] linen:hover:bg-[#e7dccb]'
+                    : 'text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a] border-transparent hover:text-[#0f172a] dark:hover:text-[#eef4fb] aurora:hover:text-[#ecf6f8] linen:hover:text-[#2b2118] hover:bg-black/5 dark:hover:bg-[#152438] aurora:hover:bg-[#152934] linen:hover:bg-[#e7dccb]'
                 }`}
               >
                 <Icon className="w-3.5 h-3.5" />
                 <span>{tab.label}</span>
                 {showInactiveTag && (
-                  <span className="px-1 py-0.2 rounded text-[9.5px] font-medium bg-slate-200/80 dark:bg-[#162638] aurora:bg-[#152934] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5]">
+                  <span className="px-1 py-0.2 rounded text-[9.5px] font-medium bg-slate-200/80 linen:bg-[#e5d9c5] dark:bg-[#162638] aurora:bg-[#152934] linen:bg-[#e7dccb] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a]">
                     未生效
                   </span>
                 )}
@@ -869,9 +869,9 @@ export const KnowledgeEvolutionModal: React.FC<KnowledgeEvolutionModalProps> = (
         </div>
 
         {!embedded && persona && (
-          <div className="hidden lg:flex items-center gap-1.5 pb-2 text-xs text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5]">
+          <div className="hidden lg:flex items-center gap-1.5 pb-2 text-xs text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a]">
             <span>当前主控人设:</span>
-            <span className="text-[#0284c7] dark:text-[#2ba0ff] aurora:text-[#2dd4bf] font-semibold">
+            <span className="text-[#0284c7] dark:text-[#2ba0ff] aurora:text-[#2dd4bf] linen:text-[#8c522d] font-semibold">
               {persona.personaName
                 ? `${persona.personaName}${persona.personaRole ? ` (${persona.personaRole})` : ''}`
                 : '未命名'}
@@ -884,21 +884,21 @@ export const KnowledgeEvolutionModal: React.FC<KnowledgeEvolutionModalProps> = (
       <div
         className={`flex-1 overflow-y-auto ${
           embedded ? 'p-4 space-y-4' : 'p-6 space-y-6'
-        } bg-white dark:bg-transparent aurora:bg-transparent select-text`}
+        } bg-white dark:bg-transparent aurora:bg-transparent linen:bg-transparent select-text`}
       >
         {/* ==================== TAB 1: GLOBAL PERSONA & STAGED PROMPTS ==================== */}
         {activeTab === 'persona' && isLoadingPersona && !persona && (
-          <div className="py-20 text-center text-xs text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5]">
+          <div className="py-20 text-center text-xs text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a]">
             正在加载人设资料档案...
           </div>
         )}
 
         {activeTab === 'persona' && persona && (
           <div className="space-y-4">
-            <div className="flex flex-wrap items-center justify-between gap-2 pb-3 border-b border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34]">
+            <div className="flex flex-wrap items-center justify-between gap-2 pb-3 border-b border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] linen:border-[#dfd2bc]">
               <div className="flex items-center gap-2 flex-wrap">
-                <h3 className="text-xs font-bold text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] flex items-center gap-1.5">
-                  <Users className="w-4 h-4 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf]" />
+                <h3 className="text-xs font-bold text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118] flex items-center gap-1.5">
+                  <Users className="w-4 h-4 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf] linen:text-[#8c522d]" />
                   <span>角色档案：{persona.personaName || '未命名'}</span>
                 </h3>
                 {hasUnsavedPersonaChanges && (
@@ -910,7 +910,7 @@ export const KnowledgeEvolutionModal: React.FC<KnowledgeEvolutionModalProps> = (
 
               <div className="flex items-center gap-1.5 flex-wrap">
                 {personaSaveSuccess && !hasUnsavedPersonaChanges && (
-                  <span className="text-[11px] text-emerald-700 dark:text-[#2ba0ff] aurora:text-[#2dd4bf] flex items-center gap-1 font-medium">
+                  <span className="text-[11px] text-emerald-700 dark:text-[#2ba0ff] aurora:text-[#2dd4bf] linen:text-[#8c522d] flex items-center gap-1 font-medium">
                     <Check className="w-3.5 h-3.5" /> 已生效
                   </span>
                 )}
@@ -919,7 +919,7 @@ export const KnowledgeEvolutionModal: React.FC<KnowledgeEvolutionModalProps> = (
                   disabled={isImportingTemplate}
                   onClick={handleImportTemplate}
                   title="显式导入一套可编辑的通用人设参考模板"
-                  className="flex items-center gap-1 px-2.5 py-1.5 bg-[#f1f5f9] hover:bg-[#e2e8f0] dark:bg-[#132234] dark:hover:bg-[#1a2e45] aurora:bg-[#13252e] aurora:hover:bg-[#18303b] text-[#0284c7] dark:text-[#7cc4ff] aurora:text-[#5eead4] text-[11px] font-medium rounded-lg border border-[#cbd5e1] dark:border-[#2ba0ff]/30 aurora:border-[#2dd4bf]/30 transition-colors cursor-pointer disabled:opacity-50"
+                  className="flex items-center gap-1 px-2.5 py-1.5 bg-[#f1f5f9] hover:bg-[#e2e8f0] dark:bg-[#132234] dark:hover:bg-[#1a2e45] aurora:bg-[#13252e] linen:bg-[#e7dccb] aurora:hover:bg-[#18303b] linen:hover:bg-[#dfd2bc] text-[#0284c7] dark:text-[#7cc4ff] aurora:text-[#5eead4] linen:text-[#8c522d] text-[11px] font-medium rounded-lg border border-[#cbd5e1] dark:border-[#2ba0ff]/30 aurora:border-[#2dd4bf]/30 linen:border-[#a86a43]/30 transition-colors cursor-pointer disabled:opacity-50"
                 >
                   <Sparkles className="w-3 h-3" />
                   <span>{isImportingTemplate ? '导入中...' : '导入模板'}</span>
@@ -929,7 +929,7 @@ export const KnowledgeEvolutionModal: React.FC<KnowledgeEvolutionModalProps> = (
                   disabled={isResettingPersona}
                   onClick={handleResetPersona}
                   title="清空当前人设档案与五阶提示词，恢复为空白初始状态"
-                  className="flex items-center gap-1 px-2.5 py-1.5 bg-[#f8fafc] hover:bg-[#f1f5f9] dark:bg-[#0e1726] dark:hover:bg-[#152438] aurora:bg-[#101c23] aurora:hover:bg-[#152934] text-[#64748b] dark:text-[#b4c6d8] aurora:text-[#b7d0d8] hover:text-[#0f172a] dark:hover:text-[#eef4fb] aurora:hover:text-[#ecf6f8] text-[11px] font-medium rounded-lg border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] transition-colors cursor-pointer disabled:opacity-50"
+                  className="flex items-center gap-1 px-2.5 py-1.5 bg-[#f8fafc] hover:bg-[#f1f5f9] dark:bg-[#0e1726] dark:hover:bg-[#152438] aurora:bg-[#101c23] linen:bg-[#efe6d6] aurora:hover:bg-[#152934] linen:hover:bg-[#e7dccb] text-[#64748b] dark:text-[#b4c6d8] aurora:text-[#b7d0d8] linen:text-[#4e3f32] hover:text-[#0f172a] dark:hover:text-[#eef4fb] aurora:hover:text-[#ecf6f8] linen:hover:text-[#2b2118] text-[11px] font-medium rounded-lg border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] linen:border-[#cbbba2] transition-colors cursor-pointer disabled:opacity-50"
                 >
                   <RotateCcw className="w-3 h-3" />
                   <span>清空</span>
@@ -938,7 +938,7 @@ export const KnowledgeEvolutionModal: React.FC<KnowledgeEvolutionModalProps> = (
                   type="button"
                   disabled={isSavingPersona}
                   onClick={handleSavePersona}
-                  className="px-3 py-1.5 bg-[#2481cc] hover:bg-[#1d6fb3] dark:bg-[#2ba0ff] dark:hover:bg-[#1e8ee8] aurora:bg-[#0d9488] aurora:hover:bg-[#0f766e] text-white text-[11px] font-semibold rounded-lg shadow-xs transition-colors cursor-pointer disabled:opacity-50"
+                  className="px-3 py-1.5 bg-[#2481cc] hover:bg-[#1d6fb3] dark:bg-[#2ba0ff] dark:hover:bg-[#1e8ee8] aurora:bg-[#0d9488] linen:bg-[#a86a43] aurora:hover:bg-[#0f766e] linen:hover:bg-[#8f5734] text-white text-[11px] font-semibold rounded-lg shadow-xs transition-colors cursor-pointer disabled:opacity-50"
                 >
                   {isSavingPersona ? '保存中...' : '保存并生效'}
                 </button>
@@ -963,7 +963,7 @@ export const KnowledgeEvolutionModal: React.FC<KnowledgeEvolutionModalProps> = (
                     type="button"
                     disabled={isResettingPersona || isImportingTemplate}
                     onClick={() => setPendingConfirmAction(null)}
-                    className="px-2.5 py-1 rounded-lg text-[11px] font-medium bg-white dark:bg-[#0e1726] aurora:bg-[#101c23] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] text-[#475569] dark:text-[#b4c6d8] aurora:text-[#b7d0d8] hover:bg-[#f1f5f9] dark:hover:bg-[#152438] aurora:hover:bg-[#152934] cursor-pointer disabled:opacity-50"
+                    className="px-2.5 py-1 rounded-lg text-[11px] font-medium bg-white dark:bg-[#0e1726] aurora:bg-[#101c23] linen:bg-[#efe6d6] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] linen:border-[#cbbba2] text-[#475569] dark:text-[#b4c6d8] aurora:text-[#b7d0d8] linen:text-[#4e3f32] hover:bg-[#f1f5f9] dark:hover:bg-[#152438] aurora:hover:bg-[#152934] linen:hover:bg-[#e7dccb] cursor-pointer disabled:opacity-50"
                   >
                     取消
                   </button>
@@ -980,7 +980,7 @@ export const KnowledgeEvolutionModal: React.FC<KnowledgeEvolutionModalProps> = (
                     className={`px-3 py-1 rounded-lg text-[11px] font-semibold text-white cursor-pointer disabled:opacity-50 ${
                       pendingConfirmAction === 'reset'
                         ? 'bg-rose-600 hover:bg-rose-500'
-                        : 'bg-[#2481cc] hover:bg-[#1d6fb3] dark:bg-[#2ba0ff] dark:hover:bg-[#1e8ee8] aurora:bg-[#0d9488] aurora:hover:bg-[#0f766e]'
+                        : 'bg-[#2481cc] hover:bg-[#1d6fb3] dark:bg-[#2ba0ff] dark:hover:bg-[#1e8ee8] aurora:bg-[#0d9488] linen:bg-[#a86a43] aurora:hover:bg-[#0f766e] linen:hover:bg-[#8f5734]'
                     }`}
                   >
                     {pendingConfirmAction === 'reset'
@@ -1000,16 +1000,16 @@ export const KnowledgeEvolutionModal: React.FC<KnowledgeEvolutionModalProps> = (
               <div
                 className={`${
                   embedded ? '' : 'lg:col-span-5'
-                } space-y-3 bg-[#f8fafc] dark:bg-[#0e1726]/85 aurora:bg-[#101c23]/90 p-3.5 rounded-xl border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34]`}
+                } space-y-3 bg-[#f8fafc] dark:bg-[#0e1726]/85 aurora:bg-[#101c23]/90 linen:bg-[#efe6d6]/90 p-3.5 rounded-xl border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] linen:border-[#dfd2bc]`}
               >
-                <h4 className="text-xs font-bold text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] uppercase tracking-wider flex items-center gap-2 border-b border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] pb-2">
-                  <Compass className="w-3.5 h-3.5 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf]" />
+                <h4 className="text-xs font-bold text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118] uppercase tracking-wider flex items-center gap-2 border-b border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] linen:border-[#dfd2bc] pb-2">
+                  <Compass className="w-3.5 h-3.5 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf] linen:text-[#8c522d]" />
                   <span>角色人设资料基本面</span>
                 </h4>
 
                 <div className="grid grid-cols-2 gap-2.5">
                   <div>
-                    <label className="text-[11px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] block mb-1">
+                    <label className="text-[11px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a] block mb-1">
                       人设姓名 / 昵称
                     </label>
                     <input
@@ -1017,11 +1017,11 @@ export const KnowledgeEvolutionModal: React.FC<KnowledgeEvolutionModalProps> = (
                       value={persona.personaName}
                       onChange={(e) => setPersona({ ...persona, personaName: e.target.value })}
                       placeholder="角色姓名或昵称"
-                      className="w-full bg-white dark:bg-[#08101a] aurora:bg-[#081014] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] rounded-lg px-2.5 py-1.5 text-xs text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] placeholder-[#94a3b8] dark:placeholder-[#4e657e] aurora:placeholder-[#5a7782] focus:outline-none focus:border-[#2481cc] dark:focus:border-[#2ba0ff] aurora:focus:border-[#2dd4bf]"
+                      className="w-full bg-white dark:bg-[#08101a] aurora:bg-[#081014] linen:bg-[#faf5ec] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] linen:border-[#cbbba2] rounded-lg px-2.5 py-1.5 text-xs text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118] placeholder-[#94a3b8] dark:placeholder-[#4e657e] aurora:placeholder-[#5a7782] linen:placeholder-[#8f7e6c] focus:outline-none focus:border-[#2481cc] dark:focus:border-[#2ba0ff] aurora:focus:border-[#2dd4bf] linen:focus:border-[#a86a43]"
                     />
                   </div>
                   <div>
-                    <label className="text-[11px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] block mb-1">
+                    <label className="text-[11px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a] block mb-1">
                       年龄 / 外貌感知
                     </label>
                     <input
@@ -1029,24 +1029,24 @@ export const KnowledgeEvolutionModal: React.FC<KnowledgeEvolutionModalProps> = (
                       value={persona.age}
                       onChange={(e) => setPersona({ ...persona, age: e.target.value })}
                       placeholder="例如：28岁"
-                      className="w-full bg-white dark:bg-[#08101a] aurora:bg-[#081014] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] rounded-lg px-2.5 py-1.5 text-xs text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] placeholder-[#94a3b8] dark:placeholder-[#4e657e] aurora:placeholder-[#5a7782] focus:outline-none focus:border-[#2481cc] dark:focus:border-[#2ba0ff] aurora:focus:border-[#2dd4bf]"
+                      className="w-full bg-white dark:bg-[#08101a] aurora:bg-[#081014] linen:bg-[#faf5ec] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] linen:border-[#cbbba2] rounded-lg px-2.5 py-1.5 text-xs text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118] placeholder-[#94a3b8] dark:placeholder-[#4e657e] aurora:placeholder-[#5a7782] linen:placeholder-[#8f7e6c] focus:outline-none focus:border-[#2481cc] dark:focus:border-[#2ba0ff] aurora:focus:border-[#2dd4bf] linen:focus:border-[#a86a43]"
                     />
                   </div>
                 </div>
 
                 <div>
-                  <label className="text-[11px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] block mb-1">身份职业背景</label>
+                  <label className="text-[11px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a] block mb-1">身份职业背景</label>
                   <input
                     type="text"
                     value={persona.personaRole}
                     onChange={(e) => setPersona({ ...persona, personaRole: e.target.value })}
                     placeholder="请输入职业、身份或业务角色"
-                    className="w-full bg-white dark:bg-[#08101a] aurora:bg-[#081014] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] rounded-lg px-2.5 py-1.5 text-xs text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] placeholder-[#94a3b8] dark:placeholder-[#4e657e] aurora:placeholder-[#5a7782] focus:outline-none focus:border-[#2481cc] dark:focus:border-[#2ba0ff] aurora:focus:border-[#2dd4bf]"
+                    className="w-full bg-white dark:bg-[#08101a] aurora:bg-[#081014] linen:bg-[#faf5ec] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] linen:border-[#cbbba2] rounded-lg px-2.5 py-1.5 text-xs text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118] placeholder-[#94a3b8] dark:placeholder-[#4e657e] aurora:placeholder-[#5a7782] linen:placeholder-[#8f7e6c] focus:outline-none focus:border-[#2481cc] dark:focus:border-[#2ba0ff] aurora:focus:border-[#2dd4bf] linen:focus:border-[#a86a43]"
                   />
                 </div>
 
                 <div>
-                  <label className="text-[11px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] block mb-1">
+                  <label className="text-[11px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a] block mb-1">
                     常居地 / 生活城市
                   </label>
                   <input
@@ -1054,12 +1054,12 @@ export const KnowledgeEvolutionModal: React.FC<KnowledgeEvolutionModalProps> = (
                     value={persona.location}
                     onChange={(e) => setPersona({ ...persona, location: e.target.value })}
                     placeholder="例如：新加坡 / 上海"
-                    className="w-full bg-white dark:bg-[#08101a] aurora:bg-[#081014] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] rounded-lg px-2.5 py-1.5 text-xs text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] placeholder-[#94a3b8] dark:placeholder-[#4e657e] aurora:placeholder-[#5a7782] focus:outline-none focus:border-[#2481cc] dark:focus:border-[#2ba0ff] aurora:focus:border-[#2dd4bf]"
+                    className="w-full bg-white dark:bg-[#08101a] aurora:bg-[#081014] linen:bg-[#faf5ec] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] linen:border-[#cbbba2] rounded-lg px-2.5 py-1.5 text-xs text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118] placeholder-[#94a3b8] dark:placeholder-[#4e657e] aurora:placeholder-[#5a7782] linen:placeholder-[#8f7e6c] focus:outline-none focus:border-[#2481cc] dark:focus:border-[#2ba0ff] aurora:focus:border-[#2dd4bf] linen:focus:border-[#a86a43]"
                   />
                 </div>
 
                 <div>
-                  <label className="text-[11px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] block mb-1">
+                  <label className="text-[11px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a] block mb-1">
                     性格特征标签 (逗号分隔)
                   </label>
                   <input
@@ -1067,12 +1067,12 @@ export const KnowledgeEvolutionModal: React.FC<KnowledgeEvolutionModalProps> = (
                     value={traitInput}
                     onChange={(e) => setTraitInput(e.target.value)}
                     placeholder="知性温柔, 情绪稳定, 独立自律, 懂生活"
-                    className="w-full bg-white dark:bg-[#08101a] aurora:bg-[#081014] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] rounded-lg px-2.5 py-1.5 text-xs text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] placeholder-[#94a3b8] dark:placeholder-[#4e657e] aurora:placeholder-[#5a7782] focus:outline-none focus:border-[#2481cc] dark:focus:border-[#2ba0ff] aurora:focus:border-[#2dd4bf]"
+                    className="w-full bg-white dark:bg-[#08101a] aurora:bg-[#081014] linen:bg-[#faf5ec] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] linen:border-[#cbbba2] rounded-lg px-2.5 py-1.5 text-xs text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118] placeholder-[#94a3b8] dark:placeholder-[#4e657e] aurora:placeholder-[#5a7782] linen:placeholder-[#8f7e6c] focus:outline-none focus:border-[#2481cc] dark:focus:border-[#2ba0ff] aurora:focus:border-[#2dd4bf] linen:focus:border-[#a86a43]"
                   />
                 </div>
 
                 <div>
-                  <label className="text-[11px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] block mb-1">
+                  <label className="text-[11px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a] block mb-1">
                     生活方式细节与日常习惯
                   </label>
                   <textarea
@@ -1080,12 +1080,12 @@ export const KnowledgeEvolutionModal: React.FC<KnowledgeEvolutionModalProps> = (
                     value={persona.lifeStyleDetails}
                     onChange={(e) => setPersona({ ...persona, lifeStyleDetails: e.target.value })}
                     placeholder="填写角色的作息、爱好与日常沟通细节..."
-                    className="w-full bg-white dark:bg-[#08101a] aurora:bg-[#081014] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] rounded-lg p-2.5 text-xs text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] placeholder-[#94a3b8] dark:placeholder-[#4e657e] aurora:placeholder-[#5a7782] focus:outline-none focus:border-[#2481cc] dark:focus:border-[#2ba0ff] aurora:focus:border-[#2dd4bf]"
+                    className="w-full bg-white dark:bg-[#08101a] aurora:bg-[#081014] linen:bg-[#faf5ec] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] linen:border-[#cbbba2] rounded-lg p-2.5 text-xs text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118] placeholder-[#94a3b8] dark:placeholder-[#4e657e] aurora:placeholder-[#5a7782] linen:placeholder-[#8f7e6c] focus:outline-none focus:border-[#2481cc] dark:focus:border-[#2ba0ff] aurora:focus:border-[#2dd4bf] linen:focus:border-[#a86a43]"
                   />
                 </div>
 
                 <div>
-                  <label className="text-[11px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] block mb-1">
+                  <label className="text-[11px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a] block mb-1">
                     核心专业视角 / 理念底色
                   </label>
                   <textarea
@@ -1093,12 +1093,12 @@ export const KnowledgeEvolutionModal: React.FC<KnowledgeEvolutionModalProps> = (
                     value={persona.investmentPhilosophy}
                     onChange={(e) => setPersona({ ...persona, investmentPhilosophy: e.target.value })}
                     placeholder="填写角色的专业理念、服务原则或价值观底色..."
-                    className="w-full bg-white dark:bg-[#08101a] aurora:bg-[#081014] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] rounded-lg p-2.5 text-xs text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] placeholder-[#94a3b8] dark:placeholder-[#4e657e] aurora:placeholder-[#5a7782] focus:outline-none focus:border-[#2481cc] dark:focus:border-[#2ba0ff] aurora:focus:border-[#2dd4bf]"
+                    className="w-full bg-white dark:bg-[#08101a] aurora:bg-[#081014] linen:bg-[#faf5ec] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] linen:border-[#cbbba2] rounded-lg p-2.5 text-xs text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118] placeholder-[#94a3b8] dark:placeholder-[#4e657e] aurora:placeholder-[#5a7782] linen:placeholder-[#8f7e6c] focus:outline-none focus:border-[#2481cc] dark:focus:border-[#2ba0ff] aurora:focus:border-[#2dd4bf] linen:focus:border-[#a86a43]"
                   />
                 </div>
 
                 <div>
-                  <label className="text-[11px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] block mb-1">
+                  <label className="text-[11px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a] block mb-1">
                     绝对红线禁忌词 (逗号分隔，严禁出现)
                   </label>
                   <input
@@ -1106,7 +1106,7 @@ export const KnowledgeEvolutionModal: React.FC<KnowledgeEvolutionModalProps> = (
                     value={tabooInput}
                     onChange={(e) => setTabooInput(e.target.value)}
                     placeholder="例如：包赚不赔, 稳赚, guaranteed profit"
-                    className="w-full bg-white dark:bg-[#08101a] aurora:bg-[#081014] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] rounded-lg px-2.5 py-1.5 text-xs text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] placeholder-[#94a3b8] dark:placeholder-[#4e657e] aurora:placeholder-[#5a7782] focus:outline-none focus:border-[#2481cc] dark:focus:border-[#2ba0ff] aurora:focus:border-[#2dd4bf]"
+                    className="w-full bg-white dark:bg-[#08101a] aurora:bg-[#081014] linen:bg-[#faf5ec] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] linen:border-[#cbbba2] rounded-lg px-2.5 py-1.5 text-xs text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118] placeholder-[#94a3b8] dark:placeholder-[#4e657e] aurora:placeholder-[#5a7782] linen:placeholder-[#8f7e6c] focus:outline-none focus:border-[#2481cc] dark:focus:border-[#2ba0ff] aurora:focus:border-[#2dd4bf] linen:focus:border-[#a86a43]"
                   />
                 </div>
               </div>
@@ -1115,12 +1115,12 @@ export const KnowledgeEvolutionModal: React.FC<KnowledgeEvolutionModalProps> = (
               <div
                 className={`${
                   embedded ? '' : 'lg:col-span-7'
-                } space-y-3.5 bg-[#f8fafc] dark:bg-[#0e1726]/85 aurora:bg-[#101c23]/90 p-3.5 rounded-xl border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] flex flex-col justify-between`}
+                } space-y-3.5 bg-[#f8fafc] dark:bg-[#0e1726]/85 aurora:bg-[#101c23]/90 linen:bg-[#efe6d6]/90 p-3.5 rounded-xl border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] linen:border-[#dfd2bc] flex flex-col justify-between`}
               >
                 <div className="space-y-3">
-                  <div className="flex items-center justify-between border-b border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] pb-2">
-                    <h4 className="text-xs font-bold text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] uppercase tracking-wider flex items-center gap-2">
-                      <Layers className="w-3.5 h-3.5 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf]" />
+                  <div className="flex items-center justify-between border-b border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] linen:border-[#dfd2bc] pb-2">
+                    <h4 className="text-xs font-bold text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118] uppercase tracking-wider flex items-center gap-2">
+                      <Layers className="w-3.5 h-3.5 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf] linen:text-[#8c522d]" />
                       <span>五阶段沟通策略与提示词</span>
                     </h4>
                   </div>
@@ -1128,7 +1128,7 @@ export const KnowledgeEvolutionModal: React.FC<KnowledgeEvolutionModalProps> = (
                   <div
                     className={`${
                       embedded ? 'grid grid-cols-3 gap-1.5' : 'grid grid-cols-2 sm:grid-cols-5 gap-1.5'
-                    } bg-white dark:bg-[#08101a] aurora:bg-[#081014] p-1.5 rounded-xl border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34]`}
+                    } bg-white dark:bg-[#08101a] aurora:bg-[#081014] linen:bg-[#faf5ec] p-1.5 rounded-xl border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] linen:border-[#dfd2bc]`}
                   >
                     {[
                       { key: 'icebreaker', label: '1.初识破冰', icon: Sparkles },
@@ -1146,8 +1146,8 @@ export const KnowledgeEvolutionModal: React.FC<KnowledgeEvolutionModalProps> = (
                           onClick={() => setActiveStageEdit(stage.key as StagedPromptKey)}
                           className={`flex flex-col items-center justify-center p-2 rounded-lg text-[11px] font-medium transition-all cursor-pointer border ${
                             isCurrent
-                              ? 'bg-[#e8f3ff] dark:bg-[#12263f] aurora:bg-[#112d36] text-[#0284c7] dark:text-[#2ba0ff] aurora:text-[#2dd4bf] shadow-xs border-[#bfdbfe] dark:border-[#2ba0ff]/40 aurora:border-[#2dd4bf]/40'
-                              : 'border-transparent text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] hover:text-[#0f172a] dark:hover:text-[#eef4fb] aurora:hover:text-[#ecf6f8] hover:bg-[#f1f5f9] dark:hover:bg-[#152438] aurora:hover:bg-[#152934]'
+                              ? 'bg-[#e8f3ff] dark:bg-[#12263f] aurora:bg-[#112d36] linen:bg-[#a86a43]/15 text-[#0284c7] dark:text-[#2ba0ff] aurora:text-[#2dd4bf] linen:text-[#8c522d] shadow-xs border-[#bfdbfe] dark:border-[#2ba0ff]/40 aurora:border-[#2dd4bf]/40 linen:border-[#a86a43]/40'
+                              : 'border-transparent text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a] hover:text-[#0f172a] dark:hover:text-[#eef4fb] aurora:hover:text-[#ecf6f8] linen:hover:text-[#2b2118] hover:bg-[#f1f5f9] dark:hover:bg-[#152438] aurora:hover:bg-[#152934] linen:hover:bg-[#e7dccb]'
                           }`}
                         >
                           <Icon className="w-3.5 h-3.5 mb-1" />
@@ -1159,7 +1159,7 @@ export const KnowledgeEvolutionModal: React.FC<KnowledgeEvolutionModalProps> = (
 
                   <div>
                     <div className="flex items-center justify-between mb-1.5">
-                      <span className="text-xs font-semibold text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8]">
+                      <span className="text-xs font-semibold text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118]">
                         阶段指导提示词：
                         {activeStageEdit === 'icebreaker'
                           ? '新朋友初识破冰'
@@ -1184,16 +1184,16 @@ export const KnowledgeEvolutionModal: React.FC<KnowledgeEvolutionModalProps> = (
                           },
                         })
                       }
-                      className="w-full bg-white dark:bg-[#08101a] aurora:bg-[#081014] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] rounded-xl p-3 text-xs text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] leading-relaxed font-mono focus:outline-none focus:border-[#2481cc] dark:focus:border-[#2ba0ff] aurora:focus:border-[#2dd4bf] resize-y"
+                      className="w-full bg-white dark:bg-[#08101a] aurora:bg-[#081014] linen:bg-[#faf5ec] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] linen:border-[#cbbba2] rounded-xl p-3 text-xs text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118] leading-relaxed font-mono focus:outline-none focus:border-[#2481cc] dark:focus:border-[#2ba0ff] aurora:focus:border-[#2dd4bf] linen:focus:border-[#a86a43] resize-y"
                     />
                   </div>
 
                   <div>
                     <div className="flex items-center justify-between mb-1.5">
-                      <label className="text-[11px] font-semibold text-[#475569] dark:text-[#b4c6d8] aurora:text-[#b7d0d8] block">
+                      <label className="text-[11px] font-semibold text-[#475569] dark:text-[#b4c6d8] aurora:text-[#b7d0d8] linen:text-[#4e3f32] block">
                         追加全局人设指令 (System Instruction)
                       </label>
-                      <span className="text-[10px] font-mono tabular-nums text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5]">
+                      <span className="text-[10px] font-mono tabular-nums text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a]">
                         {(persona.customSystemInstruction || '').length} 字
                       </span>
                     </div>
@@ -1202,17 +1202,17 @@ export const KnowledgeEvolutionModal: React.FC<KnowledgeEvolutionModalProps> = (
                       placeholder="输入补充个人经历、语气偏好或业务边界..."
                       value={persona.customSystemInstruction || ''}
                       onChange={(e) => setPersona({ ...persona, customSystemInstruction: e.target.value })}
-                      className="w-full bg-white dark:bg-[#08101a] aurora:bg-[#081014] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] rounded-xl p-3 text-xs text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] placeholder-[#94a3b8] dark:placeholder-[#4e657e] aurora:placeholder-[#5a7782] leading-relaxed font-mono focus:outline-none focus:border-[#2481cc] dark:focus:border-[#2ba0ff] aurora:focus:border-[#2dd4bf] resize-y min-h-[100px]"
+                      className="w-full bg-white dark:bg-[#08101a] aurora:bg-[#081014] linen:bg-[#faf5ec] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] linen:border-[#cbbba2] rounded-xl p-3 text-xs text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118] placeholder-[#94a3b8] dark:placeholder-[#4e657e] aurora:placeholder-[#5a7782] linen:placeholder-[#8f7e6c] leading-relaxed font-mono focus:outline-none focus:border-[#2481cc] dark:focus:border-[#2ba0ff] aurora:focus:border-[#2dd4bf] linen:focus:border-[#a86a43] resize-y min-h-[100px]"
                     />
                   </div>
                 </div>
 
-                <div className="pt-2 border-t border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] flex items-center justify-end">
+                <div className="pt-2 border-t border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] linen:border-[#dfd2bc] flex items-center justify-end">
                   <button
                     type="button"
                     disabled={isSavingPersona}
                     onClick={handleSavePersona}
-                    className="px-4 py-1.5 bg-[#2481cc] hover:bg-[#1d6fb3] dark:bg-[#2ba0ff] dark:hover:bg-[#1e8ee8] aurora:bg-[#0d9488] aurora:hover:bg-[#0f766e] text-white text-xs font-semibold rounded-lg shadow-xs cursor-pointer disabled:opacity-50 transition-colors"
+                    className="px-4 py-1.5 bg-[#2481cc] hover:bg-[#1d6fb3] dark:bg-[#2ba0ff] dark:hover:bg-[#1e8ee8] aurora:bg-[#0d9488] linen:bg-[#a86a43] aurora:hover:bg-[#0f766e] linen:hover:bg-[#8f5734] text-white text-xs font-semibold rounded-lg shadow-xs cursor-pointer disabled:opacity-50 transition-colors"
                   >
                     保存人设配置
                   </button>
@@ -1251,10 +1251,10 @@ export const KnowledgeEvolutionModal: React.FC<KnowledgeEvolutionModalProps> = (
               ].map((stat) => (
                 <div
                   key={stat.label}
-                  className="bg-[#f8fafc] dark:bg-[#0e1726]/85 aurora:bg-[#101c23]/90 border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] rounded-xl px-3 py-2.5"
+                  className="bg-[#f8fafc] dark:bg-[#0e1726]/85 aurora:bg-[#101c23]/90 linen:bg-[#efe6d6]/90 border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] linen:border-[#dfd2bc] rounded-xl px-3 py-2.5"
                 >
-                  <div className="text-[11px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5]">{stat.label}</div>
-                  <div className="text-base font-bold font-mono tabular-nums text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] mt-0.5">
+                  <div className="text-[11px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a]">{stat.label}</div>
+                  <div className="text-base font-bold font-mono tabular-nums text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118] mt-0.5">
                     {stat.value}
                   </div>
                 </div>
@@ -1275,10 +1275,10 @@ export const KnowledgeEvolutionModal: React.FC<KnowledgeEvolutionModalProps> = (
             )}
 
             {/* Document Upload & Chunked Distillation Card */}
-            <div className="bg-[#f8fafc] dark:bg-[#0e1726]/85 aurora:bg-[#101c23]/90 border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] rounded-xl p-3.5 space-y-2.5">
+            <div className="bg-[#f8fafc] dark:bg-[#0e1726]/85 aurora:bg-[#101c23]/90 linen:bg-[#efe6d6]/90 border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] linen:border-[#dfd2bc] rounded-xl p-3.5 space-y-2.5">
               <div className="flex items-center justify-between gap-2">
-                <div className="flex items-center gap-1.5 text-xs font-bold text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8]">
-                  <Upload className="w-4 h-4 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf]" />
+                <div className="flex items-center gap-1.5 text-xs font-bold text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118]">
+                  <Upload className="w-4 h-4 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf] linen:text-[#8c522d]" />
                   <span>文档真实解析与分段切片训练 (.txt / .md / .csv / .json / .pdf)</span>
                 </div>
               </div>
@@ -1292,12 +1292,12 @@ export const KnowledgeEvolutionModal: React.FC<KnowledgeEvolutionModalProps> = (
                     setSelectedFile(f);
                     setKbFeedback(null);
                   }}
-                  className="text-xs text-[#475569] dark:text-[#b4c6d8] aurora:text-[#b7d0d8] file:mr-2.5 file:py-1.5 file:px-3 file:rounded-lg file:border file:border-[#cbd5e1] dark:file:border-[#1e3148] aurora:file:border-[#203742] file:text-xs file:font-medium file:bg-white dark:file:bg-[#08101a] aurora:file:bg-[#081014] file:text-[#0f172a] dark:file:text-[#eef4fb] aurora:file:text-[#ecf6f8] hover:file:bg-[#f1f5f9] dark:hover:file:bg-[#152438] aurora:hover:file:bg-[#152934] cursor-pointer max-w-full"
+                  className="text-xs text-[#475569] dark:text-[#b4c6d8] aurora:text-[#b7d0d8] linen:text-[#4e3f32] file:mr-2.5 file:py-1.5 file:px-3 file:rounded-lg file:border file:border-[#cbd5e1] dark:file:border-[#1e3148] aurora:file:border-[#203742] linen:file:border-[#cbbba2] file:text-xs file:font-medium file:bg-white dark:file:bg-[#08101a] aurora:file:bg-[#081014] linen:file:bg-[#faf5ec] file:text-[#0f172a] dark:file:text-[#eef4fb] aurora:file:text-[#ecf6f8] linen:file:text-[#2b2118] hover:file:bg-[#f1f5f9] dark:hover:file:bg-[#152438] aurora:hover:file:bg-[#152934] linen:hover:file:bg-[#e7dccb] cursor-pointer max-w-full"
                 />
                 <select
                   value={uploadCategory}
                   onChange={(e) => setUploadCategory(e.target.value)}
-                  className="bg-white dark:bg-[#08101a] aurora:bg-[#081014] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] rounded-lg px-2.5 py-1.5 text-xs text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] focus:outline-none focus:border-[#2481cc] dark:focus:border-[#2ba0ff] aurora:focus:border-[#2dd4bf]"
+                  className="bg-white dark:bg-[#08101a] aurora:bg-[#081014] linen:bg-[#faf5ec] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] linen:border-[#cbbba2] rounded-lg px-2.5 py-1.5 text-xs text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118] focus:outline-none focus:border-[#2481cc] dark:focus:border-[#2ba0ff] aurora:focus:border-[#2dd4bf] linen:focus:border-[#a86a43]"
                 >
                   <option value="auto">AI 自动按阶段归类</option>
                   {CATEGORY_OPTIONS.map((opt) => (
@@ -1310,15 +1310,15 @@ export const KnowledgeEvolutionModal: React.FC<KnowledgeEvolutionModalProps> = (
                   type="button"
                   disabled={!selectedFile || isUploadingDoc}
                   onClick={handleUploadDocument}
-                  className="px-3 py-1.5 bg-[#2481cc] hover:bg-[#1d6fb3] dark:bg-[#2ba0ff] dark:hover:bg-[#1e8ee8] aurora:bg-[#0d9488] aurora:hover:bg-[#0f766e] text-white text-xs font-semibold rounded-lg transition-colors cursor-pointer disabled:opacity-50 flex items-center gap-1.5"
+                  className="px-3 py-1.5 bg-[#2481cc] hover:bg-[#1d6fb3] dark:bg-[#2ba0ff] dark:hover:bg-[#1e8ee8] aurora:bg-[#0d9488] linen:bg-[#a86a43] aurora:hover:bg-[#0f766e] linen:hover:bg-[#8f5734] text-white text-xs font-semibold rounded-lg transition-colors cursor-pointer disabled:opacity-50 flex items-center gap-1.5"
                 >
                   <Sparkles className={`w-3.5 h-3.5 ${isUploadingDoc ? 'animate-spin' : ''}`} />
                   <span>{isUploadingDoc ? '解析与分段提炼中...' : '上传并训练'}</span>
                 </button>
               </div>
               {selectedFile && (
-                <div className="text-[11px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5]">
-                  已选择：<span className="font-medium text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8]">{selectedFile.name}</span>（
+                <div className="text-[11px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a]">
+                  已选择：<span className="font-medium text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118]">{selectedFile.name}</span>（
                   {(selectedFile.size / 1024).toFixed(1)} KB）— 超长文档将自动按段落边界安全分段提炼并去重入库，加密/损坏文件将直接拦截报错。
                 </div>
               )}
@@ -1334,8 +1334,8 @@ export const KnowledgeEvolutionModal: React.FC<KnowledgeEvolutionModalProps> = (
                     onClick={() => setKbFilterCategory(cat.value)}
                     className={`px-2.5 py-1 rounded-lg text-[11px] font-medium border cursor-pointer transition-colors ${
                       kbFilterCategory === cat.value
-                        ? 'bg-[#e8f3ff] dark:bg-[#12263f] aurora:bg-[#112d36] text-[#0284c7] dark:text-[#2ba0ff] aurora:text-[#2dd4bf] border-[#bfdbfe] dark:border-[#2ba0ff]/40 aurora:border-[#2dd4bf]/40'
-                        : 'bg-[#f8fafc] dark:bg-[#0e1726] aurora:bg-[#101c23] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] hover:text-[#0f172a] dark:hover:text-[#eef4fb] aurora:hover:text-[#ecf6f8]'
+                        ? 'bg-[#e8f3ff] dark:bg-[#12263f] aurora:bg-[#112d36] linen:bg-[#a86a43]/15 text-[#0284c7] dark:text-[#2ba0ff] aurora:text-[#2dd4bf] linen:text-[#8c522d] border-[#bfdbfe] dark:border-[#2ba0ff]/40 aurora:border-[#2dd4bf]/40 linen:border-[#a86a43]/40'
+                        : 'bg-[#f8fafc] dark:bg-[#0e1726] aurora:bg-[#101c23] linen:bg-[#efe6d6] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a] border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] linen:border-[#dfd2bc] hover:text-[#0f172a] dark:hover:text-[#eef4fb] aurora:hover:text-[#ecf6f8] linen:hover:text-[#2b2118]'
                     }`}
                   >
                     {cat.label}
@@ -1345,13 +1345,13 @@ export const KnowledgeEvolutionModal: React.FC<KnowledgeEvolutionModalProps> = (
 
               <div className="flex items-center gap-1.5 flex-wrap">
                 <div className="relative">
-                  <Search className="w-3.5 h-3.5 text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] absolute left-2.5 top-1/2 -translate-y-1/2" />
+                  <Search className="w-3.5 h-3.5 text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a] absolute left-2.5 top-1/2 -translate-y-1/2" />
                   <input
                     type="text"
                     value={kbSearch}
                     onChange={(e) => setKbSearch(e.target.value)}
                     placeholder="检索标题/关键词..."
-                    className="pl-8 pr-2.5 py-1.5 bg-white dark:bg-[#08101a] aurora:bg-[#081014] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] rounded-lg text-xs text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] placeholder-[#94a3b8] dark:placeholder-[#4e657e] aurora:placeholder-[#5a7782] focus:outline-none focus:border-[#2481cc] dark:focus:border-[#2ba0ff] aurora:focus:border-[#2dd4bf] w-40"
+                    className="pl-8 pr-2.5 py-1.5 bg-white dark:bg-[#08101a] aurora:bg-[#081014] linen:bg-[#faf5ec] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] linen:border-[#cbbba2] rounded-lg text-xs text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118] placeholder-[#94a3b8] dark:placeholder-[#4e657e] aurora:placeholder-[#5a7782] linen:placeholder-[#8f7e6c] focus:outline-none focus:border-[#2481cc] dark:focus:border-[#2ba0ff] aurora:focus:border-[#2dd4bf] linen:focus:border-[#a86a43] w-40"
                   />
                 </div>
                 <button
@@ -1364,7 +1364,7 @@ export const KnowledgeEvolutionModal: React.FC<KnowledgeEvolutionModalProps> = (
                       setShowKbForm(true);
                     }
                   }}
-                  className="px-2.5 py-1.5 bg-[#2481cc] hover:bg-[#1d6fb3] dark:bg-[#2ba0ff] dark:hover:bg-[#1e8ee8] aurora:bg-[#0d9488] aurora:hover:bg-[#0f766e] text-white text-xs font-semibold rounded-lg flex items-center gap-1 cursor-pointer transition-colors"
+                  className="px-2.5 py-1.5 bg-[#2481cc] hover:bg-[#1d6fb3] dark:bg-[#2ba0ff] dark:hover:bg-[#1e8ee8] aurora:bg-[#0d9488] linen:bg-[#a86a43] aurora:hover:bg-[#0f766e] linen:hover:bg-[#8f5734] text-white text-xs font-semibold rounded-lg flex items-center gap-1 cursor-pointer transition-colors"
                 >
                   <Plus className="w-3.5 h-3.5" />
                   <span>手工新增</span>
@@ -1373,7 +1373,7 @@ export const KnowledgeEvolutionModal: React.FC<KnowledgeEvolutionModalProps> = (
                   <button
                     type="button"
                     onClick={() => setConfirmClearKb((v) => !v)}
-                    className="px-2.5 py-1.5 bg-[#f8fafc] hover:bg-rose-50 dark:bg-[#0e1726] dark:hover:bg-rose-950/30 aurora:bg-[#101c23] aurora:hover:bg-rose-950/30 text-rose-600 dark:text-rose-400 border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] text-xs font-medium rounded-lg cursor-pointer transition-colors"
+                    className="px-2.5 py-1.5 bg-[#f8fafc] hover:bg-rose-50 dark:bg-[#0e1726] dark:hover:bg-rose-950/30 aurora:bg-[#101c23] linen:bg-[#efe6d6] aurora:hover:bg-rose-950/30 text-rose-600 dark:text-rose-400 border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] linen:border-[#cbbba2] text-xs font-medium rounded-lg cursor-pointer transition-colors"
                   >
                     清空当前分类
                   </button>
@@ -1390,7 +1390,7 @@ export const KnowledgeEvolutionModal: React.FC<KnowledgeEvolutionModalProps> = (
                   <button
                     type="button"
                     onClick={() => setConfirmClearKb(false)}
-                    className="px-2.5 py-1 text-xs rounded-lg bg-white dark:bg-[#0e1726] aurora:bg-[#101c23] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] text-[#475569] dark:text-[#b4c6d8] aurora:text-[#b7d0d8] cursor-pointer"
+                    className="px-2.5 py-1 text-xs rounded-lg bg-white dark:bg-[#0e1726] aurora:bg-[#101c23] linen:bg-[#efe6d6] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] linen:border-[#cbbba2] text-[#475569] dark:text-[#b4c6d8] aurora:text-[#b7d0d8] linen:text-[#4e3f32] cursor-pointer"
                   >
                     取消
                   </button>
@@ -1407,15 +1407,15 @@ export const KnowledgeEvolutionModal: React.FC<KnowledgeEvolutionModalProps> = (
 
             {/* Manual Create / Edit Form */}
             {showKbForm && (
-              <div className="bg-[#f8fafc] dark:bg-[#0e1726] aurora:bg-[#101c23] border border-[#2481cc]/40 dark:border-[#2ba0ff]/40 aurora:border-[#2dd4bf]/40 rounded-xl p-3.5 space-y-2.5">
+              <div className="bg-[#f8fafc] dark:bg-[#0e1726] aurora:bg-[#101c23] linen:bg-[#efe6d6] border border-[#2481cc]/40 dark:border-[#2ba0ff]/40 aurora:border-[#2dd4bf]/40 linen:border-[#a86a43]/40 rounded-xl p-3.5 space-y-2.5">
                 <div className="flex items-center justify-between">
-                  <h4 className="text-xs font-bold text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8]">
+                  <h4 className="text-xs font-bold text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118]">
                     {editingKbId ? '编辑知识条目' : '手工录入知识条目'}
                   </h4>
                   <button
                     type="button"
                     onClick={resetKbForm}
-                    className="text-xs text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] hover:text-[#0f172a] dark:hover:text-[#eef4fb] aurora:hover:text-[#ecf6f8] cursor-pointer"
+                    className="text-xs text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a] hover:text-[#0f172a] dark:hover:text-[#eef4fb] aurora:hover:text-[#ecf6f8] linen:hover:text-[#2b2118] cursor-pointer"
                   >
                     取消
                   </button>
@@ -1424,7 +1424,7 @@ export const KnowledgeEvolutionModal: React.FC<KnowledgeEvolutionModalProps> = (
                   <select
                     value={kbFormCategory}
                     onChange={(e) => setKbFormCategory(e.target.value)}
-                    className="bg-white dark:bg-[#08101a] aurora:bg-[#081014] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] rounded-lg px-2.5 py-1.5 text-xs text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8]"
+                    className="bg-white dark:bg-[#08101a] aurora:bg-[#081014] linen:bg-[#faf5ec] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] linen:border-[#cbbba2] rounded-lg px-2.5 py-1.5 text-xs text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118]"
                   >
                     {CATEGORY_OPTIONS.map((opt) => (
                       <option key={opt.value} value={opt.value}>
@@ -1437,7 +1437,7 @@ export const KnowledgeEvolutionModal: React.FC<KnowledgeEvolutionModalProps> = (
                     value={kbFormTitle}
                     onChange={(e) => setKbFormTitle(e.target.value)}
                     placeholder="标题（如：报价异议处理话术）"
-                    className="sm:col-span-2 bg-white dark:bg-[#08101a] aurora:bg-[#081014] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] rounded-lg px-2.5 py-1.5 text-xs text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] placeholder-[#94a3b8] dark:placeholder-[#4e657e] aurora:placeholder-[#5a7782]"
+                    className="sm:col-span-2 bg-white dark:bg-[#08101a] aurora:bg-[#081014] linen:bg-[#faf5ec] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] linen:border-[#cbbba2] rounded-lg px-2.5 py-1.5 text-xs text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118] placeholder-[#94a3b8] dark:placeholder-[#4e657e] aurora:placeholder-[#5a7782] linen:placeholder-[#8f7e6c]"
                   />
                 </div>
                 <textarea
@@ -1445,7 +1445,7 @@ export const KnowledgeEvolutionModal: React.FC<KnowledgeEvolutionModalProps> = (
                   value={kbFormContent}
                   onChange={(e) => setKbFormContent(e.target.value)}
                   placeholder="填写标准业务知识、话术原则或客户常见问答..."
-                  className="w-full bg-white dark:bg-[#08101a] aurora:bg-[#081014] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] rounded-lg p-2.5 text-xs text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] placeholder-[#94a3b8] dark:placeholder-[#4e657e] aurora:placeholder-[#5a7782]"
+                  className="w-full bg-white dark:bg-[#08101a] aurora:bg-[#081014] linen:bg-[#faf5ec] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] linen:border-[#cbbba2] rounded-lg p-2.5 text-xs text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118] placeholder-[#94a3b8] dark:placeholder-[#4e657e] aurora:placeholder-[#5a7782] linen:placeholder-[#8f7e6c]"
                 />
                 <div className="flex flex-wrap items-center gap-2">
                   <input
@@ -1453,13 +1453,13 @@ export const KnowledgeEvolutionModal: React.FC<KnowledgeEvolutionModalProps> = (
                     value={kbFormKeywords}
                     onChange={(e) => setKbFormKeywords(e.target.value)}
                     placeholder="检索关键词（逗号分隔，支持多语种）"
-                    className="flex-1 min-w-[180px] bg-white dark:bg-[#08101a] aurora:bg-[#081014] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] rounded-lg px-2.5 py-1.5 text-xs text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] placeholder-[#94a3b8] dark:placeholder-[#4e657e] aurora:placeholder-[#5a7782]"
+                    className="flex-1 min-w-[180px] bg-white dark:bg-[#08101a] aurora:bg-[#081014] linen:bg-[#faf5ec] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] linen:border-[#cbbba2] rounded-lg px-2.5 py-1.5 text-xs text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118] placeholder-[#94a3b8] dark:placeholder-[#4e657e] aurora:placeholder-[#5a7782] linen:placeholder-[#8f7e6c]"
                   />
                   <button
                     type="button"
                     disabled={isSavingKb}
                     onClick={handleSaveKbItem}
-                    className="px-3.5 py-1.5 bg-[#2481cc] hover:bg-[#1d6fb3] dark:bg-[#2ba0ff] dark:hover:bg-[#1e8ee8] aurora:bg-[#0d9488] aurora:hover:bg-[#0f766e] text-white text-xs font-semibold rounded-lg cursor-pointer disabled:opacity-50 transition-colors"
+                    className="px-3.5 py-1.5 bg-[#2481cc] hover:bg-[#1d6fb3] dark:bg-[#2ba0ff] dark:hover:bg-[#1e8ee8] aurora:bg-[#0d9488] linen:bg-[#a86a43] aurora:hover:bg-[#0f766e] linen:hover:bg-[#8f5734] text-white text-xs font-semibold rounded-lg cursor-pointer disabled:opacity-50 transition-colors"
                   >
                     {isSavingKb ? '保存中...' : editingKbId ? '保存修改' : '确认入库'}
                   </button>
@@ -1469,9 +1469,9 @@ export const KnowledgeEvolutionModal: React.FC<KnowledgeEvolutionModalProps> = (
 
             {/* Knowledge Items List */}
             {isLoadingKb ? (
-              <div className="py-10 text-center text-xs text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5]">正在加载知识库...</div>
+              <div className="py-10 text-center text-xs text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a]">正在加载知识库...</div>
             ) : filteredKbItems.length === 0 ? (
-              <div className="py-12 text-center border border-dashed border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] rounded-xl text-xs text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5]">
+              <div className="py-12 text-center border border-dashed border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] linen:border-[#cbbba2] rounded-xl text-xs text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a]">
                 {kbItems.length === 0
                   ? '当前账号本地知识库为空，请通过上方“文档解析训练”或“手工新增”建立真实业务知识库。'
                   : '未找到符合当前筛选条件的知识条目。'}
@@ -1483,24 +1483,24 @@ export const KnowledgeEvolutionModal: React.FC<KnowledgeEvolutionModalProps> = (
                     key={item.id}
                     className={`rounded-xl border p-3 transition-colors ${
                       item.isActive
-                        ? 'bg-[#f8fafc] dark:bg-[#0e1726]/85 aurora:bg-[#101c23]/90 border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34]'
-                        : 'bg-[#f1f5f9]/60 dark:bg-[#08101a]/60 aurora:bg-[#081014]/60 border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] opacity-70'
+                        ? 'bg-[#f8fafc] dark:bg-[#0e1726]/85 aurora:bg-[#101c23]/90 linen:bg-[#efe6d6]/90 border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] linen:border-[#dfd2bc]'
+                        : 'bg-[#f1f5f9]/60 dark:bg-[#08101a]/60 aurora:bg-[#081014]/60 linen:bg-[#faf5ec]/70 border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] linen:border-[#dfd2bc] opacity-70'
                     }`}
                   >
                     <div className="flex items-start justify-between gap-2">
                       <div className="min-w-0 flex-1">
                         <div className="flex flex-wrap items-center gap-1.5">
-                          <span className="text-[10px] px-2 py-0.5 rounded bg-[#e8f3ff] dark:bg-[#2ba0ff]/12 aurora:bg-[#112d36] text-[#0284c7] dark:text-[#7cc4ff] aurora:text-[#5eead4] font-medium">
+                          <span className="text-[10px] px-2 py-0.5 rounded bg-[#e8f3ff] dark:bg-[#2ba0ff]/12 aurora:bg-[#112d36] linen:bg-[#a86a43]/15 text-[#0284c7] dark:text-[#7cc4ff] aurora:text-[#5eead4] linen:text-[#8c522d] font-medium">
                             {CATEGORY_LABELS[item.category] || item.category}
                           </span>
-                          <h5 className="text-xs font-bold text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] truncate">
+                          <h5 className="text-xs font-bold text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118] truncate">
                             {item.title}
                           </h5>
-                          <span className="text-[10px] font-mono text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5]">
+                          <span className="text-[10px] font-mono text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a]">
                             命中 {item.hitCount || 0}
                           </span>
                         </div>
-                        <p className="text-xs text-[#475569] dark:text-[#b4c6d8] aurora:text-[#b7d0d8] mt-1.5 whitespace-pre-wrap leading-relaxed">
+                        <p className="text-xs text-[#475569] dark:text-[#b4c6d8] aurora:text-[#b7d0d8] linen:text-[#4e3f32] mt-1.5 whitespace-pre-wrap leading-relaxed">
                           {item.content}
                         </p>
                         {(item.keywords?.length > 0 || item.sourceFile) && (
@@ -1508,13 +1508,13 @@ export const KnowledgeEvolutionModal: React.FC<KnowledgeEvolutionModalProps> = (
                             {(item.keywords || []).map((kw, idx) => (
                               <span
                                 key={idx}
-                                className="text-[10px] px-1.5 py-0.5 rounded bg-white dark:bg-[#08101a] aurora:bg-[#081014] border border-[#e2e8f0] dark:border-[#1e3148] aurora:border-[#203742] text-[#475569] dark:text-[#b4c6d8] aurora:text-[#b7d0d8]"
+                                className="text-[10px] px-1.5 py-0.5 rounded bg-white dark:bg-[#08101a] aurora:bg-[#081014] linen:bg-[#faf5ec] border border-[#e2e8f0] dark:border-[#1e3148] aurora:border-[#203742] linen:border-[#cbbba2] text-[#475569] dark:text-[#b4c6d8] aurora:text-[#b7d0d8] linen:text-[#4e3f32]"
                               >
                                 {kw}
                               </span>
                             ))}
                             {item.sourceFile && item.sourceFile !== 'manual_input' && (
-                              <span className="text-[10px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5]">
+                              <span className="text-[10px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a]">
                                 来源: {item.sourceFile}
                               </span>
                             )}
@@ -1530,7 +1530,7 @@ export const KnowledgeEvolutionModal: React.FC<KnowledgeEvolutionModalProps> = (
                           className={`p-1.5 rounded-lg border text-xs cursor-pointer transition-colors ${
                             item.isActive
                               ? 'text-emerald-600 dark:text-emerald-400 border-emerald-500/30 bg-emerald-500/10'
-                              : 'text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] bg-white dark:bg-[#08101a] aurora:bg-[#081014]'
+                              : 'text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a] border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] linen:border-[#cbbba2] bg-white dark:bg-[#08101a] aurora:bg-[#081014] linen:bg-[#faf5ec]'
                           }`}
                         >
                           <Power className="w-3.5 h-3.5" />
@@ -1539,7 +1539,7 @@ export const KnowledgeEvolutionModal: React.FC<KnowledgeEvolutionModalProps> = (
                           type="button"
                           title="编辑条目"
                           onClick={() => handleStartEditKb(item)}
-                          className="p-1.5 rounded-lg border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] bg-white dark:bg-[#08101a] aurora:bg-[#081014] text-[#475569] dark:text-[#b4c6d8] aurora:text-[#b7d0d8] hover:text-[#0284c7] dark:hover:text-[#2ba0ff] aurora:hover:text-[#2dd4bf] cursor-pointer transition-colors"
+                          className="p-1.5 rounded-lg border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] linen:border-[#cbbba2] bg-white dark:bg-[#08101a] aurora:bg-[#081014] linen:bg-[#faf5ec] text-[#475569] dark:text-[#b4c6d8] aurora:text-[#b7d0d8] linen:text-[#4e3f32] hover:text-[#0284c7] dark:hover:text-[#2ba0ff] aurora:hover:text-[#2dd4bf] cursor-pointer transition-colors"
                         >
                           <Edit3 className="w-3.5 h-3.5" />
                         </button>
@@ -1549,7 +1549,7 @@ export const KnowledgeEvolutionModal: React.FC<KnowledgeEvolutionModalProps> = (
                           onClick={() =>
                             setConfirmDeleteKbId((cur) => (cur === item.id ? null : item.id))
                           }
-                          className="p-1.5 rounded-lg border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] bg-white dark:bg-[#08101a] aurora:bg-[#081014] text-rose-600 dark:text-rose-400 hover:bg-rose-50 dark:hover:bg-rose-950/30 aurora:hover:bg-rose-950/30 cursor-pointer transition-colors"
+                          className="p-1.5 rounded-lg border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] linen:border-[#cbbba2] bg-white dark:bg-[#08101a] aurora:bg-[#081014] linen:bg-[#faf5ec] text-rose-600 dark:text-rose-400 hover:bg-rose-50 dark:hover:bg-rose-950/30 aurora:hover:bg-rose-950/30 cursor-pointer transition-colors"
                         >
                           <Trash2 className="w-3.5 h-3.5" />
                         </button>
@@ -1557,13 +1557,13 @@ export const KnowledgeEvolutionModal: React.FC<KnowledgeEvolutionModalProps> = (
                     </div>
 
                     {confirmDeleteKbId === item.id && (
-                      <div className="mt-2 pt-2 border-t border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] flex items-center justify-between gap-2 text-[11px]">
+                      <div className="mt-2 pt-2 border-t border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] linen:border-[#dfd2bc] flex items-center justify-between gap-2 text-[11px]">
                         <span className="text-rose-600 dark:text-rose-400">确认永久删除该知识条目？</span>
                         <div className="flex items-center gap-1.5">
                           <button
                             type="button"
                             onClick={() => setConfirmDeleteKbId(null)}
-                            className="px-2 py-0.5 rounded bg-white dark:bg-[#08101a] aurora:bg-[#081014] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] text-[#475569] dark:text-[#b4c6d8] aurora:text-[#b7d0d8] cursor-pointer"
+                            className="px-2 py-0.5 rounded bg-white dark:bg-[#08101a] aurora:bg-[#081014] linen:bg-[#faf5ec] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] linen:border-[#cbbba2] text-[#475569] dark:text-[#b4c6d8] aurora:text-[#b7d0d8] linen:text-[#4e3f32] cursor-pointer"
                           >
                             取消
                           </button>
@@ -1618,13 +1618,13 @@ export const KnowledgeEvolutionModal: React.FC<KnowledgeEvolutionModalProps> = (
             )}
 
             {/* One-Click Import From Current Client Card */}
-            <div className="bg-[#f8fafc] dark:bg-[#0e1726]/85 aurora:bg-[#101c23]/90 border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] rounded-xl p-3.5 space-y-2.5">
+            <div className="bg-[#f8fafc] dark:bg-[#0e1726]/85 aurora:bg-[#101c23]/90 linen:bg-[#efe6d6]/90 border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] linen:border-[#dfd2bc] rounded-xl p-3.5 space-y-2.5">
               <div className="flex items-center justify-between gap-2">
-                <div className="flex items-center gap-1.5 text-xs font-bold text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8]">
-                  <Download className="w-4 h-4 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf]" />
+                <div className="flex items-center gap-1.5 text-xs font-bold text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118]">
+                  <Download className="w-4 h-4 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf] linen:text-[#8c522d]" />
                   <span>从当前客户一键导入整文范本</span>
                 </div>
-                <span className="text-[11px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5]">
+                <span className="text-[11px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a]">
                   {activeChatId
                     ? `当前选中：${currentChat?.title || activeChatId} (${currentMessages?.length || 0} 条本地消息)`
                     : '未选中任何客户会话'}
@@ -1636,13 +1636,13 @@ export const KnowledgeEvolutionModal: React.FC<KnowledgeEvolutionModalProps> = (
                   value={importChatCustomTitle}
                   onChange={(e) => setImportChatCustomTitle(e.target.value)}
                   placeholder="可选自定义范本标题（留空将自动按客户姓名生成）"
-                  className="flex-1 min-w-[200px] bg-white dark:bg-[#08101a] aurora:bg-[#081014] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] rounded-lg px-2.5 py-1.5 text-xs text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] placeholder-[#94a3b8] dark:placeholder-[#4e657e] aurora:placeholder-[#5a7782] focus:outline-none focus:border-[#2481cc] dark:focus:border-[#2ba0ff] aurora:focus:border-[#2dd4bf]"
+                  className="flex-1 min-w-[200px] bg-white dark:bg-[#08101a] aurora:bg-[#081014] linen:bg-[#faf5ec] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] linen:border-[#cbbba2] rounded-lg px-2.5 py-1.5 text-xs text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118] placeholder-[#94a3b8] dark:placeholder-[#4e657e] aurora:placeholder-[#5a7782] linen:placeholder-[#8f7e6c] focus:outline-none focus:border-[#2481cc] dark:focus:border-[#2ba0ff] aurora:focus:border-[#2dd4bf] linen:focus:border-[#a86a43]"
                 />
                 <button
                   type="button"
                   disabled={!activeChatId || isImportingChatTranscript}
                   onClick={handleImportFromCurrentChat}
-                  className="px-3 py-1.5 bg-[#2481cc] hover:bg-[#1d6fb3] dark:bg-[#2ba0ff] dark:hover:bg-[#1e8ee8] aurora:bg-[#0d9488] aurora:hover:bg-[#0f766e] text-white text-xs font-semibold rounded-lg cursor-pointer disabled:opacity-50 flex items-center gap-1.5 transition-colors"
+                  className="px-3 py-1.5 bg-[#2481cc] hover:bg-[#1d6fb3] dark:bg-[#2ba0ff] dark:hover:bg-[#1e8ee8] aurora:bg-[#0d9488] linen:bg-[#a86a43] aurora:hover:bg-[#0f766e] linen:hover:bg-[#8f5734] text-white text-xs font-semibold rounded-lg cursor-pointer disabled:opacity-50 flex items-center gap-1.5 transition-colors"
                 >
                   <Sparkles className={`w-3.5 h-3.5 ${isImportingChatTranscript ? 'animate-spin' : ''}`} />
                   <span>{isImportingChatTranscript ? '提炼导入中...' : '一键导入并提炼风格'}</span>
@@ -1652,13 +1652,13 @@ export const KnowledgeEvolutionModal: React.FC<KnowledgeEvolutionModalProps> = (
 
             {/* Header & Toggle Manual Add */}
             <div className="flex items-center justify-between">
-              <span className="text-xs font-bold text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8]">
+              <span className="text-xs font-bold text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118]">
                 已入库整文范本 ({transcripts.length})
               </span>
               <button
                 type="button"
                 onClick={() => setShowTranscriptForm((v) => !v)}
-                className="px-2.5 py-1.5 bg-[#2481cc] hover:bg-[#1d6fb3] dark:bg-[#2ba0ff] dark:hover:bg-[#1e8ee8] aurora:bg-[#0d9488] aurora:hover:bg-[#0f766e] text-white text-xs font-semibold rounded-lg flex items-center gap-1 cursor-pointer transition-colors"
+                className="px-2.5 py-1.5 bg-[#2481cc] hover:bg-[#1d6fb3] dark:bg-[#2ba0ff] dark:hover:bg-[#1e8ee8] aurora:bg-[#0d9488] linen:bg-[#a86a43] aurora:hover:bg-[#0f766e] linen:hover:bg-[#8f5734] text-white text-xs font-semibold rounded-lg flex items-center gap-1 cursor-pointer transition-colors"
               >
                 <Plus className="w-3.5 h-3.5" />
                 <span>{showTranscriptForm ? '收起录入表单' : '手工录入整文范本'}</span>
@@ -1666,41 +1666,41 @@ export const KnowledgeEvolutionModal: React.FC<KnowledgeEvolutionModalProps> = (
             </div>
 
             {showTranscriptForm && (
-              <div className="bg-[#f8fafc] dark:bg-[#0e1726]/90 aurora:bg-[#101c23]/90 border border-[#2481cc]/35 dark:border-[#2ba0ff]/40 aurora:border-[#2dd4bf]/40 rounded-xl p-3.5 space-y-2.5">
+              <div className="bg-[#f8fafc] dark:bg-[#0e1726]/90 aurora:bg-[#101c23]/90 linen:bg-[#efe6d6]/90 border border-[#2481cc]/35 dark:border-[#2ba0ff]/40 aurora:border-[#2dd4bf]/40 linen:border-[#a86a43]/40 rounded-xl p-3.5 space-y-2.5">
                 <input
                   type="text"
                   value={newTransTitle}
                   onChange={(e) => setNewTransTitle(e.target.value)}
                   placeholder="范本标题（如：高情商破冰与商务自然转接示范）"
-                  className="w-full bg-white dark:bg-[#08101a] aurora:bg-[#081014] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] rounded-lg px-2.5 py-1.5 text-xs text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] placeholder-[#94a3b8] dark:placeholder-[#4e657e] aurora:placeholder-[#5a7782] focus:outline-none focus:border-[#2481cc] dark:focus:border-[#2ba0ff] aurora:focus:border-[#2dd4bf]"
+                  className="w-full bg-white dark:bg-[#08101a] aurora:bg-[#081014] linen:bg-[#faf5ec] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] linen:border-[#cbbba2] rounded-lg px-2.5 py-1.5 text-xs text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118] placeholder-[#94a3b8] dark:placeholder-[#4e657e] aurora:placeholder-[#5a7782] linen:placeholder-[#8f7e6c] focus:outline-none focus:border-[#2481cc] dark:focus:border-[#2ba0ff] aurora:focus:border-[#2dd4bf] linen:focus:border-[#a86a43]"
                 />
                 <input
                   type="text"
                   value={newTransDesc}
                   onChange={(e) => setNewTransDesc(e.target.value)}
                   placeholder="场景说明（可选）"
-                  className="w-full bg-white dark:bg-[#08101a] aurora:bg-[#081014] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] rounded-lg px-2.5 py-1.5 text-xs text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] placeholder-[#94a3b8] dark:placeholder-[#4e657e] aurora:placeholder-[#5a7782] focus:outline-none focus:border-[#2481cc] dark:focus:border-[#2ba0ff] aurora:focus:border-[#2dd4bf]"
+                  className="w-full bg-white dark:bg-[#08101a] aurora:bg-[#081014] linen:bg-[#faf5ec] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] linen:border-[#cbbba2] rounded-lg px-2.5 py-1.5 text-xs text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118] placeholder-[#94a3b8] dark:placeholder-[#4e657e] aurora:placeholder-[#5a7782] linen:placeholder-[#8f7e6c] focus:outline-none focus:border-[#2481cc] dark:focus:border-[#2ba0ff] aurora:focus:border-[#2dd4bf] linen:focus:border-[#a86a43]"
                 />
                 <textarea
                   rows={5}
                   value={newTransDialogue}
                   onChange={(e) => setNewTransDialogue(e.target.value)}
                   placeholder="粘贴完整真实聊天对话实录（按行分隔，如 客户: ... / 我: ...）"
-                  className="w-full bg-white dark:bg-[#08101a] aurora:bg-[#081014] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] rounded-lg p-2.5 text-xs text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] placeholder-[#94a3b8] dark:placeholder-[#4e657e] aurora:placeholder-[#5a7782] font-mono focus:outline-none focus:border-[#2481cc] dark:focus:border-[#2ba0ff] aurora:focus:border-[#2dd4bf]"
+                  className="w-full bg-white dark:bg-[#08101a] aurora:bg-[#081014] linen:bg-[#faf5ec] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] linen:border-[#cbbba2] rounded-lg p-2.5 text-xs text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118] placeholder-[#94a3b8] dark:placeholder-[#4e657e] aurora:placeholder-[#5a7782] linen:placeholder-[#8f7e6c] font-mono focus:outline-none focus:border-[#2481cc] dark:focus:border-[#2ba0ff] aurora:focus:border-[#2dd4bf] linen:focus:border-[#a86a43]"
                 />
                 <input
                   type="text"
                   value={newTransStyle}
                   onChange={(e) => setNewTransStyle(e.target.value)}
                   placeholder="可选自定义风格摘要（留空将自动调用大模型提炼口语习惯）"
-                  className="w-full bg-white dark:bg-[#08101a] aurora:bg-[#081014] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] rounded-lg px-2.5 py-1.5 text-xs text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] placeholder-[#94a3b8] dark:placeholder-[#4e657e] aurora:placeholder-[#5a7782] focus:outline-none focus:border-[#2481cc] dark:focus:border-[#2ba0ff] aurora:focus:border-[#2dd4bf]"
+                  className="w-full bg-white dark:bg-[#08101a] aurora:bg-[#081014] linen:bg-[#faf5ec] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] linen:border-[#cbbba2] rounded-lg px-2.5 py-1.5 text-xs text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118] placeholder-[#94a3b8] dark:placeholder-[#4e657e] aurora:placeholder-[#5a7782] linen:placeholder-[#8f7e6c] focus:outline-none focus:border-[#2481cc] dark:focus:border-[#2ba0ff] aurora:focus:border-[#2dd4bf] linen:focus:border-[#a86a43]"
                 />
                 <div className="flex justify-end">
                   <button
                     type="button"
                     disabled={isCreatingTranscript}
                     onClick={handleCreateTranscript}
-                    className="px-3.5 py-1.5 bg-[#2481cc] hover:bg-[#1d6fb3] dark:bg-[#2ba0ff] dark:hover:bg-[#1e8ee8] aurora:bg-[#0d9488] aurora:hover:bg-[#0f766e] text-white text-xs font-semibold rounded-lg cursor-pointer disabled:opacity-50 transition-colors"
+                    className="px-3.5 py-1.5 bg-[#2481cc] hover:bg-[#1d6fb3] dark:bg-[#2ba0ff] dark:hover:bg-[#1e8ee8] aurora:bg-[#0d9488] linen:bg-[#a86a43] aurora:hover:bg-[#0f766e] linen:hover:bg-[#8f5734] text-white text-xs font-semibold rounded-lg cursor-pointer disabled:opacity-50 transition-colors"
                   >
                     {isCreatingTranscript ? '提炼入库中...' : '保存并提炼风格'}
                   </button>
@@ -1709,9 +1709,9 @@ export const KnowledgeEvolutionModal: React.FC<KnowledgeEvolutionModalProps> = (
             )}
 
             {isLoadingTranscripts ? (
-              <div className="py-10 text-center text-xs text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5]">正在加载整文范本库...</div>
+              <div className="py-10 text-center text-xs text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a]">正在加载整文范本库...</div>
             ) : transcripts.length === 0 ? (
-              <div className="py-12 text-center border border-dashed border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] rounded-xl text-xs text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5]">
+              <div className="py-12 text-center border border-dashed border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] linen:border-[#cbbba2] rounded-xl text-xs text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a]">
                 暂无整文对话范本。请从上方“当前客户一键导入”或“手工录入”添加真实会话样本。
               </div>
             ) : (
@@ -1723,20 +1723,20 @@ export const KnowledgeEvolutionModal: React.FC<KnowledgeEvolutionModalProps> = (
                       key={t.id}
                       className={`rounded-xl border p-3 transition-colors ${
                         t.isActive
-                          ? 'bg-[#f8fafc] dark:bg-[#0e1726]/85 aurora:bg-[#101c23]/90 border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34]'
-                          : 'bg-[#f1f5f9]/70 dark:bg-[#08101a]/60 aurora:bg-[#081014]/60 border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] opacity-70'
+                          ? 'bg-[#f8fafc] dark:bg-[#0e1726]/85 aurora:bg-[#101c23]/90 linen:bg-[#efe6d6]/90 border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] linen:border-[#dfd2bc]'
+                          : 'bg-[#f1f5f9]/70 dark:bg-[#08101a]/60 aurora:bg-[#081014]/60 linen:bg-[#faf5ec]/70 border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] linen:border-[#dfd2bc] opacity-70'
                       }`}
                     >
                       <div className="flex items-start justify-between gap-2">
                         <div className="min-w-0 flex-1">
                           <div className="flex flex-wrap items-center gap-1.5">
-                            <h5 className="text-xs font-bold text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8]">{t.title}</h5>
-                            <span className="text-[10px] font-mono text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5]">
+                            <h5 className="text-xs font-bold text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118]">{t.title}</h5>
+                            <span className="text-[10px] font-mono text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a]">
                               {t.roundCount} 轮 · {t.characterCount} 字
                             </span>
                           </div>
                           {t.learnedStyle && (
-                            <div className="mt-1.5 text-xs text-[#0284c7] dark:text-[#7cc4ff] aurora:text-[#5eead4] bg-[#e8f3ff] dark:bg-[#2ba0ff]/10 aurora:bg-[#112d36] border border-[#bfdbfe] dark:border-[#2ba0ff]/25 aurora:border-[#2dd4bf]/25 rounded-lg px-2.5 py-1.5 leading-relaxed">
+                            <div className="mt-1.5 text-xs text-[#0284c7] dark:text-[#7cc4ff] aurora:text-[#5eead4] linen:text-[#8c522d] bg-[#e8f3ff] dark:bg-[#2ba0ff]/10 aurora:bg-[#112d36] linen:bg-[#a86a43]/15 border border-[#bfdbfe] dark:border-[#2ba0ff]/25 aurora:border-[#2dd4bf]/25 linen:border-[#a86a43]/25 rounded-lg px-2.5 py-1.5 leading-relaxed">
                               提炼风格：{t.learnedStyle}
                             </div>
                           )}
@@ -1746,7 +1746,7 @@ export const KnowledgeEvolutionModal: React.FC<KnowledgeEvolutionModalProps> = (
                             type="button"
                             title={isExpanded ? '收起原文' : '展开原文'}
                             onClick={() => setExpandedTranscriptId(isExpanded ? null : t.id)}
-                            className="p-1.5 rounded-lg border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] bg-white dark:bg-[#08101a] aurora:bg-[#081014] text-[#475569] dark:text-[#b4c6d8] aurora:text-[#b7d0d8] hover:bg-[#f1f5f9] dark:hover:bg-[#152438] aurora:hover:bg-[#152934] cursor-pointer transition-colors"
+                            className="p-1.5 rounded-lg border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] linen:border-[#cbbba2] bg-white dark:bg-[#08101a] aurora:bg-[#081014] linen:bg-[#faf5ec] text-[#475569] dark:text-[#b4c6d8] aurora:text-[#b7d0d8] linen:text-[#4e3f32] hover:bg-[#f1f5f9] dark:hover:bg-[#152438] aurora:hover:bg-[#152934] linen:hover:bg-[#e7dccb] cursor-pointer transition-colors"
                           >
                             {isExpanded ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
                           </button>
@@ -1757,7 +1757,7 @@ export const KnowledgeEvolutionModal: React.FC<KnowledgeEvolutionModalProps> = (
                             className={`p-1.5 rounded-lg border cursor-pointer transition-colors ${
                               t.isActive
                                 ? 'text-emerald-600 dark:text-emerald-400 border-emerald-500/30 bg-emerald-500/10'
-                                : 'text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] bg-white dark:bg-[#08101a] aurora:bg-[#081014]'
+                                : 'text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a] border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] linen:border-[#cbbba2] bg-white dark:bg-[#08101a] aurora:bg-[#081014] linen:bg-[#faf5ec]'
                             }`}
                           >
                             <Power className="w-3.5 h-3.5" />
@@ -1768,7 +1768,7 @@ export const KnowledgeEvolutionModal: React.FC<KnowledgeEvolutionModalProps> = (
                             onClick={() =>
                               setConfirmDeleteTranscriptId((cur) => (cur === t.id ? null : t.id))
                             }
-                            className="p-1.5 rounded-lg border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] bg-white dark:bg-[#08101a] aurora:bg-[#081014] text-rose-600 dark:text-rose-400 hover:bg-rose-50 dark:hover:bg-rose-950/30 cursor-pointer transition-colors"
+                            className="p-1.5 rounded-lg border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] linen:border-[#cbbba2] bg-white dark:bg-[#08101a] aurora:bg-[#081014] linen:bg-[#faf5ec] text-rose-600 dark:text-rose-400 hover:bg-rose-50 dark:hover:bg-rose-950/30 cursor-pointer transition-colors"
                           >
                             <Trash2 className="w-3.5 h-3.5" />
                           </button>
@@ -1776,19 +1776,19 @@ export const KnowledgeEvolutionModal: React.FC<KnowledgeEvolutionModalProps> = (
                       </div>
 
                       {isExpanded && (
-                        <pre className="mt-2.5 p-2.5 rounded-lg bg-white dark:bg-[#08101a] aurora:bg-[#081014] border border-[#e2e8f0] dark:border-[#1e3148] aurora:border-[#203742] text-[11px] text-[#334155] dark:text-[#b4c6d8] aurora:text-[#b7d0d8] whitespace-pre-wrap max-h-56 overflow-y-auto font-mono leading-relaxed">
+                        <pre className="mt-2.5 p-2.5 rounded-lg bg-white dark:bg-[#08101a] aurora:bg-[#081014] linen:bg-[#faf5ec] border border-[#e2e8f0] dark:border-[#1e3148] aurora:border-[#203742] linen:border-[#cbbba2] text-[11px] text-[#334155] dark:text-[#b4c6d8] aurora:text-[#b7d0d8] linen:text-[#4e3f32] whitespace-pre-wrap max-h-56 overflow-y-auto font-mono leading-relaxed">
                           {t.dialogueText}
                         </pre>
                       )}
 
                       {confirmDeleteTranscriptId === t.id && (
-                        <div className="mt-2 pt-2 border-t border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] flex items-center justify-between gap-2 text-[11px]">
+                        <div className="mt-2 pt-2 border-t border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] linen:border-[#dfd2bc] flex items-center justify-between gap-2 text-[11px]">
                           <span className="text-rose-600 dark:text-rose-400">确认永久删除该整文范本？</span>
                           <div className="flex items-center gap-1.5">
                             <button
                               type="button"
                               onClick={() => setConfirmDeleteTranscriptId(null)}
-                              className="px-2 py-0.5 rounded bg-white dark:bg-[#08101a] aurora:bg-[#081014] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] text-[#475569] dark:text-[#b4c6d8] aurora:text-[#b7d0d8] cursor-pointer"
+                              className="px-2 py-0.5 rounded bg-white dark:bg-[#08101a] aurora:bg-[#081014] linen:bg-[#faf5ec] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] linen:border-[#cbbba2] text-[#475569] dark:text-[#b4c6d8] aurora:text-[#b7d0d8] linen:text-[#4e3f32] cursor-pointer"
                             >
                               取消
                             </button>
@@ -1816,27 +1816,27 @@ export const KnowledgeEvolutionModal: React.FC<KnowledgeEvolutionModalProps> = (
           <div className="space-y-4">
             {/* Engine Status Grid */}
             <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
-              <div className="bg-[#f8fafc] dark:bg-[#0e1726]/85 aurora:bg-[#101c23]/90 border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] rounded-xl px-3 py-2.5">
-                <div className="text-[11px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5]">进化引擎版本</div>
-                <div className="text-xs font-bold font-mono text-[#0284c7] dark:text-[#2ba0ff] aurora:text-[#2dd4bf] mt-1 truncate">
+              <div className="bg-[#f8fafc] dark:bg-[#0e1726]/85 aurora:bg-[#101c23]/90 linen:bg-[#efe6d6]/90 border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] linen:border-[#dfd2bc] rounded-xl px-3 py-2.5">
+                <div className="text-[11px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a]">进化引擎版本</div>
+                <div className="text-xs font-bold font-mono text-[#0284c7] dark:text-[#2ba0ff] aurora:text-[#2dd4bf] linen:text-[#8c522d] mt-1 truncate">
                   {evolutionState?.version || 'v1.0.0'}
                 </div>
               </div>
-              <div className="bg-[#f8fafc] dark:bg-[#0e1726]/85 aurora:bg-[#101c23]/90 border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] rounded-xl px-3 py-2.5">
-                <div className="text-[11px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5]">已分析会话组</div>
-                <div className="text-base font-bold font-mono tabular-nums text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] mt-0.5">
+              <div className="bg-[#f8fafc] dark:bg-[#0e1726]/85 aurora:bg-[#101c23]/90 linen:bg-[#efe6d6]/90 border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] linen:border-[#dfd2bc] rounded-xl px-3 py-2.5">
+                <div className="text-[11px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a]">已分析会话组</div>
+                <div className="text-base font-bold font-mono tabular-nums text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118] mt-0.5">
                   {evolutionState?.totalConversationsAnalyzed || 0}
                 </div>
               </div>
-              <div className="bg-[#f8fafc] dark:bg-[#0e1726]/85 aurora:bg-[#101c23]/90 border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] rounded-xl px-3 py-2.5">
-                <div className="text-[11px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5]">习得习惯总量</div>
-                <div className="text-base font-bold font-mono tabular-nums text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] mt-0.5">
+              <div className="bg-[#f8fafc] dark:bg-[#0e1726]/85 aurora:bg-[#101c23]/90 linen:bg-[#efe6d6]/90 border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] linen:border-[#dfd2bc] rounded-xl px-3 py-2.5">
+                <div className="text-[11px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a]">习得习惯总量</div>
+                <div className="text-base font-bold font-mono tabular-nums text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118] mt-0.5">
                   {evolutionState?.totalHabitsLearned || 0}
                 </div>
               </div>
-              <div className="bg-[#f8fafc] dark:bg-[#0e1726]/85 aurora:bg-[#101c23]/90 border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] rounded-xl px-3 py-2.5">
-                <div className="text-[11px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5]">最近进化时间</div>
-                <div className="text-xs font-medium text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] mt-1">
+              <div className="bg-[#f8fafc] dark:bg-[#0e1726]/85 aurora:bg-[#101c23]/90 linen:bg-[#efe6d6]/90 border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] linen:border-[#dfd2bc] rounded-xl px-3 py-2.5">
+                <div className="text-[11px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a]">最近进化时间</div>
+                <div className="text-xs font-medium text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118] mt-1">
                   {formatDateTime(evolutionState?.lastEvolvedAt)}
                 </div>
               </div>
@@ -1856,17 +1856,17 @@ export const KnowledgeEvolutionModal: React.FC<KnowledgeEvolutionModalProps> = (
             )}
 
             {/* Trigger Incremental Evolution Learning */}
-            <div className="bg-[#f8fafc] dark:bg-[#0e1726]/85 aurora:bg-[#101c23]/90 border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] rounded-xl p-3.5 space-y-2.5">
+            <div className="bg-[#f8fafc] dark:bg-[#0e1726]/85 aurora:bg-[#101c23]/90 linen:bg-[#efe6d6]/90 border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] linen:border-[#dfd2bc] rounded-xl p-3.5 space-y-2.5">
               <div className="flex items-center justify-between">
-                <div className="flex items-center gap-1.5 text-xs font-bold text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8]">
-                  <Cpu className="w-4 h-4 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf]" />
+                <div className="flex items-center gap-1.5 text-xs font-bold text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118]">
+                  <Cpu className="w-4 h-4 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf] linen:text-[#8c522d]" />
                   <span>增量会话自进化学习控制</span>
                 </div>
                 <button
                   type="button"
                   onClick={loadEvolutionData}
                   disabled={isLoadingEvolution}
-                  className="text-[11px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] hover:text-[#0f172a] dark:hover:text-white aurora:hover:text-[#ecf6f8] flex items-center gap-1 cursor-pointer transition-colors"
+                  className="text-[11px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a] hover:text-[#0f172a] dark:hover:text-white aurora:hover:text-[#ecf6f8] linen:hover:text-[#2b2118] flex items-center gap-1 cursor-pointer transition-colors"
                 >
                   <RefreshCw className={`w-3 h-3 ${isLoadingEvolution ? 'animate-spin' : ''}`} />
                   <span>刷新</span>
@@ -1877,10 +1877,10 @@ export const KnowledgeEvolutionModal: React.FC<KnowledgeEvolutionModalProps> = (
                 value={evolutionSampleInput}
                 onChange={(e) => setEvolutionSampleInput(e.target.value)}
                 placeholder="可选补充示范语料片段（留空则自动按消息水位线抽取当前账号新增真实聊天记录，避免重复提炼）..."
-                className="w-full bg-white dark:bg-[#08101a] aurora:bg-[#081014] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] rounded-lg p-2.5 text-xs text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] placeholder-[#94a3b8] dark:placeholder-[#4e657e] aurora:placeholder-[#5a7782] focus:outline-none focus:border-[#2481cc] dark:focus:border-[#2ba0ff] aurora:focus:border-[#2dd4bf]"
+                className="w-full bg-white dark:bg-[#08101a] aurora:bg-[#081014] linen:bg-[#faf5ec] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] linen:border-[#cbbba2] rounded-lg p-2.5 text-xs text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118] placeholder-[#94a3b8] dark:placeholder-[#4e657e] aurora:placeholder-[#5a7782] linen:placeholder-[#8f7e6c] focus:outline-none focus:border-[#2481cc] dark:focus:border-[#2ba0ff] aurora:focus:border-[#2dd4bf] linen:focus:border-[#a86a43]"
               />
               <div className="flex flex-wrap items-center justify-between gap-2">
-                <span className="text-[11px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5]">
+                <span className="text-[11px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a]">
                   学习水位线：{formatDateTime(evolutionState?.lastLearnedMessageCreatedAt)} · 已启用习惯{' '}
                   {(evolutionState?.habits || []).filter((h) => h.isActive).length}/
                   {(evolutionState?.habits || []).length}
@@ -1889,7 +1889,7 @@ export const KnowledgeEvolutionModal: React.FC<KnowledgeEvolutionModalProps> = (
                   type="button"
                   disabled={isRunningEvolution}
                   onClick={handleRunEvolutionLearn}
-                  className="px-3.5 py-1.5 bg-[#2481cc] hover:bg-[#1d6fb3] dark:bg-[#2ba0ff] dark:hover:bg-[#1e8ee8] aurora:bg-[#0d9488] aurora:hover:bg-[#0f766e] text-white text-xs font-semibold rounded-lg cursor-pointer disabled:opacity-50 flex items-center gap-1.5 transition-colors"
+                  className="px-3.5 py-1.5 bg-[#2481cc] hover:bg-[#1d6fb3] dark:bg-[#2ba0ff] dark:hover:bg-[#1e8ee8] aurora:bg-[#0d9488] linen:bg-[#a86a43] aurora:hover:bg-[#0f766e] linen:hover:bg-[#8f5734] text-white text-xs font-semibold rounded-lg cursor-pointer disabled:opacity-50 flex items-center gap-1.5 transition-colors"
                 >
                   <Sparkles className={`w-3.5 h-3.5 ${isRunningEvolution ? 'animate-spin' : ''}`} />
                   <span>{isRunningEvolution ? '正在萃取沟通习惯...' : '执行增量进化学习'}</span>
@@ -1899,11 +1899,11 @@ export const KnowledgeEvolutionModal: React.FC<KnowledgeEvolutionModalProps> = (
 
             {/* Learned Habits List */}
             <div className="space-y-2">
-              <h4 className="text-xs font-bold text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8]">
+              <h4 className="text-xs font-bold text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118]">
                 已习得沟通习惯与风格技巧 ({evolutionState?.habits?.length || 0})
               </h4>
               {!evolutionState?.habits?.length ? (
-                <div className="py-10 text-center border border-dashed border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] rounded-xl text-xs text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5]">
+                <div className="py-10 text-center border border-dashed border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] linen:border-[#cbbba2] rounded-xl text-xs text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a]">
                   尚未提炼任何习惯规则。在积累真实聊天记录或补充语料后，点击上方“执行增量进化学习”。
                 </div>
               ) : (
@@ -1913,28 +1913,28 @@ export const KnowledgeEvolutionModal: React.FC<KnowledgeEvolutionModalProps> = (
                       key={h.id}
                       className={`rounded-xl border p-3 transition-colors ${
                         h.isActive
-                          ? 'bg-[#f8fafc] dark:bg-[#0e1726]/85 aurora:bg-[#101c23]/90 border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34]'
-                          : 'bg-[#f1f5f9]/70 dark:bg-[#08101a]/60 aurora:bg-[#081014]/60 border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] opacity-70'
+                          ? 'bg-[#f8fafc] dark:bg-[#0e1726]/85 aurora:bg-[#101c23]/90 linen:bg-[#efe6d6]/90 border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] linen:border-[#dfd2bc]'
+                          : 'bg-[#f1f5f9]/70 dark:bg-[#08101a]/60 aurora:bg-[#081014]/60 linen:bg-[#faf5ec]/70 border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] linen:border-[#dfd2bc] opacity-70'
                       }`}
                     >
                       <div className="flex items-start justify-between gap-2">
                         <div className="min-w-0 flex-1 space-y-1">
                           <div className="flex flex-wrap items-center gap-1.5">
-                            <span className="text-[10px] px-2 py-0.5 rounded bg-[#e8f3ff] dark:bg-[#2ba0ff]/12 aurora:bg-[#112d36] text-[#0284c7] dark:text-[#7cc4ff] aurora:text-[#5eead4] font-medium">
+                            <span className="text-[10px] px-2 py-0.5 rounded bg-[#e8f3ff] dark:bg-[#2ba0ff]/12 aurora:bg-[#112d36] linen:bg-[#a86a43]/15 text-[#0284c7] dark:text-[#7cc4ff] aurora:text-[#5eead4] linen:text-[#8c522d] font-medium">
                               {HABIT_TYPE_LABELS[h.type] || h.type}
                             </span>
-                            <span className="text-xs font-bold text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8]">{h.title}</span>
-                            <span className="text-[10px] font-mono text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5]">
+                            <span className="text-xs font-bold text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118]">{h.title}</span>
+                            <span className="text-[10px] font-mono text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a]">
                               置信 {Math.round((Number(h.confidenceScore) || 0) * 100)}% · 应用 {h.appliedCount || 0} 次
                             </span>
                           </div>
                           {h.description && (
-                            <p className="text-xs text-[#475569] dark:text-[#b4c6d8] aurora:text-[#b7d0d8] leading-relaxed">
+                            <p className="text-xs text-[#475569] dark:text-[#b4c6d8] aurora:text-[#b7d0d8] linen:text-[#4e3f32] leading-relaxed">
                               {h.description}
                             </p>
                           )}
                           {h.examplePattern && (
-                            <div className="text-[11px] text-[#64748b] dark:text-[#8ea6bc] aurora:text-[#7e9aa5] bg-white dark:bg-[#08101a] aurora:bg-[#081014] border border-[#e2e8f0] dark:border-[#1e3148] aurora:border-[#203742] rounded-lg px-2.5 py-1">
+                            <div className="text-[11px] text-[#64748b] dark:text-[#8ea6bc] aurora:text-[#7e9aa5] linen:text-[#6e5c4a] bg-white dark:bg-[#08101a] aurora:bg-[#081014] linen:bg-[#faf5ec] border border-[#e2e8f0] dark:border-[#1e3148] aurora:border-[#203742] linen:border-[#cbbba2] rounded-lg px-2.5 py-1">
                               范例：{h.examplePattern}
                             </div>
                           )}
@@ -1946,7 +1946,7 @@ export const KnowledgeEvolutionModal: React.FC<KnowledgeEvolutionModalProps> = (
                           className={`p-1.5 rounded-lg border shrink-0 cursor-pointer transition-colors ${
                             h.isActive
                               ? 'text-emerald-600 dark:text-emerald-400 border-emerald-500/30 bg-emerald-500/10'
-                              : 'text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] bg-white dark:bg-[#08101a] aurora:bg-[#081014]'
+                              : 'text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a] border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] linen:border-[#cbbba2] bg-white dark:bg-[#08101a] aurora:bg-[#081014] linen:bg-[#faf5ec]'
                           }`}
                         >
                           <Power className="w-3.5 h-3.5" />
@@ -1960,16 +1960,16 @@ export const KnowledgeEvolutionModal: React.FC<KnowledgeEvolutionModalProps> = (
 
             {/* Training & Evolution Logs */}
             {(evolutionLogs.length > 0 || kbLogs.length > 0) && (
-              <div className="space-y-2 pt-2 border-t border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34]">
-                <h4 className="text-xs font-bold text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8]">近期训练与进化日志</h4>
+              <div className="space-y-2 pt-2 border-t border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] linen:border-[#dfd2bc]">
+                <h4 className="text-xs font-bold text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118]">近期训练与进化日志</h4>
                 <div className="space-y-1.5 max-h-48 overflow-y-auto">
                   {(evolutionLogs.length > 0 ? evolutionLogs : kbLogs).slice(0, 10).map((log) => (
                     <div
                       key={log.id}
-                      className="text-[11px] bg-[#f8fafc] dark:bg-[#0e1726]/70 aurora:bg-[#101c23]/75 border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] rounded-lg px-2.5 py-1.5 flex items-center justify-between gap-2"
+                      className="text-[11px] bg-[#f8fafc] dark:bg-[#0e1726]/70 aurora:bg-[#101c23]/75 linen:bg-[#efe6d6]/75 border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] linen:border-[#dfd2bc] rounded-lg px-2.5 py-1.5 flex items-center justify-between gap-2"
                     >
-                      <span className="text-[#334155] dark:text-[#b4c6d8] aurora:text-[#b7d0d8] truncate">{log.details}</span>
-                      <span className="text-[10px] font-mono text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] shrink-0">
+                      <span className="text-[#334155] dark:text-[#b4c6d8] aurora:text-[#b7d0d8] linen:text-[#4e3f32] truncate">{log.details}</span>
+                      <span className="text-[10px] font-mono text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a] shrink-0">
                         {formatDateTime(log.createdAt)}
                       </span>
                     </div>
@@ -2004,16 +2004,16 @@ export const KnowledgeEvolutionModal: React.FC<KnowledgeEvolutionModalProps> = (
               <div
                 className={`${
                   embedded ? '' : 'md:col-span-5'
-                } bg-[#f8fafc] dark:bg-[#0e1726]/85 aurora:bg-[#101c23]/90 p-3.5 rounded-xl border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] space-y-3.5`}
+                } bg-[#f8fafc] dark:bg-[#0e1726]/85 aurora:bg-[#101c23]/90 linen:bg-[#efe6d6]/90 p-3.5 rounded-xl border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] linen:border-[#dfd2bc] space-y-3.5`}
               >
                 <div>
-                  <label className="text-xs font-semibold text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] block mb-1.5">
+                  <label className="text-xs font-semibold text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118] block mb-1.5">
                     选择当前测试的客户沟通阶段
                   </label>
                   <select
                     value={sandboxStage}
                     onChange={(e) => setSandboxStage(e.target.value as StagedPromptKey)}
-                    className="w-full bg-white dark:bg-[#08101a] aurora:bg-[#081014] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] rounded-lg px-3 py-2 text-xs text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] focus:outline-none focus:border-[#2481cc] dark:focus:border-[#2ba0ff] aurora:focus:border-[#2dd4bf]"
+                    className="w-full bg-white dark:bg-[#08101a] aurora:bg-[#081014] linen:bg-[#faf5ec] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] linen:border-[#cbbba2] rounded-lg px-3 py-2 text-xs text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118] focus:outline-none focus:border-[#2481cc] dark:focus:border-[#2ba0ff] aurora:focus:border-[#2dd4bf] linen:focus:border-[#a86a43]"
                   >
                     <option value="icebreaker">阶段 1: 新朋友初识破冰</option>
                     <option value="dailyFriend">阶段 2: 日常朋友互动与情绪价值</option>
@@ -2024,7 +2024,7 @@ export const KnowledgeEvolutionModal: React.FC<KnowledgeEvolutionModalProps> = (
                 </div>
 
                 <div>
-                  <span className="text-[11px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] block mb-1">快捷测试语料：</span>
+                  <span className="text-[11px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a] block mb-1">快捷测试语料：</span>
                   <div className="flex flex-wrap gap-1.5">
                     {[
                       { label: '初识询问', text: '你好，刚加上好友，请问你在哪座城市呀？' },
@@ -2036,7 +2036,7 @@ export const KnowledgeEvolutionModal: React.FC<KnowledgeEvolutionModalProps> = (
                         key={idx}
                         type="button"
                         onClick={() => setSandboxInput(item.text)}
-                        className="text-[10px] bg-white hover:bg-[#f1f5f9] dark:bg-[#08101a] dark:hover:bg-[#152438] aurora:bg-[#081014] aurora:hover:bg-[#152934] text-[#475569] dark:text-[#b4c6d8] aurora:text-[#b7d0d8] hover:text-[#0f172a] dark:hover:text-white aurora:hover:text-[#ecf6f8] px-2 py-1 rounded border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] transition-colors cursor-pointer"
+                        className="text-[10px] bg-white hover:bg-[#f1f5f9] dark:bg-[#08101a] dark:hover:bg-[#152438] aurora:bg-[#081014] linen:bg-[#faf5ec] aurora:hover:bg-[#152934] linen:hover:bg-[#e7dccb] text-[#475569] dark:text-[#b4c6d8] aurora:text-[#b7d0d8] linen:text-[#4e3f32] hover:text-[#0f172a] dark:hover:text-white aurora:hover:text-[#ecf6f8] linen:hover:text-[#2b2118] px-2 py-1 rounded border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] linen:border-[#cbbba2] transition-colors cursor-pointer"
                       >
                         {item.label}
                       </button>
@@ -2044,16 +2044,16 @@ export const KnowledgeEvolutionModal: React.FC<KnowledgeEvolutionModalProps> = (
                   </div>
                 </div>
 
-                <div className="border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] rounded-xl p-3 bg-white dark:bg-[#08101a] aurora:bg-[#081014] space-y-2">
+                <div className="border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] linen:border-[#dfd2bc] rounded-xl p-3 bg-white dark:bg-[#08101a] aurora:bg-[#081014] linen:bg-[#faf5ec] space-y-2">
                   <div className="flex items-center justify-between">
-                    <label className="text-xs font-semibold text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] flex items-center gap-1.5">
-                      <MessageCircle className="w-3.5 h-3.5 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf]" />
+                    <label className="text-xs font-semibold text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118] flex items-center gap-1.5">
+                      <MessageCircle className="w-3.5 h-3.5 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf] linen:text-[#8c522d]" />
                       <span>多轮历史消息上下文 (可选 · 最多30轮)</span>
                     </label>
                     <button
                       type="button"
                       onClick={() => setShowRecentHistoryInput(!showRecentHistoryInput)}
-                      className="text-[10px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] hover:text-[#0f172a] dark:hover:text-white aurora:hover:text-[#ecf6f8] cursor-pointer transition-colors"
+                      className="text-[10px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a] hover:text-[#0f172a] dark:hover:text-white aurora:hover:text-[#ecf6f8] linen:hover:text-[#2b2118] cursor-pointer transition-colors"
                     >
                       {showRecentHistoryInput ? '收起' : '展开'}
                     </button>
@@ -2064,21 +2064,21 @@ export const KnowledgeEvolutionModal: React.FC<KnowledgeEvolutionModalProps> = (
                       value={sandboxRecentHistory}
                       onChange={(e) => setSandboxRecentHistory(e.target.value)}
                       placeholder={'每行一条，例如：\n对方: 你好，想了解一下结算周期\n我: 你好呀，我们这边支持日常实时对账'}
-                      className="w-full bg-[#f8fafc] dark:bg-[#060b14] aurora:bg-[#060c0f] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] rounded-lg p-2 text-xs text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] placeholder-[#94a3b8] dark:placeholder-[#4e657e] aurora:placeholder-[#5a7782] focus:outline-none focus:border-[#2481cc] dark:focus:border-[#2ba0ff] aurora:focus:border-[#2dd4bf] font-sans"
+                      className="w-full bg-[#f8fafc] dark:bg-[#060b14] aurora:bg-[#060c0f] linen:bg-[#fcf8f0] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] linen:border-[#cbbba2] rounded-lg p-2 text-xs text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118] placeholder-[#94a3b8] dark:placeholder-[#4e657e] aurora:placeholder-[#5a7782] linen:placeholder-[#8f7e6c] focus:outline-none focus:border-[#2481cc] dark:focus:border-[#2ba0ff] aurora:focus:border-[#2dd4bf] linen:focus:border-[#a86a43] font-sans"
                     />
                   )}
                 </div>
 
-                <div className="border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] rounded-xl p-3 bg-white dark:bg-[#08101a] aurora:bg-[#081014] space-y-2">
+                <div className="border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] linen:border-[#dfd2bc] rounded-xl p-3 bg-white dark:bg-[#08101a] aurora:bg-[#081014] linen:bg-[#faf5ec] space-y-2">
                   <div className="flex items-center justify-between">
-                    <label className="text-xs font-semibold text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] flex items-center gap-1.5">
-                      <Sparkles className="w-3.5 h-3.5 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf]" />
+                    <label className="text-xs font-semibold text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118] flex items-center gap-1.5">
+                      <Sparkles className="w-3.5 h-3.5 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf] linen:text-[#8c522d]" />
                       <span>整文语气示范片段 (可选)</span>
                     </label>
                     <button
                       type="button"
                       onClick={() => setShowTranscriptInput(!showTranscriptInput)}
-                      className="text-[10px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] hover:text-[#0f172a] dark:hover:text-white aurora:hover:text-[#ecf6f8] cursor-pointer transition-colors"
+                      className="text-[10px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a] hover:text-[#0f172a] dark:hover:text-white aurora:hover:text-[#ecf6f8] linen:hover:text-[#2b2118] cursor-pointer transition-colors"
                     >
                       {showTranscriptInput ? '收起' : '展开'}
                     </button>
@@ -2089,13 +2089,13 @@ export const KnowledgeEvolutionModal: React.FC<KnowledgeEvolutionModalProps> = (
                       value={sandboxChatTranscript}
                       onChange={(e) => setSandboxChatTranscript(e.target.value)}
                       placeholder="粘贴整文示范对话，测试模型对口语习惯与语气节奏的复刻效果..."
-                      className="w-full bg-[#f8fafc] dark:bg-[#060b14] aurora:bg-[#060c0f] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] rounded-lg p-2 text-xs text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] placeholder-[#94a3b8] dark:placeholder-[#4e657e] aurora:placeholder-[#5a7782] focus:outline-none focus:border-[#2481cc] dark:focus:border-[#2ba0ff] aurora:focus:border-[#2dd4bf] font-sans"
+                      className="w-full bg-[#f8fafc] dark:bg-[#060b14] aurora:bg-[#060c0f] linen:bg-[#fcf8f0] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] linen:border-[#cbbba2] rounded-lg p-2 text-xs text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118] placeholder-[#94a3b8] dark:placeholder-[#4e657e] aurora:placeholder-[#5a7782] linen:placeholder-[#8f7e6c] focus:outline-none focus:border-[#2481cc] dark:focus:border-[#2ba0ff] aurora:focus:border-[#2dd4bf] linen:focus:border-[#a86a43] font-sans"
                     />
                   )}
                 </div>
 
                 <div>
-                  <label className="text-xs font-semibold text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] block mb-1.5">
+                  <label className="text-xs font-semibold text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118] block mb-1.5">
                     模拟客户发来的最新一条消息
                   </label>
                   <textarea
@@ -2103,7 +2103,7 @@ export const KnowledgeEvolutionModal: React.FC<KnowledgeEvolutionModalProps> = (
                     value={sandboxInput}
                     onChange={(e) => setSandboxInput(e.target.value)}
                     placeholder="输入测试客户发来的聊天内容..."
-                    className="w-full bg-white dark:bg-[#08101a] aurora:bg-[#081014] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] rounded-lg p-2.5 text-xs text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] placeholder-[#94a3b8] dark:placeholder-[#4e657e] aurora:placeholder-[#5a7782] focus:outline-none focus:border-[#2481cc] dark:focus:border-[#2ba0ff] aurora:focus:border-[#2dd4bf]"
+                    className="w-full bg-white dark:bg-[#08101a] aurora:bg-[#081014] linen:bg-[#faf5ec] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] linen:border-[#cbbba2] rounded-lg p-2.5 text-xs text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118] placeholder-[#94a3b8] dark:placeholder-[#4e657e] aurora:placeholder-[#5a7782] linen:placeholder-[#8f7e6c] focus:outline-none focus:border-[#2481cc] dark:focus:border-[#2ba0ff] aurora:focus:border-[#2dd4bf] linen:focus:border-[#a86a43]"
                   />
                 </div>
 
@@ -2117,7 +2117,7 @@ export const KnowledgeEvolutionModal: React.FC<KnowledgeEvolutionModalProps> = (
                   type="button"
                   disabled={isTestingReply || !sandboxInput.trim()}
                   onClick={handleRunSandbox}
-                  className="w-full py-2.5 bg-[#2481cc] hover:bg-[#1d6fb3] dark:bg-[#2ba0ff] dark:hover:bg-[#1e8ee8] aurora:bg-[#0d9488] aurora:hover:bg-[#0f766e] text-white text-xs font-bold rounded-xl shadow-sm transition-all cursor-pointer flex items-center justify-center gap-2 disabled:opacity-50"
+                  className="w-full py-2.5 bg-[#2481cc] hover:bg-[#1d6fb3] dark:bg-[#2ba0ff] dark:hover:bg-[#1e8ee8] aurora:bg-[#0d9488] linen:bg-[#a86a43] aurora:hover:bg-[#0f766e] linen:hover:bg-[#8f5734] text-white text-xs font-bold rounded-xl shadow-sm transition-all cursor-pointer flex items-center justify-center gap-2 disabled:opacity-50"
                 >
                   <Send className={`w-3.5 h-3.5 ${isTestingReply ? 'animate-pulse' : ''}`} />
                   <span>{isTestingReply ? '正在结合人设与知识进化库演算...' : '立即测试人设回复'}</span>
@@ -2128,15 +2128,15 @@ export const KnowledgeEvolutionModal: React.FC<KnowledgeEvolutionModalProps> = (
               <div
                 className={`${
                   embedded ? '' : 'md:col-span-7'
-                } bg-[#f8fafc] dark:bg-[#0e1726]/85 aurora:bg-[#101c23]/90 p-3.5 rounded-xl border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] flex flex-col justify-between space-y-4`}
+                } bg-[#f8fafc] dark:bg-[#0e1726]/85 aurora:bg-[#101c23]/90 linen:bg-[#efe6d6]/90 p-3.5 rounded-xl border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] linen:border-[#dfd2bc] flex flex-col justify-between space-y-4`}
               >
                 <div className="space-y-3">
-                  <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] pb-2">
-                    <h4 className="text-xs font-bold text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8]">人设效果试聊输出</h4>
+                  <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] linen:border-[#dfd2bc] pb-2">
+                    <h4 className="text-xs font-bold text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118]">人设效果试聊输出</h4>
                     {sandboxResult && (
-                      <div className="flex flex-wrap items-center gap-1.5 text-[10px] font-mono text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5]">
+                      <div className="flex flex-wrap items-center gap-1.5 text-[10px] font-mono text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a]">
                         {sandboxResult.ragSources && (
-                          <span className="px-1.5 py-0.5 rounded bg-[#e8f3ff] dark:bg-[#2ba0ff]/12 aurora:bg-[#112d36] text-[#0284c7] dark:text-[#7cc4ff] aurora:text-[#5eead4]">
+                          <span className="px-1.5 py-0.5 rounded bg-[#e8f3ff] dark:bg-[#2ba0ff]/12 aurora:bg-[#112d36] linen:bg-[#a86a43]/15 text-[#0284c7] dark:text-[#7cc4ff] aurora:text-[#5eead4] linen:text-[#8c522d]">
                             {sandboxResult.ragSources.cloudRagEnabled
                               ? `云端RAG(${sandboxResult.ragSources.cloudRagMatchedCount ?? 0})`
                               : sandboxResult.ragSources.localRagEnabled === false
@@ -2151,29 +2151,29 @@ export const KnowledgeEvolutionModal: React.FC<KnowledgeEvolutionModalProps> = (
 
                   {sandboxResult ? (
                     <div className="space-y-3">
-                      <div className="bg-white dark:bg-[#08101a] aurora:bg-[#081014] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] rounded-xl p-3.5 text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] text-sm leading-relaxed shadow-xs">
-                        <div className="mb-2 pb-2 border-b border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] text-xs font-semibold text-[#0284c7] dark:text-[#2ba0ff] aurora:text-[#2dd4bf]">
+                      <div className="bg-white dark:bg-[#08101a] aurora:bg-[#081014] linen:bg-[#faf5ec] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] linen:border-[#cbbba2] rounded-xl p-3.5 text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118] text-sm leading-relaxed shadow-xs">
+                        <div className="mb-2 pb-2 border-b border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] linen:border-[#dfd2bc] text-xs font-semibold text-[#0284c7] dark:text-[#2ba0ff] aurora:text-[#2dd4bf] linen:text-[#8c522d]">
                           {persona?.personaName || '主控人设'} 回复：
                         </div>
                         <p className="whitespace-pre-wrap text-xs sm:text-sm">{sandboxResult.reply}</p>
                       </div>
 
                       {sandboxResult.matchedKnowledge && sandboxResult.matchedKnowledge.length > 0 && (
-                        <div className="bg-white dark:bg-[#08101a] aurora:bg-[#081014] p-3 rounded-xl border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34]">
+                        <div className="bg-white dark:bg-[#08101a] aurora:bg-[#081014] linen:bg-[#faf5ec] p-3 rounded-xl border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] linen:border-[#dfd2bc]">
                           <div className="flex flex-wrap items-center justify-between gap-1.5 mb-1.5">
-                            <span className="text-[11px] font-semibold text-[#475569] dark:text-[#b4c6d8] aurora:text-[#b7d0d8] flex items-center gap-1.5">
-                              <Cloud className="w-3.5 h-3.5 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf]" />
+                            <span className="text-[11px] font-semibold text-[#475569] dark:text-[#b4c6d8] aurora:text-[#b7d0d8] linen:text-[#4e3f32] flex items-center gap-1.5">
+                              <Cloud className="w-3.5 h-3.5 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf] linen:text-[#8c522d]" />
                               <span>本次命中知识库要点：</span>
                             </span>
                             {sandboxResult.ragSources && (
                               <div className="flex flex-wrap items-center gap-1 text-[10px]">
                                 {sandboxResult.ragSources.cloudRagEnabled && (
-                                  <span className="px-1.5 py-0.5 rounded bg-[#e8f3ff] dark:bg-[#2ba0ff]/12 aurora:bg-[#112d36] text-[#0284c7] dark:text-[#7cc4ff] aurora:text-[#5eead4] font-medium">
+                                  <span className="px-1.5 py-0.5 rounded bg-[#e8f3ff] dark:bg-[#2ba0ff]/12 aurora:bg-[#112d36] linen:bg-[#a86a43]/15 text-[#0284c7] dark:text-[#7cc4ff] aurora:text-[#5eead4] linen:text-[#8c522d] font-medium">
                                     云端知识库 (Cloud RAG): {sandboxResult.ragSources.cloudRagMatchedCount ?? 0} 条
                                   </span>
                                 )}
                                 {(sandboxResult.ragSources.localRagEnabled ?? !sandboxResult.ragSources.cloudRagEnabled) && (
-                                  <span className="px-1.5 py-0.5 rounded bg-slate-500/10 text-[#475569] dark:text-[#b4c6d8] aurora:text-[#b7d0d8] font-medium">
+                                  <span className="px-1.5 py-0.5 rounded bg-slate-500/10 linen:bg-[#a86a43]/10 text-[#475569] dark:text-[#b4c6d8] aurora:text-[#b7d0d8] linen:text-[#4e3f32] font-medium">
                                     本地知识库: {sandboxResult.ragSources.localRagMatchedCount ?? 0} 条
                                   </span>
                                 )}
@@ -2184,18 +2184,18 @@ export const KnowledgeEvolutionModal: React.FC<KnowledgeEvolutionModalProps> = (
                             {sandboxResult.matchedKnowledge.map((k: any, i: number) => {
                               const isCloud = k?.source === 'cloud_kb';
                               return (
-                                <div key={i} className="text-xs text-[#475569] dark:text-[#b4c6d8] aurora:text-[#b7d0d8] flex items-center gap-1.5">
+                                <div key={i} className="text-xs text-[#475569] dark:text-[#b4c6d8] aurora:text-[#b7d0d8] linen:text-[#4e3f32] flex items-center gap-1.5">
                                   <span>•</span>
                                   <span
                                     className={`px-1 py-0.2 rounded text-[10px] font-medium shrink-0 ${
                                       isCloud
-                                        ? 'bg-[#e8f3ff] dark:bg-[#2ba0ff]/12 aurora:bg-[#112d36] text-[#0284c7] dark:text-[#7cc4ff] aurora:text-[#5eead4]'
-                                        : 'bg-slate-500/10 text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5]'
+                                        ? 'bg-[#e8f3ff] dark:bg-[#2ba0ff]/12 aurora:bg-[#112d36] linen:bg-[#a86a43]/15 text-[#0284c7] dark:text-[#7cc4ff] aurora:text-[#5eead4] linen:text-[#8c522d]'
+                                        : 'bg-slate-500/10 linen:bg-[#a86a43]/10 text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a]'
                                     }`}
                                   >
                                     {isCloud ? '云端' : '本地'}
                                   </span>
-                                  <span className="font-medium text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8]">{k.title || '知识条目'}</span>
+                                  <span className="font-medium text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118]">{k.title || '知识条目'}</span>
                                 </div>
                               );
                             })}
@@ -2204,15 +2204,15 @@ export const KnowledgeEvolutionModal: React.FC<KnowledgeEvolutionModalProps> = (
                       )}
 
                       {sandboxResult.appliedHabits && sandboxResult.appliedHabits.length > 0 && (
-                        <div className="bg-white dark:bg-[#08101a] aurora:bg-[#081014] p-3 rounded-xl border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34]">
-                          <span className="text-[11px] font-semibold text-[#475569] dark:text-[#b4c6d8] aurora:text-[#b7d0d8] mb-1.5 flex items-center gap-1.5">
-                            <Cpu className="w-3.5 h-3.5 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf]" />
+                        <div className="bg-white dark:bg-[#08101a] aurora:bg-[#081014] linen:bg-[#faf5ec] p-3 rounded-xl border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] linen:border-[#dfd2bc]">
+                          <span className="text-[11px] font-semibold text-[#475569] dark:text-[#b4c6d8] aurora:text-[#b7d0d8] linen:text-[#4e3f32] mb-1.5 flex items-center gap-1.5">
+                            <Cpu className="w-3.5 h-3.5 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf] linen:text-[#8c522d]" />
                             <span>本次叠加自进化习惯：</span>
                           </span>
                           <div className="space-y-1">
                             {sandboxResult.appliedHabits.map((h: any, i: number) => (
-                              <div key={i} className="text-xs text-[#475569] dark:text-[#b4c6d8] aurora:text-[#b7d0d8]">
-                                • <span className="font-medium text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8]">{h.title}</span>
+                              <div key={i} className="text-xs text-[#475569] dark:text-[#b4c6d8] aurora:text-[#b7d0d8] linen:text-[#4e3f32]">
+                                • <span className="font-medium text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118]">{h.title}</span>
                               </div>
                             ))}
                           </div>
@@ -2220,7 +2220,7 @@ export const KnowledgeEvolutionModal: React.FC<KnowledgeEvolutionModalProps> = (
                       )}
                     </div>
                   ) : (
-                    <div className="py-12 text-center text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5]">
+                    <div className="py-12 text-center text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a]">
                       <MessageCircle className="w-7 h-7 mx-auto mb-2 opacity-30" />
                       <p className="text-xs">输入测试话语并点击“立即测试人设回复”，在此预览实际聊天气质</p>
                     </div>
@@ -2236,7 +2236,7 @@ export const KnowledgeEvolutionModal: React.FC<KnowledgeEvolutionModalProps> = (
 
   if (embedded) {
     return (
-      <div className="flex flex-col h-full min-h-0 select-none text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8]">
+      <div className="flex flex-col h-full min-h-0 select-none text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118]">
         {innerContent}
       </div>
     );
@@ -2244,7 +2244,7 @@ export const KnowledgeEvolutionModal: React.FC<KnowledgeEvolutionModalProps> = (
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-5 bg-black/55 dark:bg-black/75 aurora:bg-black/80 backdrop-blur-md animate-in fade-in duration-200">
-      <div className="bg-white dark:bg-[#0b131f] aurora:bg-[#0c151b] border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] rounded-2xl w-full max-w-6xl h-[90vh] flex flex-col shadow-2xl overflow-hidden relative text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8]">
+      <div className="bg-white dark:bg-[#0b131f] aurora:bg-[#0c151b] linen:bg-[#f8f2e7] border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] linen:border-[#d5c6ae] rounded-2xl w-full max-w-6xl h-[90vh] flex flex-col shadow-2xl linen:shadow-sm overflow-hidden relative text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118]">
         {innerContent}
       </div>
     </div>

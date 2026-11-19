@@ -255,7 +255,7 @@ export const MemberAuthModal: React.FC<MemberAuthModalProps> = ({
 
   return (
     <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/55 dark:bg-black/80 aurora:bg-black/85 linen:bg-[#2b2118]/55 backdrop-blur-md select-none animate-in fade-in duration-200">
-      <div className="relative w-full max-w-md bg-white dark:bg-[#0b131f] aurora:bg-[#0c151b] linen:bg-[#f7f0e3] border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] linen:border-[#cbbba2] rounded-3xl shadow-2xl flex flex-col overflow-hidden text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118]">
+      <div className="relative w-full max-w-md bg-white dark:bg-[#0b131f] aurora:bg-[#0c151b] linen:bg-[#f7f0e3] border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] linen:border-[#d5c6ae] rounded-3xl shadow-2xl linen:shadow-sm flex flex-col overflow-hidden text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118]">
         {/* Top HumanSense Brand Header */}
         <div className="p-6 pb-4 bg-gradient-to-b from-[#f0f7ff] to-white dark:from-[#101c2d] dark:to-[#0b131f] aurora:from-[#10222b] aurora:to-[#0c151b] linen:from-[#efe4d2] linen:to-[#f7f0e3] border-b border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] linen:border-[#d8c8b0] flex flex-col items-center text-center relative">
           <div className="w-16 h-16 rounded-2xl overflow-hidden shadow-lg shadow-[#2481cc]/20 dark:shadow-[#2ba0ff]/25 aurora:shadow-[#0d9488]/25 linen:shadow-[#a86a43]/25 mb-3 ring-2 ring-[#2481cc]/35 dark:ring-[#2ba0ff]/40 aurora:ring-[#2dd4bf]/40 linen:ring-[#a86a43]/45 bg-[#f8fafc] dark:bg-[#08101a] aurora:bg-[#081014] linen:bg-[#e8dcc8] flex items-center justify-center">

@@ -552,20 +552,20 @@ export const MasterVoiceprintModal: React.FC<MasterVoiceprintModalProps> = ({
     <>
       {/* Header (Standalone Modal Mode Only) */}
       {!embedded && (
-        <div className="flex items-center justify-between px-5 py-3.5 border-b border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] bg-[#f8fafc] dark:bg-[#0d1726] aurora:bg-[#0e1920] shrink-0">
+        <div className="flex items-center justify-between px-5 py-3.5 border-b border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] linen:border-[#dfd2bc] bg-[#f8fafc] dark:bg-[#0d1726] aurora:bg-[#0e1920] linen:bg-[#f0e6d5] shrink-0">
           <div className="flex items-center gap-2.5">
-            <div className="w-8 h-8 rounded-lg bg-[#2481cc]/12 dark:bg-[#2ba0ff]/12 aurora:bg-[#14b8a6]/15 border border-[#2481cc]/25 dark:border-[#2ba0ff]/25 aurora:border-[#2dd4bf]/30 text-[#0284c7] dark:text-[#2ba0ff] aurora:text-[#2dd4bf] flex items-center justify-center">
+            <div className="w-8 h-8 rounded-lg bg-[#2481cc]/12 dark:bg-[#2ba0ff]/12 aurora:bg-[#14b8a6]/15 linen:bg-[#a86a43]/15 border border-[#2481cc]/25 dark:border-[#2ba0ff]/25 aurora:border-[#2dd4bf]/30 linen:border-[#a86a43]/30 text-[#0284c7] dark:text-[#2ba0ff] aurora:text-[#2dd4bf] linen:text-[#8c522d] flex items-center justify-center">
               <AudioWaveform className="w-4.5 h-4.5" />
             </div>
             <div>
-              <h2 className="text-sm font-semibold text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] tracking-wide">
+              <h2 className="text-sm font-semibold text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118] tracking-wide">
                 真人声纹样本克隆配置
               </h2>
             </div>
           </div>
           <button
             onClick={onClose}
-            className="w-7 h-7 rounded-lg flex items-center justify-center text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] hover:text-[#0f172a] dark:hover:text-[#eef4fb] aurora:hover:text-[#ecf6f8] hover:bg-black/5 dark:hover:bg-[#152438] aurora:hover:bg-[#152934] transition-colors cursor-pointer"
+            className="w-7 h-7 rounded-lg flex items-center justify-center text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a] hover:text-[#0f172a] dark:hover:text-[#eef4fb] aurora:hover:text-[#ecf6f8] linen:hover:text-[#2b2118] hover:bg-black/5 dark:hover:bg-[#152438] aurora:hover:bg-[#152934] linen:hover:bg-[#e7dccb] transition-colors cursor-pointer"
           >
             <X className="w-4 h-4" />
           </button>
@@ -580,7 +580,7 @@ export const MasterVoiceprintModal: React.FC<MasterVoiceprintModalProps> = ({
             className={`p-2.5 rounded-lg border text-xs flex items-start gap-2 leading-relaxed ${
               statusTone === 'error'
                 ? 'bg-rose-500/10 border-rose-500/30 text-rose-700 dark:text-rose-300'
-                : 'bg-[#e8f3ff] dark:bg-[#2ba0ff]/10 aurora:bg-[#112d36] border-[#bfdbfe] dark:border-[#2ba0ff]/25 aurora:border-[#2dd4bf]/35 text-[#0284c7] dark:text-[#7cc4ff] aurora:text-[#5eead4]'
+                : 'bg-[#e8f3ff] dark:bg-[#2ba0ff]/10 aurora:bg-[#112d36] linen:bg-[#a86a43]/15 border-[#bfdbfe] dark:border-[#2ba0ff]/25 aurora:border-[#2dd4bf]/35 linen:border-[#a86a43]/35 text-[#0284c7] dark:text-[#7cc4ff] aurora:text-[#5eead4] linen:text-[#8c522d]'
             }`}
           >
             <AudioWaveform className="w-3.5 h-3.5 shrink-0 mt-0.5" />
@@ -589,38 +589,38 @@ export const MasterVoiceprintModal: React.FC<MasterVoiceprintModalProps> = ({
         )}
 
         {/* Capability Notice */}
-        <div className="p-3 rounded-xl bg-[#e8f3ff]/75 dark:bg-[#2ba0ff]/10 aurora:bg-[#112d36]/80 border border-[#bfdbfe] dark:border-[#2ba0ff]/25 aurora:border-[#2dd4bf]/30 text-[11px] text-[#334155] dark:text-[#b4c6d8] aurora:text-[#b7d0d8] flex items-start gap-2 leading-relaxed">
-          <Info className="w-4 h-4 text-[#0284c7] dark:text-[#2ba0ff] aurora:text-[#2dd4bf] shrink-0 mt-0.5" />
+        <div className="p-3 rounded-xl bg-[#e8f3ff]/75 dark:bg-[#2ba0ff]/10 aurora:bg-[#112d36]/80 linen:bg-[#a86a43]/12 border border-[#bfdbfe] dark:border-[#2ba0ff]/25 aurora:border-[#2dd4bf]/30 linen:border-[#a86a43]/30 text-[11px] text-[#334155] dark:text-[#b4c6d8] aurora:text-[#b7d0d8] linen:text-[#4e3f32] flex items-start gap-2 leading-relaxed">
+          <Info className="w-4 h-4 text-[#0284c7] dark:text-[#2ba0ff] aurora:text-[#2dd4bf] linen:text-[#8c522d] shrink-0 mt-0.5" />
           <span>
             上传或录制一段 <strong>5~30 秒清晰人声样本</strong>并绑定支持零样本复刻的语音引擎（ElevenLabs / 硅基流动 CosyVoice / Fish Audio / 本地 GPT-SoVITS）。保存后，后续每次发送语音消息都会自动以该克隆声纹作为默认声音模型。
           </span>
         </div>
 
         {/* Profile Summary Card */}
-        <div className="p-3.5 rounded-xl bg-[#f8fafc] dark:bg-[#0e1726]/85 aurora:bg-[#101c23]/90 border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] space-y-3">
+        <div className="p-3.5 rounded-xl bg-[#f8fafc] dark:bg-[#0e1726]/85 aurora:bg-[#101c23]/90 linen:bg-[#efe6d6]/90 border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] linen:border-[#dfd2bc] space-y-3">
           <div className="flex-1 min-w-0">
             <input
               type="text"
               value={name}
               onChange={(e) => setName(e.target.value)}
-              className="bg-transparent text-xs font-semibold text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] placeholder-[#94a3b8] dark:placeholder-[#4e657e] aurora:placeholder-[#5a7782] focus:outline-none border-b border-transparent focus:border-[#2481cc] dark:focus:border-[#2ba0ff] aurora:focus:border-[#2dd4bf] w-full"
+              className="bg-transparent text-xs font-semibold text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118] placeholder-[#94a3b8] dark:placeholder-[#4e657e] aurora:placeholder-[#5a7782] linen:placeholder-[#8f7e6c] focus:outline-none border-b border-transparent focus:border-[#2481cc] dark:focus:border-[#2ba0ff] aurora:focus:border-[#2dd4bf] linen:focus:border-[#a86a43] w-full"
               placeholder="输入克隆声纹名称"
             />
-            <div className="text-[11px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] flex items-center gap-1.5 mt-0.5 truncate">
+            <div className="text-[11px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a] flex items-center gap-1.5 mt-0.5 truncate">
               <span>{selectedCloneProviderMeta.label.split(' ')[0]} 声纹克隆</span>
               <span>·</span>
-              <span className="font-mono text-[#0284c7] dark:text-[#7cc4ff] aurora:text-[#5eead4] truncate">
+              <span className="font-mono text-[#0284c7] dark:text-[#7cc4ff] aurora:text-[#5eead4] linen:text-[#8c522d] truncate">
                 {sampleFileName || (cloneVoiceId ? `ID: ${cloneVoiceId}` : '待上传/录制样本')}
               </span>
             </div>
           </div>
 
-          <div className="grid grid-cols-3 gap-2 pt-2.5 border-t border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] text-[11px]">
+          <div className="grid grid-cols-3 gap-2 pt-2.5 border-t border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] linen:border-[#dfd2bc] text-[11px]">
             <div className="text-center">
-              <div className="text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] text-[10px]">
+              <div className="text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a] text-[10px]">
                 声纹来源
               </div>
-              <div className="font-medium text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] mt-0.5 truncate">
+              <div className="font-medium text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118] mt-0.5 truncate">
                 {hasAnySampleAudio
                   ? `${sampleDuration ? `${sampleDuration}s ` : ''}个人样本`
                   : cloneVoiceId
@@ -629,14 +629,14 @@ export const MasterVoiceprintModal: React.FC<MasterVoiceprintModalProps> = ({
               </div>
             </div>
             <div className="text-center">
-              <div className="text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] text-[10px]">语速 / 音高</div>
-              <div className="font-medium text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] mt-0.5 tabular-nums">
+              <div className="text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a] text-[10px]">语速 / 音高</div>
+              <div className="font-medium text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118] mt-0.5 tabular-nums">
                 {rate.toFixed(2)}x / {pitch.toFixed(2)}x
               </div>
             </div>
             <div className="text-center">
-              <div className="text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] text-[10px]">应用状态</div>
-              <div className="font-medium text-[#0284c7] dark:text-[#2ba0ff] aurora:text-[#2dd4bf] mt-0.5">
+              <div className="text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a] text-[10px]">应用状态</div>
+              <div className="font-medium text-[#0284c7] dark:text-[#2ba0ff] aurora:text-[#2dd4bf] linen:text-[#8c522d] mt-0.5">
                 {voiceprint ? (enabledAsDefault ? '默认配置' : '已保存') : '待保存'}
               </div>
             </div>
@@ -644,10 +644,10 @@ export const MasterVoiceprintModal: React.FC<MasterVoiceprintModalProps> = ({
         </div>
 
         {/* Voice Clone Sample Upload / Mic Recording Section */}
-        <div className="p-3.5 rounded-xl bg-[#f8fafc] dark:bg-[#0e1726]/85 aurora:bg-[#101c23]/90 border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] space-y-3 text-xs">
+        <div className="p-3.5 rounded-xl bg-[#f8fafc] dark:bg-[#0e1726]/85 aurora:bg-[#101c23]/90 linen:bg-[#efe6d6]/90 border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] linen:border-[#dfd2bc] space-y-3 text-xs">
             <div className="flex items-center justify-between gap-2">
-              <span className="font-semibold text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] flex items-center gap-1.5">
-                <AudioWaveform className="w-3.5 h-3.5 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf]" />
+              <span className="font-semibold text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118] flex items-center gap-1.5">
+                <AudioWaveform className="w-3.5 h-3.5 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf] linen:text-[#8c522d]" />
                 <span>个人声纹样本采集 (5~30秒清晰人声)</span>
               </span>
               {hasAnySampleAudio && (
@@ -675,9 +675,9 @@ export const MasterVoiceprintModal: React.FC<MasterVoiceprintModalProps> = ({
                 type="button"
                 disabled={isRecording}
                 onClick={() => fileInputRef.current?.click()}
-                className="py-2 px-3 rounded-lg bg-white dark:bg-[#08101a] aurora:bg-[#081014] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] hover:border-[#2481cc] dark:hover:border-[#2ba0ff] aurora:hover:border-[#2dd4bf] text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] font-medium flex items-center justify-center gap-1.5 transition-colors cursor-pointer disabled:opacity-50"
+                className="py-2 px-3 rounded-lg bg-white dark:bg-[#08101a] aurora:bg-[#081014] linen:bg-[#faf5ec] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] linen:border-[#cbbba2] hover:border-[#2481cc] dark:hover:border-[#2ba0ff] aurora:hover:border-[#2dd4bf] text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118] font-medium flex items-center justify-center gap-1.5 transition-colors cursor-pointer disabled:opacity-50"
               >
-                <Upload className="w-3.5 h-3.5 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf]" />
+                <Upload className="w-3.5 h-3.5 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf] linen:text-[#8c522d]" />
                 <span>上传本地音频文件</span>
               </button>
 
@@ -687,7 +687,7 @@ export const MasterVoiceprintModal: React.FC<MasterVoiceprintModalProps> = ({
                 className={`py-2 px-3 rounded-lg border font-medium flex items-center justify-center gap-1.5 transition-colors cursor-pointer ${
                   isRecording
                     ? 'bg-rose-500/15 border-rose-500/40 text-rose-700 dark:text-rose-300 animate-pulse'
-                    : 'bg-white dark:bg-[#08101a] aurora:bg-[#081014] border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] hover:border-[#2481cc] dark:hover:border-[#2ba0ff] aurora:hover:border-[#2dd4bf] text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8]'
+                    : 'bg-white dark:bg-[#08101a] aurora:bg-[#081014] linen:bg-[#faf5ec] border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] linen:border-[#cbbba2] hover:border-[#2481cc] dark:hover:border-[#2ba0ff] aurora:hover:border-[#2dd4bf] text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118]'
                 }`}
               >
                 {isRecording ? (
@@ -697,7 +697,7 @@ export const MasterVoiceprintModal: React.FC<MasterVoiceprintModalProps> = ({
                   </>
                 ) : (
                   <>
-                    <Mic className="w-3.5 h-3.5 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf]" />
+                    <Mic className="w-3.5 h-3.5 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf] linen:text-[#8c522d]" />
                     <span>麦克风现场录制</span>
                   </>
                 )}
@@ -705,12 +705,12 @@ export const MasterVoiceprintModal: React.FC<MasterVoiceprintModalProps> = ({
             </div>
 
             {previewAudioUrl && (
-              <div className="p-2.5 rounded-lg bg-white dark:bg-[#08101a] aurora:bg-[#081014] border border-[#e2e8f0] dark:border-[#1e3148] aurora:border-[#203742] space-y-1.5">
-                <div className="flex items-center justify-between text-[11px] text-[#475569] dark:text-[#b4c6d8] aurora:text-[#b7d0d8]">
+              <div className="p-2.5 rounded-lg bg-white dark:bg-[#08101a] aurora:bg-[#081014] linen:bg-[#faf5ec] border border-[#e2e8f0] dark:border-[#1e3148] aurora:border-[#203742] linen:border-[#cbbba2] space-y-1.5">
+                <div className="flex items-center justify-between text-[11px] text-[#475569] dark:text-[#b4c6d8] aurora:text-[#b7d0d8] linen:text-[#4e3f32]">
                   <span className="truncate font-medium">
                     {sampleFileName || '已保存的个人声纹样本'}
                   </span>
-                  <span className="text-[#0284c7] dark:text-[#7cc4ff] aurora:text-[#5eead4] shrink-0 tabular-nums">
+                  <span className="text-[#0284c7] dark:text-[#7cc4ff] aurora:text-[#5eead4] linen:text-[#8c522d] shrink-0 tabular-nums">
                     {sampleDuration ? `${sampleDuration} 秒` : ''} {pendingSampleDataUrl ? '· 待保存' : sampleId ? '· 已持久化' : ''}
                   </span>
                 </div>
@@ -719,7 +719,7 @@ export const MasterVoiceprintModal: React.FC<MasterVoiceprintModalProps> = ({
             )}
 
             <div className="space-y-1">
-              <div className="flex items-center justify-between text-[11px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5]">
+              <div className="flex items-center justify-between text-[11px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a]">
                 <span>参考音频原文 (用于提升声纹对齐准确度)</span>
                 <span>CosyVoice / GPT-SoVITS 建议填写</span>
               </div>
@@ -728,23 +728,23 @@ export const MasterVoiceprintModal: React.FC<MasterVoiceprintModalProps> = ({
                 value={sampleTranscript}
                 onChange={(e) => setSampleTranscript(e.target.value)}
                 placeholder="请输入您在样本音频中朗读的原话内容（例如：你好，今天天气真不错，很高兴认识你。）"
-                className="w-full bg-white dark:bg-[#08101a] aurora:bg-[#081014] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] rounded-lg px-3 py-1.5 text-xs text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] placeholder-[#94a3b8] dark:placeholder-[#4e657e] aurora:placeholder-[#5a7782] focus:outline-none focus:border-[#2481cc] dark:focus:border-[#2ba0ff] aurora:focus:border-[#2dd4bf] resize-none"
+                className="w-full bg-white dark:bg-[#08101a] aurora:bg-[#081014] linen:bg-[#faf5ec] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] linen:border-[#cbbba2] rounded-lg px-3 py-1.5 text-xs text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118] placeholder-[#94a3b8] dark:placeholder-[#4e657e] aurora:placeholder-[#5a7782] linen:placeholder-[#8f7e6c] focus:outline-none focus:border-[#2481cc] dark:focus:border-[#2ba0ff] aurora:focus:border-[#2dd4bf] linen:focus:border-[#a86a43] resize-none"
               />
             </div>
 
             {/* Clone Provider & Credentials */}
-            <div className="pt-2 border-t border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] space-y-2.5">
+            <div className="pt-2 border-t border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] linen:border-[#dfd2bc] space-y-2.5">
               <div className="flex items-center justify-between">
-                <span className="text-[11px] font-semibold text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8]">
+                <span className="text-[11px] font-semibold text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118]">
                   声纹克隆推理引擎
                 </span>
-                <span className="text-[10px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5]">真实参考音频克隆</span>
+                <span className="text-[10px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a]">真实参考音频克隆</span>
               </div>
 
               <select
                 value={cloneProvider}
                 onChange={(e) => handleSelectCloneProvider(e.target.value as VoiceCloneProvider)}
-                className="w-full bg-white dark:bg-[#08101a] aurora:bg-[#081014] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] rounded-lg px-3 py-1.5 text-xs text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] focus:outline-none focus:border-[#2481cc] dark:focus:border-[#2ba0ff] aurora:focus:border-[#2dd4bf]"
+                className="w-full bg-white dark:bg-[#08101a] aurora:bg-[#081014] linen:bg-[#faf5ec] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] linen:border-[#cbbba2] rounded-lg px-3 py-1.5 text-xs text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118] focus:outline-none focus:border-[#2481cc] dark:focus:border-[#2ba0ff] aurora:focus:border-[#2dd4bf] linen:focus:border-[#a86a43]"
               >
                 {VOICE_CLONE_PROVIDERS.map((p) => (
                   <option key={p.id} value={p.id}>
@@ -753,17 +753,17 @@ export const MasterVoiceprintModal: React.FC<MasterVoiceprintModalProps> = ({
                 ))}
               </select>
 
-              <p className="text-[10.5px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] leading-snug">
+              <p className="text-[10.5px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a] leading-snug">
                 {selectedCloneProviderMeta.hint}
               </p>
 
               <div className="space-y-1">
-                <div className="flex items-center justify-between text-[11px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5]">
+                <div className="flex items-center justify-between text-[11px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a]">
                   <span>克隆服务接入网址 (Base URL)</span>
                   <button
                     type="button"
                     onClick={() => setCloneGatewayUrl(selectedCloneProviderMeta.defaultUrl)}
-                    className="text-[#0284c7] dark:text-[#2ba0ff] aurora:text-[#2dd4bf] hover:underline cursor-pointer"
+                    className="text-[#0284c7] dark:text-[#2ba0ff] aurora:text-[#2dd4bf] linen:text-[#8c522d] hover:underline cursor-pointer"
                   >
                     填入默认地址
                   </button>
@@ -773,12 +773,12 @@ export const MasterVoiceprintModal: React.FC<MasterVoiceprintModalProps> = ({
                   value={cloneGatewayUrl}
                   onChange={(e) => setCloneGatewayUrl(e.target.value)}
                   placeholder={selectedCloneProviderMeta.defaultUrl}
-                  className="w-full bg-white dark:bg-[#08101a] aurora:bg-[#081014] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] rounded-lg px-3 py-1.5 text-xs font-mono text-[#0284c7] dark:text-[#7cc4ff] aurora:text-[#5eead4] placeholder-[#94a3b8] dark:placeholder-[#4e657e] aurora:placeholder-[#5a7782] focus:outline-none focus:border-[#2481cc] dark:focus:border-[#2ba0ff] aurora:focus:border-[#2dd4bf]"
+                  className="w-full bg-white dark:bg-[#08101a] aurora:bg-[#081014] linen:bg-[#faf5ec] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] linen:border-[#cbbba2] rounded-lg px-3 py-1.5 text-xs font-mono text-[#0284c7] dark:text-[#7cc4ff] aurora:text-[#5eead4] linen:text-[#8c522d] placeholder-[#94a3b8] dark:placeholder-[#4e657e] aurora:placeholder-[#5a7782] linen:placeholder-[#8f7e6c] focus:outline-none focus:border-[#2481cc] dark:focus:border-[#2ba0ff] aurora:focus:border-[#2dd4bf] linen:focus:border-[#a86a43]"
                 />
               </div>
 
               <div className="space-y-1">
-                <div className="flex items-center justify-between text-[11px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5]">
+                <div className="flex items-center justify-between text-[11px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a]">
                   <span>克隆引擎 API 密钥 (Key)</span>
                   <span>本地 GPT-SoVITS 可留空</span>
                 </div>
@@ -788,12 +788,12 @@ export const MasterVoiceprintModal: React.FC<MasterVoiceprintModalProps> = ({
                     value={cloneApiKey}
                     onChange={(e) => setCloneApiKey(e.target.value)}
                     placeholder="填写 ElevenLabs / 硅基流动 / Fish Audio API Key"
-                    className="w-full bg-white dark:bg-[#08101a] aurora:bg-[#081014] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] rounded-lg pl-3 pr-9 py-1.5 text-xs font-mono text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] placeholder-[#94a3b8] dark:placeholder-[#4e657e] aurora:placeholder-[#5a7782] focus:outline-none focus:border-[#2481cc] dark:focus:border-[#2ba0ff] aurora:focus:border-[#2dd4bf]"
+                    className="w-full bg-white dark:bg-[#08101a] aurora:bg-[#081014] linen:bg-[#faf5ec] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] linen:border-[#cbbba2] rounded-lg pl-3 pr-9 py-1.5 text-xs font-mono text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118] placeholder-[#94a3b8] dark:placeholder-[#4e657e] aurora:placeholder-[#5a7782] linen:placeholder-[#8f7e6c] focus:outline-none focus:border-[#2481cc] dark:focus:border-[#2ba0ff] aurora:focus:border-[#2dd4bf] linen:focus:border-[#a86a43]"
                   />
                   <button
                     type="button"
                     onClick={() => setShowCloneApiKey((v) => !v)}
-                    className="absolute right-2.5 top-1/2 -translate-y-1/2 text-[#64748b] dark:text-[#7b93ad] hover:text-[#0f172a] dark:hover:text-[#eef4fb] cursor-pointer"
+                    className="absolute right-2.5 top-1/2 -translate-y-1/2 text-[#64748b] dark:text-[#7b93ad] linen:text-[#6e5c4a] hover:text-[#0f172a] dark:hover:text-[#eef4fb] linen:hover:text-[#2b2118] cursor-pointer"
                   >
                     {showCloneApiKey ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
                   </button>
@@ -801,7 +801,7 @@ export const MasterVoiceprintModal: React.FC<MasterVoiceprintModalProps> = ({
               </div>
 
               <div className="space-y-1">
-                <div className="flex items-center justify-between text-[11px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5]">
+                <div className="flex items-center justify-between text-[11px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a]">
                   <span>已注册 Voice ID / URI（可选，首次合成后自动缓存）</span>
                 </div>
                 <input
@@ -809,20 +809,20 @@ export const MasterVoiceprintModal: React.FC<MasterVoiceprintModalProps> = ({
                   value={cloneVoiceId}
                   onChange={(e) => setCloneVoiceId(e.target.value)}
                   placeholder="留空则在首次合成时自动上传样本生成并绑定"
-                  className="w-full bg-white dark:bg-[#08101a] aurora:bg-[#081014] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] rounded-lg px-3 py-1.5 text-xs font-mono text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] placeholder-[#94a3b8] dark:placeholder-[#4e657e] aurora:placeholder-[#5a7782] focus:outline-none focus:border-[#2481cc] dark:focus:border-[#2ba0ff] aurora:focus:border-[#2dd4bf]"
+                  className="w-full bg-white dark:bg-[#08101a] aurora:bg-[#081014] linen:bg-[#faf5ec] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] linen:border-[#cbbba2] rounded-lg px-3 py-1.5 text-xs font-mono text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118] placeholder-[#94a3b8] dark:placeholder-[#4e657e] aurora:placeholder-[#5a7782] linen:placeholder-[#8f7e6c] focus:outline-none focus:border-[#2481cc] dark:focus:border-[#2ba0ff] aurora:focus:border-[#2dd4bf] linen:focus:border-[#a86a43]"
                 />
               </div>
             </div>
           </div>
 
         {/* TTS Model Selector */}
-        <div className="p-3.5 rounded-xl bg-[#f8fafc] dark:bg-[#0e1726]/85 aurora:bg-[#101c23]/90 border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] space-y-2.5">
+        <div className="p-3.5 rounded-xl bg-[#f8fafc] dark:bg-[#0e1726]/85 aurora:bg-[#101c23]/90 linen:bg-[#efe6d6]/90 border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] linen:border-[#dfd2bc] space-y-2.5">
           <div className="flex items-center justify-between gap-2">
-            <span className="text-xs font-medium text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] flex items-center gap-1.5">
-              <Cpu className="w-3.5 h-3.5 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf]" />
+            <span className="text-xs font-medium text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118] flex items-center gap-1.5">
+              <Cpu className="w-3.5 h-3.5 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf] linen:text-[#8c522d]" />
               语音合成模型型号
             </span>
-            <span className="text-[10px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5]">支持自由输入</span>
+            <span className="text-[10px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a]">支持自由输入</span>
           </div>
 
           <input
@@ -830,11 +830,11 @@ export const MasterVoiceprintModal: React.FC<MasterVoiceprintModalProps> = ({
             value={ttsModel}
             onChange={(e) => setTtsModel(e.target.value)}
             placeholder={`输入克隆模型型号，默认：${selectedCloneProviderMeta.defaultModel}`}
-            className="w-full bg-white dark:bg-[#08101a] aurora:bg-[#081014] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] rounded-lg px-3 py-1.5 text-xs font-mono text-[#0284c7] dark:text-[#7cc4ff] aurora:text-[#5eead4] placeholder-[#94a3b8] dark:placeholder-[#4e657e] aurora:placeholder-[#5a7782] focus:outline-none focus:border-[#2481cc] dark:focus:border-[#2ba0ff] aurora:focus:border-[#2dd4bf]"
+            className="w-full bg-white dark:bg-[#08101a] aurora:bg-[#081014] linen:bg-[#faf5ec] border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] linen:border-[#cbbba2] rounded-lg px-3 py-1.5 text-xs font-mono text-[#0284c7] dark:text-[#7cc4ff] aurora:text-[#5eead4] linen:text-[#8c522d] placeholder-[#94a3b8] dark:placeholder-[#4e657e] aurora:placeholder-[#5a7782] linen:placeholder-[#8f7e6c] focus:outline-none focus:border-[#2481cc] dark:focus:border-[#2ba0ff] aurora:focus:border-[#2dd4bf] linen:focus:border-[#a86a43]"
           />
 
-          <p className="text-[10.5px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] flex items-center gap-1.5 leading-snug">
-            <Link className="w-3 h-3 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf] shrink-0" />
+          <p className="text-[10.5px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a] flex items-center gap-1.5 leading-snug">
+            <Link className="w-3 h-3 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf] linen:text-[#8c522d] shrink-0" />
             <span>
               真人声纹克隆模式将直接使用上方配置的支持参考音频复刻的引擎网址与密钥。
             </span>
@@ -842,17 +842,17 @@ export const MasterVoiceprintModal: React.FC<MasterVoiceprintModalProps> = ({
         </div>
 
         {/* ffmpeg Audio Parameters */}
-        <div className="p-3.5 rounded-xl bg-[#f8fafc] dark:bg-[#0e1726]/85 aurora:bg-[#101c23]/90 border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] space-y-3 text-xs">
-          <span className="font-medium text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] flex items-center gap-1.5">
-            <Sliders className="w-3.5 h-3.5 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf]" />
+        <div className="p-3.5 rounded-xl bg-[#f8fafc] dark:bg-[#0e1726]/85 aurora:bg-[#101c23]/90 linen:bg-[#efe6d6]/90 border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] linen:border-[#dfd2bc] space-y-3 text-xs">
+          <span className="font-medium text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118] flex items-center gap-1.5">
+            <Sliders className="w-3.5 h-3.5 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf] linen:text-[#8c522d]" />
             <span>音频参数（ffmpeg 实效微调）</span>
           </span>
 
           {/* Pitch */}
           <div className="space-y-1">
-            <div className="flex justify-between text-[11px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5]">
+            <div className="flex justify-between text-[11px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a]">
               <span>音高基线 (ffmpeg 实效变调)</span>
-              <span className="text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] font-medium tabular-nums">{pitch.toFixed(2)}x</span>
+              <span className="text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118] font-medium tabular-nums">{pitch.toFixed(2)}x</span>
             </div>
             <input
               type="range"
@@ -861,15 +861,15 @@ export const MasterVoiceprintModal: React.FC<MasterVoiceprintModalProps> = ({
               step="0.05"
               value={pitch}
               onChange={(e) => setPitch(parseFloat(e.target.value))}
-              className="w-full h-1 bg-[#cbd5e1] dark:bg-[#1e3148] aurora:bg-[#203742] rounded-lg appearance-none cursor-pointer accent-[#2481cc] dark:accent-[#2ba0ff] aurora:accent-[#14b8a6]"
+              className="w-full h-1 bg-[#cbd5e1] dark:bg-[#1e3148] aurora:bg-[#203742] linen:bg-[#d7c8b0] rounded-lg appearance-none cursor-pointer accent-[#2481cc] dark:accent-[#2ba0ff] aurora:accent-[#14b8a6] linen:accent-[#a86a43]"
             />
           </div>
 
           {/* Rate */}
           <div className="space-y-1">
-            <div className="flex justify-between text-[11px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5]">
+            <div className="flex justify-between text-[11px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a]">
               <span>语速节奏 (ffmpeg 实效变速)</span>
-              <span className="text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] font-medium tabular-nums">{rate.toFixed(2)}x</span>
+              <span className="text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118] font-medium tabular-nums">{rate.toFixed(2)}x</span>
             </div>
             <input
               type="range"
@@ -878,21 +878,21 @@ export const MasterVoiceprintModal: React.FC<MasterVoiceprintModalProps> = ({
               step="0.05"
               value={rate}
               onChange={(e) => setRate(parseFloat(e.target.value))}
-              className="w-full h-1 bg-[#cbd5e1] dark:bg-[#1e3148] aurora:bg-[#203742] rounded-lg appearance-none cursor-pointer accent-[#2481cc] dark:accent-[#2ba0ff] aurora:accent-[#14b8a6]"
+              className="w-full h-1 bg-[#cbd5e1] dark:bg-[#1e3148] aurora:bg-[#203742] linen:bg-[#d7c8b0] rounded-lg appearance-none cursor-pointer accent-[#2481cc] dark:accent-[#2ba0ff] aurora:accent-[#14b8a6] linen:accent-[#a86a43]"
             />
           </div>
         </div>
 
         {/* Global Default Toggle */}
-        <div className="p-3 rounded-xl bg-[#f8fafc] dark:bg-[#0e1726]/85 aurora:bg-[#101c23]/90 border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] flex items-center justify-between gap-3">
-          <div className="text-xs font-semibold text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8]">
+        <div className="p-3 rounded-xl bg-[#f8fafc] dark:bg-[#0e1726]/85 aurora:bg-[#101c23]/90 linen:bg-[#efe6d6]/90 border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] linen:border-[#dfd2bc] flex items-center justify-between gap-3">
+          <div className="text-xs font-semibold text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118]">
             发语音时默认使用此克隆声纹
           </div>
           <button
             type="button"
             onClick={() => setEnabledAsDefault(!enabledAsDefault)}
             className={`w-10 h-5.5 rounded-full transition-colors relative cursor-pointer shrink-0 ${
-              enabledAsDefault ? 'bg-[#2481cc] dark:bg-[#2ba0ff] aurora:bg-[#0d9488]' : 'bg-[#cbd5e1] dark:bg-[#1e3148] aurora:bg-[#203742]'
+              enabledAsDefault ? 'bg-[#2481cc] dark:bg-[#2ba0ff] aurora:bg-[#0d9488] linen:bg-[#a86a43]' : 'bg-[#cbd5e1] dark:bg-[#1e3148] aurora:bg-[#203742] linen:bg-[#d7c8b0]'
             }`}
           >
             <div
@@ -905,17 +905,17 @@ export const MasterVoiceprintModal: React.FC<MasterVoiceprintModalProps> = ({
       </div>
 
       {/* Footer */}
-      <div className="flex items-center justify-between px-4 py-3 border-t border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] bg-[#f8fafc] dark:bg-[#0d1726] aurora:bg-[#0e1920] shrink-0">
+      <div className="flex items-center justify-between px-4 py-3 border-t border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] linen:border-[#dfd2bc] bg-[#f8fafc] dark:bg-[#0d1726] aurora:bg-[#0e1920] linen:bg-[#f0e6d5] shrink-0">
         {!embedded ? (
           <button
             type="button"
             onClick={onClose}
-            className="px-3.5 py-1.5 rounded-lg text-xs font-medium text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] hover:text-[#0f172a] dark:hover:text-[#eef4fb] aurora:hover:text-[#ecf6f8] hover:bg-black/5 dark:hover:bg-[#152438] aurora:hover:bg-[#152934] transition-colors cursor-pointer"
+            className="px-3.5 py-1.5 rounded-lg text-xs font-medium text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a] hover:text-[#0f172a] dark:hover:text-[#eef4fb] aurora:hover:text-[#ecf6f8] linen:hover:text-[#2b2118] hover:bg-black/5 dark:hover:bg-[#152438] aurora:hover:bg-[#152934] linen:hover:bg-[#e7dccb] transition-colors cursor-pointer"
           >
             取消
           </button>
         ) : (
-          <span className="text-[11px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5]">
+          <span className="text-[11px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a]">
             {voiceprint ? '已配置个人声纹克隆模型' : '上传或录制声纹样本后保存'}
           </span>
         )}
@@ -924,7 +924,7 @@ export const MasterVoiceprintModal: React.FC<MasterVoiceprintModalProps> = ({
           type="button"
           disabled={isSaving || isRecording}
           onClick={() => void handleSave()}
-          className="px-4 py-2 rounded-lg bg-[#2481cc] hover:bg-[#1d6fb3] dark:bg-[#2ba0ff] dark:hover:bg-[#1e8ee8] aurora:bg-[#0d9488] aurora:hover:bg-[#0f766e] text-white font-medium text-xs flex items-center gap-1.5 shadow-xs transition-colors cursor-pointer disabled:opacity-50"
+          className="px-4 py-2 rounded-lg bg-[#2481cc] hover:bg-[#1d6fb3] dark:bg-[#2ba0ff] dark:hover:bg-[#1e8ee8] aurora:bg-[#0d9488] linen:bg-[#a86a43] aurora:hover:bg-[#0f766e] linen:hover:bg-[#8f5734] text-white font-medium text-xs flex items-center gap-1.5 shadow-xs transition-colors cursor-pointer disabled:opacity-50"
         >
           {isSaving ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Check className="w-3.5 h-3.5" />}
           <span>保存声纹克隆配置</span>
@@ -935,7 +935,7 @@ export const MasterVoiceprintModal: React.FC<MasterVoiceprintModalProps> = ({
 
   if (embedded) {
     return (
-      <div className="flex flex-col h-full min-h-0 select-none text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8]">
+      <div className="flex flex-col h-full min-h-0 select-none text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118]">
         {innerContent}
       </div>
     );
@@ -943,7 +943,7 @@ export const MasterVoiceprintModal: React.FC<MasterVoiceprintModalProps> = ({
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/55 dark:bg-black/75 aurora:bg-black/80 backdrop-blur-xs animate-in fade-in duration-150 select-none">
-      <div className="relative w-full max-w-md bg-white dark:bg-[#0b131f] aurora:bg-[#0c151b] border border-[#e2e8f0] dark:border-[#1e3148] aurora:border-[#203742] rounded-xl shadow-xl flex flex-col overflow-hidden text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8]">
+      <div className="relative w-full max-w-md bg-white dark:bg-[#0b131f] aurora:bg-[#0c151b] linen:bg-[#f8f2e7] border border-[#e2e8f0] dark:border-[#1e3148] aurora:border-[#203742] linen:border-[#d5c6ae] rounded-xl shadow-xl linen:shadow-sm flex flex-col overflow-hidden text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118]">
         {innerContent}
       </div>
     </div>

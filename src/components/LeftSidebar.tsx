@@ -546,9 +546,9 @@ export const LeftSidebar: React.FC<LeftSidebarProps> = ({
                   className={`relative group flex flex-col items-center shrink-0 w-full px-1 py-0.5 rounded-lg transition-all ${
                     isDraggingThisAcc ? 'opacity-45' : ''
                   } ${
-                    isDropBeforeAcc ? 'border-t-2 border-t-[#2ba0ff] aurora:border-t-[#2dd4bf]' : ''
+                    isDropBeforeAcc ? 'border-t-2 border-t-[#2ba0ff] aurora:border-t-[#2dd4bf] linen:border-t-[#d4a373]' : ''
                   } ${
-                    isDropAfterAcc ? 'border-b-2 border-b-[#2ba0ff] aurora:border-b-[#2dd4bf]' : ''
+                    isDropAfterAcc ? 'border-b-2 border-b-[#2ba0ff] aurora:border-b-[#2dd4bf] linen:border-b-[#d4a373]' : ''
                   }`}
                 >
                   <button
@@ -720,11 +720,11 @@ export const LeftSidebar: React.FC<LeftSidebarProps> = ({
                         className={`w-full px-1.5 py-0.5 flex items-center gap-0.5 group/grp rounded-md transition-all ${
                           isDraggingThisGrp ? 'opacity-45' : ''
                         } ${
-                          isGrpDropBefore ? 'border-t-2 border-t-[#2ba0ff] aurora:border-t-[#2dd4bf]' : ''
+                          isGrpDropBefore ? 'border-t-2 border-t-[#2ba0ff] aurora:border-t-[#2dd4bf] linen:border-t-[#d4a373]' : ''
                         } ${
-                          isGrpDropAfter ? 'border-b-2 border-b-[#2ba0ff] aurora:border-b-[#2dd4bf]' : ''
+                          isGrpDropAfter ? 'border-b-2 border-b-[#2ba0ff] aurora:border-b-[#2dd4bf] linen:border-b-[#d4a373]' : ''
                         } ${
-                          isAccIntoThisGrp ? 'ring-1 ring-[#2ba0ff] aurora:ring-[#2dd4bf] bg-[#2ba0ff]/10 aurora:bg-[#2dd4bf]/10' : ''
+                          isAccIntoThisGrp ? 'ring-1 ring-[#2ba0ff] aurora:ring-[#2dd4bf] linen:ring-[#d4a373] bg-[#2ba0ff]/10 aurora:bg-[#2dd4bf]/10 linen:bg-[#d4a373]/20' : ''
                         }`}
                       >
                         <button
@@ -794,7 +794,7 @@ export const LeftSidebar: React.FC<LeftSidebarProps> = ({
                       }}
                       className={`w-full px-2 py-0.5 flex items-center justify-center rounded-md transition-all ${
                         dropTarget?.kind === 'group-drop' && dropTarget.groupId === ''
-                          ? 'ring-1 ring-[#2ba0ff] aurora:ring-[#2dd4bf] bg-[#2ba0ff]/10 aurora:bg-[#2dd4bf]/10'
+                          ? 'ring-1 ring-[#2ba0ff] aurora:ring-[#2dd4bf] linen:ring-[#d4a373] bg-[#2ba0ff]/10 aurora:bg-[#2dd4bf]/10 linen:bg-[#d4a373]/20'
                           : ''
                       }`}
                     >
@@ -841,7 +841,7 @@ export const LeftSidebar: React.FC<LeftSidebarProps> = ({
           <div
             ref={remarkPopoverRef}
             style={{ top: editingRemarkState.top, left: editingRemarkState.left }}
-            className="fixed z-50 w-64 rounded-xl bg-white dark:bg-[#0d1724] aurora:bg-[#0e1b22] linen:bg-[#f8f2e7] border border-[#e2e8f0] dark:border-[#1e3148] aurora:border-[#1f3944] linen:border-[#cbbba2] shadow-xl p-3 text-xs"
+            className="fixed z-50 w-64 rounded-xl bg-white dark:bg-[#0d1724] aurora:bg-[#0e1b22] linen:bg-[#f8f2e7] border border-[#e2e8f0] dark:border-[#1e3148] aurora:border-[#1f3944] linen:border-[#d5c6ae] shadow-xl linen:shadow-sm p-3 text-xs"
           >
             <div className="flex items-center justify-between gap-2 mb-2.5">
               <div className="min-w-0">
@@ -993,7 +993,7 @@ export const LeftSidebar: React.FC<LeftSidebarProps> = ({
         <div
           ref={groupPopoverRef}
           style={{ top: groupEditorState.top, left: groupEditorState.left }}
-          className="fixed z-50 w-60 rounded-xl bg-white dark:bg-[#0d1724] aurora:bg-[#0e1b22] linen:bg-[#f8f2e7] border border-[#e2e8f0] dark:border-[#1e3148] aurora:border-[#1f3944] linen:border-[#cbbba2] shadow-xl p-3 text-xs"
+          className="fixed z-50 w-60 rounded-xl bg-white dark:bg-[#0d1724] aurora:bg-[#0e1b22] linen:bg-[#f8f2e7] border border-[#e2e8f0] dark:border-[#1e3148] aurora:border-[#1f3944] linen:border-[#d5c6ae] shadow-xl linen:shadow-sm p-3 text-xs"
         >
           <div className="flex items-center justify-between gap-2 mb-2.5">
             <div className="font-semibold text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118]">

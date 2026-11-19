@@ -154,9 +154,9 @@ export const TelegramVoiceCallModal: React.FC<TelegramVoiceCallModalProps> = ({
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/55 dark:bg-black/75 aurora:bg-black/80 backdrop-blur-md animate-in fade-in duration-200 select-none">
-      <div className="relative w-full max-w-sm rounded-3xl bg-gradient-to-b from-[#f8fafc] to-white dark:from-[#101c2d] dark:to-[#09111c] aurora:from-[#10222b] aurora:to-[#081116] text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] p-6 shadow-2xl border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] flex flex-col items-center">
+      <div className="relative w-full max-w-sm rounded-3xl bg-gradient-to-b from-[#f8fafc] to-white dark:from-[#101c2d] dark:to-[#09111c] aurora:from-[#10222b] linen:from-[#efe6d6] aurora:to-[#081116] linen:to-[#f8f2e7] text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118] p-6 shadow-2xl linen:shadow-sm border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] linen:border-[#d5c6ae] flex flex-col items-center">
         {/* Top Signaling Indicator */}
-        <div className="flex items-center gap-1.5 text-[11px] text-[#475569] dark:text-[#b4c6d8] aurora:text-[#b7d0d8] font-medium mb-6">
+        <div className="flex items-center gap-1.5 text-[11px] text-[#475569] dark:text-[#b4c6d8] aurora:text-[#b7d0d8] linen:text-[#4e3f32] font-medium mb-6">
           <Shield className="w-3.5 h-3.5 text-emerald-600 dark:text-emerald-400" />
           <span>Telegram 云端呼叫信令</span>
         </div>
@@ -164,7 +164,7 @@ export const TelegramVoiceCallModal: React.FC<TelegramVoiceCallModalProps> = ({
         {/* Contact Avatar */}
         <div className="relative my-4">
           <div
-            className="w-28 h-28 rounded-full overflow-hidden flex items-center justify-center text-3xl font-bold text-white shadow-2xl border-4 border-white dark:border-white/15 aurora:border-[#2dd4bf]/25 relative z-10"
+            className="w-28 h-28 rounded-full overflow-hidden flex items-center justify-center text-3xl font-bold text-white shadow-2xl border-4 border-white dark:border-white/15 aurora:border-[#2dd4bf]/25 linen:border-[#e7dccb] relative z-10"
             style={{ backgroundColor: displayAvatarBg }}
           >
             {displayAvatarUrl ? (
@@ -179,10 +179,10 @@ export const TelegramVoiceCallModal: React.FC<TelegramVoiceCallModalProps> = ({
         </div>
 
         {/* Contact Name & Status */}
-        <h3 className="text-xl font-bold text-center mt-3 truncate max-w-[240px] text-[#0f172a] dark:text-white aurora:text-[#ecf6f8]">
+        <h3 className="text-xl font-bold text-center mt-3 truncate max-w-[240px] text-[#0f172a] dark:text-white aurora:text-[#ecf6f8] linen:text-[#2b2118]">
           {displayName}
         </h3>
-        <p className="text-sm font-medium mt-1 text-[#0284c7] dark:text-[#2ba0ff] aurora:text-[#2dd4bf] tabular-nums text-center">
+        <p className="text-sm font-medium mt-1 text-[#0284c7] dark:text-[#2ba0ff] aurora:text-[#2dd4bf] linen:text-[#8c522d] tabular-nums text-center">
           {callStatus === 'calling' && '正在连接 Telegram 云端呼叫信令...'}
           {callStatus === 'ringing' && '对方客户端正在响铃（等待接听）...'}
           {callStatus === 'connected' && `信令已接通 ${formatDuration(duration)}`}
