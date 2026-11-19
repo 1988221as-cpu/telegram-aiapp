@@ -1299,7 +1299,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
     if (messageToDelete) {
       const targetMsg = messageToDelete;
       const isLocalOnly =
-        !targetMsg.telegramMessageId ||
+        !resolveClientTelegramMessageId(targetMsg) ||
         targetMsg.deliveryStatus === 'failed' ||
         targetMsg.deliveryStatus === 'pending';
       const revoke = isLocalOnly ? false : revokeSingleDelete;
@@ -1356,9 +1356,14 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
     setIsForwarding(true);
     try {
       const isCloudForward = Boolean(chat?.id.startsWith('tg_') && targetChatId.startsWith('tg_'));
+      const nonSystemMsgs = forwardModalMessages.filter((m) => m.sender !== 'system');
+      if (nonSystemMsgs.length === 0) {
+        showSyncNotice('入/退群等系统提示消息不支持转发');
+        return;
+      }
       const forwardableMsgs = isCloudForward
-        ? forwardModalMessages.filter((m) => resolveClientTelegramMessageId(m) !== undefined)
-        : forwardModalMessages;
+        ? nonSystemMsgs.filter((m) => resolveClientTelegramMessageId(m) !== undefined)
+        : nonSystemMsgs;
       const tgIds = forwardableMsgs
         .map((m) => resolveClientTelegramMessageId(m))
         .filter((id): id is number => typeof id === 'number' && id > 0);
@@ -1383,7 +1388,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
       setSelectedMessageIds(new Set());
       showSyncNotice(
         skippedCount > 0
-          ? `已转发 ${forwardableMsgs.length} 条云端消息至「${targetChat?.title || '目标对话'}」（已跳过 ${skippedCount} 条未送达消息）`
+          ? `已转发 ${forwardableMsgs.length} 条云端消息至「${targetChat?.title || '目标对话'}」（已跳过 ${skippedCount} 条不支持转发或未送达消息）`
           : `已转发 ${forwardableMsgs.length} 条消息至「${targetChat?.title || '目标对话'}」`,
         3000
       );
@@ -1772,7 +1777,10 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
     setSyncNotice(null);
     try {
       const res = await sendAutonomousChat(
-        messages.slice(-30).map((m) => {
+        messages
+          .filter((m) => m.sender !== 'system')
+          .slice(-30)
+          .map((m) => {
           const rawBody = (m.text || '').trim();
           const preferredMediaText = (m.sttText || m.imageCaption || '').trim();
           const resolvedText = (
@@ -6470,7 +6478,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
       {/* Telegram Confirmation Modal for Deleting Single Message */}
       {messageToDelete && (() => {
         const isLocalOnly =
-          !messageToDelete.telegramMessageId ||
+          !resolveClientTelegramMessageId(messageToDelete) ||
           messageToDelete.deliveryStatus === 'failed' ||
           messageToDelete.deliveryStatus === 'pending';
         const isTgUserChat = chat.id.startsWith('tg_') && currentAccountId !== 'acc_telegram_bot';

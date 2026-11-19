@@ -3488,7 +3488,7 @@ export default function App() {
               chatId: targetChatId,
               accountId: targetAccountId,
               telegramMessageId: typeof upd.telegramMessageId === 'number' ? upd.telegramMessageId : undefined,
-              sender: upd.sender || 'peer',
+              sender: isSystemEventMsg ? 'system' : (upd.sender || 'peer'),
               senderName: isOfficialNotice ? officialTitle : (upd.senderName || ''),
               senderId: upd.senderId,
               senderAvatarUrl: upd.senderAvatarUrl,
@@ -4635,6 +4635,7 @@ export default function App() {
       revokeRestoredBlobUrlsForMessage(targetAccountId, id);
       void cleanupPersistedPendingMedia(targetAccountId, id);
       recordDeletedMessageId(id, targetAccountId, targetChatId);
+      deleteLocalMessage(targetChatId, id, targetAccountId);
     });
     const deletedBlobUrls: string[] = [];
     currentList.forEach((m) => {
