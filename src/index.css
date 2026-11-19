@@ -167,31 +167,23 @@
   background-size: 100% 100%, 100% 100%, 24px 24px;
 }
 
-/* 羊皮深纹理：左侧深咖麻布纵纹 / 会话列表细纹 / 聊天区深亚麻编织纸纹 */
+/* 羊皮纯净色调（无条纹）：左侧暖卡其褐 / 会话列表暖米纸 / 聊天区暖沙纸底色 */
 @utility hs-linen-rail-bg {
-  background-color: #6d5b4b;
-  background-image:
-    repeating-linear-gradient(90deg, rgba(255, 248, 236, 0.045) 0px, rgba(255, 248, 236, 0.045) 1px, transparent 1px, transparent 4px),
-    repeating-linear-gradient(0deg, rgba(32, 22, 13, 0.085) 0px, rgba(32, 22, 13, 0.085) 1px, transparent 1px, transparent 3px),
-    linear-gradient(180deg, #796554 0%, #635243 100%);
+  background-color: #988670;
+  background-image: linear-gradient(180deg, #9a8872 0%, #94826c 100%);
 }
 
 @utility hs-linen-list-bg {
-  background-color: #f2eadc;
-  background-image:
-    repeating-linear-gradient(90deg, rgba(118, 92, 66, 0.075) 0px, rgba(118, 92, 66, 0.075) 1px, transparent 1px, transparent 5px),
-    repeating-linear-gradient(0deg, rgba(118, 92, 66, 0.03) 0px, rgba(118, 92, 66, 0.03) 1px, transparent 1px, transparent 6px),
-    linear-gradient(180deg, rgba(252, 247, 238, 0.65) 0%, rgba(232, 220, 200, 0.52) 100%);
+  background-color: #f1eadf;
+  background-image: linear-gradient(180deg, #f4ede3 0%, #ede4d6 100%);
 }
 
 .theme-linen .tg-chat-pattern {
-  background-color: #d6c8b0;
+  background-color: #d4c7b3;
   background-image:
-    radial-gradient(ellipse 80% 60% at 50% 45%, rgba(255, 250, 238, 0.18), transparent 72%),
-    repeating-linear-gradient(90deg, rgba(78, 59, 39, 0.11) 0px, rgba(78, 59, 39, 0.11) 1px, transparent 1px, transparent 4px),
-    repeating-linear-gradient(0deg, rgba(78, 59, 39, 0.095) 0px, rgba(78, 59, 39, 0.095) 1px, transparent 1px, transparent 4px),
-    repeating-linear-gradient(45deg, rgba(58, 42, 27, 0.05) 0px, rgba(58, 42, 27, 0.05) 2px, transparent 2px, transparent 8px),
-    linear-gradient(180deg, #dfd2bc 0%, #cfc0a5 100%);
+    radial-gradient(ellipse 80% 60% at 50% 45%, rgba(255, 250, 238, 0.14), transparent 72%),
+    linear-gradient(180deg, #d8ccba 0%, #cfc1ab 100%);
+  background-size: 100% 100%, 100% 100%;
 }
 
 /* Frosted Glass Surface Utility */
