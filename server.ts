@@ -21305,7 +21305,7 @@ function readLocalAppVersion(): string {
       }
     } catch {}
   }
-  return '1.2.1';
+  return '1.2.2';
 }
 
 // Lightweight GitHub Releases version check (portable & installer compatible)
