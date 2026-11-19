@@ -1890,7 +1890,7 @@ export async function sendAutonomousChat(
         targetLanguage,
       }),
     },
-    45000
+    135000
   );
 
   if (!res.ok) {
@@ -2672,7 +2672,7 @@ export async function analyzeCustomerMemory(
           chatTitle,
         }),
       },
-      55000
+      135000
     );
     if (res.ok) {
       const data = await res.json();
@@ -5040,7 +5040,7 @@ export async function testPersonaReplyApi(params: {
         customConfig: buildSafeLlmConfigPayload(params.customConfig),
       }),
       credentials: 'include',
-    }, 30000);
+    }, 135000);
     const data = await res.json().catch(() => ({}));
     if (!res.ok) return { success: false, error: data?.error || `试聊失败 (HTTP ${res.status})` };
     return data;

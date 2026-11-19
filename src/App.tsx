@@ -2278,6 +2278,10 @@ export default function App() {
             prev.forEach((c) => map.set(msgBucketKey(c.accountId || targetAccId, c.id), c));
             scopedDbChats.forEach((dbc: Chat) => {
               const bucketKey = msgBucketKey(dbc.accountId || targetAccId, dbc.id);
+              const override = recentDialogOverridesRef.current[bucketKey];
+              if (override?.deleted && Date.now() - override.updatedAt < 60_000) {
+                return;
+              }
               const existing = map.get(bucketKey);
               if (existing) {
                 map.set(bucketKey, {
@@ -2293,6 +2297,13 @@ export default function App() {
                       : {}),
                 });
               } else {
+                if (
+                  targetAccId.startsWith('acc_tg_') &&
+                  dbc.id.startsWith('tg_') &&
+                  (lastDialogsSyncAtRef.current[targetAccId] || 0) > 0
+                ) {
+                  return;
+                }
                 map.set(bucketKey, dbc);
               }
             });

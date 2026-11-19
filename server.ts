@@ -3288,10 +3288,26 @@ export async function fetchTelegramUserDialogs(
       return rawFolder === undefined || rawFolder === null ? 0 : Number(rawFolder);
     };
 
+    const isLeftOrInactiveGroupDialog = (dlg: any): boolean => {
+      const ent: any = dlg?.entity;
+      if (!ent) return false;
+      const cls = String(ent.className || '');
+      if (cls === 'ChatEmpty' || cls === 'ChatForbidden' || cls === 'ChannelForbidden') {
+        return true;
+      }
+      if (cls === 'Chat' || cls === 'Channel' || dlg?.isGroup || dlg?.isChannel) {
+        if (Boolean(ent.left) || Boolean(ent.deactivated) || Boolean(ent.migratedTo)) {
+          return true;
+        }
+      }
+      return false;
+    };
+
     const mergedMap = new Map<string, { dialog: any; isArchived: boolean; pinOrder?: number }>();
     let mainPinIdx = 0;
     for (const d of mainDialogs) {
       if (!d || d.id === undefined || d.id === null) continue;
+      if (isLeftOrInactiveGroupDialog(d)) continue;
       const folderId = resolveDialogFolderId(d);
       if (folderId === 1) continue;
       const dPinned = Boolean(d.pinned || d.dialog?.pinned);
@@ -3304,6 +3320,7 @@ export async function fetchTelegramUserDialogs(
     let archPinIdx = 0;
     for (const d of archivedDialogs) {
       if (!d || d.id === undefined || d.id === null) continue;
+      if (isLeftOrInactiveGroupDialog(d)) continue;
       const folderId = resolveDialogFolderId(d);
       if (folderId !== 1) continue;
       const key = String(d.id);
@@ -10084,7 +10101,7 @@ ${conversationTranscript}`;
           messages: [{ role: 'user', content: analysisPrompt }],
           temperature: 0.1,
           maxTokens: 2048,
-          timeoutMs: 35000,
+          timeoutMs: 120000,
           maxRetries: 0,
           throwOnError: true,
           skipSync: true,
@@ -10134,7 +10151,7 @@ ${conversationTranscript}`;
           messages: [{ role: 'user', content: analysisPrompt }],
           temperature: 0.1,
           maxTokens: 2048,
-          timeoutMs: 35000,
+          timeoutMs: 120000,
           maxRetries: 0,
           userJwt: effectiveUserJwt,
           throwOnError: true,
@@ -11184,6 +11201,7 @@ app.post('/api/persona/test-reply', aiGenerationLimiter, requireTenantAuth, asyn
         messages: llmMessages,
         temperature: 0.7,
         maxTokens: 500,
+        timeoutMs: 120000,
         userJwt: bearerJwt,
         throwOnError: true,
         skipSync: true,
@@ -16866,7 +16884,7 @@ app.post('/api/llm/chat', aiGenerationLimiter, requireTenantAuth, async (req: Re
                   },
                 }),
               },
-              { timeoutMs: 15000, maxRetries: 2 }
+              { timeoutMs: 120000, maxRetries: 0 }
             );
 
             if (resGemini.ok) {
@@ -16941,7 +16959,7 @@ app.post('/api/llm/chat', aiGenerationLimiter, requireTenantAuth, async (req: Re
                     messages: anthropicMessages,
                   }),
                 },
-                { timeoutMs: 15000, maxRetries: 2 }
+                { timeoutMs: 120000, maxRetries: 0 }
               );
 
               if (response.ok) {
@@ -17039,7 +17057,7 @@ app.post('/api/llm/chat', aiGenerationLimiter, requireTenantAuth, async (req: Re
                   headers,
                   body: JSON.stringify(requestBody),
                 },
-                { timeoutMs: 15000, maxRetries: 2 }
+                { timeoutMs: 120000, maxRetries: 0 }
               );
 
               if (response.ok) {
@@ -19604,6 +19622,7 @@ ${dialogueTranscript}
           messages: webhookLlmMessages.length > 0 ? webhookLlmMessages : [{ role: 'user', content: webhookPromptText }],
           temperature: 0.7,
           maxTokens: 500,
+          timeoutMs: 120000,
           userJwt: lastActiveUserJwt || undefined,
           throwOnError: true,
           skipSync: true,
@@ -27391,6 +27410,7 @@ app.post('/api/telegram/user/dialogs/delete', requireTenantAuth, async (req: Req
     if (inputPeer instanceof Api.InputPeerChannel) {
       await connected.client.invoke(new Api.channels.LeaveChannel({ channel: inputPeer }));
     } else if (inputPeer instanceof Api.InputPeerChat) {
+      let leftChatOk = false;
       try {
         await connected.client.invoke(
           new Api.messages.DeleteChatUser({
@@ -27399,7 +27419,11 @@ app.post('/api/telegram/user/dialogs/delete', requireTenantAuth, async (req: Req
             revokeHistory: Boolean(revoke),
           })
         );
+        leftChatOk = true;
       } catch {
+        // 若此前已退群（如 USER_NOT_PARTICIPANT），继续执行 DeleteHistory 移除云端对话
+      }
+      try {
         await connected.client.invoke(
           new Api.messages.DeleteHistory({
             peer: inputPeer,
@@ -27408,6 +27432,11 @@ app.post('/api/telegram/user/dialogs/delete', requireTenantAuth, async (req: Req
             revoke: Boolean(revoke),
           })
         );
+      } catch (delHistErr: any) {
+        if (!leftChatOk) {
+          throw delHistErr;
+        }
+        console.warn('[Telegram DeleteHistory after LeaveChat Warning]:', delHistErr?.message || delHistErr);
       }
     } else {
       await connected.client.invoke(
@@ -27426,6 +27455,12 @@ app.post('/api/telegram/user/dialogs/delete', requireTenantAuth, async (req: Req
       const accPlaceholders = accVariants.map(() => '?').join(', ');
       await db
         .prepare(`DELETE FROM messages WHERE (chat_id = ? OR chat_id = ?) AND account_id IN (${accPlaceholders})`)
+        .run(String(chatId), altChatId, ...accVariants);
+      await db
+        .prepare(`DELETE FROM account_customer_profiles WHERE (chat_id = ? OR chat_id = ?) AND account_id IN (${accPlaceholders})`)
+        .run(String(chatId), altChatId, ...accVariants);
+      await db
+        .prepare(`DELETE FROM customer_profiles WHERE (chat_id = ? OR chat_id = ?) AND account_id IN (${accPlaceholders})`)
         .run(String(chatId), altChatId, ...accVariants);
     } catch {}
     removeConnectedDialogFromCache(connected, chatId);
@@ -32330,6 +32365,7 @@ export function attachTelegramClientMessageListener(client: TelegramClient, phon
                     messages: contextMessages,
                     temperature: 0.7,
                     maxTokens: 500,
+                    timeoutMs: 120000,
                     userJwt: lastActiveUserJwt || undefined,
                     throwOnError: true,
                     skipSync: true,
