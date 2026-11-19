@@ -38,6 +38,8 @@ import {
   Square,
   History,
   ChevronUp,
+  ChevronLeft,
+  ChevronRight,
   Users,
   Megaphone,
   ExternalLink,
@@ -65,6 +67,7 @@ import {
   transcribeAudio,
   sendAutonomousChat,
   fetchTelegramCloudMessagesApi,
+  fetchTelegramSharedMediaApi,
   submitTrainingFeedbackApi,
   sendTelegramStickerApi,
   fetchGlobalPersonaApi,
@@ -204,6 +207,17 @@ function getTranslationErrorLabel(channel?: Message['translationErrorChannel']):
     default:
       return '译文失败';
   }
+}
+
+function buildSafeMediaDownloadName(caption: string | undefined, fallbackPrefix: string, fallbackExt: string): string {
+  const cleaned = (caption || '')
+    .replace(/[\r\n/\\:*?"<>|]+/g, '_')
+    .trim()
+    .slice(0, 64);
+  if (!cleaned) {
+    return `${fallbackPrefix}_${Date.now()}.${fallbackExt}`;
+  }
+  return /\.[a-z0-9]{2,5}$/i.test(cleaned) ? cleaned : `${cleaned}.${fallbackExt}`;
 }
 
 function formatMediaSizeLabel(bytes: number): string {
@@ -566,7 +580,7 @@ interface ChatAreaProps {
   currentAccountId?: string;
   availableChats?: Chat[];
   hasMoreHistory?: boolean;
-  onLoadOlderMessages?: (chatId: string, offsetId: number) => Promise<{ ok: boolean; count: number; hasMore: boolean; error?: string }>;
+  onLoadOlderMessages?: (chatId: string, offsetId: number) => Promise<{ ok: boolean; count: number; hasMore: boolean; nextOffsetId?: number; error?: string }>;
   onMessagesSynced?: (synced: Message[], meta?: { hasMore?: boolean; readOutboxMaxId?: number; fromLocalFallback?: boolean; chatId?: string; accountId?: string }) => void;
   onOpenKnowledgeEvolution?: () => void;
   onOpenVoiceprintConfig?: () => void;
@@ -964,12 +978,32 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
   } | null>(null);
   const [messageToDelete, setMessageToDelete] = useState<Message | null>(null);
   const [revokeSingleDelete, setRevokeSingleDelete] = useState(true);
+  const [olderCursorOffsetId, setOlderCursorOffsetId] = useState<number | null>(null);
+  const sharedPhotoGalleryCacheRef = useRef<Record<string, Message[]>>({});
+  const activeChatScopeKeyRef = useRef<string>('');
+  activeChatScopeKeyRef.current = `${currentAccountId || 'default'}::${chat?.id || ''}`;
+  const pendingJumpTargetRef = useRef<{
+    scopeKey: string;
+    msgId: string;
+    telegramMessageId?: number;
+  } | null>(null);
+  type LightboxGalleryItem = {
+    type: 'image' | 'video';
+    url: string;
+    rawUrl?: string;
+    caption?: string;
+    msgId: string;
+    message?: Message;
+  };
   const [lightboxMedia, setLightboxMedia] = useState<{
     type: 'image' | 'video';
     url: string;
     rawUrl?: string;
     caption?: string;
     msgId: string;
+    message?: Message;
+    gallery?: LightboxGalleryItem[];
+    galleryIndex?: number;
   } | null>(null);
 
   const [memberProfileModal, setMemberProfileModal] = useState<{
@@ -999,6 +1033,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
   } | null>(null);
 
   useEffect(() => {
+    setOlderCursorOffsetId(null);
     setLightboxMedia(null);
     setMemberProfileModal(null);
     setReadReceiptsModal(null);
@@ -1727,24 +1762,204 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
     }
   };
 
+  const openImageGalleryLightbox = useCallback(
+    (targetMsg: Message, seedList?: Message[]) => {
+      const targetUrl = targetMsg.imageUrl ? resolveDisplayUrl(targetMsg.imageUrl) : undefined;
+      if (!targetUrl) return;
+      const cacheKey = `${currentAccountId || 'default'}::${chat?.id || ''}`;
+      const cachedCloud = sharedPhotoGalleryCacheRef.current[cacheKey] || [];
+      const buildGalleryItems = (sourceLists: Message[][]) => {
+        const dedup = new Map<string, Message>();
+        for (const list of sourceLists) {
+          for (const item of list) {
+            if (
+              !item ||
+              !item.imageUrl ||
+              (item.isVideo && !item.isImage) ||
+              isMessageDeleted(item.id, currentAccountId, item.chatId || chat?.id)
+            ) {
+              continue;
+            }
+            const key =
+              typeof item.telegramMessageId === 'number' && item.telegramMessageId > 0
+                ? `tg_${item.telegramMessageId}`
+                : item.id;
+            if (!dedup.has(key)) dedup.set(key, item);
+          }
+        }
+        const sorted = Array.from(dedup.values()).sort((a, b) => {
+          if (
+            typeof a.telegramMessageId === 'number' &&
+            a.telegramMessageId > 0 &&
+            typeof b.telegramMessageId === 'number' &&
+            b.telegramMessageId > 0
+          ) {
+            return a.telegramMessageId - b.telegramMessageId;
+          }
+          return (a.createdAt || 0) - (b.createdAt || 0);
+        });
+        return sorted
+          .map((m) => {
+            const safeUrl = m.imageUrl ? resolveDisplayUrl(m.imageUrl) : undefined;
+            if (!safeUrl) return null;
+            return {
+              type: 'image' as const,
+              url: safeUrl,
+              rawUrl: m.imageUrl,
+              caption: m.text?.trim() && !isSystemMediaPlaceholder(m.text, m) ? m.text : m.imageCaption,
+              msgId: m.id,
+              message: m,
+            };
+          })
+          .filter(Boolean) as LightboxGalleryItem[];
+      };
+
+      const initialGallery = buildGalleryItems([seedList || [], cachedCloud, messages, [targetMsg]]);
+      const initialIndex = Math.max(
+        0,
+        initialGallery.findIndex(
+          (g) =>
+            g.msgId === targetMsg.id ||
+            (typeof targetMsg.telegramMessageId === 'number' &&
+              g.message?.telegramMessageId === targetMsg.telegramMessageId)
+        )
+      );
+      const currentItem = initialGallery[initialIndex];
+      setLightboxMedia({
+        type: 'image',
+        url: currentItem?.url || targetUrl,
+        rawUrl: currentItem?.rawUrl || targetMsg.imageUrl,
+        caption: currentItem?.caption || targetMsg.imageCaption,
+        msgId: currentItem?.msgId || targetMsg.id,
+        message: currentItem?.message || targetMsg,
+        gallery: initialGallery,
+        galleryIndex: initialIndex,
+      });
+
+      if (
+        chat?.id?.startsWith('tg_') &&
+        currentAccountId !== 'acc_telegram_bot' &&
+        !(cacheKey in sharedPhotoGalleryCacheRef.current)
+      ) {
+        const targetChatId = chat.id;
+        const targetAccountId = currentAccountId;
+        const targetScopeKey = cacheKey;
+        void (async () => {
+          const collected: Message[] = [];
+          let nextOff: number | undefined = undefined;
+          for (let page = 0; page < 4; page += 1) {
+            if (activeChatScopeKeyRef.current !== targetScopeKey) return;
+            const res = await fetchTelegramSharedMediaApi(targetChatId, targetAccountId, {
+              type: 'media',
+              limit: 80,
+              offsetId: nextOff,
+            });
+            if (!res.ok || res.items.length === 0) break;
+            collected.push(...res.items);
+            if (!res.hasMore || !res.nextOffsetId || (nextOff !== undefined && res.nextOffsetId >= nextOff)) break;
+            nextOff = res.nextOffsetId;
+          }
+          if (activeChatScopeKeyRef.current !== targetScopeKey) return;
+          sharedPhotoGalleryCacheRef.current[targetScopeKey] = collected;
+          if (collected.length === 0) return;
+          setLightboxMedia((cur) => {
+            if (!cur || cur.type !== 'image' || activeChatScopeKeyRef.current !== targetScopeKey) {
+              return cur;
+            }
+            const expandedGallery = buildGalleryItems([
+              seedList || [],
+              collected,
+              messages,
+              cur.message ? [cur.message] : [],
+            ]);
+            if (expandedGallery.length <= 1) return cur;
+            const nextIdx = Math.max(
+              0,
+              expandedGallery.findIndex(
+                (g) =>
+                  g.msgId === cur.msgId ||
+                  (typeof cur.message?.telegramMessageId === 'number' &&
+                    g.message?.telegramMessageId === cur.message.telegramMessageId)
+              )
+            );
+            return {
+              ...cur,
+              gallery: expandedGallery,
+              galleryIndex: nextIdx,
+            };
+          });
+        })();
+      }
+    },
+    [chat?.id, currentAccountId, messages]
+  );
+
+  const navigateLightboxGallery = useCallback((delta: number) => {
+    setLightboxMedia((cur) => {
+      if (!cur || !cur.gallery || cur.gallery.length <= 1) return cur;
+      const curIdx = typeof cur.galleryIndex === 'number' ? cur.galleryIndex : 0;
+      const nextIdx = (curIdx + delta + cur.gallery.length) % cur.gallery.length;
+      const target = cur.gallery[nextIdx];
+      if (!target) return cur;
+      const refreshedUrl = (target.rawUrl ? resolveDisplayUrl(target.rawUrl) : undefined) || target.url;
+      return {
+        ...cur,
+        type: target.type,
+        url: refreshedUrl,
+        rawUrl: target.rawUrl,
+        caption: target.caption,
+        msgId: target.msgId,
+        message: target.message,
+        galleryIndex: nextIdx,
+      };
+    });
+  }, []);
+
   const handleLoadOlderClick = async () => {
     if (!chat?.id || !onLoadOlderMessages || isLoadingOlder) return;
-    const tgIds = messages
-      .map((m) => m.telegramMessageId)
-      .filter((id): id is number => typeof id === 'number' && id > 0);
-    const minTgId = tgIds.length > 0 ? Math.min(...tgIds) : 0;
     const viewport = scrollViewportRef.current;
     const prevHeight = viewport?.scrollHeight || 0;
     const prevTop = viewport?.scrollTop || 0;
     suppressAutoScrollRef.current = true;
     setIsLoadingOlder(true);
     try {
-      const res = await onLoadOlderMessages(chat.id, minTgId);
-      if (!res.ok) {
-        showSyncNotice(`加载历史消息失败：${res.error || '请检查网络连接'}`);
+      const tgIds = messages
+        .map((m) => m.telegramMessageId)
+        .filter((id): id is number => typeof id === 'number' && id > 0);
+      const minLoadedTgId = tgIds.length > 0 ? Math.min(...tgIds) : 0;
+      let cursor =
+        olderCursorOffsetId && minLoadedTgId > 0
+          ? Math.min(olderCursorOffsetId, minLoadedTgId)
+          : olderCursorOffsetId || minLoadedTgId;
+
+      let totalLoaded = 0;
+      let lastRes: { ok: boolean; count: number; hasMore: boolean; nextOffsetId?: number; error?: string } = {
+        ok: true,
+        count: 0,
+        hasMore: false,
+      };
+      // 若当前页全为不可见服务消息导致 count=0 且后端仍有更早消息，自动跳过空页最多连续翻 3 次
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        const prevCursor = cursor;
+        lastRes = await onLoadOlderMessages(chat.id, cursor);
+        if (!lastRes.ok) break;
+        if (lastRes.nextOffsetId) {
+          if (prevCursor > 0 && lastRes.nextOffsetId >= prevCursor) {
+            break;
+          }
+          setOlderCursorOffsetId(lastRes.nextOffsetId);
+          cursor = lastRes.nextOffsetId;
+        }
+        totalLoaded += lastRes.count;
+        if (lastRes.count > 0 || !lastRes.hasMore || !lastRes.nextOffsetId) {
+          break;
+        }
+      }
+      if (!lastRes.ok) {
+        showSyncNotice(`加载历史消息失败：${lastRes.error || '请检查网络连接'}`);
         return;
       }
-      if (res.count === 0) {
+      if (totalLoaded === 0 && !lastRes.hasMore) {
         showSyncNotice('已到达对话最早历史记录', 2500);
         return;
       }
@@ -2027,6 +2242,19 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
         }
       }
 
+      if (lightboxMedia && lightboxMedia.gallery && lightboxMedia.gallery.length > 1) {
+        if (e.key === 'ArrowLeft') {
+          e.preventDefault();
+          navigateLightboxGallery(-1);
+          return;
+        }
+        if (e.key === 'ArrowRight') {
+          e.preventDefault();
+          navigateLightboxGallery(1);
+          return;
+        }
+      }
+
       if (e.key === 'Escape') {
         if (lightboxMedia) {
           e.preventDefault();
@@ -2176,18 +2404,92 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
       setCloudSearchResults(null);
     }
 
+    const targetScopeKey = `${currentAccountId || 'default'}::${chat?.id || ''}`;
     requestAnimationFrame(() => {
       setTimeout(() => {
         const targetEl = scrollViewportRef.current?.querySelector(
           `[data-msg-id="${CSS.escape(matched.id)}"]`
         ) as HTMLElement | null;
         if (targetEl) {
+          pendingJumpTargetRef.current = null;
+          isNearBottomRef.current = false;
+          suppressAutoScrollRef.current = true;
           targetEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
           setHighlightedMsgId(matched.id);
           setTimeout(
             () => setHighlightedMsgId((cur) => (cur === matched.id ? null : cur)),
             2000
           );
+          setTimeout(() => {
+            suppressAutoScrollRef.current = false;
+          }, 350);
+        } else if (
+          chat?.id?.startsWith('tg_') &&
+          currentAccountId !== 'acc_telegram_bot' &&
+          onLoadOlderMessages &&
+          typeof targetMsg.telegramMessageId === 'number' &&
+          targetMsg.telegramMessageId > 0 &&
+          !isLoadingOlder
+        ) {
+          pendingJumpTargetRef.current = {
+            scopeKey: targetScopeKey,
+            msgId: matched.id,
+            telegramMessageId: targetMsg.telegramMessageId,
+          };
+          void (async () => {
+            suppressAutoScrollRef.current = true;
+            setIsLoadingOlder(true);
+            showSyncNotice('正在定位更早的历史消息...', 2500);
+            try {
+              const tgIds = messages
+                .map((m) => m.telegramMessageId)
+                .filter((id): id is number => typeof id === 'number' && id > 0);
+              const minLoadedTgId = tgIds.length > 0 ? Math.min(...tgIds) : 0;
+              let cursor =
+                olderCursorOffsetId && minLoadedTgId > 0
+                  ? Math.min(olderCursorOffsetId, minLoadedTgId)
+                  : olderCursorOffsetId || minLoadedTgId;
+              for (let page = 0; page < 6; page += 1) {
+                if (
+                  activeChatScopeKeyRef.current !== targetScopeKey ||
+                  !pendingJumpTargetRef.current
+                ) {
+                  break;
+                }
+                const prevCursor = cursor;
+                const res = await onLoadOlderMessages(chat.id, cursor);
+                if (!res.ok) break;
+                if (res.nextOffsetId) {
+                  setOlderCursorOffsetId(res.nextOffsetId);
+                  cursor = res.nextOffsetId;
+                }
+                if (
+                  !res.hasMore ||
+                  !res.nextOffsetId ||
+                  (prevCursor > 0 && res.nextOffsetId >= prevCursor) ||
+                  res.nextOffsetId <= targetMsg.telegramMessageId!
+                ) {
+                  break;
+                }
+              }
+            } finally {
+              setIsLoadingOlder(false);
+              if (activeChatScopeKeyRef.current !== targetScopeKey) {
+                if (pendingJumpTargetRef.current?.scopeKey === targetScopeKey) {
+                  pendingJumpTargetRef.current = null;
+                }
+                suppressAutoScrollRef.current = false;
+              } else {
+                setTimeout(() => {
+                  if (pendingJumpTargetRef.current?.scopeKey === targetScopeKey) {
+                    pendingJumpTargetRef.current = null;
+                    suppressAutoScrollRef.current = false;
+                    showSyncNotice('该历史消息距离当前过远，可继续点击顶部“加载更早历史消息”', 3000);
+                  }
+                }, 220);
+              }
+            }
+          })();
         } else {
           showSyncNotice('该消息暂未加载到当前窗口，可点击顶部“加载更早历史消息”后重试', 3000);
         }
@@ -2196,6 +2498,36 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
   };
 
   useEffect(() => {
+    const pending = pendingJumpTargetRef.current;
+    const scopeKey = `${currentAccountId || 'default'}::${chat?.id || ''}`;
+    if (pending && pending.scopeKey === scopeKey) {
+      const matched = messages.find(
+        (m) =>
+          m.id === pending.msgId ||
+          (typeof pending.telegramMessageId === 'number' &&
+            m.telegramMessageId === pending.telegramMessageId)
+      );
+      if (matched) {
+        requestAnimationFrame(() => {
+          const targetEl = scrollViewportRef.current?.querySelector(
+            `[data-msg-id="${CSS.escape(matched.id)}"]`
+          ) as HTMLElement | null;
+          if (targetEl) {
+            pendingJumpTargetRef.current = null;
+            isNearBottomRef.current = false;
+            targetEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            setHighlightedMsgId(matched.id);
+            setTimeout(
+              () => setHighlightedMsgId((cur) => (cur === matched.id ? null : cur)),
+              2000
+            );
+            setTimeout(() => {
+              suppressAutoScrollRef.current = false;
+            }, 350);
+          }
+        });
+      }
+    }
     const currentId = chat?.id || null;
     const chatChanged = prevChatIdForScrollRef.current !== currentId;
     const appended = messages.length > prevMsgCountRef.current;
@@ -2205,7 +2537,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
     if (chatChanged || appended) {
       scrollToBottom();
     }
-  }, [chat?.id, messages]);
+  }, [chat?.id, currentAccountId, messages]);
 
   // Keep viewport anchored at bottom when window shrinks/resizes if user was already near bottom
   useEffect(() => {
@@ -2242,6 +2574,9 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
     setReplyingTo(null);
     setEditingMessage(null);
     setTranslateOnEdit(false);
+    setOlderCursorOffsetId(null);
+    pendingJumpTargetRef.current = null;
+    suppressAutoScrollRef.current = false;
     clearPastedImage(true);
     if (syncNoticeTimerRef.current) {
       clearTimeout(syncNoticeTimerRef.current);
@@ -4383,6 +4718,18 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
         onScroll={(e) => {
           const el = e.currentTarget;
           isNearBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight <= 72;
+          if (
+            el.scrollHeight > el.clientHeight + 40 &&
+            el.scrollTop <= 80 &&
+            chat.id.startsWith('tg_') &&
+            currentAccountId !== 'acc_telegram_bot' &&
+            hasMoreHistory &&
+            cloudSearchResults === null &&
+            !isLoadingOlder &&
+            onLoadOlderMessages
+          ) {
+            void handleLoadOlderClick();
+          }
         }}
         className="flex-1 min-h-0 min-w-0 overflow-y-auto overflow-x-hidden px-3.5 py-2.5 space-y-1.5 tg-chat-pattern select-text"
       >
@@ -4813,13 +5160,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                           if (isMultiSelectMode) return;
                           e.preventDefault();
                           e.stopPropagation();
-                          setLightboxMedia({
-                            type: 'image',
-                            url: safeImageHref,
-                            rawUrl: msg.imageUrl,
-                            caption: hasVisibleImageCaption ? msg.text : msg.imageCaption,
-                            msgId: msg.id,
-                          });
+                          openImageGalleryLightbox(msg);
                         }}
                         className="w-full h-auto object-cover max-h-72 cursor-pointer hover:opacity-95 transition-opacity rounded-[9px]"
                         onLoad={(e) => {
@@ -4835,13 +5176,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                           type="button"
                           onClick={(e) => {
                             e.stopPropagation();
-                            setLightboxMedia({
-                              type: 'image',
-                              url: safeImageHref,
-                              rawUrl: msg.imageUrl,
-                              caption: hasVisibleImageCaption ? msg.text : msg.imageCaption,
-                              msgId: msg.id,
-                            });
+                            openImageGalleryLightbox(msg);
                           }}
                           title="全屏查看大图"
                           className="p-1 hover:bg-white/20 rounded-md cursor-pointer transition-colors"
@@ -4865,7 +5200,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                         </button>
                         <a
                           href={safeImageHref}
-                          download={msg.imageCaption || `tg_photo_${Date.now()}.png`}
+                          download={buildSafeMediaDownloadName(msg.imageCaption, 'tg_photo', 'png')}
                           onClick={(e) => {
                             e.stopPropagation();
                             const resolved = resolveDisplayUrl(msg.imageUrl);
@@ -4880,7 +5215,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                                 if (!safeDownloadHref) return;
                                 const a = document.createElement('a');
                                 a.href = safeDownloadHref;
-                                a.download = msg.imageCaption || `tg_photo_${Date.now()}.png`;
+                                a.download = buildSafeMediaDownloadName(msg.imageCaption, 'tg_photo', 'png');
                                 document.body.appendChild(a);
                                 a.click();
                                 document.body.removeChild(a);
@@ -6274,7 +6609,17 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
         chat={chat}
         accountId={currentAccountId}
         messages={messages}
-        onClearHistory={onClearHistory}
+        onClearHistory={
+          onClearHistory
+            ? async (targetChatId, options) => {
+                const res = await onClearHistory(targetChatId, options);
+                if (!res || res.ok !== false) {
+                  delete sharedPhotoGalleryCacheRef.current[`${currentAccountId || 'default'}::${targetChatId}`];
+                }
+                return res;
+              }
+            : undefined
+        }
         onToggleMute={onToggleMuteChat}
         onTogglePin={onTogglePinChat}
         onUpdateTitle={onUpdateChatTitle}
@@ -6282,6 +6627,9 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
         onAddContact={onAddContact}
         onRemoveContact={onRemoveContact}
         onRefreshMediaUrls={onRefreshMediaUrls}
+        onOpenMediaPreview={(targetMsg, allMedia) => {
+          openImageGalleryLightbox(targetMsg, allMedia);
+        }}
         onJumpToMessage={handleJumpToMessage}
         onSelectMember={(member) => {
           void handleOpenGroupMemberProfile({
@@ -7461,8 +7809,11 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
         )}
 
       {/* Fullscreen Image & Video Lightbox Preview Modal */}
-      {lightboxMedia &&
-        createPortal(
+      {lightboxMedia && (() => {
+        const effectiveLightboxUrl =
+          (lightboxMedia.rawUrl ? resolveDisplayUrl(lightboxMedia.rawUrl) : undefined) ||
+          lightboxMedia.url;
+        return createPortal(
           <div
             className="fixed inset-0 z-[80] bg-black/90 backdrop-blur-xs flex flex-col items-center justify-center p-4 sm:p-8 select-none animate-in fade-in duration-150"
             onClick={() => setLightboxMedia(null)}
@@ -7472,14 +7823,39 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
               className="w-full max-w-6xl flex items-center justify-between gap-3 mb-3 text-white shrink-0"
               onClick={(e) => e.stopPropagation()}
             >
-              <div className="text-xs text-white/80 truncate">
-                {lightboxMedia.caption || (lightboxMedia.type === 'video' ? '视频全屏预览' : '图片全屏预览')}
+              <div className="flex items-center gap-2 min-w-0">
+                {lightboxMedia.gallery && lightboxMedia.gallery.length > 1 && (
+                  <span className="px-2 py-0.5 rounded-md bg-white/15 text-[11px] font-medium tabular-nums shrink-0">
+                    {(lightboxMedia.galleryIndex ?? 0) + 1} / {lightboxMedia.gallery.length}
+                  </span>
+                )}
+                <span className="text-xs text-white/80 truncate">
+                  {lightboxMedia.caption || (lightboxMedia.type === 'video' ? '视频全屏预览' : '图片全屏预览')}
+                </span>
               </div>
               <div className="flex items-center gap-2 shrink-0">
+                {lightboxMedia.message && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const target = lightboxMedia.message;
+                      setLightboxMedia(null);
+                      if (target) {
+                        setChatInfoOpen(false);
+                        handleJumpToMessage(target);
+                      }
+                    }}
+                    className="px-2.5 py-1.5 rounded-lg bg-white/10 hover:bg-white/20 text-xs flex items-center gap-1.5 cursor-pointer transition-colors"
+                    title="定位到聊天中的该消息"
+                  >
+                    <Reply className="w-3.5 h-3.5" />
+                    <span>定位消息</span>
+                  </button>
+                )}
                 {lightboxMedia.type === 'image' && (
                   <button
                     type="button"
-                    onClick={() => copyImageToClipboard(lightboxMedia.url, lightboxMedia.msgId)}
+                    onClick={() => copyImageToClipboard(effectiveLightboxUrl, lightboxMedia.msgId)}
                     className="px-2.5 py-1.5 rounded-lg bg-white/10 hover:bg-white/20 text-xs flex items-center gap-1.5 cursor-pointer transition-colors"
                     title="复制照片到剪贴板"
                   >
@@ -7491,19 +7867,38 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                     <span>{copiedId === lightboxMedia.msgId ? '已复制' : '复制'}</span>
                   </button>
                 )}
-                <a
-                  href={lightboxMedia.url}
-                  download={
+                {(() => {
+                  const safeDownloadName =
                     lightboxMedia.type === 'video'
                       ? `tg_video_${Date.now()}.mp4`
-                      : lightboxMedia.caption || `tg_photo_${Date.now()}.png`
-                  }
-                  className="px-2.5 py-1.5 rounded-lg bg-white/10 hover:bg-white/20 text-xs flex items-center gap-1.5 cursor-pointer transition-colors"
-                  title="保存原文件"
-                >
-                  <Download className="w-3.5 h-3.5" />
-                  <span>保存</span>
-                </a>
+                      : buildSafeMediaDownloadName(lightboxMedia.caption, 'tg_photo', 'png');
+                  return (
+                    <a
+                      href={effectiveLightboxUrl}
+                      download={safeDownloadName}
+                      onClick={(e) => {
+                        if (lightboxMedia.rawUrl && isSignedResourceUrlExpiringSoon(effectiveLightboxUrl)) {
+                          e.preventDefault();
+                          void triggerSilentUrlRefresh(lightboxMedia.rawUrl, true).then((nextUrl) => {
+                            const downloadHref = sanitizeSafeResourceUrl(nextUrl) || effectiveLightboxUrl;
+                            if (!downloadHref) return;
+                            const a = document.createElement('a');
+                            a.href = downloadHref;
+                            a.download = safeDownloadName;
+                            document.body.appendChild(a);
+                            a.click();
+                            document.body.removeChild(a);
+                          });
+                        }
+                      }}
+                      className="px-2.5 py-1.5 rounded-lg bg-white/10 hover:bg-white/20 text-xs flex items-center gap-1.5 cursor-pointer transition-colors"
+                      title="保存原文件"
+                    >
+                      <Download className="w-3.5 h-3.5" />
+                      <span>保存</span>
+                    </a>
+                  );
+                })()}
                 <button
                   type="button"
                   onClick={() => setLightboxMedia(null)}
@@ -7518,7 +7913,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
 
             {/* Main Centered Media Stage */}
             <div
-              className="flex-1 w-full flex items-center justify-center min-h-0"
+              className="relative flex-1 w-full flex items-center justify-center min-h-0"
               onClick={(e) => {
                 if (e.target === e.currentTarget) {
                   setLightboxMedia(null);
@@ -7527,9 +7922,37 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                 }
               }}
             >
+              {lightboxMedia.gallery && lightboxMedia.gallery.length > 1 && (
+                <>
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      navigateLightboxGallery(-1);
+                    }}
+                    title="上一张 (←)"
+                    aria-label="上一张图片"
+                    className="absolute left-2 sm:left-4 z-10 p-2.5 rounded-full bg-black/55 hover:bg-black/80 text-white border border-white/15 cursor-pointer transition-colors"
+                  >
+                    <ChevronLeft className="w-5 h-5" />
+                  </button>
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      navigateLightboxGallery(1);
+                    }}
+                    title="下一张 (→)"
+                    aria-label="下一张图片"
+                    className="absolute right-2 sm:right-4 z-10 p-2.5 rounded-full bg-black/55 hover:bg-black/80 text-white border border-white/15 cursor-pointer transition-colors"
+                  >
+                    <ChevronRight className="w-5 h-5" />
+                  </button>
+                </>
+              )}
               {lightboxMedia.type === 'image' ? (
                 <img
-                  src={lightboxMedia.url}
+                  src={effectiveLightboxUrl}
                   alt={lightboxMedia.caption || 'fullscreen image'}
                   onClick={() => setLightboxMedia(null)}
                   onError={() => {
@@ -7541,7 +7964,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                 />
               ) : (
                 <video
-                  src={lightboxMedia.url}
+                  src={effectiveLightboxUrl}
                   controls
                   autoPlay
                   onError={() => {
@@ -7555,7 +7978,8 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
             </div>
           </div>,
           document.body
-        )}
+        );
+      })()}
     </div>
   );
 };

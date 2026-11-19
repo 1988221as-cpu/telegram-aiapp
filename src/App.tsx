@@ -2371,32 +2371,31 @@ export default function App() {
       void hydrateBucketPendingMedia(targetAccId, targetChatId);
     }
 
-    if (!localMsgs || localMsgs.length === 0 || targetAccId === 'acc_telegram_bot') {
-      fetchMessagesFromDb(targetChatId, targetAccId, { limit: 60 }).then((cloudMsgs) => {
-        if (isMounted && cloudMsgs && cloudMsgs.length > 0) {
-          const callMsgsInDb = cloudMsgs.filter((m: any) => Boolean(m?.isCall));
-          if (callMsgsInDb.length > 0 && targetAccId === activeAccountIdRef.current) {
-            setCallRecords((prev) =>
-              mergeCallMessagesIntoCallRecords(prev, callMsgsInDb, chatsRef.current, targetAccId)
-            );
-          }
-          setChatHasMoreMap((prev) => ({
-            ...prev,
-            [bucketKey]: prev[bucketKey] ?? cloudMsgs.length >= 60,
-          }));
-          setMessagesMap((prev) => {
-            const base = getBucketMessages(prev, targetAccId, targetChatId);
-            const merged = mergeCloudMessagesWithLocal(
-              base.length > 0 ? base : getLocalMessages(targetChatId, targetAccId),
-              cloudMsgs,
-              { accountId: targetAccId, chatId: targetChatId }
-            );
-            return { ...prev, [bucketKey]: merged };
-          });
-          void hydrateBucketPendingMedia(targetAccId, targetChatId);
+    // 即使本地缓存有最近消息，也补充合并 SQLite 中已同步过的更早历史记录
+    fetchMessagesFromDb(targetChatId, targetAccId, { limit: 150 }).then((cloudMsgs) => {
+      if (isMounted && cloudMsgs && cloudMsgs.length > 0) {
+        const callMsgsInDb = cloudMsgs.filter((m: any) => Boolean(m?.isCall));
+        if (callMsgsInDb.length > 0 && targetAccId === activeAccountIdRef.current) {
+          setCallRecords((prev) =>
+            mergeCallMessagesIntoCallRecords(prev, callMsgsInDb, chatsRef.current, targetAccId)
+          );
         }
-      }).catch(() => {});
-    }
+        setChatHasMoreMap((prev) => ({
+          ...prev,
+          [bucketKey]: prev[bucketKey] ?? cloudMsgs.length >= 150,
+        }));
+        setMessagesMap((prev) => {
+          const base = getBucketMessages(prev, targetAccId, targetChatId);
+          const merged = mergeCloudMessagesWithLocal(
+            base.length > 0 ? base : getLocalMessages(targetChatId, targetAccId),
+            cloudMsgs,
+            { preserveAllLocal: true, accountId: targetAccId, chatId: targetChatId }
+          );
+          return { ...prev, [bucketKey]: merged };
+        });
+        void hydrateBucketPendingMedia(targetAccId, targetChatId);
+      }
+    }).catch(() => {});
 
     if (targetChatId.startsWith('tg_') && targetAccId !== 'acc_telegram_bot') {
       fetchTelegramCloudMessagesApi(targetChatId, targetAccId, { limit: 40 }).then((cloudRes) => {
@@ -4789,7 +4788,7 @@ export default function App() {
   const handleLoadOlderMessages = async (
     chatId: string,
     offsetId: number
-  ): Promise<{ ok: boolean; count: number; hasMore: boolean; error?: string }> => {
+  ): Promise<{ ok: boolean; count: number; hasMore: boolean; nextOffsetId?: number; error?: string }> => {
     const targetAccountId = activeAccountId;
     const bucketKey = msgBucketKey(targetAccountId, chatId);
     const currentMsgs = getBucketMessages(messagesMapRef.current, targetAccountId, chatId);
@@ -4849,7 +4848,10 @@ export default function App() {
       return { ok: false, count: 0, hasMore: false, error: res.error };
     }
     if (res.messages.length === 0) {
-      return await loadSqliteOlderFallback();
+      const sqliteFallback = await loadSqliteOlderFallback();
+      if (sqliteFallback.count > 0) return sqliteFallback;
+      setChatHasMoreMap((prev) => ({ ...prev, [bucketKey]: res.hasMore }));
+      return { ok: true, count: 0, hasMore: res.hasMore, nextOffsetId: res.nextOffsetId };
     }
     setChatHasMoreMap((prev) => ({ ...prev, [bucketKey]: res.hasMore }));
     setMessagesMap((prev) => {
@@ -4861,7 +4863,7 @@ export default function App() {
       });
       return { ...prev, [bucketKey]: merged };
     });
-    return { ok: true, count: res.messages.length, hasMore: res.hasMore };
+    return { ok: true, count: res.messages.length, hasMore: res.hasMore, nextOffsetId: res.nextOffsetId };
   };
 
   const handleEditMessage = async (

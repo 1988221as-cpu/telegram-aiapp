@@ -31,7 +31,7 @@ import {
 
 declare const __APP_VERSION__: string | undefined;
 export const APP_VERSION =
-  typeof __APP_VERSION__ !== 'undefined' && __APP_VERSION__ ? __APP_VERSION__ : '1.2.2';
+  typeof __APP_VERSION__ !== 'undefined' && __APP_VERSION__ ? __APP_VERSION__ : '1.2.3';
 
 // ==================== SESSION TOKEN & TENANT AUTHENTICATION HELPERS ====================
 
@@ -3720,6 +3720,7 @@ export async function fetchTelegramCloudMessagesApi(
   ok: boolean;
   messages: Message[];
   hasMore: boolean;
+  nextOffsetId?: number;
   readOutboxMaxId?: number;
   fromLocalFallback?: boolean;
   error?: string;
@@ -3747,6 +3748,7 @@ export async function fetchTelegramCloudMessagesApi(
         ok: true,
         messages: data.messages,
         hasMore: Boolean(data.hasMore),
+        nextOffsetId: typeof data.nextOffsetId === 'number' ? data.nextOffsetId : undefined,
         fromLocalFallback: Boolean(data.fromLocalFallback),
         readOutboxMaxId: typeof data.readOutboxMaxId === 'number' ? data.readOutboxMaxId : undefined,
       };
@@ -3762,6 +3764,59 @@ export async function fetchTelegramCloudMessagesApi(
   } catch (err: any) {
     console.warn('[Sync Cloud Messages Error]:', err);
     return { ok: false, messages: [], hasMore: false, error: err?.message || '网络连接异常' };
+  }
+}
+
+export type TelegramSharedMediaType = 'media' | 'files' | 'voice' | 'links';
+
+export async function fetchTelegramSharedMediaApi(
+  chatId: string,
+  accountId?: string,
+  options?: { type?: TelegramSharedMediaType; limit?: number; offsetId?: number }
+): Promise<{
+  ok: boolean;
+  items: Message[];
+  hasMore: boolean;
+  nextOffsetId?: number;
+  totalCount?: number;
+  fromLocalFallback?: boolean;
+  error?: string;
+}> {
+  try {
+    const query = new URLSearchParams();
+    query.set('type', options?.type || 'media');
+    query.set('limit', String(options?.limit || 60));
+    if (options?.offsetId && options.offsetId > 0) {
+      query.set('offsetId', String(options.offsetId));
+    }
+    const res = await fetchWithTimeout(
+      `/api/telegram/user/shared-media/${encodeURIComponent(chatId)}?${query.toString()}`,
+      {
+        headers: getAuthHeaders(accountId),
+      },
+      20000
+    );
+    const data = await res.json().catch(() => ({}));
+    if (res.ok && data?.ok && Array.isArray(data.items)) {
+      return {
+        ok: true,
+        items: data.items,
+        hasMore: Boolean(data.hasMore),
+        nextOffsetId: typeof data.nextOffsetId === 'number' ? data.nextOffsetId : undefined,
+        totalCount: typeof data.totalCount === 'number' ? data.totalCount : undefined,
+        fromLocalFallback: Boolean(data.fromLocalFallback),
+      };
+    }
+    return {
+      ok: false,
+      items: [],
+      hasMore: false,
+      fromLocalFallback: Boolean(data?.fromLocalFallback),
+      error: data?.error || data?.message || `拉取共享媒体失败 (HTTP ${res.status})`,
+    };
+  } catch (err: any) {
+    console.warn('[Sync Shared Media Error]:', err);
+    return { ok: false, items: [], hasMore: false, error: err?.message || '网络连接异常' };
   }
 }
 

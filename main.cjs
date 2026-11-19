@@ -121,8 +121,15 @@ function getOrCreateMasterKeyBytes() {
 
 function isAuthorizedCryptoIpcEvent(event) {
   try {
-    const url = event?.senderFrame?.url || event?.sender?.getURL?.() || '';
-    return url.startsWith(`http://127.0.0.1:${FIXED_APP_PORT}`) || url.startsWith(`http://localhost:${FIXED_APP_PORT}`);
+    const rawUrl = event?.senderFrame?.url || event?.sender?.getURL?.() || '';
+    const parsed = new URL(rawUrl);
+    return (
+      parsed.protocol === 'http:' &&
+      !parsed.username &&
+      !parsed.password &&
+      parsed.port === String(FIXED_APP_PORT) &&
+      (parsed.hostname === '127.0.0.1' || parsed.hostname === 'localhost')
+    );
   } catch {
     return false;
   }
@@ -617,6 +624,29 @@ async function createWindow() {
       shell.openExternal(url).catch((err) => writeLog('warn', `Failed to open external URL ${url}: ${err.message}`));
     }
     return { action: 'deny' };
+  });
+
+  // Restrict top-level navigation strictly to local app origin or built-in splash/error data pages
+  mainWindow.webContents.on('will-navigate', (event, url) => {
+    if (typeof url === 'string' && url.startsWith('data:text/html')) {
+      return;
+    }
+    try {
+      const parsed = new URL(url);
+      const isLocalApp =
+        parsed.protocol === 'http:' &&
+        !parsed.username &&
+        !parsed.password &&
+        parsed.port === String(FIXED_APP_PORT) &&
+        (parsed.hostname === '127.0.0.1' || parsed.hostname === 'localhost');
+      if (isLocalApp) return;
+      event.preventDefault();
+      if (parsed.protocol === 'http:' || parsed.protocol === 'https:') {
+        shell.openExternal(url).catch((err) => writeLog('warn', `Failed to open external URL ${url}: ${err.message}`));
+      }
+    } catch {
+      event.preventDefault();
+    }
   });
 
   // Ensure fixed port 38271 and start

@@ -3778,12 +3778,15 @@ export function resignTelegramResourceUrl(
 
 app.post('/api/telegram/resource/refresh-url', requireTenantAuth, (req: Request, res: Response) => {
   try {
+    const scope = resolveScopedAccountFromRequest(req, { allowBot: true });
+    if (!scope.ok) {
+      return res.status(scope.status).json({ ok: false, code: scope.code, error: scope.error });
+    }
     const authContext = (req as any).auth;
     const isMaster = Boolean(authContext?.session?.isMaster);
-    const requestedAcc = String((req.body?.accountId as string) || (req.headers['x-account-id'] as string) || '').trim();
-    const effectiveAccountId = requestedAcc || authContext?.effectiveAccountId || '';
+    const effectiveAccountId = scope.accountId;
     const accVariants = effectiveAccountId ? getScopedAccountIdVariants(effectiveAccountId) : [];
-    const enforceAccountMatch = !isMaster || Boolean(requestedAcc);
+    const enforceAccountMatch = !isMaster || scope.isExplicit;
 
     const inputUrls: string[] = [];
     if (typeof req.body?.url === 'string' && req.body.url.trim()) {
@@ -5597,6 +5600,25 @@ app.post('/api/auth/proxy', async (req: Request, res: Response) => {
   if (!isAllowedClientOrigin(req)) {
     return res.status(403).json({ ok: false, error: 'Forbidden: Invalid request origin' });
   }
+  const hasActiveAuthState =
+    Boolean(lastActiveUserJwt) ||
+    connectedUserClients.size > 0 ||
+    activeUserClients.size > 0 ||
+    activeQrSessions.size > 0;
+  if (hasActiveAuthState) {
+    const bearer = extractBearerToken(req);
+    const verified =
+      bearer && !isJwtTokenRevoked(bearer)
+        ? verifyJwtTokenWithReason(bearer, getActiveJwtVerificationConfig())
+        : { valid: false };
+    if (!verified.valid) {
+      return res.status(401).json({
+        ok: false,
+        code: 'AUTH_SESSION_REQUIRED',
+        error: '当前存在活跃登录会话，修改全局代理请携带有效会员认证令牌',
+      });
+    }
+  }
   try {
     const existing = await loadSystemProxyConfigFromDb();
     const incomingPassword = typeof req.body?.password === 'string' ? req.body.password : undefined;
@@ -5995,6 +6017,11 @@ app.get('/api/admin/users/stats', requireTenantAuth, async (req: Request, res: R
 // 1. Database Status & Metrics (Protected with requireTenantAuth)
 app.get('/api/database/status', requireTenantAuth, async (req: Request, res: Response) => {
   try {
+    const authContext = (req as any).auth;
+    const session = authContext?.session;
+    if (!session || session.isBot || authContext?.isBot || !session.isMaster) {
+      return res.status(403).json({ error: '权限不足：仅主账号会员有权查看系统数据库状态' });
+    }
     const pingResult = await db.ping();
     const msgRes = (await db.prepare('SELECT count(*) as count FROM messages').get()) as any;
     const profileRes = (await db
@@ -6052,8 +6079,8 @@ app.get('/api/database/backup', requireTenantAuth, async (req: Request, res: Res
   try {
     const authContext = (req as any).auth;
     const session = authContext?.session;
-    if (!session || session.isBot || authContext?.isBot) {
-      return res.status(403).json({ error: '权限不足：仅客户端已登录会员有权导出数据库备份' });
+    if (!session || session.isBot || authContext?.isBot || !session.isMaster) {
+      return res.status(403).json({ error: '权限不足：仅主账号会员有权导出数据库备份' });
     }
     const headerPassphrase = typeof req.headers['x-backup-passphrase'] === 'string'
       ? req.headers['x-backup-passphrase']
@@ -6090,8 +6117,8 @@ app.post('/api/database/backup', requireTenantAuth, async (req: Request, res: Re
   try {
     const authContext = (req as any).auth;
     const session = authContext?.session;
-    if (!session || session.isBot || authContext?.isBot) {
-      return res.status(403).json({ error: '权限不足：仅客户端已登录会员有权导出数据库备份' });
+    if (!session || session.isBot || authContext?.isBot || !session.isMaster) {
+      return res.status(403).json({ error: '权限不足：仅主账号会员有权导出数据库备份' });
     }
     const passphrase = typeof req.body?.passphrase === 'string' ? req.body.passphrase : '';
     if (passphrase.length < BACKUP_MIN_PASSPHRASE_LENGTH) {
@@ -6118,8 +6145,8 @@ app.post('/api/database/restore', requireTenantAuth, async (req: Request, res: R
   try {
     const authContext = (req as any).auth;
     const session = authContext?.session;
-    if (!session || session.isBot || authContext?.isBot) {
-      return res.status(403).json({ error: '权限不足：仅客户端已登录会员有权恢复数据库备份' });
+    if (!session || session.isBot || authContext?.isBot || !session.isMaster) {
+      return res.status(403).json({ error: '权限不足：仅主账号会员有权恢复数据库备份' });
     }
 
     const { confirm = false } = req.query;
@@ -6188,8 +6215,8 @@ app.post('/api/database/purge', requireTenantAuth, async (req: Request, res: Res
   try {
     const authContext = (req as any).auth;
     const session = authContext?.session;
-    if (!session || session.isBot || authContext?.isBot) {
-      return res.status(403).json({ error: '权限不足：仅客户端已登录会员有权执行本地数据库粉碎' });
+    if (!session || session.isBot || authContext?.isBot || !session.isMaster) {
+      return res.status(403).json({ error: '权限不足：仅主账号会员有权执行本地数据库粉碎' });
     }
     const { confirm = false } = req.query;
     if (confirm !== 'true' && req.body?.confirm !== true) {
@@ -6495,6 +6522,9 @@ export function resolveScopedAiAccountId(
 ): { ok: true; accountId: string } | { ok: false; status: number; error: string } {
   const authContext = (req as any).auth;
   const session = authContext?.session;
+  if (!session) {
+    return { ok: false, status: 401, error: '未授权访问：缺少有效会话' };
+  }
   const rawRequested =
     typeof req.body?.accountId === 'string' && req.body.accountId.trim()
       ? req.body.accountId.trim()
@@ -6502,7 +6532,7 @@ export function resolveScopedAiAccountId(
       ? req.query.accountId.trim()
       : '';
 
-  if (authContext?.isBot) {
+  if (authContext?.isBot || session.isBot) {
     if (rawRequested && rawRequested !== 'acc_telegram_bot') {
       return { ok: false, status: 403, error: 'Bot 会话禁止跨账号访问其他账号的知识库或人设数据' };
     }
@@ -6510,6 +6540,12 @@ export function resolveScopedAiAccountId(
   }
 
   const effective = String(authContext?.effectiveAccountId || session?.accountId || 'acc_1').trim() || 'acc_1';
+  if (!session.isMaster) {
+    if (rawRequested && rawRequested !== effective) {
+      return { ok: false, status: 403, error: `无权跨账号访问目标账号 (${rawRequested}) 的知识库或进化数据` };
+    }
+    return { ok: true, accountId: effective };
+  }
   if (!rawRequested) {
     return { ok: true, accountId: effective };
   }
@@ -7730,10 +7766,13 @@ app.get('/api/messages/local-media/:fileKey', async (req: Request, res: Response
     const stat = await fs.promises.stat(diskPath);
     const total = stat.size;
     const mime = inferMediaMimeFromExt(diskPath);
+    const isScriptableMime = isScriptableActiveMediaMime(mime);
     res.setHeader('Content-Type', mime);
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('Content-Security-Policy', "default-src 'none'; sandbox");
     res.setHeader('Accept-Ranges', 'bytes');
     res.setHeader('Cache-Control', 'private, max-age=1800');
-    if (req.query.download === '1' || req.query.download === 'true') {
+    if (isScriptableMime || req.query.download === '1' || req.query.download === 'true') {
       res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(path.basename(diskPath))}`);
     }
 
@@ -8950,9 +8989,12 @@ export function applyUploadedMediaToMessagePayload(
 // 3. Relay Message to Telegram & Persist to Unified Conversation Store (supports streaming multipart/form-data & lightweight text JSON)
 app.post('/api/messages', requireTenantAuth, parseMultipartMessageUpload, async (req: Request, res: Response) => {
   try {
-    const authContext = (req as any).auth;
+    const scope = resolveScopedAccountFromRequest(req, { allowBot: true });
+    if (!scope.ok) {
+      return res.status(scope.status).json({ success: false, code: scope.code, error: scope.error });
+    }
     const msgId = req.body?.id || `msg_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
-    const effectiveAccountId = authContext?.effectiveAccountId || req.body?.accountId || 'acc_1';
+    const effectiveAccountId = scope.accountId;
     const uploadedMedia = (req as any).uploadedMedia;
     const { payload: outboundPayload, mediaUrl } = applyUploadedMediaToMessagePayload(
       req.body && typeof req.body === 'object' ? req.body : {},
@@ -9012,8 +9054,12 @@ app.post('/api/messages', requireTenantAuth, parseMultipartMessageUpload, async 
 app.post('/api/messages/:id/retry', requireTenantAuth, parseMultipartMessageUpload, async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
+    const scope = resolveScopedAccountFromRequest(req, { allowBot: true });
+    if (!scope.ok) {
+      return res.status(scope.status).json({ success: false, code: scope.code, error: scope.error });
+    }
     const authContext = (req as any).auth;
-    const effectiveAccountId = authContext?.effectiveAccountId || 'acc_1';
+    const effectiveAccountId = scope.accountId;
     const isMaster = Boolean(authContext?.session?.isMaster);
     const uploadedMedia = (req as any).uploadedMedia;
 
@@ -14666,6 +14712,10 @@ async function convertAudioBufferToWavIfNeeded(inputBuf: Buffer, ext: string): P
 
 app.post('/api/audio/voiceprint-sample', requireTenantAuth, async (req: Request, res: Response) => {
   try {
+    const authContext = (req as any).auth;
+    if (!authContext?.session || authContext.session.isBot || authContext.isBot || !authContext.session.isMaster) {
+      return res.status(403).json({ ok: false, error: '权限不足：仅主账号会员有权上传声纹样本' });
+    }
     const { audioDataUrl, fileName, sampleId: requestedSampleId } = req.body || {};
     if (!audioDataUrl || typeof audioDataUrl !== 'string') {
       return res.status(400).json({ ok: false, error: '请提供有效的音频文件或录音数据' });
@@ -14702,6 +14752,10 @@ app.post('/api/audio/voiceprint-sample', requireTenantAuth, async (req: Request,
 
 app.get('/api/audio/voiceprint-sample/:id', requireTenantAuth, async (req: Request, res: Response) => {
   try {
+    const authContext = (req as any).auth;
+    if (!authContext?.session || authContext.session.isBot || authContext.isBot || !authContext.session.isMaster) {
+      return res.status(403).json({ ok: false, error: '权限不足：仅主账号会员有权读取声纹样本' });
+    }
     const found = findVoiceprintSampleFile(req.params.id);
     if (!found) {
       return res.status(404).json({ ok: false, error: '声纹样本不存在或已被删除' });
@@ -14716,6 +14770,10 @@ app.get('/api/audio/voiceprint-sample/:id', requireTenantAuth, async (req: Reque
 
 app.delete('/api/audio/voiceprint-sample/:id', requireTenantAuth, async (req: Request, res: Response) => {
   try {
+    const authContext = (req as any).auth;
+    if (!authContext?.session || authContext.session.isBot || authContext.isBot || !authContext.session.isMaster) {
+      return res.status(403).json({ ok: false, error: '权限不足：仅主账号会员有权删除声纹样本' });
+    }
     const safeId = sanitizeVoiceprintSampleId(req.params.id);
     if (!safeId) {
       return res.status(400).json({ ok: false, error: '无效的声纹样本 ID' });
@@ -20193,9 +20251,13 @@ app.get('/api/telegram/webhook/status', requireTenantAuth, (_req: Request, res: 
   });
 });
 
-// 14. Telegram Webhook Registration Endpoint (Protected with requireTenantAuth)
+// 14. Telegram Webhook Registration Endpoint (Protected with requireTenantAuth + Master Only)
 app.post('/api/telegram/webhook/register', requireTenantAuth, async (req: Request, res: Response) => {
   try {
+    const authContext = (req as any).auth;
+    if (!authContext?.session?.isMaster || authContext.session.isBot || authContext.isBot) {
+      return res.status(403).json({ ok: false, error: '权限不足：仅主账号会员有权配置 Telegram Bot Webhook' });
+    }
     const targetBotToken = req.body.botToken || process.env.TELEGRAM_BOT_TOKEN;
     if (!targetBotToken) {
       return res.status(400).json({
@@ -20203,6 +20265,10 @@ app.post('/api/telegram/webhook/register', requireTenantAuth, async (req: Reques
         error: 'Missing TELEGRAM_BOT_TOKEN. Please set it in environment variables or provide in request body.',
       });
     }
+    if (typeof targetBotToken !== 'string' || !/^\d{5,}:[A-Za-z0-9_-]{20,}$/.test(targetBotToken.trim())) {
+      return res.status(400).json({ ok: false, error: '无效的 Telegram Bot Token 格式' });
+    }
+    const cleanBotToken = targetBotToken.trim();
 
     // Determine target webhook URL
     let webhookUrl = req.body.webhookUrl || process.env.TELEGRAM_WEBHOOK_URL;
@@ -20215,8 +20281,8 @@ app.post('/api/telegram/webhook/register', requireTenantAuth, async (req: Reques
     // Ensure valid URL syntax
     try {
       const parsed = new URL(webhookUrl);
-      if (!parsed.protocol.startsWith('http')) {
-        return res.status(400).json({ ok: false, error: 'Invalid Webhook URL protocol (must be http or https)' });
+      if ((parsed.protocol !== 'http:' && parsed.protocol !== 'https:') || parsed.username || parsed.password) {
+        return res.status(400).json({ ok: false, error: 'Invalid Webhook URL (must be http/https without embedded credentials)' });
       }
     } catch {
       return res.status(400).json({ ok: false, error: 'Invalid Webhook URL syntax' });
@@ -20236,7 +20302,7 @@ app.post('/api/telegram/webhook/register', requireTenantAuth, async (req: Reques
     }
 
     console.log(`[Telegram Webhook Register] Registering webhook to Telegram API: ${webhookUrl} (dropPending: ${dropPendingUpdates})`);
-    const tgRes = await fetch(`https://api.telegram.org/bot${targetBotToken}/setWebhook`, {
+    const tgRes = await fetch(`https://api.telegram.org/bot${cleanBotToken}/setWebhook`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
@@ -20247,7 +20313,7 @@ app.post('/api/telegram/webhook/register', requireTenantAuth, async (req: Reques
     // Verify registration by calling getWebhookInfo
     let webhookInfo = null;
     try {
-      const infoRes = await fetch(`https://api.telegram.org/bot${targetBotToken}/getWebhookInfo`);
+      const infoRes = await fetch(`https://api.telegram.org/bot${cleanBotToken}/getWebhookInfo`);
       webhookInfo = await infoRes.json();
     } catch (e: any) {
       console.warn('[Telegram Webhook Info Warning]:', e.message);
@@ -20279,9 +20345,13 @@ app.post('/api/telegram/webhook/register', requireTenantAuth, async (req: Reques
   }
 });
 
-// 15. Telegram Webhook Live Info Endpoint (Protected with requireTenantAuth)
+// 15. Telegram Webhook Live Info Endpoint (Protected with requireTenantAuth + Master Only)
 app.get('/api/telegram/webhook/info', requireTenantAuth, async (req: Request, res: Response) => {
   try {
+    const authContext = (req as any).auth;
+    if (!authContext?.session?.isMaster || authContext.session.isBot || authContext.isBot) {
+      return res.status(403).json({ ok: false, error: '权限不足：仅主账号会员有权查询 Telegram Bot Webhook 状态' });
+    }
     const targetBotToken = (req.query.botToken as string) || process.env.TELEGRAM_BOT_TOKEN;
     if (!targetBotToken) {
       return res.status(400).json({
@@ -20289,8 +20359,12 @@ app.get('/api/telegram/webhook/info', requireTenantAuth, async (req: Request, re
         error: 'Missing TELEGRAM_BOT_TOKEN. Please set it in environment variables or query parameter.',
       });
     }
+    if (typeof targetBotToken !== 'string' || !/^\d{5,}:[A-Za-z0-9_-]{20,}$/.test(targetBotToken.trim())) {
+      return res.status(400).json({ ok: false, error: '无效的 Telegram Bot Token 格式' });
+    }
+    const cleanBotToken = targetBotToken.trim();
 
-    const tgRes = await fetch(`https://api.telegram.org/bot${targetBotToken}/getWebhookInfo`);
+    const tgRes = await fetch(`https://api.telegram.org/bot${cleanBotToken}/getWebhookInfo`);
     const data = await tgRes.json();
     res.json(data);
   } catch (err: any) {
@@ -20298,9 +20372,13 @@ app.get('/api/telegram/webhook/info', requireTenantAuth, async (req: Request, re
   }
 });
 
-// 16. Telegram Webhook Delete / Reset Endpoint (Protected with requireTenantAuth)
+// 16. Telegram Webhook Delete / Reset Endpoint (Protected with requireTenantAuth + Master Only)
 app.post('/api/telegram/webhook/delete', requireTenantAuth, async (req: Request, res: Response) => {
   try {
+    const authContext = (req as any).auth;
+    if (!authContext?.session?.isMaster || authContext.session.isBot || authContext.isBot) {
+      return res.status(403).json({ ok: false, error: '权限不足：仅主账号会员有权删除 Telegram Bot Webhook' });
+    }
     const targetBotToken = req.body.botToken || process.env.TELEGRAM_BOT_TOKEN;
     if (!targetBotToken) {
       return res.status(400).json({
@@ -20308,9 +20386,13 @@ app.post('/api/telegram/webhook/delete', requireTenantAuth, async (req: Request,
         error: 'Missing TELEGRAM_BOT_TOKEN. Please set it in environment variables.',
       });
     }
+    if (typeof targetBotToken !== 'string' || !/^\d{5,}:[A-Za-z0-9_-]{20,}$/.test(targetBotToken.trim())) {
+      return res.status(400).json({ ok: false, error: '无效的 Telegram Bot Token 格式' });
+    }
+    const cleanBotToken = targetBotToken.trim();
 
     const dropPendingUpdates = Boolean(req.body.dropPendingUpdates);
-    const tgRes = await fetch(`https://api.telegram.org/bot${targetBotToken}/deleteWebhook`, {
+    const tgRes = await fetch(`https://api.telegram.org/bot${cleanBotToken}/deleteWebhook`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ drop_pending_updates: dropPendingUpdates }),
@@ -20322,9 +20404,17 @@ app.post('/api/telegram/webhook/delete', requireTenantAuth, async (req: Request,
   }
 });
 
-// 17. Send Voice Message directly to Telegram User (Protected with requireTenantAuth)
+// 17. Send Voice Message directly to Telegram User (Protected with requireTenantAuth + Bot/Master scope)
 app.post('/api/telegram/send-voice', requireTenantAuth, async (req: Request, res: Response) => {
   try {
+    const scope = resolveScopedAccountFromRequest(req, { allowBot: true });
+    if (!scope.ok) {
+      return res.status(scope.status).json({ ok: false, code: scope.code, error: scope.error });
+    }
+    const authContext = (req as any).auth;
+    if (!authContext?.session?.isMaster && scope.accountId !== 'acc_telegram_bot') {
+      return res.status(403).json({ ok: false, code: 'ACCOUNT_SCOPE_FORBIDDEN', error: '权限不足：仅主账号或 Bot 会话有权调用 Bot 语音发送接口' });
+    }
     const { chatId, audioUrl, text, caption, duration, messageId } = req.body || {};
     if (!chatId || !audioUrl || typeof audioUrl !== 'string') {
       return res.status(400).json({ ok: false, error: 'chatId and audioUrl are required' });
@@ -20664,7 +20754,7 @@ export function normalizeAndValidateProxyConfig(input: any): { ok: true; config:
   if (rawType !== 'socks5' && rawType !== 'socks4') {
     return { ok: false, error: '当前仅支持 SOCKS5 / SOCKS4 代理协议' };
   }
-  if (!host || /\s/.test(host)) {
+  if (!host || /[\s\x00-\x1f\x7f/@?#\\]/.test(host) || host.includes('://')) {
     return { ok: false, error: '请输入有效的代理服务器地址（如 127.0.0.1）' };
   }
   if (!Number.isInteger(port) || port < 1 || port > 65535) {
@@ -21224,6 +21314,10 @@ app.get('/api/system/proxy', requireTenantAuth, async (_req: Request, res: Respo
 
 app.post('/api/system/proxy', requireTenantAuth, async (req: Request, res: Response) => {
   try {
+    const authContext = (req as any).auth;
+    if (!authContext?.session?.isMaster || authContext.session.isBot || authContext.isBot) {
+      return res.status(403).json({ ok: false, code: 'MASTER_REQUIRED', error: '权限不足：仅主账号会员有权修改全局网络代理' });
+    }
     const existing = await loadSystemProxyConfigFromDb();
     const incomingPassword = typeof req.body?.password === 'string' ? req.body.password : undefined;
     const preserveExistingPassword =
@@ -21305,7 +21399,7 @@ function readLocalAppVersion(): string {
       }
     } catch {}
   }
-  return '1.2.2';
+  return '1.2.3';
 }
 
 // Lightweight GitHub Releases version check (portable & installer compatible)
@@ -22207,6 +22301,10 @@ export function normalizePhoneNumber(raw: string): string {
 // 18. Send Verification Code to Personal Telegram Account
 app.post('/api/telegram/user/send-code', requireTenantAuth, async (req: Request, res: Response) => {
   try {
+    const authContext = (req as any).auth;
+    if (!authContext?.session?.isMaster || authContext.session.isBot || authContext.isBot) {
+      return res.status(403).json({ ok: false, error: '权限不足：仅主账号会员有权绑定或登录新 Telegram 账号' });
+    }
     const { phone, apiId, apiHash } = req.body;
     if (!phone || typeof phone !== 'string') {
       return res.status(400).json({ ok: false, error: '请输入正确的国际格式手机号码 (例如: +8613800000000 或 +12125550123)' });
@@ -22398,6 +22496,10 @@ app.post('/api/telegram/user/send-code', requireTenantAuth, async (req: Request,
 // 18.1 Resend Verification Code via SMS / Voice Call
 app.post('/api/telegram/user/resend-code', requireTenantAuth, async (req: Request, res: Response) => {
   try {
+    const authContext = (req as any).auth;
+    if (!authContext?.session?.isMaster || authContext.session.isBot || authContext.isBot) {
+      return res.status(403).json({ ok: false, error: '权限不足：仅主账号会员有权执行验证码重发' });
+    }
     const { phone } = req.body;
     if (!phone) {
       return res.status(400).json({ ok: false, error: '手机号码为必填项' });
@@ -22476,6 +22578,10 @@ app.post('/api/telegram/user/resend-code', requireTenantAuth, async (req: Reques
 // 18.1.1 Cancel Pending Code Verification Auth (Release socket connection immediately)
 app.post('/api/telegram/user/cancel-auth', requireTenantAuth, async (req: Request, res: Response) => {
   try {
+    const authContext = (req as any).auth;
+    if (!authContext?.session?.isMaster || authContext.session.isBot || authContext.isBot) {
+      return res.status(403).json({ ok: false, error: '权限不足：仅主账号会员有权取消验证会话' });
+    }
     const { phone } = req.body;
     if (phone) {
       const cleanPhone = normalizePhoneNumber(String(phone));
@@ -22734,6 +22840,10 @@ async function finishQrLogin(sessionObj: QrSessionContext, user: any) {
 // 18.2 Request Telegram Official QR Code Login Token
 app.post('/api/telegram/user/qr-token', requireTenantAuth, async (req: Request, res: Response) => {
   try {
+    const authContext = (req as any).auth;
+    if (!authContext?.session?.isMaster || authContext.session.isBot || authContext.isBot) {
+      return res.status(403).json({ ok: false, error: '权限不足：仅主账号会员有权发起扫码绑定新账号' });
+    }
     const resolvedCreds = await resolveTelegramApiCredentials({
       bearerToken: extractBearerToken(req),
     });
@@ -22932,6 +23042,10 @@ app.post('/api/telegram/user/qr-token', requireTenantAuth, async (req: Request, 
 // 18.2.1 Immediately Cancel QR Session and Disconnect Socket (only if not yet authorized/transferred)
 app.post('/api/telegram/user/cancel-qr', requireTenantAuth, async (req: Request, res: Response) => {
   try {
+    const authContext = (req as any).auth;
+    if (!authContext?.session?.isMaster || authContext.session.isBot || authContext.isBot) {
+      return res.status(403).json({ ok: false, error: '权限不足：仅主账号会员有权取消扫码会话' });
+    }
     const { sessionId } = req.body;
     if (sessionId && activeQrSessions.has(sessionId)) {
       const sessionObj = activeQrSessions.get(sessionId)!;
@@ -22959,6 +23073,10 @@ app.post('/api/telegram/user/cancel-qr', requireTenantAuth, async (req: Request,
 // 18.3 Check QR Code Scan & Authorization Status
 app.get('/api/telegram/user/qr-status', requireTenantAuth, async (req: Request, res: Response) => {
   try {
+    const authContext = (req as any).auth;
+    if (!authContext?.session?.isMaster || authContext.session.isBot || authContext.isBot) {
+      return res.status(403).json({ ok: false, error: '权限不足：仅主账号会员有权查询扫码登录状态' });
+    }
     const sessionId = req.query.sessionId as string;
     if (!sessionId || !activeQrSessions.has(sessionId)) {
       return res.status(400).json({ ok: false, error: '二维码已失效，请刷新重新获取' });
@@ -23008,6 +23126,10 @@ app.get('/api/telegram/user/qr-status', requireTenantAuth, async (req: Request, 
 // 18.4 Submit 2FA Password for QR Code Login (Protected with authAttemptLimiter)
 app.post('/api/telegram/user/qr-password', requireTenantAuth, authAttemptLimiter, async (req: Request, res: Response) => {
   try {
+    const authContext = (req as any).auth;
+    if (!authContext?.session?.isMaster || authContext.session.isBot || authContext.isBot) {
+      return res.status(403).json({ ok: false, error: '权限不足：仅主账号会员有权校验扫码两步密码' });
+    }
     const { sessionId, password } = req.body;
     if (!sessionId || !activeQrSessions.has(sessionId)) {
       return res.status(400).json({ ok: false, error: '二维码会话已过期，请重新扫码' });
@@ -23069,6 +23191,10 @@ app.post('/api/telegram/user/qr-password', requireTenantAuth, authAttemptLimiter
 // 19. Verify Code and Login Personal Telegram Account (Protected with authAttemptLimiter anti-brute-force)
 app.post('/api/telegram/user/verify-code', requireTenantAuth, authAttemptLimiter, async (req: Request, res: Response) => {
   try {
+    const authContext = (req as any).auth;
+    if (!authContext?.session?.isMaster || authContext.session.isBot || authContext.isBot) {
+      return res.status(403).json({ ok: false, error: '权限不足：仅主账号会员有权校验验证码登录新账号' });
+    }
     const { phone, code, password } = req.body;
     if (!phone || !code) {
       return res.status(400).json({ ok: false, error: '手机号和验证码为必填项' });
@@ -23445,11 +23571,33 @@ app.get('/api/telegram/user/status', requireTenantAuth, async (req: Request, res
       }
     }
 
+    const authContext = (req as any).auth;
+    const isMaster = Boolean(authContext?.session?.isMaster);
+    const lockedAccountId = String(authContext?.effectiveAccountId || authContext?.session?.accountId || '').trim();
+    const scopedVariants = !isMaster && lockedAccountId ? getScopedAccountIdVariants(lockedAccountId) : [];
+    const matchesLockedScope = (item: { accountId?: string; id?: string; userId?: string; phone?: string }) => {
+      if (isMaster) return true;
+      if (!lockedAccountId) return false;
+      const candidates = [
+        item.accountId,
+        item.id,
+        item.userId,
+        item.userId ? `acc_tg_${item.userId}` : undefined,
+        item.phone,
+      ]
+        .map((v) => String(v || '').trim())
+        .filter(Boolean);
+      return candidates.some((c) => c === lockedAccountId || scopedVariants.includes(c));
+    };
+
+    const scopedActiveUsers = inMemoryActiveList.filter(matchesLockedScope);
+    const scopedExpiredAccounts = Array.from(expiredMap.values()).filter(matchesLockedScope);
+
     res.json({
       ok: true,
-      hasActiveSession: inMemoryActiveList.some((u) => u.isConnected),
-      activeUsers: inMemoryActiveList,
-      expiredAccounts: Array.from(expiredMap.values()),
+      hasActiveSession: scopedActiveUsers.some((u) => u.isConnected),
+      activeUsers: scopedActiveUsers,
+      expiredAccounts: scopedExpiredAccounts,
       credentialsConfigured: hasCredsInMemory,
       credentialsError: !hasCredsInMemory ? lastCloudCredsError?.error || null : null,
       isRestoringSessions: telegramSessionRestoreState.inProgress,
@@ -23463,12 +23611,20 @@ app.get('/api/telegram/user/status', requireTenantAuth, async (req: Request, res
 // 20.0.1 On-demand Reconnect for Persisted / Offline Telegram Sessions (and sync cloud creds if missing)
 app.post('/api/telegram/user/reconnect', requireTenantAuth, async (req: Request, res: Response) => {
   try {
+    const targetScope = resolveScopedTelegramTarget(req, {
+      allowBot: false,
+      rawPhone: req.body?.phone,
+      rawUserId: req.body?.userId,
+    });
+    if (!targetScope.ok) {
+      return res.status(targetScope.status).json({ ok: false, code: targetScope.code, error: targetScope.error });
+    }
     const bearerToken = extractBearerToken(req);
     const forceCredsRefresh = Boolean(req.body?.forceCredsRefresh);
     const forceReconnect = Boolean(req.body?.forceReconnect);
-    const targetAccountId = typeof req.body?.accountId === 'string' ? req.body.accountId.trim() : '';
-    const targetUserId = typeof req.body?.userId === 'string' ? req.body.userId.trim() : '';
-    const targetPhoneRaw = typeof req.body?.phone === 'string' ? req.body.phone.trim() : '';
+    const targetAccountId = targetScope.accountId;
+    const targetUserId = targetScope.userId;
+    const targetPhoneRaw = targetScope.phone;
     const targetPhone = targetPhoneRaw
       ? normalizePhoneNumber(targetPhoneRaw) || targetPhoneRaw
       : targetAccountId.startsWith('+') || /^00\d+$/.test(targetAccountId)
@@ -23575,8 +23731,15 @@ app.post('/api/telegram/user/reconnect', requireTenantAuth, async (req: Request,
 
 // 20.1 Fetch Real Dialogs for Connected Telegram Personal Account
 app.get('/api/telegram/user/dialogs', requireTenantAuth, async (req: Request, res: Response) => {
-  const accountId = (req.query.accountId as string) || (req.headers['x-account-id'] as string);
-  const phone = req.query.phone as string;
+  const targetScope = resolveScopedTelegramTarget(req, {
+    allowBot: false,
+    rawPhone: req.query.phone,
+  });
+  if (!targetScope.ok) {
+    return res.status(targetScope.status).json({ ok: false, code: targetScope.code, dialogs: [], error: targetScope.error });
+  }
+  const accountId = targetScope.accountId;
+  const phone = targetScope.phone;
   let connected: ConnectedTelegramUser | undefined;
   try {
     if (accountId) {
@@ -23947,7 +24110,7 @@ app.get('/api/telegram/user/avatar/:chatId', async (req: Request, res: Response)
 
     const { chatId } = req.params;
     const cleanId = chatId.replace(/^tg_/, '');
-    const accountId = (req.query.accountId as string) || (req.headers['x-account-id'] as string) || '';
+    const accountId = typeof req.query.accountId === 'string' ? req.query.accountId.trim() : '';
 
     // 1. Resolve matching active Telegram user client strictly isolated by accountId
     const peer: any = /^-?\d+$/.test(cleanId) ? Number(cleanId) : cleanId;
@@ -24062,11 +24225,26 @@ export function parseHttpByteRange(rangeHeader: string | undefined, totalSize: n
   return { kind: 'range', start, end };
 }
 
+function isScriptableActiveMediaMime(mime: string): boolean {
+  const normalized = String(mime || '').toLowerCase().split(';')[0].trim();
+  return (
+    normalized === 'image/svg+xml' ||
+    normalized === 'text/html' ||
+    normalized === 'application/xhtml+xml' ||
+    normalized === 'text/xml' ||
+    normalized === 'application/xml' ||
+    normalized === 'application/javascript' ||
+    normalized === 'text/javascript'
+  );
+}
+
 function applyMediaDownloadHeaders(res: Response, mime: string, fileName: string, forceDownload: boolean) {
   res.setHeader('Content-Type', mime);
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('Content-Security-Policy', "default-src 'none'; sandbox");
   res.setHeader('Accept-Ranges', 'bytes');
   res.setHeader('Cache-Control', 'private, max-age=1800');
-  if (forceDownload) {
+  if (forceDownload || isScriptableActiveMediaMime(mime)) {
     const safeName = encodeURIComponent(fileName || 'telegram_file');
     res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${safeName}`);
   }
@@ -24437,7 +24615,7 @@ app.get('/api/telegram/user/media/:chatId/:msgId', async (req: Request, res: Res
       return res.status(400).send('Invalid message ID');
     }
 
-    const accountId = (req.query.accountId as string) || (req.headers['x-account-id'] as string) || '';
+    const accountId = typeof req.query.accountId === 'string' ? req.query.accountId.trim() : '';
     const forceDownload = req.query.download === '1' || req.query.download === 'true';
     const wantThumb = req.query.thumb === '1' || req.query.thumb === 'true';
     const cleanChatId = String(chatId || '').replace(/^tg_/, '');
@@ -24600,8 +24778,27 @@ app.get('/api/telegram/user/media/:chatId/:msgId', async (req: Request, res: Res
 });
 
 // 20.2 List all active connected in-memory user accounts
-app.get('/api/telegram/user/active-accounts', requireTenantAuth, async (_req: Request, res: Response) => {
+app.get('/api/telegram/user/active-accounts', requireTenantAuth, async (req: Request, res: Response) => {
   try {
+    const authContext = (req as any).auth;
+    const isMaster = Boolean(authContext?.session?.isMaster);
+    const lockedAccountId = String(authContext?.effectiveAccountId || authContext?.session?.accountId || '').trim();
+    const scopedVariants = !isMaster && lockedAccountId ? getScopedAccountIdVariants(lockedAccountId) : [];
+    const matchesLockedScope = (item: { accountId?: string; id?: string; userId?: string; phone?: string }) => {
+      if (isMaster) return true;
+      if (!lockedAccountId) return false;
+      const candidates = [
+        item.accountId,
+        item.id,
+        item.userId,
+        item.userId ? `acc_tg_${item.userId}` : undefined,
+        item.phone,
+      ]
+        .map((v) => String(v || '').trim())
+        .filter(Boolean);
+      return candidates.some((c) => c === lockedAccountId || scopedVariants.includes(c));
+    };
+
     const unique = new Map<string, any>();
     for (const u of connectedUserClients.values()) {
       const uid = u.userId ? String(u.userId).trim() : '';
@@ -24609,6 +24806,7 @@ app.get('/api/telegram/user/active-accounts', requireTenantAuth, async (_req: Re
       const canonicalId = uid ? `acc_tg_${uid}` : normPhone;
       const dedupKey = uid || normPhone;
       if (!dedupKey || unique.has(dedupKey)) continue;
+      if (!matchesLockedScope({ id: canonicalId, userId: uid, phone: u.phone })) continue;
       const runtime = telegramAccountRuntimeStates.get(
         resolveTelegramAccountRuntimeKey({ userId: uid || undefined, phone: normPhone || undefined })
       );
@@ -24633,7 +24831,7 @@ app.get('/api/telegram/user/active-accounts', requireTenantAuth, async (_req: Re
     res.json({
       ok: true,
       accounts: Array.from(unique.values()),
-      expiredAccounts: Array.from(recentlyExpiredAccounts.values()),
+      expiredAccounts: Array.from(recentlyExpiredAccounts.values()).filter(matchesLockedScope),
     });
   } catch (err: any) {
     res.status(500).json({ ok: false, error: err.message });
@@ -24643,7 +24841,18 @@ app.get('/api/telegram/user/active-accounts', requireTenantAuth, async (_req: Re
 // 20.3 Disconnect / Logout Telegram User Account
 app.post('/api/telegram/user/disconnect', requireTenantAuth, async (req: Request, res: Response) => {
   try {
-    const { accountId, phone, userId, forceLocalOnly } = req.body || {};
+    const targetScope = resolveScopedTelegramTarget(req, {
+      allowBot: false,
+      rawPhone: req.body?.phone,
+      rawUserId: req.body?.userId,
+    });
+    if (!targetScope.ok) {
+      return res.status(targetScope.status).json({ ok: false, code: targetScope.code, error: targetScope.error });
+    }
+    const accountId = targetScope.accountId;
+    const phone = targetScope.phone;
+    const userId = targetScope.userId;
+    const { forceLocalOnly } = req.body || {};
     const targetClient = resolveConnectedTelegramUser(accountId, phone, userId);
     const p = phone || targetClient?.phone;
     const normPhone = p ? normalizePhoneNumber(p) : '';
@@ -24759,10 +24968,24 @@ app.post('/api/telegram/user/disconnect', requireTenantAuth, async (req: Request
 
 // 20.3.1 Update Telegram User Profile & Username via MTProto (account.UpdateProfile / account.UpdateUsername)
 app.post('/api/telegram/user/update-profile', requireTenantAuth, async (req: Request, res: Response) => {
+  let scopedAccountId = '';
+  let scopedPhone = '';
+  let scopedUserId = '';
   try {
-    const accountId = (req.body?.accountId as string) || (req.headers['x-account-id'] as string) || '';
-    const phone = (req.body?.phone as string) || '';
-    const userId = (req.body?.userId as string) || '';
+    const targetScope = resolveScopedTelegramTarget(req, {
+      allowBot: false,
+      rawPhone: req.body?.phone,
+      rawUserId: req.body?.userId,
+    });
+    if (!targetScope.ok) {
+      return res.status(targetScope.status).json({ ok: false, code: targetScope.code, cloudSynced: false, error: targetScope.error });
+    }
+    const accountId = targetScope.accountId;
+    const phone = targetScope.phone;
+    const userId = targetScope.userId;
+    scopedAccountId = accountId;
+    scopedPhone = phone;
+    scopedUserId = userId;
     const { name, username, bio } = req.body || {};
 
     const connected = resolveConnectedTelegramUser(accountId, phone, userId);
@@ -24848,19 +25071,33 @@ app.post('/api/telegram/user/update-profile', requireTenantAuth, async (req: Req
     });
   } catch (err: any) {
     return await handleMtprotoRouteError(res, err, {
-      accountId: (req.body?.accountId as string) || (req.headers['x-account-id'] as string) || '',
-      phone: (req.body?.phone as string) || '',
-      userId: (req.body?.userId as string) || '',
+      accountId: scopedAccountId,
+      phone: scopedPhone,
+      userId: scopedUserId,
     }, 500);
   }
 });
 
 // 20.3.1a Upload Official Telegram Profile Avatar (photos.UploadProfilePhoto)
 app.post('/api/telegram/user/upload-avatar', requireTenantAuth, async (req: Request, res: Response) => {
+  let scopedAccountId = '';
+  let scopedPhone = '';
+  let scopedUserId = '';
   try {
-    const accountId = (req.body?.accountId as string) || (req.headers['x-account-id'] as string) || '';
-    const phone = (req.body?.phone as string) || '';
-    const userId = (req.body?.userId as string) || '';
+    const targetScope = resolveScopedTelegramTarget(req, {
+      allowBot: false,
+      rawPhone: req.body?.phone,
+      rawUserId: req.body?.userId,
+    });
+    if (!targetScope.ok) {
+      return res.status(targetScope.status).json({ ok: false, code: targetScope.code, error: targetScope.error });
+    }
+    const accountId = targetScope.accountId;
+    const phone = targetScope.phone;
+    const userId = targetScope.userId;
+    scopedAccountId = accountId;
+    scopedPhone = phone;
+    scopedUserId = userId;
     const imageDataUrl = (req.body?.imageDataUrl as string) || '';
 
     const connected = resolveConnectedTelegramUser(accountId, phone, userId);
@@ -24919,9 +25156,9 @@ app.post('/api/telegram/user/upload-avatar', requireTenantAuth, async (req: Requ
     });
   } catch (err: any) {
     return await handleMtprotoRouteError(res, err, {
-      accountId: (req.body?.accountId as string) || (req.headers['x-account-id'] as string) || '',
-      phone: (req.body?.phone as string) || '',
-      userId: (req.body?.userId as string) || '',
+      accountId: scopedAccountId,
+      phone: scopedPhone,
+      userId: scopedUserId,
     }, 500);
   }
 });
@@ -24954,10 +25191,24 @@ export function prunePendingChangePhoneSessions(now = Date.now()): number {
 }
 
 app.post('/api/telegram/user/change-phone/send-code', requireTenantAuth, async (req: Request, res: Response) => {
+  let scopedAccountId = '';
+  let scopedPhone = '';
+  let scopedUserId = '';
   try {
-    const accountId = (req.body?.accountId as string) || (req.headers['x-account-id'] as string) || '';
-    const phone = (req.body?.phone as string) || '';
-    const userId = (req.body?.userId as string) || '';
+    const targetScope = resolveScopedTelegramTarget(req, {
+      allowBot: false,
+      rawPhone: req.body?.phone,
+      rawUserId: req.body?.userId,
+    });
+    if (!targetScope.ok) {
+      return res.status(targetScope.status).json({ ok: false, code: targetScope.code, error: targetScope.error });
+    }
+    const accountId = targetScope.accountId;
+    const phone = targetScope.phone;
+    const userId = targetScope.userId;
+    scopedAccountId = accountId;
+    scopedPhone = phone;
+    scopedUserId = userId;
     const rawNewPhone = (req.body?.newPhone as string) || '';
 
     const connected = resolveConnectedTelegramUser(accountId, phone, userId);
@@ -24999,18 +25250,32 @@ app.post('/api/telegram/user/change-phone/send-code', requireTenantAuth, async (
       return res.status(400).json({ ok: false, error: '该新手机号已被其他 Telegram 账号占用，无法换绑。' });
     }
     return await handleMtprotoRouteError(res, err, {
-      accountId: (req.body?.accountId as string) || (req.headers['x-account-id'] as string) || '',
-      phone: (req.body?.phone as string) || '',
-      userId: (req.body?.userId as string) || '',
+      accountId: scopedAccountId,
+      phone: scopedPhone,
+      userId: scopedUserId,
     }, 400);
   }
 });
 
 app.post('/api/telegram/user/change-phone/confirm', requireTenantAuth, authAttemptLimiter, async (req: Request, res: Response) => {
+  let scopedAccountId = '';
+  let scopedPhone = '';
+  let scopedUserId = '';
   try {
-    const accountId = (req.body?.accountId as string) || (req.headers['x-account-id'] as string) || '';
-    const phone = (req.body?.phone as string) || '';
-    const userId = (req.body?.userId as string) || '';
+    const targetScope = resolveScopedTelegramTarget(req, {
+      allowBot: false,
+      rawPhone: req.body?.phone,
+      rawUserId: req.body?.userId,
+    });
+    if (!targetScope.ok) {
+      return res.status(targetScope.status).json({ ok: false, code: targetScope.code, error: targetScope.error });
+    }
+    const accountId = targetScope.accountId;
+    const phone = targetScope.phone;
+    const userId = targetScope.userId;
+    scopedAccountId = accountId;
+    scopedPhone = phone;
+    scopedUserId = userId;
     const code = String(req.body?.code || '').trim();
     const rawNewPhone = (req.body?.newPhone as string) || '';
 
@@ -25062,9 +25327,9 @@ app.post('/api/telegram/user/change-phone/confirm', requireTenantAuth, authAttem
     });
   } catch (err: any) {
     return await handleMtprotoRouteError(res, err, {
-      accountId: (req.body?.accountId as string) || (req.headers['x-account-id'] as string) || '',
-      phone: (req.body?.phone as string) || '',
-      userId: (req.body?.userId as string) || '',
+      accountId: scopedAccountId,
+      phone: scopedPhone,
+      userId: scopedUserId,
     }, 400);
   }
 });
@@ -25332,10 +25597,24 @@ function serializeDialogFilter(f: any, selfUserId?: string) {
 
 // 20.3.1c Fetch Complete Official Telegram Account Settings via MTProto
 app.get('/api/telegram/user/settings', requireTenantAuth, async (req: Request, res: Response) => {
+  let scopedAccountId = '';
+  let scopedPhone = '';
+  let scopedUserId = '';
   try {
-    const accountId = (req.query.accountId as string) || (req.headers['x-account-id'] as string) || '';
-    const phone = (req.query.phone as string) || '';
-    const userId = (req.query.userId as string) || '';
+    const targetScope = resolveScopedTelegramTarget(req, {
+      allowBot: false,
+      rawPhone: req.query.phone,
+      rawUserId: req.query.userId,
+    });
+    if (!targetScope.ok) {
+      return res.status(targetScope.status).json({ ok: false, code: targetScope.code, error: targetScope.error });
+    }
+    const accountId = targetScope.accountId;
+    const phone = targetScope.phone;
+    const userId = targetScope.userId;
+    scopedAccountId = accountId;
+    scopedPhone = phone;
+    scopedUserId = userId;
 
     const connected = resolveConnectedTelegramUser(accountId, phone, userId);
     if (!connected || !connected.client) {
@@ -25512,19 +25791,33 @@ app.get('/api/telegram/user/settings', requireTenantAuth, async (req: Request, r
     });
   } catch (err: any) {
     return await handleMtprotoRouteError(res, err, {
-      accountId: (req.query.accountId as string) || (req.headers['x-account-id'] as string) || '',
-      phone: (req.query.phone as string) || '',
-      userId: (req.query.userId as string) || '',
+      accountId: scopedAccountId,
+      phone: scopedPhone,
+      userId: scopedUserId,
     }, 500);
   }
 });
 
 // Lightweight Dialog Filters endpoint for main ChatList folder tab sync
 app.get('/api/telegram/user/folders', requireTenantAuth, async (req: Request, res: Response) => {
+  let scopedAccountId = '';
+  let scopedPhone = '';
+  let scopedUserId = '';
   try {
-    const accountId = (req.query.accountId as string) || (req.headers['x-account-id'] as string) || '';
-    const phone = (req.query.phone as string) || '';
-    const userId = (req.query.userId as string) || '';
+    const targetScope = resolveScopedTelegramTarget(req, {
+      allowBot: false,
+      rawPhone: req.query.phone,
+      rawUserId: req.query.userId,
+    });
+    if (!targetScope.ok) {
+      return res.status(targetScope.status).json({ ok: false, code: targetScope.code, error: targetScope.error });
+    }
+    const accountId = targetScope.accountId;
+    const phone = targetScope.phone;
+    const userId = targetScope.userId;
+    scopedAccountId = accountId;
+    scopedPhone = phone;
+    scopedUserId = userId;
     const connected = resolveConnectedTelegramUser(accountId, phone, userId);
     if (!connected || !connected.client) {
       return res.status(400).json({ ok: false, error: '当前账号未在线连接 Telegram MTProto' });
@@ -25541,19 +25834,33 @@ app.get('/api/telegram/user/folders', requireTenantAuth, async (req: Request, re
     return res.json({ ok: true, cloudSynced: true, folders });
   } catch (err: any) {
     return await handleMtprotoRouteError(res, err, {
-      accountId: (req.query.accountId as string) || (req.headers['x-account-id'] as string) || '',
-      phone: (req.query.phone as string) || '',
-      userId: (req.query.userId as string) || '',
+      accountId: scopedAccountId,
+      phone: scopedPhone,
+      userId: scopedUserId,
     }, 400);
   }
 });
 
 // 20.3.1d Update Official Telegram 2FA Cloud Password (UpdatePasswordSettings / Email Confirmation / Reset)
 app.post('/api/telegram/user/settings/two-factor', requireTenantAuth, authAttemptLimiter, async (req: Request, res: Response) => {
+  let scopedAccountId = '';
+  let scopedPhone = '';
+  let scopedUserId = '';
   try {
-    const accountId = (req.body?.accountId as string) || (req.headers['x-account-id'] as string) || '';
-    const phone = (req.body?.phone as string) || '';
-    const userId = (req.body?.userId as string) || '';
+    const targetScope = resolveScopedTelegramTarget(req, {
+      allowBot: false,
+      rawPhone: req.body?.phone,
+      rawUserId: req.body?.userId,
+    });
+    if (!targetScope.ok) {
+      return res.status(targetScope.status).json({ ok: false, code: targetScope.code, error: targetScope.error });
+    }
+    const accountId = targetScope.accountId;
+    const phone = targetScope.phone;
+    const userId = targetScope.userId;
+    scopedAccountId = accountId;
+    scopedPhone = phone;
+    scopedUserId = userId;
     const { action, currentPassword, newPassword, hint, email, code } = req.body || {};
 
     const connected = resolveConnectedTelegramUser(accountId, phone, userId);
@@ -25729,19 +26036,33 @@ app.post('/api/telegram/user/settings/two-factor', requireTenantAuth, authAttemp
     });
   } catch (err: any) {
     return await handleMtprotoRouteError(res, err, {
-      accountId: (req.body?.accountId as string) || (req.headers['x-account-id'] as string) || '',
-      phone: (req.body?.phone as string) || '',
-      userId: (req.body?.userId as string) || '',
+      accountId: scopedAccountId,
+      phone: scopedPhone,
+      userId: scopedUserId,
     }, 400);
   }
 });
 
 // 20.3.1e Update Official Telegram Privacy Settings (account.SetPrivacy with full keys & user exceptions)
 app.post('/api/telegram/user/settings/privacy', requireTenantAuth, async (req: Request, res: Response) => {
+  let scopedAccountId = '';
+  let scopedPhone = '';
+  let scopedUserId = '';
   try {
-    const accountId = (req.body?.accountId as string) || (req.headers['x-account-id'] as string) || '';
-    const phone = (req.body?.phone as string) || '';
-    const userId = (req.body?.userId as string) || '';
+    const targetScope = resolveScopedTelegramTarget(req, {
+      allowBot: false,
+      rawPhone: req.body?.phone,
+      rawUserId: req.body?.userId,
+    });
+    if (!targetScope.ok) {
+      return res.status(targetScope.status).json({ ok: false, code: targetScope.code, error: targetScope.error });
+    }
+    const accountId = targetScope.accountId;
+    const phone = targetScope.phone;
+    const userId = targetScope.userId;
+    scopedAccountId = accountId;
+    scopedPhone = phone;
+    scopedUserId = userId;
     const rawKey = String(req.body?.key || '').trim() as TelegramPrivacyRuleKey;
     const mode = req.body?.mode;
 
@@ -25814,19 +26135,33 @@ app.post('/api/telegram/user/settings/privacy', requireTenantAuth, async (req: R
     });
   } catch (err: any) {
     return await handleMtprotoRouteError(res, err, {
-      accountId: (req.body?.accountId as string) || (req.headers['x-account-id'] as string) || '',
-      phone: (req.body?.phone as string) || '',
-      userId: (req.body?.userId as string) || '',
+      accountId: scopedAccountId,
+      phone: scopedPhone,
+      userId: scopedUserId,
     }, 400);
   }
 });
 
 // 20.3.1e-2 Update Official Telegram Global Privacy & Anti-Harassment Settings (account.SetGlobalPrivacySettings)
 app.post('/api/telegram/user/settings/global-privacy', requireTenantAuth, async (req: Request, res: Response) => {
+  let scopedAccountId = '';
+  let scopedPhone = '';
+  let scopedUserId = '';
   try {
-    const accountId = (req.body?.accountId as string) || (req.headers['x-account-id'] as string) || '';
-    const phone = (req.body?.phone as string) || '';
-    const userId = (req.body?.userId as string) || '';
+    const targetScope = resolveScopedTelegramTarget(req, {
+      allowBot: false,
+      rawPhone: req.body?.phone,
+      rawUserId: req.body?.userId,
+    });
+    if (!targetScope.ok) {
+      return res.status(targetScope.status).json({ ok: false, code: targetScope.code, error: targetScope.error });
+    }
+    const accountId = targetScope.accountId;
+    const phone = targetScope.phone;
+    const userId = targetScope.userId;
+    scopedAccountId = accountId;
+    scopedPhone = phone;
+    scopedUserId = userId;
 
     const connected = resolveConnectedTelegramUser(accountId, phone, userId);
     if (!connected || !connected.client) {
@@ -25858,19 +26193,33 @@ app.post('/api/telegram/user/settings/global-privacy', requireTenantAuth, async 
     });
   } catch (err: any) {
     return await handleMtprotoRouteError(res, err, {
-      accountId: (req.body?.accountId as string) || (req.headers['x-account-id'] as string) || '',
-      phone: (req.body?.phone as string) || '',
-      userId: (req.body?.userId as string) || '',
+      accountId: scopedAccountId,
+      phone: scopedPhone,
+      userId: scopedUserId,
     }, 400);
   }
 });
 
 // 20.3.1e-3 Update Official Telegram Account Self-Destruct Inactivity TTL (account.SetAccountTTL)
 app.post('/api/telegram/user/settings/account-ttl', requireTenantAuth, async (req: Request, res: Response) => {
+  let scopedAccountId = '';
+  let scopedPhone = '';
+  let scopedUserId = '';
   try {
-    const accountId = (req.body?.accountId as string) || (req.headers['x-account-id'] as string) || '';
-    const phone = (req.body?.phone as string) || '';
-    const userId = (req.body?.userId as string) || '';
+    const targetScope = resolveScopedTelegramTarget(req, {
+      allowBot: false,
+      rawPhone: req.body?.phone,
+      rawUserId: req.body?.userId,
+    });
+    if (!targetScope.ok) {
+      return res.status(targetScope.status).json({ ok: false, code: targetScope.code, error: targetScope.error });
+    }
+    const accountId = targetScope.accountId;
+    const phone = targetScope.phone;
+    const userId = targetScope.userId;
+    scopedAccountId = accountId;
+    scopedPhone = phone;
+    scopedUserId = userId;
     const days = Number(req.body?.days);
 
     if (!Number.isInteger(days) || days < 30 || days > 730) {
@@ -25895,19 +26244,33 @@ app.post('/api/telegram/user/settings/account-ttl', requireTenantAuth, async (re
     });
   } catch (err: any) {
     return await handleMtprotoRouteError(res, err, {
-      accountId: (req.body?.accountId as string) || (req.headers['x-account-id'] as string) || '',
-      phone: (req.body?.phone as string) || '',
-      userId: (req.body?.userId as string) || '',
+      accountId: scopedAccountId,
+      phone: scopedPhone,
+      userId: scopedUserId,
     }, 400);
   }
 });
 
 // 20.3.1f Terminate Official Active Telegram Session(s) (account.ResetAuthorization / auth.ResetAuthorizations)
 app.post('/api/telegram/user/settings/sessions/terminate', requireTenantAuth, async (req: Request, res: Response) => {
+  let scopedAccountId = '';
+  let scopedPhone = '';
+  let scopedUserId = '';
   try {
-    const accountId = (req.body?.accountId as string) || (req.headers['x-account-id'] as string) || '';
-    const phone = (req.body?.phone as string) || '';
-    const userId = (req.body?.userId as string) || '';
+    const targetScope = resolveScopedTelegramTarget(req, {
+      allowBot: false,
+      rawPhone: req.body?.phone,
+      rawUserId: req.body?.userId,
+    });
+    if (!targetScope.ok) {
+      return res.status(targetScope.status).json({ ok: false, code: targetScope.code, error: targetScope.error });
+    }
+    const accountId = targetScope.accountId;
+    const phone = targetScope.phone;
+    const userId = targetScope.userId;
+    scopedAccountId = accountId;
+    scopedPhone = phone;
+    scopedUserId = userId;
     const { hash, terminateAllOthers } = req.body || {};
 
     const connected = resolveConnectedTelegramUser(accountId, phone, userId);
@@ -25953,19 +26316,33 @@ app.post('/api/telegram/user/settings/sessions/terminate', requireTenantAuth, as
     });
   } catch (err: any) {
     return await handleMtprotoRouteError(res, err, {
-      accountId: (req.body?.accountId as string) || (req.headers['x-account-id'] as string) || '',
-      phone: (req.body?.phone as string) || '',
-      userId: (req.body?.userId as string) || '',
+      accountId: scopedAccountId,
+      phone: scopedPhone,
+      userId: scopedUserId,
     }, 400);
   }
 });
 
 // 20.3.1g Update Official Telegram Notification Settings (account.UpdateNotifySettings)
 app.post('/api/telegram/user/settings/notifications', requireTenantAuth, async (req: Request, res: Response) => {
+  let scopedAccountId = '';
+  let scopedPhone = '';
+  let scopedUserId = '';
   try {
-    const accountId = (req.body?.accountId as string) || (req.headers['x-account-id'] as string) || '';
-    const phone = (req.body?.phone as string) || '';
-    const userId = (req.body?.userId as string) || '';
+    const targetScope = resolveScopedTelegramTarget(req, {
+      allowBot: false,
+      rawPhone: req.body?.phone,
+      rawUserId: req.body?.userId,
+    });
+    if (!targetScope.ok) {
+      return res.status(targetScope.status).json({ ok: false, code: targetScope.code, error: targetScope.error });
+    }
+    const accountId = targetScope.accountId;
+    const phone = targetScope.phone;
+    const userId = targetScope.userId;
+    scopedAccountId = accountId;
+    scopedPhone = phone;
+    scopedUserId = userId;
     const scope: 'users' | 'chats' | 'broadcasts' | 'both' | 'all' = req.body?.scope || 'both';
     const enabled = Boolean(req.body?.enabled);
     const previewText = req.body?.previewText !== false;
@@ -26038,19 +26415,33 @@ app.post('/api/telegram/user/settings/notifications', requireTenantAuth, async (
     });
   } catch (err: any) {
     return await handleMtprotoRouteError(res, err, {
-      accountId: (req.body?.accountId as string) || (req.headers['x-account-id'] as string) || '',
-      phone: (req.body?.phone as string) || '',
-      userId: (req.body?.userId as string) || '',
+      accountId: scopedAccountId,
+      phone: scopedPhone,
+      userId: scopedUserId,
     }, 400);
   }
 });
 
 // 20.3.1h Create/Update Official Telegram Dialog Folder (messages.UpdateDialogFilter)
 app.post('/api/telegram/user/settings/folders', requireTenantAuth, async (req: Request, res: Response) => {
+  let scopedAccountId = '';
+  let scopedPhone = '';
+  let scopedUserId = '';
   try {
-    const accountId = (req.body?.accountId as string) || (req.headers['x-account-id'] as string) || '';
-    const phone = (req.body?.phone as string) || '';
-    const userId = (req.body?.userId as string) || '';
+    const targetScope = resolveScopedTelegramTarget(req, {
+      allowBot: false,
+      rawPhone: req.body?.phone,
+      rawUserId: req.body?.userId,
+    });
+    if (!targetScope.ok) {
+      return res.status(targetScope.status).json({ ok: false, code: targetScope.code, error: targetScope.error });
+    }
+    const accountId = targetScope.accountId;
+    const phone = targetScope.phone;
+    const userId = targetScope.userId;
+    scopedAccountId = accountId;
+    scopedPhone = phone;
+    scopedUserId = userId;
     const folder = req.body?.filter;
 
     const connected = resolveConnectedTelegramUser(accountId, phone, userId);
@@ -26153,19 +26544,33 @@ app.post('/api/telegram/user/settings/folders', requireTenantAuth, async (req: R
     });
   } catch (err: any) {
     return await handleMtprotoRouteError(res, err, {
-      accountId: (req.body?.accountId as string) || (req.headers['x-account-id'] as string) || '',
-      phone: (req.body?.phone as string) || '',
-      userId: (req.body?.userId as string) || '',
+      accountId: scopedAccountId,
+      phone: scopedPhone,
+      userId: scopedUserId,
     }, 400);
   }
 });
 
 // 20.3.1h2 Reorder Official Telegram Dialog Folders (messages.UpdateDialogFiltersOrder)
 app.post('/api/telegram/user/settings/folders/order', requireTenantAuth, async (req: Request, res: Response) => {
+  let scopedAccountId = '';
+  let scopedPhone = '';
+  let scopedUserId = '';
   try {
-    const accountId = (req.body?.accountId as string) || (req.headers['x-account-id'] as string) || '';
-    const phone = (req.body?.phone as string) || '';
-    const userId = (req.body?.userId as string) || '';
+    const targetScope = resolveScopedTelegramTarget(req, {
+      allowBot: false,
+      rawPhone: req.body?.phone,
+      rawUserId: req.body?.userId,
+    });
+    if (!targetScope.ok) {
+      return res.status(targetScope.status).json({ ok: false, code: targetScope.code, error: targetScope.error });
+    }
+    const accountId = targetScope.accountId;
+    const phone = targetScope.phone;
+    const userId = targetScope.userId;
+    scopedAccountId = accountId;
+    scopedPhone = phone;
+    scopedUserId = userId;
     const rawOrder = Array.isArray(req.body?.order) ? req.body.order : [];
     const customOrder = rawOrder.map((n: any) => Number(n)).filter((n: number) => Number.isInteger(n) && n >= 2);
 
@@ -26210,19 +26615,33 @@ app.post('/api/telegram/user/settings/folders/order', requireTenantAuth, async (
     });
   } catch (err: any) {
     return await handleMtprotoRouteError(res, err, {
-      accountId: (req.body?.accountId as string) || (req.headers['x-account-id'] as string) || '',
-      phone: (req.body?.phone as string) || '',
-      userId: (req.body?.userId as string) || '',
+      accountId: scopedAccountId,
+      phone: scopedPhone,
+      userId: scopedUserId,
     }, 400);
   }
 });
 
 // 20.3.1i Delete Official Telegram Dialog Folder (messages.UpdateDialogFilter without filter)
 app.delete('/api/telegram/user/settings/folders/:id', requireTenantAuth, async (req: Request, res: Response) => {
+  let scopedAccountId = '';
+  let scopedPhone = '';
+  let scopedUserId = '';
   try {
-    const accountId = (req.query.accountId as string) || (req.headers['x-account-id'] as string) || '';
-    const phone = (req.query.phone as string) || '';
-    const userId = (req.query.userId as string) || '';
+    const targetScope = resolveScopedTelegramTarget(req, {
+      allowBot: false,
+      rawPhone: req.query.phone,
+      rawUserId: req.query.userId,
+    });
+    if (!targetScope.ok) {
+      return res.status(targetScope.status).json({ ok: false, code: targetScope.code, error: targetScope.error });
+    }
+    const accountId = targetScope.accountId;
+    const phone = targetScope.phone;
+    const userId = targetScope.userId;
+    scopedAccountId = accountId;
+    scopedPhone = phone;
+    scopedUserId = userId;
     const filterId = Number(req.params.id);
 
     if (!filterId || filterId < 2) {
@@ -26257,19 +26676,33 @@ app.delete('/api/telegram/user/settings/folders/:id', requireTenantAuth, async (
     });
   } catch (err: any) {
     return await handleMtprotoRouteError(res, err, {
-      accountId: (req.query.accountId as string) || (req.headers['x-account-id'] as string) || '',
-      phone: (req.query.phone as string) || '',
-      userId: (req.query.userId as string) || '',
+      accountId: scopedAccountId,
+      phone: scopedPhone,
+      userId: scopedUserId,
     }, 400);
   }
 });
 
 // 20.3.1j Real Telegram Saved Messages ('me' / InputPeerSelf)
 app.get('/api/telegram/user/saved-messages', requireTenantAuth, async (req: Request, res: Response) => {
+  let scopedAccountId = '';
+  let scopedPhone = '';
+  let scopedUserId = '';
   try {
-    const accountId = (req.query.accountId as string) || (req.headers['x-account-id'] as string) || '';
-    const phone = (req.query.phone as string) || '';
-    const userId = (req.query.userId as string) || '';
+    const targetScope = resolveScopedTelegramTarget(req, {
+      allowBot: false,
+      rawPhone: req.query.phone,
+      rawUserId: req.query.userId,
+    });
+    if (!targetScope.ok) {
+      return res.status(targetScope.status).json({ ok: false, code: targetScope.code, error: targetScope.error });
+    }
+    const accountId = targetScope.accountId;
+    const phone = targetScope.phone;
+    const userId = targetScope.userId;
+    scopedAccountId = accountId;
+    scopedPhone = phone;
+    scopedUserId = userId;
 
     const connected = resolveConnectedTelegramUser(accountId, phone, userId);
     if (!connected || !connected.client) {
@@ -26307,17 +26740,23 @@ app.get('/api/telegram/user/saved-messages', requireTenantAuth, async (req: Requ
     });
   } catch (err: any) {
     return await handleMtprotoRouteError(res, err, {
-      accountId: (req.query.accountId as string) || (req.headers['x-account-id'] as string) || '',
-      phone: (req.query.phone as string) || '',
-      userId: (req.query.userId as string) || '',
+      accountId: scopedAccountId,
+      phone: scopedPhone,
+      userId: scopedUserId,
     }, 500);
   }
 });
 
 // 20.3.1k Edit Telegram Message in Cloud (MTProto messages.EditMessage / Bot editMessageText)
 app.post('/api/telegram/user/messages/edit', requireTenantAuth, async (req: Request, res: Response) => {
+  let scopedAccountId = '';
   try {
-    const accountId = (req.body?.accountId as string) || (req.headers['x-account-id'] as string) || '';
+    const scope = resolveScopedAccountFromRequest(req, { allowBot: true });
+    if (!scope.ok) {
+      return res.status(scope.status).json({ ok: false, code: scope.code, error: scope.error });
+    }
+    const accountId = scope.accountId;
+    scopedAccountId = accountId;
     const { chatId, messageId, telegramMessageId, newText, translatedText } = req.body || {};
 
     if (!chatId || !newText || !String(newText).trim()) {
@@ -26404,15 +26843,21 @@ app.post('/api/telegram/user/messages/edit', requireTenantAuth, async (req: Requ
     return res.json({ ok: true, cloudSynced: true, telegramMessageId: tgMsgId });
   } catch (err: any) {
     return await handleMtprotoRouteError(res, err, {
-      accountId: (req.body?.accountId as string) || (req.headers['x-account-id'] as string) || '',
+      accountId: scopedAccountId,
     }, 400);
   }
 });
 
 // 20.3.1l Send / Remove Official Telegram Message Reaction (messages.SendReaction)
 app.post('/api/telegram/user/messages/react', requireTenantAuth, async (req: Request, res: Response) => {
+  let scopedAccountId = '';
   try {
-    const accountId = (req.body?.accountId as string) || (req.headers['x-account-id'] as string) || '';
+    const scope = resolveScopedAccountFromRequest(req, { allowBot: false });
+    if (!scope.ok) {
+      return res.status(scope.status).json({ ok: false, code: scope.code, error: scope.error });
+    }
+    const accountId = scope.accountId;
+    scopedAccountId = accountId;
     const { chatId, messageId, telegramMessageId, emoji, remove } = req.body || {};
 
     const connected = resolveConnectedTelegramUser(accountId);
@@ -26485,15 +26930,21 @@ app.post('/api/telegram/user/messages/react', requireTenantAuth, async (req: Req
     return res.json({ ok: true, cloudSynced: true, telegramMessageId: tgMsgId });
   } catch (err: any) {
     return await handleMtprotoRouteError(res, err, {
-      accountId: (req.body?.accountId as string) || (req.headers['x-account-id'] as string) || '',
+      accountId: scopedAccountId,
     }, 400);
   }
 });
 
 // 20.3.1m Pin / Unpin Telegram Message in Cloud (messages.UpdatePinnedMessage)
 app.post('/api/telegram/user/messages/pin', requireTenantAuth, async (req: Request, res: Response) => {
+  let scopedAccountId = '';
   try {
-    const accountId = (req.body?.accountId as string) || (req.headers['x-account-id'] as string) || '';
+    const scope = resolveScopedAccountFromRequest(req, { allowBot: false });
+    if (!scope.ok) {
+      return res.status(scope.status).json({ ok: false, code: scope.code, error: scope.error });
+    }
+    const accountId = scope.accountId;
+    scopedAccountId = accountId;
     const { chatId, messageId, telegramMessageId, pin } = req.body || {};
 
     const connected = resolveConnectedTelegramUser(accountId);
@@ -26538,15 +26989,21 @@ app.post('/api/telegram/user/messages/pin', requireTenantAuth, async (req: Reque
     return res.json({ ok: true, cloudSynced: true, pinned: Boolean(pin), telegramMessageId: tgMsgId });
   } catch (err: any) {
     return await handleMtprotoRouteError(res, err, {
-      accountId: (req.body?.accountId as string) || (req.headers['x-account-id'] as string) || '',
+      accountId: scopedAccountId,
     }, 400);
   }
 });
 
 // 20.3.1m-2 Fetch Read Participants for a Group Message (messages.GetMessageReadParticipants)
 app.get('/api/telegram/user/messages/read-participants', requireTenantAuth, async (req: Request, res: Response) => {
+  let scopedAccountId = '';
   try {
-    const accountId = (req.query.accountId as string) || (req.headers['x-account-id'] as string) || '';
+    const scope = resolveScopedAccountFromRequest(req, { allowBot: false });
+    if (!scope.ok) {
+      return res.status(scope.status).json({ ok: false, code: scope.code, error: scope.error });
+    }
+    const accountId = scope.accountId;
+    scopedAccountId = accountId;
     const chatId = String(req.query.chatId || '').trim();
     const messageId = String(req.query.messageId || '').trim();
     const telegramMessageId = req.query.telegramMessageId ? Number(req.query.telegramMessageId) : undefined;
@@ -26682,15 +27139,21 @@ app.get('/api/telegram/user/messages/read-participants', requireTenantAuth, asyn
     return res.json({ ok: true, chatId, telegramMessageId: tgMsgId, participants });
   } catch (err: any) {
     return await handleMtprotoRouteError(res, err, {
-      accountId: (req.query.accountId as string) || (req.headers['x-account-id'] as string) || '',
+      accountId: scopedAccountId,
     }, 400);
   }
 });
 
 // 20.3.1n Toggle Dialog Pin in Telegram Cloud (messages.ToggleDialogPin)
 app.post('/api/telegram/user/dialogs/pin', requireTenantAuth, async (req: Request, res: Response) => {
+  let scopedAccountId = '';
   try {
-    const accountId = (req.body?.accountId as string) || (req.headers['x-account-id'] as string) || '';
+    const scope = resolveScopedAccountFromRequest(req, { allowBot: false });
+    if (!scope.ok) {
+      return res.status(scope.status).json({ ok: false, code: scope.code, error: scope.error });
+    }
+    const accountId = scope.accountId;
+    scopedAccountId = accountId;
     const { chatId, pinned } = req.body || {};
 
     const connected = resolveConnectedTelegramUser(accountId);
@@ -26718,15 +27181,21 @@ app.post('/api/telegram/user/dialogs/pin', requireTenantAuth, async (req: Reques
     return res.json({ ok: true, cloudSynced: true, pinned: Boolean(pinned) });
   } catch (err: any) {
     return await handleMtprotoRouteError(res, err, {
-      accountId: (req.body?.accountId as string) || (req.headers['x-account-id'] as string) || '',
+      accountId: scopedAccountId,
     }, 400);
   }
 });
 
 // 20.3.1o Mute / Unmute Specific Dialog in Telegram Cloud (account.UpdateNotifySettings)
 app.post('/api/telegram/user/dialogs/mute', requireTenantAuth, async (req: Request, res: Response) => {
+  let scopedAccountId = '';
   try {
-    const accountId = (req.body?.accountId as string) || (req.headers['x-account-id'] as string) || '';
+    const scope = resolveScopedAccountFromRequest(req, { allowBot: false });
+    if (!scope.ok) {
+      return res.status(scope.status).json({ ok: false, code: scope.code, error: scope.error });
+    }
+    const accountId = scope.accountId;
+    scopedAccountId = accountId;
     const { chatId, muted } = req.body || {};
 
     const connected = resolveConnectedTelegramUser(accountId);
@@ -26767,15 +27236,21 @@ app.post('/api/telegram/user/dialogs/mute', requireTenantAuth, async (req: Reque
     return res.json({ ok: true, cloudSynced: true, muted: Boolean(muted) });
   } catch (err: any) {
     return await handleMtprotoRouteError(res, err, {
-      accountId: (req.body?.accountId as string) || (req.headers['x-account-id'] as string) || '',
+      accountId: scopedAccountId,
     }, 400);
   }
 });
 
 // 20.3.1p Archive / Unarchive Dialog in Telegram Cloud (folders.EditPeerFolders)
 app.post('/api/telegram/user/dialogs/archive', requireTenantAuth, async (req: Request, res: Response) => {
+  let scopedAccountId = '';
   try {
-    const accountId = (req.body?.accountId as string) || (req.headers['x-account-id'] as string) || '';
+    const scope = resolveScopedAccountFromRequest(req, { allowBot: false });
+    if (!scope.ok) {
+      return res.status(scope.status).json({ ok: false, code: scope.code, error: scope.error });
+    }
+    const accountId = scope.accountId;
+    scopedAccountId = accountId;
     const { chatId, archived } = req.body || {};
 
     const connected = resolveConnectedTelegramUser(accountId);
@@ -26806,15 +27281,21 @@ app.post('/api/telegram/user/dialogs/archive', requireTenantAuth, async (req: Re
     return res.json({ ok: true, cloudSynced: true, archived: resolvedArchived });
   } catch (err: any) {
     return await handleMtprotoRouteError(res, err, {
-      accountId: (req.body?.accountId as string) || (req.headers['x-account-id'] as string) || '',
+      accountId: scopedAccountId,
     }, 400);
   }
 });
 
 // 20.3.1q Mark Dialog Unread / Read in Telegram Cloud (messages.MarkDialogUnread / markAsRead)
 app.post('/api/telegram/user/dialogs/unread', requireTenantAuth, async (req: Request, res: Response) => {
+  let scopedAccountId = '';
   try {
-    const accountId = (req.body?.accountId as string) || (req.headers['x-account-id'] as string) || '';
+    const scope = resolveScopedAccountFromRequest(req, { allowBot: false });
+    if (!scope.ok) {
+      return res.status(scope.status).json({ ok: false, code: scope.code, error: scope.error });
+    }
+    const accountId = scope.accountId;
+    scopedAccountId = accountId;
     const { chatId, unread } = req.body || {};
 
     const connected = resolveConnectedTelegramUser(accountId);
@@ -26839,15 +27320,21 @@ app.post('/api/telegram/user/dialogs/unread', requireTenantAuth, async (req: Req
     return res.json({ ok: true, cloudSynced: true, unread: Boolean(unread) });
   } catch (err: any) {
     return await handleMtprotoRouteError(res, err, {
-      accountId: (req.body?.accountId as string) || (req.headers['x-account-id'] as string) || '',
+      accountId: scopedAccountId,
     }, 400);
   }
 });
 
 // 20.3.1r Clear Chat History in Telegram Cloud (messages.DeleteHistory justClear=true)
 app.post('/api/telegram/user/dialogs/clear-history', requireTenantAuth, async (req: Request, res: Response) => {
+  let scopedAccountId = '';
   try {
-    const accountId = (req.body?.accountId as string) || (req.headers['x-account-id'] as string) || '';
+    const scope = resolveScopedAccountFromRequest(req, { allowBot: false });
+    if (!scope.ok) {
+      return res.status(scope.status).json({ ok: false, code: scope.code, error: scope.error });
+    }
+    const accountId = scope.accountId;
+    scopedAccountId = accountId;
     const { chatId, revoke } = req.body || {};
 
     const connected = resolveConnectedTelegramUser(accountId);
@@ -26878,15 +27365,21 @@ app.post('/api/telegram/user/dialogs/clear-history', requireTenantAuth, async (r
     return res.json({ ok: true, cloudSynced: true });
   } catch (err: any) {
     return await handleMtprotoRouteError(res, err, {
-      accountId: (req.body?.accountId as string) || (req.headers['x-account-id'] as string) || '',
+      accountId: scopedAccountId,
     }, 400);
   }
 });
 
 // 20.3.1s Delete Dialog / Leave Group or Channel in Telegram Cloud
 app.post('/api/telegram/user/dialogs/delete', requireTenantAuth, async (req: Request, res: Response) => {
+  let scopedAccountId = '';
   try {
-    const accountId = (req.body?.accountId as string) || (req.headers['x-account-id'] as string) || '';
+    const scope = resolveScopedAccountFromRequest(req, { allowBot: false });
+    if (!scope.ok) {
+      return res.status(scope.status).json({ ok: false, code: scope.code, error: scope.error });
+    }
+    const accountId = scope.accountId;
+    scopedAccountId = accountId;
     const { chatId, revoke } = req.body || {};
 
     const connected = resolveConnectedTelegramUser(accountId);
@@ -26940,15 +27433,21 @@ app.post('/api/telegram/user/dialogs/delete', requireTenantAuth, async (req: Req
     return res.json({ ok: true, cloudSynced: true });
   } catch (err: any) {
     return await handleMtprotoRouteError(res, err, {
-      accountId: (req.body?.accountId as string) || (req.headers['x-account-id'] as string) || '',
+      accountId: scopedAccountId,
     }, 400);
   }
 });
 
 // 20.3.1s2 Mark Dialog Read in Telegram Cloud (markAsRead + clear unread badge)
 app.post('/api/telegram/user/dialogs/read', requireTenantAuth, async (req: Request, res: Response) => {
+  let scopedAccountId = '';
   try {
-    const accountId = (req.body?.accountId as string) || (req.headers['x-account-id'] as string) || '';
+    const scope = resolveScopedAccountFromRequest(req, { allowBot: false });
+    if (!scope.ok) {
+      return res.status(scope.status).json({ ok: false, code: scope.code, error: scope.error });
+    }
+    const accountId = scope.accountId;
+    scopedAccountId = accountId;
     const { chatId, maxId } = req.body || {};
     if (!chatId) {
       return res.status(400).json({ ok: false, error: 'chatId 不能为空' });
@@ -26979,7 +27478,7 @@ app.post('/api/telegram/user/dialogs/read', requireTenantAuth, async (req: Reque
     return res.json({ ok: true, cloudSynced: true });
   } catch (err: any) {
     return await handleMtprotoRouteError(res, err, {
-      accountId: (req.body?.accountId as string) || (req.headers['x-account-id'] as string) || '',
+      accountId: scopedAccountId,
     }, 400);
   }
 });
@@ -27198,8 +27697,14 @@ app.post('/api/telegram/user/messages/forward', requireTenantAuth, async (req: R
 
 // 20.3.1t Rename Telegram Contact Remark in Cloud (contacts.AddContact)
 app.post('/api/telegram/user/contacts/rename', requireTenantAuth, async (req: Request, res: Response) => {
+  let scopedAccountId = '';
   try {
-    const accountId = (req.body?.accountId as string) || (req.headers['x-account-id'] as string) || '';
+    const scope = resolveScopedAccountFromRequest(req, { allowBot: false });
+    if (!scope.ok) {
+      return res.status(scope.status).json({ ok: false, code: scope.code, error: scope.error });
+    }
+    const accountId = scope.accountId;
+    scopedAccountId = accountId;
     const { chatId, newTitle } = req.body || {};
     const cleanTitle = String(newTitle || '').trim();
 
@@ -27242,11 +27747,8 @@ app.post('/api/telegram/user/contacts/rename', requireTenantAuth, async (req: Re
     );
 
     try {
-      const scopedAccountId =
-        (req.body?.accountId as string) ||
-        (req.headers['x-account-id'] as string) ||
-        `acc_tg_${connected.userId}`;
-      const accVariants = getScopedAccountIdVariants(scopedAccountId);
+      const scopedAccountIdForDb = scopedAccountId || `acc_tg_${connected.userId}`;
+      const accVariants = getScopedAccountIdVariants(scopedAccountIdForDb);
       const accPh = accVariants.map(() => '?').join(', ');
       const canonicalChatId = canonicalizeCustomerChatId(chatId);
       const chatCandidates = Array.from(new Set([canonicalChatId, String(chatId || '').trim()].filter(Boolean)));
@@ -27264,16 +27766,22 @@ app.post('/api/telegram/user/contacts/rename', requireTenantAuth, async (req: Re
     return res.json({ ok: true, cloudSynced: true, title: cleanTitle });
   } catch (err: any) {
     return await handleMtprotoRouteError(res, err, {
-      accountId: (req.body?.accountId as string) || (req.headers['x-account-id'] as string) || '',
+      accountId: scopedAccountId,
     }, 400);
   }
 });
 
 // 20.3.1u Fetch Real Telegram Chat Full Info & Participants (users.GetFullUser / messages.GetFullChat / channels.GetFullChannel + channels.GetParticipants)
 app.get('/api/telegram/user/chat-info/:chatId', requireTenantAuth, async (req: Request, res: Response) => {
+  let scopedAccountId = '';
   try {
+    const scope = resolveScopedAccountFromRequest(req, { allowBot: false });
+    if (!scope.ok) {
+      return res.status(scope.status).json({ ok: false, code: scope.code, chatId: req.params.chatId, error: scope.error });
+    }
     const { chatId } = req.params;
-    const accountId = (req.query.accountId as string) || (req.headers['x-account-id'] as string) || '';
+    const accountId = scope.accountId;
+    scopedAccountId = accountId;
 
     const connected = resolveConnectedTelegramUser(accountId);
     if (!connected || !connected.client) {
@@ -27604,8 +28112,7 @@ app.get('/api/telegram/user/chat-info/:chatId', requireTenantAuth, async (req: R
     });
   } catch (err: any) {
     if (isTelegramSessionExpiredError(err)) {
-      const accountId = (req.query.accountId as string) || (req.headers['x-account-id'] as string) || '';
-      await markTelegramSessionExpired({ accountId, reason: formatTelegramError(err) });
+      await markTelegramSessionExpired({ accountId: scopedAccountId, reason: formatTelegramError(err) });
       return res.status(401).json({ ok: false, code: 'TELEGRAM_SESSION_EXPIRED', error: formatTelegramError(err) });
     }
     return res.status(400).json({ ok: false, error: formatTelegramError(err) });
@@ -27614,8 +28121,14 @@ app.get('/api/telegram/user/chat-info/:chatId', requireTenantAuth, async (req: R
 
 // 20.3.1u2 Remove Group / Supergroup Member with Strict Creator/Admin Permission Enforcement
 app.post('/api/telegram/user/group/remove-member', requireTenantAuth, async (req: Request, res: Response) => {
+  let scopedAccountId = '';
   try {
-    const accountId = (req.body?.accountId as string) || (req.headers['x-account-id'] as string) || '';
+    const scope = resolveScopedAccountFromRequest(req, { allowBot: false });
+    if (!scope.ok) {
+      return res.status(scope.status).json({ ok: false, code: scope.code, error: scope.error });
+    }
+    const accountId = scope.accountId;
+    scopedAccountId = accountId;
     const chatId = String(req.body?.chatId || '').trim();
     const memberId = String(req.body?.memberId || '').trim();
 
@@ -27824,7 +28337,7 @@ app.post('/api/telegram/user/group/remove-member', requireTenantAuth, async (req
       return res.status(404).json({ ok: false, error: '该用户已不在当前群组中' });
     }
     return await handleMtprotoRouteError(res, err, {
-      accountId: (req.body?.accountId as string) || (req.headers['x-account-id'] as string) || '',
+      accountId: scopedAccountId,
     }, 400);
   }
 });
@@ -27996,8 +28509,14 @@ async function fetchStickerPacksInBatches(
 }
 
 app.get('/api/telegram/user/stickers', requireTenantAuth, async (req: Request, res: Response) => {
+  let scopedAccountId = '';
   try {
-    const accountId = (req.query.accountId as string) || (req.headers['x-account-id'] as string) || '';
+    const scope = resolveScopedAccountFromRequest(req, { allowBot: false });
+    if (!scope.ok) {
+      return res.status(scope.status).json({ ok: false, code: scope.code, packs: [], error: scope.error });
+    }
+    const accountId = scope.accountId;
+    scopedAccountId = accountId;
     const connected = resolveConnectedTelegramUser(accountId);
     if (!connected || !connected.client) {
       return res.status(400).json({
@@ -28049,15 +28568,21 @@ app.get('/api/telegram/user/stickers', requireTenantAuth, async (req: Request, r
     return res.json({ ok: true, packs });
   } catch (err: any) {
     return await handleMtprotoRouteError(res, err, {
-      accountId: (req.query.accountId as string) || (req.headers['x-account-id'] as string) || '',
+      accountId: scopedAccountId,
     }, 400);
   }
 });
 
 // 20.3.1v2 Cloud Search Official Telegram Sticker Sets & Stickers by Keyword or Emoji
 app.get('/api/telegram/user/stickers/search', requireTenantAuth, async (req: Request, res: Response) => {
+  let scopedAccountId = '';
   try {
-    const accountId = (req.query.accountId as string) || (req.headers['x-account-id'] as string) || '';
+    const scope = resolveScopedAccountFromRequest(req, { allowBot: false });
+    if (!scope.ok) {
+      return res.status(scope.status).json({ ok: false, code: scope.code, packs: [], error: scope.error });
+    }
+    const accountId = scope.accountId;
+    scopedAccountId = accountId;
     const q = String(req.query.q || '').trim();
     if (!q) {
       return res.json({ ok: true, packs: [] });
@@ -28155,7 +28680,7 @@ app.get('/api/telegram/user/stickers/search', requireTenantAuth, async (req: Req
     return res.json({ ok: true, packs });
   } catch (err: any) {
     return await handleMtprotoRouteError(res, err, {
-      accountId: (req.query.accountId as string) || (req.headers['x-account-id'] as string) || '',
+      accountId: scopedAccountId,
     }, 400);
   }
 });
@@ -28172,7 +28697,7 @@ app.get('/api/telegram/user/sticker/:setId/:docId', async (req: Request, res: Re
 
     const { setId, docId } = req.params;
     const setAccessHash = String(req.query.setAccessHash || '');
-    const accountId = (req.query.accountId as string) || (req.headers['x-account-id'] as string) || '';
+    const accountId = typeof req.query.accountId === 'string' ? req.query.accountId.trim() : '';
 
     const primaryConnected = accountId ? resolveConnectedTelegramUser(accountId) : undefined;
     const candidates: ConnectedTelegramUser[] = [];
@@ -28264,8 +28789,14 @@ app.get('/api/telegram/user/sticker/:setId/:docId', async (req: Request, res: Re
 
 // 20.3.1x Send Real Official Telegram Sticker via messages.SendMedia
 app.post('/api/telegram/user/send-sticker', requireTenantAuth, async (req: Request, res: Response) => {
+  let scopedAccountId = '';
   try {
-    const accountId = (req.body?.accountId as string) || (req.headers['x-account-id'] as string) || '';
+    const scope = resolveScopedAccountFromRequest(req, { allowBot: false });
+    if (!scope.ok) {
+      return res.status(scope.status).json({ ok: false, code: scope.code, error: scope.error });
+    }
+    const accountId = scope.accountId;
+    scopedAccountId = accountId;
     const {
       chatId,
       docId,
@@ -28433,10 +28964,74 @@ app.post('/api/telegram/user/send-sticker', requireTenantAuth, async (req: Reque
     });
   } catch (err: any) {
     return await handleMtprotoRouteError(res, err, {
-      accountId: (req.body?.accountId as string) || (req.headers['x-account-id'] as string) || '',
+      accountId: scopedAccountId,
     }, 400);
   }
 });
+
+export function resolveScopedTelegramTarget(
+  req: Request,
+  options?: { allowBot?: boolean; rawPhone?: unknown; rawUserId?: unknown }
+):
+  | { ok: true; accountId: string; isExplicit: boolean; isMaster: boolean; phone: string; userId: string }
+  | { ok: false; status: number; code: string; error: string } {
+  const scope = resolveScopedAccountFromRequest(req, { allowBot: options?.allowBot ?? false });
+  if (!scope.ok) return scope;
+  const isMaster = Boolean((req as any).auth?.session?.isMaster);
+  const rawPhone = typeof options?.rawPhone === 'string' ? options.rawPhone.trim() : '';
+  const rawUserId = typeof options?.rawUserId === 'string' ? options.rawUserId.trim() : '';
+
+  if (!isMaster) {
+    const expectedUid = scope.accountId.startsWith('acc_tg_') ? scope.accountId.replace(/^acc_tg_/, '').trim() : '';
+    if (rawUserId && rawUserId !== scope.accountId && (!expectedUid || rawUserId !== expectedUid)) {
+      return {
+        ok: false,
+        status: 403,
+        code: 'ACCOUNT_SCOPE_FORBIDDEN',
+        error: `无权跨账号操作目标用户 (${rawUserId})`,
+      };
+    }
+    if (rawPhone) {
+      const boundConn = resolveConnectedTelegramUser(scope.accountId);
+      if (boundConn) {
+        const normReqPhone = normalizePhoneNumber(rawPhone) || rawPhone;
+        const normBoundPhone = boundConn.phone ? normalizePhoneNumber(boundConn.phone) || boundConn.phone : '';
+        if (rawPhone !== boundConn.phone && normReqPhone !== normBoundPhone) {
+          return {
+            ok: false,
+            status: 403,
+            code: 'ACCOUNT_SCOPE_FORBIDDEN',
+            error: '无权通过手机号跨账号操作其他会话',
+          };
+        }
+      } else if (!expectedUid) {
+        return {
+          ok: false,
+          status: 403,
+          code: 'ACCOUNT_SCOPE_FORBIDDEN',
+          error: '当前子账号未绑定个人 Telegram 账号，禁止通过手机号指定会话',
+        };
+      }
+    }
+    return {
+      ok: true,
+      accountId: scope.accountId,
+      isExplicit: scope.isExplicit,
+      isMaster: false,
+      phone: '',
+      userId: expectedUid,
+    };
+  }
+
+  return {
+    ok: true,
+    accountId: scope.isExplicit ? scope.accountId : '',
+    isExplicit: scope.isExplicit,
+    isMaster: true,
+    phone: rawPhone,
+    userId: rawUserId,
+  };
+}
 
 // Helper to resolve connected MTProto client by accountId / phone / userId
 export function resolveConnectedTelegramUser(
@@ -28668,8 +29263,14 @@ function mapTelegramUserToContact(
 
 // 20.3.2 Sync real contacts from Telegram Cloud MTProto (contacts.GetContacts + contacts.GetBlocked)
 app.get('/api/telegram/user/contacts', requireTenantAuth, async (req: Request, res: Response) => {
+  let scopedAccountId = '';
   try {
-    const accountId = (req.query.accountId as string) || (req.headers['x-account-id'] as string) || '';
+    const scope = resolveScopedAccountFromRequest(req, { allowBot: false });
+    if (!scope.ok) {
+      return res.status(scope.status).json({ ok: false, code: scope.code, cloudSynced: false, contacts: [], error: scope.error });
+    }
+    const accountId = scope.accountId;
+    scopedAccountId = accountId;
     const connected = resolveConnectedTelegramUser(accountId);
     if (!connected || !connected.client) {
       return res.json({
@@ -28706,15 +29307,21 @@ app.get('/api/telegram/user/contacts', requireTenantAuth, async (req: Request, r
     return res.json({ ok: true, cloudSynced: true, contacts });
   } catch (err: any) {
     return await handleMtprotoRouteError(res, err, {
-      accountId: (req.query.accountId as string) || (req.headers['x-account-id'] as string) || '',
+      accountId: scopedAccountId,
     }, 500);
   }
 });
 
 // 20.3.2.1 Search global Telegram users & contacts via MTProto (contacts.Search + contacts.ResolvePhone)
 app.get('/api/telegram/user/contacts/search', requireTenantAuth, async (req: Request, res: Response) => {
+  let scopedAccountId = '';
   try {
-    const accountId = (req.query.accountId as string) || (req.headers['x-account-id'] as string) || '';
+    const scope = resolveScopedAccountFromRequest(req, { allowBot: false });
+    if (!scope.ok) {
+      return res.status(scope.status).json({ ok: false, code: scope.code, contacts: [], error: scope.error });
+    }
+    const accountId = scope.accountId;
+    scopedAccountId = accountId;
     const q = typeof req.query.q === 'string' ? req.query.q.trim() : '';
     if (!q) {
       return res.json({ ok: true, contacts: [] });
@@ -28783,15 +29390,21 @@ app.get('/api/telegram/user/contacts/search', requireTenantAuth, async (req: Req
     return res.json({ ok: true, cloudSynced: true, contacts });
   } catch (err: any) {
     return await handleMtprotoRouteError(res, err, {
-      accountId: (req.query.accountId as string) || (req.headers['x-account-id'] as string) || '',
+      accountId: scopedAccountId,
     }, 500);
   }
 });
 
 // 20.3.2.2 Fetch real Telegram Blacklist / Blocked Users via MTProto (contacts.GetBlocked paginated)
 app.get('/api/telegram/user/contacts/blocked', requireTenantAuth, async (req: Request, res: Response) => {
+  let scopedAccountId = '';
   try {
-    const accountId = (req.query.accountId as string) || (req.headers['x-account-id'] as string) || '';
+    const scope = resolveScopedAccountFromRequest(req, { allowBot: false });
+    if (!scope.ok) {
+      return res.status(scope.status).json({ ok: false, code: scope.code, blocked: [], error: scope.error });
+    }
+    const accountId = scope.accountId;
+    scopedAccountId = accountId;
     const connected = resolveConnectedTelegramUser(accountId);
     if (!connected || !connected.client) {
       return res.status(400).json({
@@ -28809,15 +29422,21 @@ app.get('/api/telegram/user/contacts/blocked', requireTenantAuth, async (req: Re
     return res.json({ ok: true, cloudSynced: true, blocked });
   } catch (err: any) {
     return await handleMtprotoRouteError(res, err, {
-      accountId: (req.query.accountId as string) || (req.headers['x-account-id'] as string) || '',
+      accountId: scopedAccountId,
     }, 500);
   }
 });
 
 // 20.3.3 Add/Import real contact to Telegram Cloud MTProto (contacts.ImportContacts / contacts.AddContact)
 app.post('/api/telegram/user/contacts/add', requireTenantAuth, async (req: Request, res: Response) => {
+  let scopedAccountId = '';
   try {
-    const accountId = (req.body?.accountId as string) || (req.headers['x-account-id'] as string) || '';
+    const scope = resolveScopedAccountFromRequest(req, { allowBot: false });
+    if (!scope.ok) {
+      return res.status(scope.status).json({ ok: false, code: scope.code, cloudSynced: false, error: scope.error });
+    }
+    const accountId = scope.accountId;
+    scopedAccountId = accountId;
     const { name, phone, username, chatId } = req.body || {};
     const connected = resolveConnectedTelegramUser(accountId);
     if (!connected || !connected.client) {
@@ -28948,15 +29567,21 @@ app.post('/api/telegram/user/contacts/add', requireTenantAuth, async (req: Reque
     return res.json({ ok: true, cloudSynced: true, contact });
   } catch (err: any) {
     return await handleMtprotoRouteError(res, err, {
-      accountId: (req.body?.accountId as string) || (req.headers['x-account-id'] as string) || '',
+      accountId: scopedAccountId,
     }, 500);
   }
 });
 
 // 20.3.3.1 Delete contact from Telegram Cloud MTProto (contacts.DeleteContacts)
 app.post('/api/telegram/user/contacts/delete', requireTenantAuth, async (req: Request, res: Response) => {
+  let scopedAccountId = '';
   try {
-    const accountId = (req.body?.accountId as string) || (req.headers['x-account-id'] as string) || '';
+    const scope = resolveScopedAccountFromRequest(req, { allowBot: false });
+    if (!scope.ok) {
+      return res.status(scope.status).json({ ok: false, code: scope.code, error: scope.error });
+    }
+    const accountId = scope.accountId;
+    scopedAccountId = accountId;
     const chatId = req.body?.chatId;
     if (!chatId) {
       return res.status(400).json({ ok: false, error: '联系人 ID 为必填项' });
@@ -28977,15 +29602,21 @@ app.post('/api/telegram/user/contacts/delete', requireTenantAuth, async (req: Re
     return res.json({ ok: true, cloudSynced: true });
   } catch (err: any) {
     return await handleMtprotoRouteError(res, err, {
-      accountId: (req.body?.accountId as string) || (req.headers['x-account-id'] as string) || '',
+      accountId: scopedAccountId,
     }, 500);
   }
 });
 
 // 20.3.3.2 Block contact in Telegram Cloud MTProto (contacts.Block)
 app.post('/api/telegram/user/contacts/block', requireTenantAuth, async (req: Request, res: Response) => {
+  let scopedAccountId = '';
   try {
-    const accountId = (req.body?.accountId as string) || (req.headers['x-account-id'] as string) || '';
+    const scope = resolveScopedAccountFromRequest(req, { allowBot: false });
+    if (!scope.ok) {
+      return res.status(scope.status).json({ ok: false, code: scope.code, error: scope.error });
+    }
+    const accountId = scope.accountId;
+    scopedAccountId = accountId;
     const chatId = req.body?.chatId;
     if (!chatId) {
       return res.status(400).json({ ok: false, error: '联系人 ID 为必填项' });
@@ -29006,15 +29637,21 @@ app.post('/api/telegram/user/contacts/block', requireTenantAuth, async (req: Req
     return res.json({ ok: true, cloudSynced: true });
   } catch (err: any) {
     return await handleMtprotoRouteError(res, err, {
-      accountId: (req.body?.accountId as string) || (req.headers['x-account-id'] as string) || '',
+      accountId: scopedAccountId,
     }, 500);
   }
 });
 
 // 20.3.3.3 Unblock contact in Telegram Cloud MTProto (contacts.Unblock)
 app.post('/api/telegram/user/contacts/unblock', requireTenantAuth, async (req: Request, res: Response) => {
+  let scopedAccountId = '';
   try {
-    const accountId = (req.body?.accountId as string) || (req.headers['x-account-id'] as string) || '';
+    const scope = resolveScopedAccountFromRequest(req, { allowBot: false });
+    if (!scope.ok) {
+      return res.status(scope.status).json({ ok: false, code: scope.code, error: scope.error });
+    }
+    const accountId = scope.accountId;
+    scopedAccountId = accountId;
     const chatId = req.body?.chatId;
     if (!chatId) {
       return res.status(400).json({ ok: false, error: '联系人 ID 为必填项' });
@@ -29035,15 +29672,21 @@ app.post('/api/telegram/user/contacts/unblock', requireTenantAuth, async (req: R
     return res.json({ ok: true, cloudSynced: true });
   } catch (err: any) {
     return await handleMtprotoRouteError(res, err, {
-      accountId: (req.body?.accountId as string) || (req.headers['x-account-id'] as string) || '',
+      accountId: scopedAccountId,
     }, 500);
   }
 });
 
 // 20.3.4 Create real group / supergroup on Telegram Cloud MTProto
 app.post('/api/telegram/user/create-group', requireTenantAuth, async (req: Request, res: Response) => {
+  let scopedAccountId = '';
   try {
-    const accountId = (req.body?.accountId as string) || (req.headers['x-account-id'] as string) || '';
+    const scope = resolveScopedAccountFromRequest(req, { allowBot: false });
+    if (!scope.ok) {
+      return res.status(scope.status).json({ ok: false, code: scope.code, cloudSynced: false, error: scope.error });
+    }
+    const accountId = scope.accountId;
+    scopedAccountId = accountId;
     const title = typeof req.body?.title === 'string' ? req.body.title.trim() : '';
     const memberPeers: Array<{ id?: string; username?: string; phone?: string }> = Array.isArray(req.body?.memberPeers)
       ? req.body.memberPeers
@@ -29127,15 +29770,21 @@ app.post('/api/telegram/user/create-group', requireTenantAuth, async (req: Reque
     return res.json({ ok: true, cloudSynced: true, invitedCount, chat });
   } catch (err: any) {
     return await handleMtprotoRouteError(res, err, {
-      accountId: (req.body?.accountId as string) || (req.headers['x-account-id'] as string) || '',
+      accountId: scopedAccountId,
     }, 500);
   }
 });
 
 // 20.3.5 Create real broadcast channel on Telegram Cloud MTProto
 app.post('/api/telegram/user/create-channel', requireTenantAuth, async (req: Request, res: Response) => {
+  let scopedAccountId = '';
   try {
-    const accountId = (req.body?.accountId as string) || (req.headers['x-account-id'] as string) || '';
+    const scope = resolveScopedAccountFromRequest(req, { allowBot: false });
+    if (!scope.ok) {
+      return res.status(scope.status).json({ ok: false, code: scope.code, cloudSynced: false, error: scope.error });
+    }
+    const accountId = scope.accountId;
+    scopedAccountId = accountId;
     const title = typeof req.body?.title === 'string' ? req.body.title.trim() : '';
     const description = typeof req.body?.description === 'string' ? req.body.description.trim() : '';
     const channelType = req.body?.channelType === 'private' ? 'private' : 'public';
@@ -29226,7 +29875,7 @@ app.post('/api/telegram/user/create-channel', requireTenantAuth, async (req: Req
     return res.json({ ok: true, cloudSynced: true, chat, usernameWarning });
   } catch (err: any) {
     return await handleMtprotoRouteError(res, err, {
-      accountId: (req.body?.accountId as string) || (req.headers['x-account-id'] as string) || '',
+      accountId: scopedAccountId,
     }, 500);
   }
 });
@@ -29325,8 +29974,14 @@ function formatTelegramChatEntityToUiChat(entity: any, connectedUserId: string, 
 
 // 20.3.5.1 Preview Telegram Group/Channel Invite Link (CheckChatInvite / ResolveUsername)
 app.post('/api/telegram/user/invite/preview', requireTenantAuth, async (req: Request, res: Response) => {
+  let scopedAccountId = '';
   try {
-    const accountId = (req.body?.accountId as string) || (req.headers['x-account-id'] as string) || '';
+    const scope = resolveScopedAccountFromRequest(req, { allowBot: false });
+    if (!scope.ok) {
+      return res.status(scope.status).json({ ok: false, code: scope.code, error: scope.error });
+    }
+    const accountId = scope.accountId;
+    scopedAccountId = accountId;
     const rawUrl = typeof req.body?.url === 'string' ? req.body.url.trim() : '';
     const parsed = parseTelegramInviteOrPublicLink(rawUrl);
     if (!parsed) {
@@ -29389,14 +30044,18 @@ app.post('/api/telegram/user/invite/preview', requireTenantAuth, async (req: Req
     });
   } catch (err: any) {
     return await handleMtprotoRouteError(res, err, {
-      accountId: (req.body?.accountId as string) || (req.headers['x-account-id'] as string) || '',
+      accountId: scopedAccountId,
     }, 400);
   }
 });
 
 // 20.3.5.2 Join Telegram Group/Channel via Invite Hash or Public Username
 app.post('/api/telegram/user/invite/join', requireTenantAuth, async (req: Request, res: Response) => {
-  const accountId = (req.body?.accountId as string) || (req.headers['x-account-id'] as string) || '';
+  const scope = resolveScopedAccountFromRequest(req, { allowBot: false });
+  if (!scope.ok) {
+    return res.status(scope.status).json({ ok: false, code: scope.code, error: scope.error });
+  }
+  const accountId = scope.accountId;
   const rawUrl = typeof req.body?.url === 'string' ? req.body.url.trim() : '';
   const parsed = parseTelegramInviteOrPublicLink(rawUrl);
   if (!parsed) {
@@ -29924,7 +30583,11 @@ function extractTelegramMediaFields(
   const isImage = Boolean(
     !isVideo &&
       !isAudio &&
-      (m.photo || media?.className === 'MessageMediaPhoto' || isStickerImage || isStickerThumb || mimeType.startsWith('image/'))
+      (m.photo ||
+        media?.className === 'MessageMediaPhoto' ||
+        isStickerImage ||
+        isStickerThumb ||
+        (mimeType.startsWith('image/') && !mimeType.includes('svg')))
   );
   const isFile = Boolean(doc && !isImage && !isVideo && !isAudio);
 
@@ -29983,7 +30646,13 @@ export async function syncTelegramUserChatMessages(
   rawChatId: string,
   limit = 40,
   explicitUserId?: string,
-  options?: { offsetId?: number; search?: string; throwOnError?: boolean }
+  options?: {
+    offsetId?: number;
+    search?: string;
+    throwOnError?: boolean;
+    filter?: Api.TypeMessagesFilter;
+    metaOut?: { rawCount: number; minRawId?: number; totalCount?: number };
+  }
 ) {
   try {
     const rawId = rawChatId.startsWith('tg_') ? rawChatId.replace('tg_', '') : rawChatId;
@@ -30003,8 +30672,21 @@ export async function syncTelegramUserChatMessages(
     if (options?.search && options.search.trim()) {
       iterParams.search = options.search.trim();
     }
+    if (options?.filter) {
+      iterParams.filter = options.filter;
+    }
 
     const messages = await client.getMessages(peerTarget, iterParams);
+    const rawMessagesList = Array.isArray(messages) ? messages : [];
+    const rawIds = rawMessagesList
+      .map((m: any) => Number(m?.id || 0))
+      .filter((id: number) => Number.isInteger(id) && id > 0);
+    if (options?.metaOut) {
+      options.metaOut.rawCount = rawMessagesList.length;
+      options.metaOut.minRawId = rawIds.length > 0 ? Math.min(...rawIds) : undefined;
+      options.metaOut.totalCount =
+        typeof (messages as any)?.total === 'number' ? (messages as any).total : undefined;
+    }
 
     const canonicalId =
       rawId === 'me' && explicitUserId
@@ -30014,10 +30696,10 @@ export async function syncTelegramUserChatMessages(
           : `tg_${rawChatId}`;
     const accountId = `acc_tg_${explicitUserId || (client as any)._selfId || 'user'}`;
 
-    const allFetched: any[] = Array.isArray(messages) ? [...messages] : [];
+    const allFetched: any[] = [...rawMessagesList];
 
-    // On initial sync (not pagination/search), also include up to 5 latest pinned messages so older pinned banners appear
-    if (!options?.offsetId && !options?.search) {
+    // On initial sync (not pagination/search/filter), also include up to 5 latest pinned messages so older pinned banners appear
+    if (!options?.offsetId && !options?.search && !options?.filter) {
       try {
         const pinnedMsgs = await client.getMessages(peerTarget, {
           limit: 5,
@@ -30035,7 +30717,7 @@ export async function syncTelegramUserChatMessages(
     }
 
     if (allFetched.length === 0) {
-      if (!options?.offsetId && !options?.search) {
+      if (!options?.offsetId && !options?.search && !options?.filter) {
         try {
           const altChatId = canonicalId.startsWith('tg_') ? canonicalId.replace(/^tg_/, '') : `tg_${canonicalId}`;
           const accVariants = getScopedAccountIdVariants(accountId);
@@ -30174,8 +30856,8 @@ export async function syncTelegramUserChatMessages(
       });
     }
 
-    // Save to unified database cache (skip when searching subset only)
-    if (!options?.search) {
+    // Save to unified database cache (skip when searching or filtering media subset only)
+    if (!options?.search && !options?.filter) {
       for (const msg of synced) {
         await upsertSyncedMessageToDb(msg, canonicalId, accountId);
       }
@@ -30199,14 +30881,25 @@ export async function querySqlitePaginatedMessagesFallback(
   const safeLimit = Math.min(Math.max(Number(options?.limit) || 30, 1), 100);
   const altChatId = chatId.startsWith('tg_') ? chatId.replace(/^tg_/, '') : `tg_${chatId}`;
   const effectiveAcc = String(accountId || '').trim();
+  const selfTgMatch = effectiveAcc.match(/^acc_tg_(\d+)$/);
+  const chatIdCandidates = Array.from(
+    new Set(
+      [
+        chatId,
+        altChatId,
+        ...((chatId === 'me' || chatId === 'tg_me') && selfTgMatch ? [`tg_${selfTgMatch[1]}`, selfTgMatch[1]] : []),
+      ].filter(Boolean)
+    )
+  );
+  const chatIdPlaceholders = chatIdCandidates.map(() => '?').join(', ');
   const accVariants = effectiveAcc ? getScopedAccountIdVariants(effectiveAcc) : [''];
   const accPlaceholders = accVariants.map(() => '?').join(', ');
 
   const conditions = [
-    '(chat_id = ? OR chat_id = ?)',
+    `chat_id IN (${chatIdPlaceholders})`,
     effectiveAcc ? `account_id IN (${accPlaceholders})` : '1=1',
   ];
-  const args: any[] = [chatId, altChatId, ...(effectiveAcc ? accVariants : [])];
+  const args: any[] = [...chatIdCandidates, ...(effectiveAcc ? accVariants : [])];
 
   if (options?.offsetId && Number.isInteger(options.offsetId) && options.offsetId > 0) {
     conditions.push('telegram_message_id IS NOT NULL AND telegram_message_id > 0 AND telegram_message_id < ?');
@@ -30385,10 +31078,14 @@ app.get('/api/telegram/user/messages/:chatId', requireTenantAuth, async (req: Re
       });
     }
 
+    const syncMeta: { rawCount: number; minRawId?: number; totalCount?: number } = {
+      rawCount: 0,
+    };
     const messages = await syncTelegramUserChatMessages(connected.client, chatId, limit, connected.userId, {
       offsetId,
       search,
       throwOnError: true,
+      metaOut: syncMeta,
     });
 
     if (offsetId && messages.length === 0) {
@@ -30421,10 +31118,17 @@ app.get('/api/telegram/user/messages/:chatId', requireTenantAuth, async (req: Re
       } catch {}
     }
 
+    const visibleTgIds = messages
+      .map((m: any) => Number(m?.telegramMessageId || 0))
+      .filter((id: number) => Number.isInteger(id) && id > 0);
+    const nextOffsetId =
+      syncMeta.minRawId || (visibleTgIds.length > 0 ? Math.min(...visibleTgIds) : undefined);
+
     res.json({
       ok: true,
       messages,
-      hasMore: messages.length >= limit,
+      hasMore: syncMeta.rawCount >= limit,
+      ...(nextOffsetId ? { nextOffsetId } : {}),
       ...(typeof readOutboxMaxId === 'number' ? { readOutboxMaxId } : {}),
     });
   } catch (err: any) {
@@ -30482,6 +31186,307 @@ app.get('/api/telegram/user/messages/:chatId', requireTenantAuth, async (req: Re
       });
     }
     res.status(500).json({ ok: false, error: formatTelegramError(err), messages: [] });
+  }
+});
+
+type SharedMediaFilterType = 'media' | 'files' | 'voice' | 'links';
+
+function resolveSharedMediaType(raw?: unknown): SharedMediaFilterType {
+  const val = String(raw || '').trim().toLowerCase();
+  if (val === 'files' || val === 'voice' || val === 'links') return val;
+  return 'media';
+}
+
+export async function querySqliteSharedMediaFallback(
+  chatId: string,
+  accountId: string | undefined,
+  options?: { type?: SharedMediaFilterType; limit?: number; offsetId?: number }
+): Promise<{ items: UnifiedChatMessage[]; hasMore: boolean; nextOffsetId?: number; totalCount: number }> {
+  const mediaType = resolveSharedMediaType(options?.type);
+  const safeLimit = Math.min(Math.max(Number(options?.limit) || 60, 1), 100);
+  const altChatId = chatId.startsWith('tg_') ? chatId.replace(/^tg_/, '') : `tg_${chatId}`;
+  const effectiveAcc = String(accountId || '').trim();
+  const selfTgMatch = effectiveAcc.match(/^acc_tg_(\d+)$/);
+  const chatIdCandidates = Array.from(
+    new Set(
+      [
+        chatId,
+        altChatId,
+        ...((chatId === 'me' || chatId === 'tg_me') && selfTgMatch ? [`tg_${selfTgMatch[1]}`, selfTgMatch[1]] : []),
+      ].filter(Boolean)
+    )
+  );
+  const chatIdPlaceholders = chatIdCandidates.map(() => '?').join(', ');
+  const accVariants = effectiveAcc ? getScopedAccountIdVariants(effectiveAcc) : [''];
+  const accPlaceholders = accVariants.map(() => '?').join(', ');
+
+  const baseConditions = [
+    `chat_id IN (${chatIdPlaceholders})`,
+    effectiveAcc ? `account_id IN (${accPlaceholders})` : '1=1',
+  ];
+  const baseArgs: any[] = [...chatIdCandidates, ...(effectiveAcc ? accVariants : [])];
+
+  if (mediaType === 'media') {
+    baseConditions.push("(is_image = 1 OR is_video = 1 OR COALESCE(image_url, '') != '' OR COALESCE(video_url, '') != '')");
+  } else if (mediaType === 'files') {
+    baseConditions.push("(is_file = 1 OR COALESCE(file_name, '') != '')");
+  } else if (mediaType === 'voice') {
+    baseConditions.push("(is_audio = 1 OR COALESCE(audio_url, '') != '')");
+  } else {
+    baseConditions.push("(text LIKE '%http://%' OR text LIKE '%https://%' OR text LIKE '%t.me/%')");
+  }
+
+  let totalCount = 0;
+  try {
+    const countRow = (await db
+      .prepare(`SELECT COUNT(*) as cnt FROM messages WHERE ${baseConditions.join(' AND ')}`)
+      .get(...baseArgs)) as any;
+    totalCount = Number(countRow?.cnt || 0);
+  } catch {}
+
+  const pagedConditions = [...baseConditions];
+  const pagedArgs = [...baseArgs];
+  if (options?.offsetId && Number.isInteger(options.offsetId) && options.offsetId > 0) {
+    pagedConditions.push('telegram_message_id IS NOT NULL AND telegram_message_id > 0 AND telegram_message_id < ?');
+    pagedArgs.push(options.offsetId);
+  }
+  pagedArgs.push(safeLimit + 1);
+
+  const descRows = (await db
+    .prepare(
+      `SELECT
+        id, chat_id as chatId, account_id as accountId, sender, sender_name as senderName,
+        sender_id as senderId,
+        text, translated_text as translatedText, is_audio as isAudio, audio_duration as audioDuration,
+        audio_url as audioUrl, stt_text as sttText, voice_tone as voiceTone,
+        is_image as isImage, image_url as imageUrl, image_caption as imageCaption,
+        is_video as isVideo, video_url as videoUrl, video_duration as videoDuration,
+        is_file as isFile, file_name as fileName, file_size as fileSize, file_url as fileUrl,
+        timestamp, created_at as createdAt, delivery_status as deliveryStatus,
+        telegram_message_id as telegramMessageId,
+        reply_to_json as replyToJson,
+        is_edited as isEdited,
+        is_pinned as isPinned,
+        forward_from as forwardFrom,
+        reactions_json as reactionsJson,
+        system_event_type as systemEventType
+      FROM messages
+      WHERE ${pagedConditions.join(' AND ')}
+      ORDER BY COALESCE(telegram_message_id, 0) DESC, created_at DESC
+      LIMIT ?`
+    )
+    .all(...pagedArgs)) as any[];
+
+  const hasMore = descRows.length > safeLimit;
+  const pageRows = hasMore ? descRows.slice(0, safeLimit) : descRows;
+
+  const resignUrlIfNeeded = (rawUrl?: string, msgAcc?: string) => {
+    if (!rawUrl || typeof rawUrl !== 'string') return rawUrl;
+    if (rawUrl.startsWith('/api/messages/local-media/') || isSignedResourceUrlExpiring(rawUrl)) {
+      return resignTelegramResourceUrl(rawUrl, msgAcc || effectiveAcc) || rawUrl;
+    }
+    return rawUrl;
+  };
+
+  const items: UnifiedChatMessage[] = pageRows.map((r: any) => {
+    const replyTo = r.replyToJson ? safeJsonParse(r.replyToJson, undefined) : undefined;
+    const parsedReactions = parseStoredReactionsJson(r.reactionsJson);
+    const cleanSenderId = r.senderId ? String(r.senderId).trim() : '';
+    const senderAvatarUrl =
+      r.sender !== 'me' && cleanSenderId && r.accountId && r.accountId !== 'acc_telegram_bot'
+        ? signTelegramResourceUrl(`/api/telegram/user/avatar/${encodeURIComponent(cleanSenderId)}`, r.accountId)
+        : undefined;
+    const senderRole: 'me' | 'peer' | 'system' =
+      r.sender === 'me' ? 'me' : r.sender === 'system' ? 'system' : 'peer';
+    return {
+      id: r.id,
+      chatId: r.chatId,
+      accountId: r.accountId,
+      sender: senderRole,
+      senderName: r.senderName || '',
+      ...(cleanSenderId ? { senderId: cleanSenderId } : {}),
+      ...(senderAvatarUrl ? { senderAvatarUrl } : {}),
+      text: r.text || '',
+      translatedText: r.translatedText || '',
+      isAudio: Boolean(r.isAudio),
+      audioDuration: Number(r.audioDuration || 0),
+      audioUrl: resignUrlIfNeeded(r.audioUrl, r.accountId) || '',
+      sttText: r.sttText || '',
+      voiceTone: r.voiceTone || '',
+      isImage: Boolean(r.isImage),
+      imageUrl: resignUrlIfNeeded(r.imageUrl, r.accountId) || '',
+      imageCaption: r.imageCaption || '',
+      isVideo: Boolean(r.isVideo),
+      videoUrl: resignUrlIfNeeded(r.videoUrl, r.accountId) || '',
+      videoDuration: Number(r.videoDuration || 0),
+      isFile: Boolean(r.isFile),
+      fileName: r.fileName || '',
+      fileSize: r.fileSize || '',
+      fileUrl: resignUrlIfNeeded(r.fileUrl, r.accountId) || '',
+      timestamp: r.timestamp || '',
+      createdAt: Number(r.createdAt || Date.now()),
+      deliveryStatus: r.deliveryStatus || 'delivered',
+      telegramMessageId: r.telegramMessageId ? Number(r.telegramMessageId) : undefined,
+      ...(replyTo ? { replyTo } : {}),
+      isEdited: Boolean(r.isEdited),
+      isPinned: Boolean(r.isPinned),
+      ...(r.forwardFrom ? { forwardFrom: r.forwardFrom } : {}),
+      ...(parsedReactions.reactions ? { reactions: parsedReactions.reactions } : {}),
+      ...(parsedReactions.myReactions ? { myReactions: parsedReactions.myReactions } : {}),
+      ...inferCallMetadataFromStoredRecord(r, senderRole),
+      ...(r.systemEventType ? { systemEventType: r.systemEventType } : {}),
+    };
+  });
+
+  const tgIds = items
+    .map((m) => Number(m.telegramMessageId || 0))
+    .filter((id) => Number.isInteger(id) && id > 0);
+  const nextOffsetId = tgIds.length > 0 ? Math.min(...tgIds) : undefined;
+
+  return { items, hasMore, nextOffsetId, totalCount };
+}
+
+// 20.4.1 Fetch full shared media/files/voice/links across entire chat history via Telegram MTProto filter + SQLite fallback
+app.get('/api/telegram/user/shared-media/:chatId', requireTenantAuth, async (req: Request, res: Response) => {
+  const { chatId } = req.params;
+  const scope = resolveScopedAccountFromRequest(req, { allowBot: true });
+  if (!scope.ok) {
+    return res.status(scope.status).json({ ok: false, code: scope.code, error: scope.error });
+  }
+  const accountId = scope.accountId;
+  const mediaType = resolveSharedMediaType(req.query.type);
+  const limit = Math.min(Math.max(Number(req.query.limit) || 60, 1), 100);
+  const rawOffsetId = req.query.offsetId ? Number(req.query.offsetId) : undefined;
+  const offsetId = rawOffsetId && Number.isInteger(rawOffsetId) && rawOffsetId > 0 ? rawOffsetId : undefined;
+
+  let connected: ConnectedTelegramUser | undefined;
+  try {
+    connected =
+      accountId && accountId !== 'acc_telegram_bot'
+        ? connectedUserClients.get(accountId) ||
+          Array.from(connectedUserClients.values()).find(
+            (u) => u.userId === accountId || u.phone === accountId || `acc_tg_${u.userId}` === accountId
+          )
+        : undefined;
+
+    if (!connected || !connected.client) {
+      const localFallback = await querySqliteSharedMediaFallback(chatId, accountId, {
+        type: mediaType,
+        limit,
+        offsetId,
+      });
+      return res.json({
+        ok: true,
+        fromLocalFallback: true,
+        items: localFallback.items,
+        hasMore: localFallback.hasMore,
+        nextOffsetId: localFallback.nextOffsetId,
+        totalCount: localFallback.totalCount,
+      });
+    }
+
+    const floodCooldown = getTelegramFloodCooldown({
+      accountId: accountId || `acc_tg_${connected.userId}`,
+      userId: connected.userId,
+      phone: connected.phone,
+    });
+    if (floodCooldown) {
+      const localFallback = await querySqliteSharedMediaFallback(
+        chatId,
+        accountId || `acc_tg_${connected.userId}`,
+        { type: mediaType, limit, offsetId }
+      );
+      return res.json({
+        ok: true,
+        fromLocalFallback: true,
+        floodWait: true,
+        items: localFallback.items,
+        hasMore: localFallback.hasMore,
+        nextOffsetId: localFallback.nextOffsetId,
+        totalCount: localFallback.totalCount,
+      });
+    }
+
+    const filterInstance: Api.TypeMessagesFilter =
+      mediaType === 'files'
+        ? new Api.InputMessagesFilterDocument()
+        : mediaType === 'voice'
+          ? new Api.InputMessagesFilterRoundVoice()
+          : mediaType === 'links'
+            ? new Api.InputMessagesFilterUrl()
+            : new Api.InputMessagesFilterPhotoVideo();
+
+    const syncMeta: { rawCount: number; minRawId?: number; totalCount?: number } = {
+      rawCount: 0,
+    };
+    const syncedDesc = (
+      await syncTelegramUserChatMessages(connected.client, chatId, limit, connected.userId, {
+        offsetId,
+        filter: filterInstance,
+        throwOnError: true,
+        metaOut: syncMeta,
+      })
+    ).sort((a, b) => {
+      if (
+        typeof a.telegramMessageId === 'number' &&
+        a.telegramMessageId > 0 &&
+        typeof b.telegramMessageId === 'number' &&
+        b.telegramMessageId > 0
+      ) {
+        return b.telegramMessageId - a.telegramMessageId;
+      }
+      return (b.createdAt || 0) - (a.createdAt || 0);
+    });
+
+    const itemTgIds = syncedDesc
+      .map((m: any) => Number(m?.telegramMessageId || 0))
+      .filter((id: number) => Number.isInteger(id) && id > 0);
+    const nextOffsetId =
+      syncMeta.minRawId || (itemTgIds.length > 0 ? Math.min(...itemTgIds) : undefined);
+
+    res.json({
+      ok: true,
+      items: syncedDesc,
+      hasMore: syncMeta.rawCount >= limit,
+      ...(nextOffsetId ? { nextOffsetId } : {}),
+      ...(typeof syncMeta.totalCount === 'number' ? { totalCount: syncMeta.totalCount } : {}),
+    });
+  } catch (err: any) {
+    recordTelegramFloodWait(
+      { accountId, userId: connected?.userId, phone: connected?.phone },
+      err,
+      'messages.Search'
+    );
+    if (isTelegramSessionExpiredError(err)) {
+      await markTelegramSessionExpired({
+        accountId,
+        userId: connected?.userId,
+        phone: connected?.phone,
+        reason: formatTelegramError(err),
+      });
+      return res.status(401).json({
+        ok: false,
+        code: 'TELEGRAM_SESSION_EXPIRED',
+        error: formatTelegramError(err),
+        items: [],
+      });
+    }
+    try {
+      const localFallback = await querySqliteSharedMediaFallback(
+        chatId,
+        accountId || (connected?.userId ? `acc_tg_${connected.userId}` : ''),
+        { type: mediaType, limit, offsetId }
+      );
+      return res.json({
+        ok: true,
+        fromLocalFallback: true,
+        items: localFallback.items,
+        hasMore: localFallback.hasMore,
+        nextOffsetId: localFallback.nextOffsetId,
+        totalCount: localFallback.totalCount,
+      });
+    } catch {}
+    res.status(500).json({ ok: false, error: formatTelegramError(err), items: [] });
   }
 });
 

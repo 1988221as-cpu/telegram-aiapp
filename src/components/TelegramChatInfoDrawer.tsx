@@ -28,6 +28,8 @@ import {
 import { Chat, Message, TelegramChatFullInfo, TelegramCommonChatItem, TelegramContact } from '../types';
 import {
   fetchTelegramChatFullInfoApi,
+  fetchTelegramSharedMediaApi,
+  TelegramSharedMediaType,
   removeTelegramGroupMemberApi,
   addTelegramUserContactApi,
   blockTelegramUserContactApi,
@@ -37,8 +39,21 @@ import {
   isSignedResourceUrlExpiringSoon,
   refreshSignedResourceUrlsApi,
   ensureFreshSignedResourceUrl,
+  isMessageDeleted,
 } from '../services/apiService';
 import { sanitizeSafeResourceUrl } from '../services/urlSafety';
+
+function compareSharedMessagesDesc(a: Message, b: Message): number {
+  if (
+    typeof a.telegramMessageId === 'number' &&
+    a.telegramMessageId > 0 &&
+    typeof b.telegramMessageId === 'number' &&
+    b.telegramMessageId > 0
+  ) {
+    return b.telegramMessageId - a.telegramMessageId;
+  }
+  return (b.createdAt || 0) - (a.createdAt || 0);
+}
 
 interface TelegramChatInfoDrawerProps {
   isOpen: boolean;
@@ -54,6 +69,7 @@ interface TelegramChatInfoDrawerProps {
   onAddContact?: (contact: TelegramContact) => void;
   onRemoveContact?: (contactId: string) => void;
   onRefreshMediaUrls?: (urls: string[]) => Promise<Record<string, string>>;
+  onOpenMediaPreview?: (message: Message, allMediaMessages: Message[]) => void;
   onJumpToMessage?: (message: Message) => void;
   onSelectMember?: (member: {
     id: string;
@@ -81,10 +97,42 @@ export const TelegramChatInfoDrawer: React.FC<TelegramChatInfoDrawerProps> = ({
   onAddContact,
   onRemoveContact,
   onRefreshMediaUrls,
+  onOpenMediaPreview,
   onJumpToMessage,
   onSelectMember,
   onSelectCommonGroup,
 }) => {
+  type SharedTabBucket = {
+    items: Message[];
+    loading: boolean;
+    loaded: boolean;
+    hasMore: boolean;
+    nextOffsetId?: number;
+    totalCount?: number;
+    error?: string;
+  };
+  const createEmptySharedMediaBuckets = (): Record<TelegramSharedMediaType, SharedTabBucket> => ({
+    media: { items: [], loading: false, loaded: false, hasMore: false },
+    files: { items: [], loading: false, loaded: false, hasMore: false },
+    voice: { items: [], loading: false, loaded: false, hasMore: false },
+    links: { items: [], loading: false, loaded: false, hasMore: false },
+  });
+  const emptySharedMediaBucketsRef = useRef<Record<TelegramSharedMediaType, SharedTabBucket>>(
+    createEmptySharedMediaBuckets()
+  );
+  const currentSharedScopeKey = `${accountId || 'default'}::${chat?.id || ''}`;
+  const [sharedMediaStore, setSharedMediaStore] = useState<{
+    scopeKey: string;
+    buckets: Record<TelegramSharedMediaType, SharedTabBucket>;
+  }>(() => ({
+    scopeKey: '',
+    buckets: createEmptySharedMediaBuckets(),
+  }));
+  const sharedMediaState =
+    sharedMediaStore.scopeKey === currentSharedScopeKey
+      ? sharedMediaStore.buckets
+      : emptySharedMediaBucketsRef.current;
+  const sharedMediaReqGenRef = useRef(0);
   const [activeTab, setActiveTab] = useState<'media' | 'files' | 'voice' | 'links' | 'members' | 'common_groups'>('media');
   const [isEditingRemark, setIsEditingRemark] = useState(false);
   const [remarkText, setRemarkText] = useState(chat?.title || '');
@@ -222,11 +270,141 @@ export const TelegramChatInfoDrawer: React.FC<TelegramChatInfoDrawerProps> = ({
     setMemberActionError(null);
     setCopiedField(null);
     setAddContactName(chat.title || '');
+    sharedMediaReqGenRef.current += 1;
+    setSharedMediaStore({
+      scopeKey: currentSharedScopeKey,
+      buckets: createEmptySharedMediaBuckets(),
+    });
+    setActiveTab((cur) =>
+      (cur === 'members' && !chat.isGroup && !chat.isChannel) || cur === 'common_groups'
+        ? 'media'
+        : cur
+    );
     if (chat.id.startsWith('tg_')) {
       void loadFullInfo();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isOpen, chat?.id, accountId]);
+
+  const loadSharedMediaPage = useCallback(
+    async (tab: TelegramSharedMediaType, loadMore = false) => {
+      if (!chat?.id) return;
+      const currentBucket = sharedMediaState[tab];
+      if (currentBucket.loading) return;
+      if (loadMore && (!currentBucket.hasMore || !currentBucket.nextOffsetId)) return;
+
+      const reqGen = sharedMediaReqGenRef.current;
+      const targetScopeKey = currentSharedScopeKey;
+      const offsetId = loadMore ? currentBucket.nextOffsetId : undefined;
+
+      setSharedMediaStore((prev) => {
+        const baseBuckets = prev.scopeKey === targetScopeKey ? prev.buckets : createEmptySharedMediaBuckets();
+        return {
+          scopeKey: targetScopeKey,
+          buckets: {
+            ...baseBuckets,
+            [tab]: { ...baseBuckets[tab], loading: true, error: undefined },
+          },
+        };
+      });
+
+      const res = await fetchTelegramSharedMediaApi(chat.id, accountId, {
+        type: tab,
+        limit: 60,
+        offsetId,
+      });
+
+      if (sharedMediaReqGenRef.current !== reqGen) return;
+
+      if (!res.ok) {
+        setSharedMediaStore((prev) => {
+          const baseBuckets = prev.scopeKey === targetScopeKey ? prev.buckets : createEmptySharedMediaBuckets();
+          return {
+            scopeKey: targetScopeKey,
+            buckets: {
+              ...baseBuckets,
+              [tab]: {
+                ...baseBuckets[tab],
+                loading: false,
+                loaded: true,
+                error: res.error || '加载共享媒体失败',
+              },
+            },
+          };
+        });
+        return;
+      }
+
+      setSharedMediaStore((prev) => {
+        const baseBuckets = prev.scopeKey === targetScopeKey ? prev.buckets : createEmptySharedMediaBuckets();
+        const prevBucket = baseBuckets[tab];
+        const mergedMap = new Map<string, Message>();
+        const putItem = (item: Message) => {
+          if (!item || isMessageDeleted(item.id, accountId, item.chatId || chat?.id)) return;
+          const key =
+            typeof item.telegramMessageId === 'number' && item.telegramMessageId > 0
+              ? `tg_${item.telegramMessageId}`
+              : item.id;
+          const existing = mergedMap.get(key);
+          mergedMap.set(key, existing ? { ...existing, ...item } : item);
+        };
+        if (loadMore) {
+          prevBucket.items.forEach(putItem);
+        }
+        res.items.forEach(putItem);
+
+        const nextItems = Array.from(mergedMap.values()).sort(compareSharedMessagesDesc);
+
+        const nextMinTgId = nextItems.reduce((min, item) => {
+          if (typeof item.telegramMessageId === 'number' && item.telegramMessageId > 0) {
+            return min === undefined ? item.telegramMessageId : Math.min(min, item.telegramMessageId);
+          }
+          return min;
+        }, undefined as number | undefined);
+
+        const resolvedNextOffset = res.nextOffsetId || nextMinTgId;
+        const madeProgress =
+          !loadMore ||
+          nextItems.length > prevBucket.items.length ||
+          (Boolean(resolvedNextOffset) && resolvedNextOffset !== prevBucket.nextOffsetId);
+
+        return {
+          scopeKey: targetScopeKey,
+          buckets: {
+            ...baseBuckets,
+            [tab]: {
+              items: nextItems,
+              loading: false,
+              loaded: true,
+              hasMore: res.hasMore && madeProgress,
+              nextOffsetId: resolvedNextOffset,
+              totalCount:
+                typeof res.totalCount === 'number'
+                  ? Math.max(res.totalCount, nextItems.length)
+                  : prevBucket.totalCount,
+              error: undefined,
+            },
+          },
+        };
+      });
+    },
+    [accountId, chat?.id, currentSharedScopeKey, sharedMediaState]
+  );
+
+  useEffect(() => {
+    if (!isOpen || !chat?.id) return;
+    if (
+      activeTab === 'media' ||
+      activeTab === 'files' ||
+      activeTab === 'voice' ||
+      activeTab === 'links'
+    ) {
+      const bucket = sharedMediaState[activeTab];
+      if (!bucket.loaded && !bucket.loading) {
+        void loadSharedMediaPage(activeTab, false);
+      }
+    }
+  }, [isOpen, chat?.id, activeTab, sharedMediaState, loadSharedMediaPage]);
 
   useEffect(() => {
     if (!isOpen || !chat) return;
@@ -246,6 +424,16 @@ export const TelegramChatInfoDrawer: React.FC<TelegramChatInfoDrawerProps> = ({
       pushIfExpiring(m.imageUrl);
       pushIfExpiring(m.videoUrl);
       pushIfExpiring(m.fileUrl);
+      pushIfExpiring(m.audioUrl);
+    }
+    for (const m of sharedMediaState.media.items) {
+      pushIfExpiring(m.imageUrl);
+      pushIfExpiring(m.videoUrl);
+    }
+    for (const m of sharedMediaState.files.items) {
+      pushIfExpiring(m.fileUrl);
+    }
+    for (const m of sharedMediaState.voice.items) {
       pushIfExpiring(m.audioUrl);
     }
     if (Array.isArray(fullInfo?.participants)) {
@@ -278,7 +466,7 @@ export const TelegramChatInfoDrawer: React.FC<TelegramChatInfoDrawerProps> = ({
     return () => {
       cancelled = true;
     };
-  }, [isOpen, chat, messages, fullInfo, accountId, onRefreshMediaUrls, refreshedUrlsMap]);
+  }, [isOpen, chat, messages, sharedMediaState, fullInfo, accountId, onRefreshMediaUrls, refreshedUrlsMap]);
 
   const handleSaveRemark = async () => {
     if (!chat) return;
@@ -312,10 +500,61 @@ export const TelegramChatInfoDrawer: React.FC<TelegramChatInfoDrawerProps> = ({
 
   if (!isOpen || !chat) return null;
 
-  const mediaMessages = messages.filter((m) => m.isImage || m.imageUrl || m.isVideo || m.videoUrl);
-  const fileMessages = messages.filter((m) => m.isFile || m.fileName);
-  const voiceMessages = messages.filter((m) => m.isAudio || m.audioUrl);
-  const linkMessages = messages.filter((m) => m.text && (m.text.includes('http://') || m.text.includes('https://') || m.text.includes('t.me/')));
+  const mergeSharedList = (localFiltered: Message[], remoteItems: Message[]): Message[] => {
+    const map = new Map<string, Message>();
+    const put = (m: Message) => {
+      if (!m || isMessageDeleted(m.id, accountId, m.chatId || chat.id)) return;
+      const key =
+        typeof m.telegramMessageId === 'number' && m.telegramMessageId > 0
+          ? `tg_${m.telegramMessageId}`
+          : m.id;
+      const prev = map.get(key);
+      if (!prev) {
+        map.set(key, m);
+      } else {
+        map.set(key, {
+          ...prev,
+          ...m,
+          imageUrl: m.imageUrl || prev.imageUrl,
+          videoUrl: m.videoUrl || prev.videoUrl,
+          fileUrl: m.fileUrl || prev.fileUrl,
+          audioUrl: m.audioUrl || prev.audioUrl,
+        });
+      }
+    };
+    remoteItems.forEach(put);
+    localFiltered.forEach(put);
+    return Array.from(map.values()).sort(compareSharedMessagesDesc);
+  };
+
+  const mediaMessages = mergeSharedList(
+    messages.filter((m) => m.isImage || m.imageUrl || m.isVideo || m.videoUrl),
+    sharedMediaState.media.items
+  );
+  const fileMessages = mergeSharedList(
+    messages.filter((m) => m.isFile || m.fileName),
+    sharedMediaState.files.items
+  );
+  const voiceMessages = mergeSharedList(
+    messages.filter((m) => m.isAudio || m.audioUrl),
+    sharedMediaState.voice.items
+  );
+  const linkMessages = mergeSharedList(
+    messages.filter((m) => m.text && (m.text.includes('http://') || m.text.includes('https://') || m.text.includes('t.me/'))),
+    sharedMediaState.links.items
+  );
+
+  const activeSharedBucket =
+    activeTab === 'media' || activeTab === 'files' || activeTab === 'voice' || activeTab === 'links'
+      ? sharedMediaState[activeTab]
+      : null;
+
+  const formatTabCount = (listLen: number, bucket: SharedTabBucket) => {
+    if (typeof bucket.totalCount === 'number' && bucket.totalCount > listLen) {
+      return bucket.totalCount;
+    }
+    return bucket.hasMore ? `${listLen}+` : listLen;
+  };
 
   return (
     <div className="fixed inset-0 z-50 flex justify-end animate-in fade-in duration-200 select-none">
@@ -341,7 +580,20 @@ export const TelegramChatInfoDrawer: React.FC<TelegramChatInfoDrawerProps> = ({
         </div>
 
         {/* Scrollable Content */}
-        <div className="flex-1 overflow-y-auto">
+        <div
+          className="flex-1 overflow-y-auto"
+          onScroll={(e) => {
+            const el = e.currentTarget;
+            if (
+              activeSharedBucket &&
+              activeSharedBucket.hasMore &&
+              !activeSharedBucket.loading &&
+              el.scrollHeight - el.scrollTop - el.clientHeight <= 140
+            ) {
+              void loadSharedMediaPage(activeTab as TelegramSharedMediaType, true);
+            }
+          }}
+        >
           {/* Avatar & Title Section */}
           <div className="p-6 flex flex-col items-center border-b border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] linen:border-[#dfd2bc] bg-[#f8fafc] dark:bg-[#0e1726]/85 aurora:bg-[#101c23]/90 linen:bg-[#efe6d6]/90">
             <div
@@ -858,7 +1110,7 @@ export const TelegramChatInfoDrawer: React.FC<TelegramChatInfoDrawerProps> = ({
                   : 'border-transparent text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a] hover:text-[#0f172a] dark:hover:text-[#eef4fb] aurora:hover:text-[#ecf6f8] linen:hover:text-[#2b2118]'
               }`}
             >
-              媒体 ({mediaMessages.length})
+              媒体 ({formatTabCount(mediaMessages.length, sharedMediaState.media)})
             </button>
             <button
               onClick={() => setActiveTab('files')}
@@ -868,7 +1120,7 @@ export const TelegramChatInfoDrawer: React.FC<TelegramChatInfoDrawerProps> = ({
                   : 'border-transparent text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a] hover:text-[#0f172a] dark:hover:text-[#eef4fb] aurora:hover:text-[#ecf6f8] linen:hover:text-[#2b2118]'
               }`}
             >
-              文件 ({fileMessages.length})
+              文件 ({formatTabCount(fileMessages.length, sharedMediaState.files)})
             </button>
             <button
               onClick={() => setActiveTab('voice')}
@@ -878,7 +1130,7 @@ export const TelegramChatInfoDrawer: React.FC<TelegramChatInfoDrawerProps> = ({
                   : 'border-transparent text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a] hover:text-[#0f172a] dark:hover:text-[#eef4fb] aurora:hover:text-[#ecf6f8] linen:hover:text-[#2b2118]'
               }`}
             >
-              语音 ({voiceMessages.length})
+              语音 ({formatTabCount(voiceMessages.length, sharedMediaState.voice)})
             </button>
             <button
               onClick={() => setActiveTab('links')}
@@ -888,7 +1140,7 @@ export const TelegramChatInfoDrawer: React.FC<TelegramChatInfoDrawerProps> = ({
                   : 'border-transparent text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a] hover:text-[#0f172a] dark:hover:text-[#eef4fb] aurora:hover:text-[#ecf6f8] linen:hover:text-[#2b2118]'
               }`}
             >
-              链接 ({linkMessages.length})
+              链接 ({formatTabCount(linkMessages.length, sharedMediaState.links)})
             </button>
             {!chat.isGroup && !chat.isChannel && commonChats.length > 0 && (
               <button
@@ -920,7 +1172,12 @@ export const TelegramChatInfoDrawer: React.FC<TelegramChatInfoDrawerProps> = ({
           <div className="p-3">
             {activeTab === 'media' && (
               <div>
-                {mediaMessages.length === 0 ? (
+                {sharedMediaState.media.loading && mediaMessages.length === 0 ? (
+                  <div className="py-12 flex flex-col items-center justify-center gap-2 text-xs text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a]">
+                    <Loader2 className="w-5 h-5 animate-spin text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf] linen:text-[#a86a43]" />
+                    <span>正在从云端同步全部媒体图片...</span>
+                  </div>
+                ) : mediaMessages.length === 0 ? (
                   <div className="py-12 text-center text-xs text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a]">
                     暂无共享照片或视频
                   </div>
@@ -934,13 +1191,20 @@ export const TelegramChatInfoDrawer: React.FC<TelegramChatInfoDrawerProps> = ({
                         onClose();
                         onJumpToMessage?.(m);
                       };
+                      const handlePreviewMedia = () => {
+                        if (onOpenMediaPreview) {
+                          onOpenMediaPreview(m, mediaMessages);
+                        } else if (onJumpToMessage) {
+                          handleLocateMedia();
+                        }
+                      };
                       return (
                         <div
                           key={m.id}
-                          onClick={!isVid && onJumpToMessage ? handleLocateMedia : undefined}
-                          title={!isVid && onJumpToMessage ? '点击前往聊天中的该消息位置' : undefined}
+                          onClick={!isVid ? handlePreviewMedia : undefined}
+                          title={!isVid ? (onOpenMediaPreview ? '点击全屏查看聊天所有图片' : '点击前往聊天中的该消息位置') : undefined}
                           className={`aspect-square rounded-lg overflow-hidden bg-[#f1f5f9] dark:bg-[#132234] aurora:bg-[#13252e] linen:bg-[#efe6d6] relative group ${
-                            !isVid && onJumpToMessage ? 'cursor-pointer' : ''
+                            !isVid && (onOpenMediaPreview || onJumpToMessage) ? 'cursor-pointer' : ''
                           }`}
                         >
                           {isVid && resolvedVideoSrc ? (
@@ -977,6 +1241,7 @@ export const TelegramChatInfoDrawer: React.FC<TelegramChatInfoDrawerProps> = ({
                             <>
                               <img
                                 src={resolvedImageSrc}
+                                loading="lazy"
                                 alt={m.imageCaption || 'media'}
                                 className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-200"
                                 onLoad={(e) => {
@@ -992,12 +1257,18 @@ export const TelegramChatInfoDrawer: React.FC<TelegramChatInfoDrawerProps> = ({
                                 }}
                               />
                               {onJumpToMessage && (
-                                <div className="pointer-events-none absolute inset-x-0 bottom-0 p-1 bg-gradient-to-t from-black/75 via-black/30 to-transparent opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-end">
-                                  <span className="px-1.5 py-0.5 rounded bg-black/60 text-white text-[9px] font-medium inline-flex items-center gap-0.5">
-                                    <CornerUpLeft className="w-2.5 h-2.5" />
-                                    定位消息
-                                  </span>
-                                </div>
+                                <button
+                                  type="button"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    handleLocateMedia();
+                                  }}
+                                  title="前往聊天中的该消息位置"
+                                  className="absolute bottom-1 right-1 px-1.5 py-0.5 rounded bg-black/70 hover:bg-[#2481cc] linen:hover:bg-[#a86a43] text-white text-[9px] font-medium inline-flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity cursor-pointer"
+                                >
+                                  <CornerUpLeft className="w-2.5 h-2.5" />
+                                  <span>定位</span>
+                                </button>
                               )}
                             </>
                           ) : (
@@ -1141,6 +1412,25 @@ export const TelegramChatInfoDrawer: React.FC<TelegramChatInfoDrawerProps> = ({
                       <span className="truncate text-[#2481cc] dark:text-[#7cc4ff] aurora:text-[#5eead4] linen:text-[#8c522d] underline">{m.text}</span>
                     </div>
                   ))
+                )}
+              </div>
+            )}
+
+            {activeSharedBucket && (activeSharedBucket.hasMore || activeSharedBucket.loading || activeSharedBucket.error) && (
+              <div className="pt-3 pb-1 flex flex-col items-center gap-1.5">
+                {activeSharedBucket.error && (
+                  <span className="text-[11px] text-rose-500">{activeSharedBucket.error}</span>
+                )}
+                {(activeSharedBucket.hasMore || activeSharedBucket.loading) && (
+                  <button
+                    type="button"
+                    disabled={activeSharedBucket.loading}
+                    onClick={() => void loadSharedMediaPage(activeTab as TelegramSharedMediaType, true)}
+                    className="px-3.5 py-1.5 rounded-lg bg-[#f1f5f9] dark:bg-[#132234] aurora:bg-[#13252e] linen:bg-[#efe6d6] hover:bg-[#e2e8f0] dark:hover:bg-[#1a2f47] aurora:hover:bg-[#18303b] linen:hover:bg-[#e5d9c5] text-xs font-medium text-[#2481cc] dark:text-[#7cc4ff] aurora:text-[#5eead4] linen:text-[#8c522d] flex items-center gap-1.5 cursor-pointer disabled:opacity-50 transition-colors"
+                  >
+                    <Loader2 className={`w-3.5 h-3.5 ${activeSharedBucket.loading ? 'animate-spin' : 'hidden'}`} />
+                    <span>{activeSharedBucket.loading ? '正在加载更多历史...' : '加载更多历史媒体'}</span>
+                  </button>
                 )}
               </div>
             )}
