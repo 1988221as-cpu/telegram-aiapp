@@ -2992,6 +2992,128 @@ function extractTelegramPhoneCallFields(m: any): {
   };
 }
 
+export type TelegramSystemEventType = 'join' | 'leave' | 'service';
+
+function formatTelegramActorDisplayName(entity: any): string {
+  if (!entity) return '';
+  const full = [entity.firstName, entity.lastName].filter(Boolean).join(' ').trim();
+  if (full) return full;
+  if (entity.title) return String(entity.title).trim();
+  if (entity.username) return `@${String(entity.username).replace(/^@/, '')}`;
+  return '';
+}
+
+export function extractTelegramGroupServiceFields(
+  m: any,
+  resolvedNames?: Map<string, string>
+): {
+  text: string;
+  systemEventType: TelegramSystemEventType;
+  referencedUserIds: string[];
+} | null {
+  const action = m?.action;
+  if (!action) return null;
+
+  const cls = String(action.className || '');
+  const isAddUser = cls === 'MessageActionChatAddUser' || action instanceof Api.MessageActionChatAddUser;
+  const isJoinedByLink = cls === 'MessageActionChatJoinedByLink' || action instanceof Api.MessageActionChatJoinedByLink;
+  const isJoinedByReq = cls === 'MessageActionChatJoinedByRequest' || action instanceof Api.MessageActionChatJoinedByRequest;
+  const isDeleteUser = cls === 'MessageActionChatDeleteUser' || action instanceof Api.MessageActionChatDeleteUser;
+
+  if (!isAddUser && !isJoinedByLink && !isJoinedByReq && !isDeleteUser) {
+    return null;
+  }
+
+  const actorId = extractTelegramSenderPeerId(m);
+  const lookupName = (uid: string): string => {
+    if (!uid) return '';
+    const fromMap = resolvedNames?.get(uid);
+    if (fromMap) return fromMap;
+    const senderEntity = m?.sender;
+    if (senderEntity && String(senderEntity.id || '') === uid) {
+      const sName = formatTelegramActorDisplayName(senderEntity);
+      if (sName) return sName;
+    }
+    if (uid === actorId) {
+      const actorFallback = getTelegramMessageSenderName(m, false);
+      if (actorFallback) return actorFallback;
+    }
+    const ent = m?._entities instanceof Map ? m._entities.get(uid) || m._entities.get(Number(uid)) : undefined;
+    if (ent) {
+      const eName = formatTelegramActorDisplayName(ent);
+      if (eName) return eName;
+    }
+    return '';
+  };
+
+  const actorName = (actorId ? lookupName(actorId) : '') || getTelegramMessageSenderName(m, false);
+
+  if (isAddUser) {
+    const userIds = Array.isArray(action.users) ? action.users.map((u: any) => String(u)).filter(Boolean) : [];
+    const names = userIds.map((uid: string) => lookupName(uid) || `成员 ${uid}`);
+    const text =
+      userIds.length === 1 && actorId && userIds[0] === actorId
+        ? `👤 ${names[0] || actorName || '新成员'} 加入了群组`
+        : names.length > 0
+          ? (actorName ? `👤 ${actorName} 邀请 ${names.join('、')} 加入了群组` : `👤 ${names.join('、')} 加入了群组`)
+          : `👤 ${actorName || '新成员'} 加入了群组`;
+    return { text, systemEventType: 'join', referencedUserIds: userIds };
+  }
+
+  if (isJoinedByLink) {
+    return {
+      text: `👤 ${actorName || '新成员'} 通过邀请链接加入了群组`,
+      systemEventType: 'join',
+      referencedUserIds: actorId ? [actorId] : [],
+    };
+  }
+
+  if (isJoinedByReq) {
+    return {
+      text: `👤 ${actorName || '新成员'} 经管理员批准加入了群组`,
+      systemEventType: 'join',
+      referencedUserIds: actorId ? [actorId] : [],
+    };
+  }
+
+  const targetId = action.userId !== undefined && action.userId !== null ? String(action.userId) : '';
+  const targetName = (targetId ? lookupName(targetId) : '') || (targetId === actorId ? actorName : '');
+  const text =
+    !actorId || !targetId || targetId === actorId
+      ? `🚪 ${targetName || actorName || '成员'} 退出了群组`
+      : `🚪 ${actorName || '管理员'} 将 ${targetName || `成员 ${targetId}`} 移出了群组`;
+  return {
+    text,
+    systemEventType: 'leave',
+    referencedUserIds: targetId ? [targetId] : [],
+  };
+}
+
+async function resolveTelegramGroupServiceFields(
+  m: any,
+  client: TelegramClient,
+  nameCache?: Map<string, string>
+): Promise<{ text: string; systemEventType: TelegramSystemEventType } | null> {
+  const initial = extractTelegramGroupServiceFields(m, nameCache);
+  if (!initial) return null;
+
+  const resolved = nameCache || new Map<string, string>();
+  const actorId = extractTelegramSenderPeerId(m);
+  const idsToResolve = Array.from(new Set([...(actorId ? [actorId] : []), ...initial.referencedUserIds])).filter(Boolean);
+  for (const uid of idsToResolve) {
+    if (resolved.has(uid)) continue;
+    try {
+      const ent: any = await client.getEntity(/^-?\d+$/.test(uid) ? Number(uid) : uid);
+      const disp = formatTelegramActorDisplayName(ent);
+      if (disp) resolved.set(uid, disp);
+    } catch {}
+  }
+  const refined = extractTelegramGroupServiceFields(m, resolved);
+  return refined
+    ? { text: refined.text, systemEventType: refined.systemEventType }
+    : { text: initial.text, systemEventType: initial.systemEventType };
+}
+
 function inferCallMetadataFromStoredRecord(
   raw: any,
   sender: 'me' | 'peer' | 'system'
@@ -3046,6 +3168,8 @@ function summarizeTelegramDialogMedia(message: any): string {
   if (!message) return '暂无消息';
   const callInfo = extractTelegramPhoneCallFields(message);
   if (callInfo) return callInfo.text;
+  const groupSvcInfo = extractTelegramGroupServiceFields(message);
+  if (groupSvcInfo) return groupSvcInfo.text;
   const text = String(message.message || '').trim();
   const media = message.media;
   if (!media) return text || '暂无消息';
@@ -6127,6 +6251,7 @@ export interface UnifiedChatMessage {
   callDuration?: number;
   isVideoCall?: boolean;
   telegramCallId?: string;
+  systemEventType?: TelegramSystemEventType;
 }
 
 export function parseStoredReactionsJson(raw: any): {
@@ -6277,6 +6402,9 @@ export function normalizeStoredMessageRecord(
     isPinned: Boolean(raw.isPinned ?? raw.is_pinned),
     ...(raw.forwardFrom || raw.forward_from ? { forwardFrom: String(raw.forwardFrom ?? raw.forward_from) } : {}),
     ...inferCallMetadataFromStoredRecord(raw, sender),
+    ...((raw.systemEventType || raw.system_event_type)
+      ? { systemEventType: String(raw.systemEventType ?? raw.system_event_type) as TelegramSystemEventType }
+      : {}),
   };
 }
 
@@ -6744,6 +6872,7 @@ export async function upsertSyncedMessageToDb(
         await db
           .prepare(
             `UPDATE messages SET
+               sender = CASE WHEN ? = 'system' THEN 'system' ELSE sender END,
                sender_name = CASE WHEN ? != '' THEN ? ELSE sender_name END,
                sender_id = CASE WHEN ? != '' THEN ? ELSE sender_id END,
                text = CASE WHEN ? != '' THEN ? ELSE text END,
@@ -6768,10 +6897,12 @@ export async function upsertSyncedMessageToDb(
                is_edited = CASE WHEN ? = 1 THEN 1 ELSE is_edited END,
                is_pinned = ?,
                forward_from = COALESCE(?, forward_from),
-               reactions_json = COALESCE(?, reactions_json)
+               reactions_json = COALESCE(?, reactions_json),
+               system_event_type = CASE WHEN ? != '' THEN ? ELSE system_event_type END
              WHERE id = ?`
           )
           .run(
+            msg.sender,
             safeSenderName,
             safeSenderName,
             safeSenderId,
@@ -6813,6 +6944,8 @@ export async function upsertSyncedMessageToDb(
             msg.isPinned ? 1 : 0,
             msg.forwardFrom || null,
             reactionsJson,
+            msg.systemEventType || '',
+            msg.systemEventType || '',
             existingByTg.id
           );
         return true;
@@ -6828,9 +6961,10 @@ export async function upsertSyncedMessageToDb(
           is_image, image_url, image_caption, is_video, video_url, video_duration,
           is_file, file_name, file_size, file_url,
           timestamp, created_at, delivery_status, telegram_message_id,
-          reply_to_json, is_edited, is_pinned, forward_from, reactions_json
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          reply_to_json, is_edited, is_pinned, forward_from, reactions_json, system_event_type
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
+          sender = CASE WHEN excluded.sender = 'system' THEN 'system' ELSE messages.sender END,
           sender_name = CASE WHEN excluded.sender_name != '' AND excluded.sender_name NOT IN ('客户', '对方', '我方', 'Telegram 联系人') THEN excluded.sender_name ELSE messages.sender_name END,
           sender_id = CASE WHEN excluded.sender_id != '' THEN excluded.sender_id ELSE messages.sender_id END,
           text = CASE WHEN excluded.text != '' THEN excluded.text ELSE messages.text END,
@@ -6856,7 +6990,8 @@ export async function upsertSyncedMessageToDb(
           is_edited = CASE WHEN excluded.is_edited = 1 THEN 1 ELSE messages.is_edited END,
           is_pinned = excluded.is_pinned,
           forward_from = COALESCE(excluded.forward_from, messages.forward_from),
-          reactions_json = COALESCE(excluded.reactions_json, messages.reactions_json)`
+          reactions_json = COALESCE(excluded.reactions_json, messages.reactions_json),
+          system_event_type = CASE WHEN excluded.system_event_type != '' THEN excluded.system_event_type ELSE messages.system_event_type END`
       )
       .run(
         msg.id,
@@ -6890,7 +7025,8 @@ export async function upsertSyncedMessageToDb(
         msg.isEdited ? 1 : 0,
         msg.isPinned ? 1 : 0,
         msg.forwardFrom || null,
-        reactionsJson
+        reactionsJson,
+        msg.systemEventType || ''
       );
     return true;
   } catch (err: any) {
@@ -7016,7 +7152,8 @@ export async function resolveUnifiedChatMessages(params: {
           timestamp, created_at as createdAt, delivery_status as deliveryStatus,
           telegram_message_id as telegramMessageId,
           reply_to_json as replyToJson, is_edited as isEdited, is_pinned as isPinned,
-          forward_from as forwardFrom, reactions_json as reactionsJson
+          forward_from as forwardFrom, reactions_json as reactionsJson,
+          system_event_type as systemEventType
         FROM (
           SELECT * FROM messages
           WHERE (chat_id = ? OR chat_id = ?) AND account_id IN (${accPlaceholders})
@@ -7456,7 +7593,8 @@ app.get('/api/messages/:chatId', requireTenantAuth, async (req: Request, res: Re
           is_edited as isEdited,
           is_pinned as isPinned,
           forward_from as forwardFrom,
-          reactions_json as reactionsJson
+          reactions_json as reactionsJson,
+          system_event_type as systemEventType
         FROM messages
         WHERE (chat_id = ? OR chat_id = ?) AND account_id IN (${accPlaceholders}) ${beforeClause}
         ORDER BY created_at DESC
@@ -7479,7 +7617,8 @@ app.get('/api/messages/:chatId', requireTenantAuth, async (req: Request, res: Re
           is_edited as isEdited,
           is_pinned as isPinned,
           forward_from as forwardFrom,
-          reactions_json as reactionsJson
+          reactions_json as reactionsJson,
+          system_event_type as systemEventType
         FROM messages
         WHERE (chat_id = ? OR chat_id = ?) AND account_id IN (${accPlaceholders})
         ORDER BY created_at ASC
@@ -7528,6 +7667,7 @@ app.get('/api/messages/:chatId', requireTenantAuth, async (req: Request, res: Re
         ...(r.forwardFrom ? { forwardFrom: r.forwardFrom } : {}),
         deliveryStatus: r.deliveryStatus || 'delivered',
         ...inferCallMetadataFromStoredRecord(r, senderRole),
+        ...(r.systemEventType ? { systemEventType: r.systemEventType } : {}),
       };
     });
 
@@ -19575,6 +19715,80 @@ async function processIncomingBotUpdate(
   }
 
   const tgChatId = `tg_${msg.chat?.id}`;
+  const formatBotMemberName = (u: any): string =>
+    [u?.first_name, u?.last_name].filter(Boolean).join(' ').trim() ||
+    (u?.username ? `@${String(u.username).replace(/^@/, '')}` : '') ||
+    (u?.id ? `成员 ${u.id}` : '成员');
+  const botNewMembers = Array.isArray(msg.new_chat_members) ? msg.new_chat_members : [];
+  const botLeftMember = msg.left_chat_member;
+  if (botNewMembers.length > 0 || botLeftMember) {
+    const nowSvc = Date.now();
+    const actorId = msg.from?.id ? String(msg.from.id) : '';
+    const actorName = msg.from ? formatBotMemberName(msg.from) : '';
+    let serviceText = '';
+    let systemEventType: TelegramSystemEventType = 'join';
+    if (botNewMembers.length > 0) {
+      const names = botNewMembers.map(formatBotMemberName).join('、');
+      const isSelfJoin = botNewMembers.length === 1 && actorId && String(botNewMembers[0]?.id || '') === actorId;
+      serviceText = isSelfJoin || !actorName ? `👤 ${names} 加入了群组` : `👤 ${actorName} 邀请 ${names} 加入了群组`;
+      systemEventType = 'join';
+    } else {
+      const targetId = botLeftMember?.id ? String(botLeftMember.id) : '';
+      const targetName = formatBotMemberName(botLeftMember);
+      serviceText =
+        !actorId || !targetId || targetId === actorId
+          ? `🚪 ${targetName} 退出了群组`
+          : `🚪 ${actorName} 将 ${targetName} 移出了群组`;
+      systemEventType = 'leave';
+    }
+    const internalMsgId = `tg_${msg.message_id}_${updateId}`;
+    const incomingMsgTimestamp = new Date(msg.date ? msg.date * 1000 : nowSvc).toLocaleTimeString([], {
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: false,
+    });
+    const incomingTgMsgId = Number(msg.message_id) || null;
+    await db
+      .prepare(
+        `INSERT OR REPLACE INTO messages (
+          id, chat_id, account_id, sender, sender_name, text, translated_text,
+          timestamp, created_at, telegram_message_id, system_event_type
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      )
+      .run(
+        internalMsgId,
+        tgChatId,
+        'acc_telegram_bot',
+        'system',
+        actorName,
+        serviceText,
+        '',
+        incomingMsgTimestamp,
+        nowSvc,
+        incomingTgMsgId,
+        systemEventType
+      );
+    pushPendingLocalUpdate({
+      id: internalMsgId,
+      telegramMessageId: incomingTgMsgId ?? undefined,
+      chatId: tgChatId,
+      accountId: 'acc_telegram_bot',
+      sender: 'system',
+      systemEventType,
+      senderName: actorName,
+      text: serviceText,
+      timestamp: incomingMsgTimestamp,
+      createdAt: nowSvc,
+    });
+    return {
+      ok: true,
+      update_id: updateId,
+      chat_id: tgChatId,
+      message_id: msg.message_id,
+      queued: false,
+    };
+  }
+
   const senderName = [msg.from?.first_name, msg.from?.last_name].filter(Boolean).join(' ') || msg.from?.username || `TG用户_${msg.chat?.id}`;
   const isAudio = Boolean(msg.voice || msg.audio);
   const voiceFileId = msg.voice?.file_id || msg.audio?.file_id || '';
@@ -29355,7 +29569,12 @@ async function resolveTelegramMessageSenderInfo(
   return result;
 }
 
-function extractTelegramMediaFields(m: any, canonicalId: string, accountId: string) {
+function extractTelegramMediaFields(
+  m: any,
+  canonicalId: string,
+  accountId: string,
+  groupServiceOverride?: { text: string; systemEventType: TelegramSystemEventType } | null
+) {
   const callInfo = extractTelegramPhoneCallFields(m);
   if (callInfo) {
     return {
@@ -29380,6 +29599,29 @@ function extractTelegramMediaFields(m: any, canonicalId: string, accountId: stri
       callDuration: callInfo.callDuration,
       isVideoCall: callInfo.isVideoCall,
       telegramCallId: callInfo.telegramCallId,
+    };
+  }
+
+  const groupSvcInfo = groupServiceOverride ?? extractTelegramGroupServiceFields(m);
+  if (groupSvcInfo) {
+    return {
+      text: groupSvcInfo.text,
+      systemEventType: groupSvcInfo.systemEventType,
+      isAudio: false,
+      audioDuration: 0,
+      audioUrl: '',
+      isImage: false,
+      imageUrl: '',
+      imageCaption: '',
+      isVideo: false,
+      videoDuration: 0,
+      videoWidth: undefined,
+      videoHeight: undefined,
+      videoUrl: '',
+      isFile: false,
+      fileName: undefined,
+      fileSize: undefined,
+      fileUrl: '',
     };
   }
 
@@ -29560,10 +29802,15 @@ export async function syncTelegramUserChatMessages(
 
     const synced: any[] = [];
     const senderInfoCache = new Map<string, { senderId: string; senderName: string; senderAvatarUrl?: string }>();
+    const groupMemberNameCache = new Map<string, string>();
     for (const m of allFetched) {
       if (!m) continue;
-      const mediaParsed = extractTelegramMediaFields(m, canonicalId, accountId);
-      if (!mediaParsed.text && !m.media && !mediaParsed.isCall) continue;
+      const resolvedGroupSvc =
+        m?.action && !extractTelegramPhoneCallFields(m)
+          ? await resolveTelegramGroupServiceFields(m, client, groupMemberNameCache)
+          : null;
+      const mediaParsed = extractTelegramMediaFields(m, canonicalId, accountId, resolvedGroupSvc);
+      if (!mediaParsed.text && !m.media && !mediaParsed.isCall && !mediaParsed.systemEventType) continue;
 
       const isOut = Boolean(m.out);
       const createdAt = m.date ? m.date * 1000 : Date.now();
@@ -29606,7 +29853,8 @@ export async function syncTelegramUserChatMessages(
         telegramMessageId: Number(m.id),
         chatId: canonicalId,
         accountId,
-        sender: isOut ? 'me' : 'peer',
+        sender: mediaParsed.systemEventType ? 'system' : (isOut ? 'me' : 'peer'),
+        ...(mediaParsed.systemEventType ? { systemEventType: mediaParsed.systemEventType } : {}),
         senderName,
         ...(senderInfo.senderId ? { senderId: senderInfo.senderId } : {}),
         ...(senderInfo.senderAvatarUrl ? { senderAvatarUrl: senderInfo.senderAvatarUrl } : {}),
@@ -29715,7 +29963,8 @@ export async function querySqlitePaginatedMessagesFallback(
         is_edited as isEdited,
         is_pinned as isPinned,
         forward_from as forwardFrom,
-        reactions_json as reactionsJson
+        reactions_json as reactionsJson,
+        system_event_type as systemEventType
       FROM messages
       WHERE ${conditions.join(' AND ')}
       ORDER BY COALESCE(telegram_message_id, 0) DESC, created_at DESC
@@ -29780,6 +30029,7 @@ export async function querySqlitePaginatedMessagesFallback(
       ...(parsedReactions.reactions ? { reactions: parsedReactions.reactions } : {}),
       ...(parsedReactions.myReactions ? { myReactions: parsedReactions.myReactions } : {}),
       ...inferCallMetadataFromStoredRecord(r, senderRole),
+      ...(r.systemEventType ? { systemEventType: r.systemEventType } : {}),
     };
   });
 
@@ -30055,8 +30305,9 @@ export interface LocalIncomingUpdate {
   chatId: string;
   rawChatId?: string;
   accountId: string;
-  sender: 'me' | 'peer';
+  sender: 'me' | 'peer' | 'system';
   senderName: string;
+  systemEventType?: TelegramSystemEventType;
   senderId?: string;
   senderAvatarUrl?: string;
   text: string;
@@ -30486,7 +30737,8 @@ export function attachTelegramClientMessageListener(client: TelegramClient, phon
           chatId: canonicalChatId,
           rawChatId,
           accountId,
-          sender: isOut ? 'me' : 'peer',
+          sender: parsedMedia.systemEventType ? 'system' : (isOut ? 'me' : 'peer'),
+          ...(parsedMedia.systemEventType ? { systemEventType: parsedMedia.systemEventType } : {}),
           senderName: senderInfo.senderName,
           ...(senderInfo.senderId ? { senderId: senderInfo.senderId } : {}),
           ...(senderInfo.senderAvatarUrl ? { senderAvatarUrl: senderInfo.senderAvatarUrl } : {}),
@@ -30528,9 +30780,9 @@ export function attachTelegramClientMessageListener(client: TelegramClient, phon
                 lastMessage: summaryText,
                 lastTime: timestamp,
                 lastDate: Math.max(Number(matchedCachedDlg.lastDate || 0), msgDateSec),
-                ...(!isOut ? { unreadCount: Number(matchedCachedDlg.unreadCount || 0) + 1 } : {}),
+                ...(!isOut && !parsedMedia.systemEventType ? { unreadCount: Number(matchedCachedDlg.unreadCount || 0) + 1 } : {}),
               },
-              { invalidateCache: Boolean(!isOut && matchedCachedDlg.isArchived && !matchedCachedDlg.isMuted) }
+              { invalidateCache: Boolean(!isOut && !parsedMedia.systemEventType && matchedCachedDlg.isArchived && !matchedCachedDlg.isMuted) }
             );
           } else {
             msgConnObj.dialogsFetchedAt = 0;
@@ -30541,8 +30793,9 @@ export function attachTelegramClientMessageListener(client: TelegramClient, phon
         // Persist real-time MTProto message into unified conversation store so customer analysis/evolution/transcripts never read stale empty tables
         void upsertSyncedMessageToDb(realtimeUpdate, canonicalChatId, accountId);
 
-        // Check if Autopilot is enabled for this chat strictly scoped by accountId (NEVER run Autopilot on official notifications)
+        // Check if Autopilot is enabled for this chat strictly scoped by accountId (NEVER run Autopilot on official notifications or group join/leave notices)
         const isAutopilotOn =
+          !parsedMedia.systemEventType &&
           !isOfficialService &&
           (isAutopilotEnabledForChat(accountId, canonicalChatId) || isAutopilotEnabledForChat(accountId, rawChatId));
 
@@ -31646,7 +31899,9 @@ export function attachTelegramClientMessageListener(client: TelegramClient, phon
         if (update instanceof Api.UpdateNewMessage || update instanceof Api.UpdateNewChannelMessage) {
           const msgObj: any = update.message;
           const callInfo = msgObj ? extractTelegramPhoneCallFields(msgObj) : null;
-          if (!callInfo || !msgObj?.id) return;
+          const groupServiceInfo =
+            !callInfo && msgObj?.action ? await resolveTelegramGroupServiceFields(msgObj, client) : null;
+          if ((!callInfo && !groupServiceInfo) || !msgObj?.id) return;
 
           const canonicalChatId =
             resolveRawPeerChatId(msgObj.peerId) ||
@@ -31679,7 +31934,7 @@ export function attachTelegramClientMessageListener(client: TelegramClient, phon
             senderName: '',
             senderAvatarUrl: undefined as string | undefined,
           }));
-          if (!isOut && !senderInfo.senderName) {
+          if (!isOut && !senderInfo.senderName && !groupServiceInfo) {
             try {
               const entity: any = await client.getEntity(/^-?\d+$/.test(rawChatId) ? Number(rawChatId) : rawChatId);
               const entName =
@@ -31699,28 +31954,49 @@ export function attachTelegramClientMessageListener(client: TelegramClient, phon
             } catch {}
           }
 
-          const callUpdate: LocalIncomingUpdate = {
+          const serviceUpdate: LocalIncomingUpdate = {
             id: messageId,
             type: 'message',
             telegramMessageId: Number(msgObj.id),
             chatId: canonicalChatId,
             rawChatId,
             accountId,
-            sender: isOut ? 'me' : 'peer',
+            sender: groupServiceInfo ? 'system' : (isOut ? 'me' : 'peer'),
+            ...(groupServiceInfo ? { systemEventType: groupServiceInfo.systemEventType } : {}),
             senderName: senderInfo.senderName,
             ...(senderInfo.senderId ? { senderId: senderInfo.senderId } : {}),
             ...(senderInfo.senderAvatarUrl ? { senderAvatarUrl: senderInfo.senderAvatarUrl } : {}),
-            text: callInfo.text,
+            text: callInfo ? callInfo.text : groupServiceInfo!.text,
             timestamp,
             createdAt,
-            isCall: true,
-            callType: callInfo.callType,
-            callDuration: callInfo.callDuration,
-            isVideoCall: callInfo.isVideoCall,
-            ...(callInfo.telegramCallId ? { telegramCallId: callInfo.telegramCallId } : {}),
+            ...(callInfo
+              ? {
+                  isCall: true,
+                  callType: callInfo.callType,
+                  callDuration: callInfo.callDuration,
+                  isVideoCall: callInfo.isVideoCall,
+                  ...(callInfo.telegramCallId ? { telegramCallId: callInfo.telegramCallId } : {}),
+                }
+              : {}),
           };
-          pushPendingLocalUpdate(callUpdate);
-          void upsertSyncedMessageToDb(callUpdate, canonicalChatId, accountId);
+          pushPendingLocalUpdate(serviceUpdate);
+          if (groupServiceInfo) {
+            const msgConnObj = connectedUserClients.get(accountId) || connectedUserClients.get(userId);
+            if (msgConnObj && Array.isArray(msgConnObj.dialogs)) {
+              const matchedCachedDlg: any = msgConnObj.dialogs.find(
+                (d: any) => d && (String(d.id) === canonicalChatId || String(d.rawId || '') === rawChatId)
+              );
+              if (matchedCachedDlg) {
+                const msgDateSec = msgObj.date ? Number(msgObj.date) : Math.floor(createdAt / 1000);
+                patchConnectedDialogCache(msgConnObj, canonicalChatId, {
+                  lastMessage: groupServiceInfo.text,
+                  lastTime: timestamp,
+                  lastDate: Math.max(Number(matchedCachedDlg.lastDate || 0), msgDateSec),
+                });
+              }
+            }
+          }
+          void upsertSyncedMessageToDb(serviceUpdate, canonicalChatId, accountId);
           return;
         }
 

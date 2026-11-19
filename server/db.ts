@@ -415,7 +415,8 @@ export async function initDatabase() {
       is_edited INTEGER DEFAULT 0,
       is_pinned INTEGER DEFAULT 0,
       forward_from TEXT,
-      reactions_json TEXT
+      reactions_json TEXT,
+      system_event_type TEXT DEFAULT ''
     );
 
     CREATE INDEX IF NOT EXISTS idx_messages_chat_created ON messages (chat_id, created_at);
@@ -632,6 +633,9 @@ export async function initDatabase() {
   } catch {}
   try {
     await db.exec(`ALTER TABLE messages ADD COLUMN sender_id TEXT`);
+  } catch {}
+  try {
+    await db.exec(`ALTER TABLE messages ADD COLUMN system_event_type TEXT DEFAULT ''`);
   } catch {}
 
   try {
@@ -1350,6 +1354,7 @@ export function validateDatabaseSnapshot(snapshot: any): { skippedUserSessions: 
         assertNonNegFiniteNumber(row.created_at, `messages[${i}].created_at`, true);
         assertFlagInt(row.is_edited, `messages[${i}].is_edited`, 0);
         assertFlagInt(row.is_pinned, `messages[${i}].is_pinned`, 0);
+        assertStringField(row.system_event_type, `messages[${i}].system_event_type`, '', 64);
       } else if (tableName === 'customer_profiles') {
         assertRequiredNonEmptyString(row.chat_id, `customer_profiles[${i}].chat_id`, 256);
         assertStringField(row.account_id, `customer_profiles[${i}].account_id`, 'acc_1', 256);
@@ -1553,8 +1558,8 @@ export async function restoreDatabaseSnapshot(snapshot: any): Promise<{ success:
             is_image, image_url, image_caption, is_video, video_url, video_duration,
             is_file, file_name, file_size, file_url,
             timestamp, created_at, delivery_status, telegram_message_id,
-            reply_to_json, is_edited, is_pinned, forward_from, reactions_json
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            reply_to_json, is_edited, is_pinned, forward_from, reactions_json, system_event_type
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         `).run(
           m.id, m.chat_id, m.account_id, m.sender, m.sender_name ?? '', m.sender_id ?? '', m.text ?? '', m.translated_text ?? '',
           m.is_audio ?? 0, m.audio_duration ?? 0, m.audio_url ?? '', m.stt_text ?? '', m.voice_tone ?? '',
@@ -1567,7 +1572,8 @@ export async function restoreDatabaseSnapshot(snapshot: any): Promise<{ success:
           m.is_edited ?? 0,
           m.is_pinned ?? 0,
           m.forward_from ?? null,
-          m.reactions_json ?? null
+          m.reactions_json ?? null,
+          m.system_event_type ?? ''
         );
       }
     }

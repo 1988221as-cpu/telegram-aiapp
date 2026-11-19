@@ -193,6 +193,7 @@ export interface Message {
   callDuration?: number;
   isVideoCall?: boolean;
   telegramCallId?: string;
+  systemEventType?: 'join' | 'leave' | 'service';
 }
 
 export interface MemberUser {

@@ -44,6 +44,7 @@ import {
   Clock,
   Maximize2,
   UserPlus,
+  UserMinus,
   MessageCircle,
   ShieldCheck,
   Phone,
@@ -932,6 +933,21 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
   const [showBatchDeleteModal, setShowBatchDeleteModal] = useState(false);
   const [revokeBatchDelete, setRevokeBatchDelete] = useState(true);
   const [isBatchDeleting, setIsBatchDeleting] = useState(false);
+  const [showClearGroupNoticesModal, setShowClearGroupNoticesModal] = useState(false);
+  const [isClearingGroupNotices, setIsClearingGroupNotices] = useState(false);
+
+  const isGroupNoticeMsg = useCallback((m: Message): boolean => {
+    return (
+      m.sender === 'system' &&
+      (m.systemEventType === 'join' ||
+        m.systemEventType === 'leave' ||
+        /加入了群组|退出了群组|移出了群组/.test(m.text || ''))
+    );
+  }, []);
+  const groupNoticeMessages = React.useMemo(
+    () => messages.filter(isGroupNoticeMsg),
+    [messages, isGroupNoticeMsg]
+  );
   const [forwardModalMessages, setForwardModalMessages] = useState<Message[] | null>(null);
   const [forwardSearch, setForwardSearch] = useState('');
   const [forwardDropAuthor, setForwardDropAuthor] = useState(false);
@@ -1410,6 +1426,38 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
       showSyncNotice(`已批量删除 ${ids.length} 条消息`, 2500);
     } finally {
       setIsBatchDeleting(false);
+    }
+  };
+
+  const handleConfirmClearGroupNotices = async () => {
+    if (groupNoticeMessages.length === 0 || isClearingGroupNotices || !onBatchDeleteMessages) return;
+    setIsClearingGroupNotices(true);
+    try {
+      const ids = groupNoticeMessages.map((m) => m.id);
+      const res = await onBatchDeleteMessages(ids, { revoke: revokeBatchDelete });
+      if (res && typeof res === 'object' && res.ok === false) {
+        showSyncNotice(`清理群提示失败：${res.error || '请检查群组管理员删除权限或网络'}`);
+        return;
+      }
+      const deletedIdSet = new Set(ids);
+      const deletedTgIdSet = new Set(
+        groupNoticeMessages
+          .map((m) => resolveClientTelegramMessageId(m))
+          .filter((id): id is number => typeof id === 'number' && id > 0)
+      );
+      setCloudSearchResults((prev) =>
+        prev
+          ? prev.filter(
+              (m) =>
+                !deletedIdSet.has(m.id) &&
+                !(resolveClientTelegramMessageId(m) !== undefined && deletedTgIdSet.has(resolveClientTelegramMessageId(m)!))
+            )
+          : null
+      );
+      setShowClearGroupNoticesModal(false);
+      showSyncNotice(`已清理 ${ids.length} 条入/退群提示`, 2500);
+    } finally {
+      setIsClearingGroupNotices(false);
     }
   };
 
@@ -3920,6 +3968,32 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                 <span className="font-medium">{isSyncingCloud ? '正在刷新对话...' : '刷新当前对话'}</span>
               </button>
 
+              {(chat.isGroup || groupNoticeMessages.length > 0) && onBatchDeleteMessages && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setIsHeaderMoreMenuOpen(false);
+                    setRevokeBatchDelete(true);
+                    setShowClearGroupNoticesModal(true);
+                  }}
+                  disabled={groupNoticeMessages.length === 0 || isClearingGroupNotices || isBatchDeleting}
+                  title={
+                    groupNoticeMessages.length > 0
+                      ? `一键清理当前群聊中的 ${groupNoticeMessages.length} 条入/退群提示`
+                      : '当前群聊暂无可清理的入/退群提示'
+                  }
+                  className="w-full flex items-center justify-between gap-2 px-2.5 py-1.5 rounded-lg text-rose-600 dark:text-rose-400 aurora:text-rose-400 linen:text-[#a64234] hover:bg-rose-50 dark:hover:bg-rose-500/15 aurora:hover:bg-rose-500/15 linen:hover:bg-[#f2ded6] disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer transition-colors"
+                >
+                  <span className="flex items-center gap-1.5 font-medium">
+                    <Trash2 className="w-3.5 h-3.5 shrink-0" />
+                    <span>清理入/退群提示</span>
+                  </span>
+                  <span className="px-1.5 py-0.5 rounded-full text-[10px] font-semibold tabular-nums bg-rose-500/12">
+                    {groupNoticeMessages.length}
+                  </span>
+                </button>
+              )}
+
               <div className="h-px bg-[#e2e8f0] dark:bg-[#18273a] aurora:bg-[#182b34] linen:bg-[#dfd2bc] mx-1" />
 
               <div
@@ -4294,7 +4368,8 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
 
         {displayedMessages.map((msg, idx) => {
           const isMe = msg.sender === 'me';
-          const isGroupPeer = Boolean(chat.isGroup && !isMe);
+          const isSystemNotice = msg.sender === 'system';
+          const isGroupPeer = Boolean(chat.isGroup && !isMe && !isSystemNotice);
           const dayKey = getMessageDayKey(msg);
           const prevMsg = idx > 0 ? displayedMessages[idx - 1] : null;
           const nextMsg = idx < displayedMessages.length - 1 ? displayedMessages[idx + 1] : null;
@@ -4308,11 +4383,11 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
             ? msg.senderId || cleanSenderName || `msg_${msg.id}`
             : '';
           const prevGroupKey =
-            isGroupPeer && prevMsg && prevMsg.sender !== 'me' && prevDayKey === dayKey
+            isGroupPeer && prevMsg && prevMsg.sender !== 'me' && prevMsg.sender !== 'system' && prevDayKey === dayKey
               ? prevMsg.senderId || normalizeGroupMemberDisplayName(prevMsg.senderName) || `msg_${prevMsg.id}`
               : '';
           const nextGroupKey =
-            isGroupPeer && nextMsg && nextMsg.sender !== 'me' && nextDayKey === dayKey
+            isGroupPeer && nextMsg && nextMsg.sender !== 'me' && nextMsg.sender !== 'system' && nextDayKey === dayKey
               ? nextMsg.senderId || normalizeGroupMemberDisplayName(nextMsg.senderName) || `msg_${nextMsg.id}`
               : '';
           const isSameSenderAsPrev = Boolean(isGroupPeer && senderGroupKey && senderGroupKey === prevGroupKey);
@@ -4339,6 +4414,70 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
           const hasOverlayImageTimestamp = Boolean(
             msg.isImage && msg.imageUrl && resolveDisplayUrl(msg.imageUrl) && !hasInlineMediaFooterContent
           );
+
+          if (isSystemNotice) {
+            const isLeaveEvent = msg.systemEventType === 'leave' || /退出了群组|移出了群组/.test(msg.text || '');
+            const isJoinEvent = msg.systemEventType === 'join' || /加入了群组/.test(msg.text || '');
+            return (
+              <React.Fragment key={msg.id}>
+                {showDayDivider && (
+                  <div className="flex items-center justify-center my-1">
+                    <span className="px-3 py-0.5 rounded-full bg-white/90 dark:bg-[#0e1726]/80 aurora:bg-[#101c23]/85 linen:bg-[#f6efe2]/95 border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#1c323c] linen:border-[#cbbba2] text-[11px] font-medium text-[#64748b] dark:text-[#b4c6d8] aurora:text-[#b7d0d8] linen:text-[#5c4a38] shadow-xs">
+                      {formatMessageDayLabel(dayKey)}
+                    </span>
+                  </div>
+                )}
+                <div
+                  data-msg-id={msg.id}
+                  data-system-event={msg.systemEventType || (isLeaveEvent ? 'leave' : isJoinEvent ? 'join' : 'service')}
+                  onClick={isMultiSelectMode ? () => toggleSelectMessage(msg.id) : undefined}
+                  className={`w-full flex items-center justify-center my-1.5 px-2 ${isMultiSelectMode ? 'cursor-pointer' : ''}`}
+                >
+                  <div
+                    className={`group/sys inline-flex items-center gap-1.5 max-w-[88%] px-3 py-1 rounded-full text-[11.5px] leading-snug border shadow-xs transition-colors ${
+                      isSelectedMulti
+                        ? 'bg-[#2481cc]/15 dark:bg-[#2ba0ff]/20 aurora:bg-[#14b8a6]/20 linen:bg-[#a86a43]/20 border-[#2481cc] dark:border-[#2ba0ff] aurora:border-[#2dd4bf] linen:border-[#a86a43] text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118]'
+                        : 'bg-white/90 dark:bg-[#0e1726]/85 aurora:bg-[#101c23]/90 linen:bg-[#f6efe2]/95 border-[#e2e8f0] dark:border-[#1e3148] aurora:border-[#203742] linen:border-[#cbbba2] text-[#475569] dark:text-[#b4c6d8] aurora:text-[#b7d0d8] linen:text-[#5c4a38]'
+                    }`}
+                  >
+                    {isMultiSelectMode && (
+                      <span className="shrink-0">
+                        {isSelectedMulti ? (
+                          <CheckSquare className="w-3.5 h-3.5 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#5eead4] linen:text-[#a86a43]" />
+                        ) : (
+                          <Square className="w-3.5 h-3.5 opacity-60" />
+                        )}
+                      </span>
+                    )}
+                    {isLeaveEvent ? (
+                      <UserMinus className="w-3.5 h-3.5 shrink-0 text-amber-600 dark:text-amber-400 aurora:text-amber-300 linen:text-[#a64234]" />
+                    ) : (
+                      <UserPlus className="w-3.5 h-3.5 shrink-0 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#5eead4] linen:text-[#8c522d]" />
+                    )}
+                    <span className="truncate">{(msg.text || '').replace(/^(?:👤|🚪)\s*/, '')}</span>
+                    {msg.timestamp && (
+                      <span className="text-[10px] opacity-65 tabular-nums shrink-0">{msg.timestamp}</span>
+                    )}
+                    {!isMultiSelectMode && onDeleteMessage && (
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setRevokeSingleDelete(true);
+                          setMessageToDelete(msg);
+                        }}
+                        aria-label={`删除群提示: ${msg.text}`}
+                        title="删除此条入/退群提示"
+                        className="ml-0.5 p-1 rounded-full text-rose-500/80 hover:text-rose-600 dark:text-rose-400/85 dark:hover:text-rose-300 hover:bg-rose-500/12 transition-colors cursor-pointer shrink-0"
+                      >
+                        <Trash2 className="w-3 h-3" />
+                      </button>
+                    )}
+                  </div>
+                </div>
+              </React.Fragment>
+            );
+          }
 
           return (
             <React.Fragment key={msg.id}>
@@ -6338,7 +6477,11 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
         const isSupergroupOrChannel = chat.id.startsWith('tg_-100') || Boolean(chat.isChannel);
         const showRevokeOption = !isLocalOnly && isTgUserChat && !isSupergroupOrChannel;
         const showSupergroupHint = !isLocalOnly && isTgUserChat && isSupergroupOrChannel;
-        const showPeerGroupHint = !isLocalOnly && isTgUserChat && messageToDelete.sender === 'peer' && (chat.isGroup || chat.isChannel);
+        const showPeerGroupHint =
+          !isLocalOnly &&
+          isTgUserChat &&
+          (messageToDelete.sender === 'peer' || messageToDelete.sender === 'system') &&
+          (chat.isGroup || chat.isChannel);
         return (
           <div className="fixed inset-0 bg-black/55 dark:bg-black/75 aurora:bg-black/80 backdrop-blur-xs flex items-center justify-center z-50 p-4 animate-in fade-in duration-150">
             <div className="bg-white dark:bg-[#0b131f] aurora:bg-[#0c151b] linen:bg-[#f8f2e7] border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] linen:border-[#d5c6ae] rounded-2xl p-5 max-w-sm w-full shadow-2xl linen:shadow-sm space-y-4">
@@ -6355,7 +6498,9 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                       ? '该消息未送达 Telegram 云端，确认后将仅从本地列表移除。'
                       : messageToDelete.sender === 'me'
                         ? '确定删除您发送的这条消息吗？'
-                        : '确定删除客户发送的这条消息吗？'}
+                        : messageToDelete.sender === 'system'
+                          ? '确定删除这条入/退群系统提示吗？'
+                          : '确定删除客户发送的这条消息吗？'}
                   </p>
                 </div>
               </div>
@@ -6474,6 +6619,71 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
             </div>
           </div>
         </div>
+        );
+      })()}
+
+      {/* Batch Clear Group Join/Leave Notices Modal */}
+      {showClearGroupNoticesModal && (() => {
+        const isTgUserChat = chat.id.startsWith('tg_') && currentAccountId !== 'acc_telegram_bot';
+        const isSupergroupOrChannel = chat.id.startsWith('tg_-100') || Boolean(chat.isChannel);
+        return (
+          <div className="fixed inset-0 bg-black/55 dark:bg-black/75 aurora:bg-black/80 backdrop-blur-xs flex items-center justify-center z-50 p-4 animate-in fade-in duration-150">
+            <div className="bg-white dark:bg-[#0b131f] aurora:bg-[#0c151b] linen:bg-[#f8f2e7] border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] linen:border-[#d5c6ae] rounded-2xl p-5 max-w-sm w-full shadow-2xl linen:shadow-sm space-y-4">
+              <div className="flex items-center gap-3">
+                <div className="w-10 h-10 rounded-full bg-rose-500/10 dark:bg-rose-500/20 text-rose-500 flex items-center justify-center shrink-0">
+                  <Trash2 className="w-5 h-5" />
+                </div>
+                <div className="min-w-0">
+                  <h3 className="text-sm font-semibold text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118]">
+                    清理当前群聊 {groupNoticeMessages.length} 条入/退群提示？
+                  </h3>
+                  <p className="text-xs text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a] mt-0.5">
+                    将删除所有成员加入、退出或移出群提示，并同步至 Telegram 云端与本地缓存。
+                  </p>
+                </div>
+              </div>
+
+              {isTgUserChat && !isSupergroupOrChannel && (
+                <label className="flex items-start gap-2.5 p-2.5 rounded-xl bg-[#f8fafc] dark:bg-[#0e1726] aurora:bg-[#101c23] linen:bg-[#efe6d6] border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] linen:border-[#d5c6ae] cursor-pointer text-xs">
+                  <input
+                    type="checkbox"
+                    checked={revokeBatchDelete}
+                    onChange={(e) => setRevokeBatchDelete(e.target.checked)}
+                    className="mt-0.5 rounded border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] linen:border-[#bfa98c] text-[#2481cc] aurora:text-[#14b8a6] linen:text-[#a86a43] focus:ring-[#2481cc] aurora:focus:ring-[#2dd4bf] linen:focus:ring-[#a86a43]"
+                  />
+                  <span className="text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118] leading-snug">
+                    同时为对方删除 / 群内撤回
+                  </span>
+                </label>
+              )}
+
+              {isTgUserChat && isSupergroupOrChannel && (
+                <p className="text-[11px] text-amber-700 dark:text-amber-400 leading-snug">
+                  提示：在超级群组/频道中删除入/退群提示将对所有成员生效；若非管理员可能被服务端拒绝。
+                </p>
+              )}
+
+              <div className="flex items-center justify-end gap-2 pt-1">
+                <button
+                  type="button"
+                  disabled={isClearingGroupNotices}
+                  onClick={() => setShowClearGroupNoticesModal(false)}
+                  className="px-4 py-2 rounded-xl text-xs font-medium text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a] hover:bg-[#f1f5f9] dark:hover:bg-[#152438] aurora:hover:bg-[#152934] linen:hover:bg-[#e9decb] transition-colors cursor-pointer"
+                >
+                  取消
+                </button>
+                <button
+                  type="button"
+                  disabled={isClearingGroupNotices}
+                  onClick={() => void handleConfirmClearGroupNotices()}
+                  className="px-4 py-2 rounded-xl text-xs font-semibold bg-rose-500 hover:bg-rose-600 disabled:opacity-50 text-white shadow-sm transition-colors cursor-pointer flex items-center gap-1.5"
+                >
+                  <Trash2 className="w-3.5 h-3.5" />
+                  <span>{isClearingGroupNotices ? '正在清理...' : '确认清理全部'}</span>
+                </button>
+              </div>
+            </div>
+          </div>
         );
       })()}
 

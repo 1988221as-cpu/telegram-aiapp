@@ -331,6 +331,9 @@ function mergeCloudMessagesWithLocal(
         fileUrl: cm.fileUrl || lm.fileUrl,
         reactions: cm.reactions ?? lm.reactions,
         myReactions: cm.myReactions ?? lm.myReactions,
+        ...(cm.systemEventType || lm.systemEventType
+          ? { systemEventType: cm.systemEventType || lm.systemEventType }
+          : {}),
         deliveryStatus: 'delivered' as const,
       };
     }
@@ -2649,7 +2652,7 @@ export default function App() {
 
     for (let i = currentMsgs.length - 1; i >= 0; i--) {
       const m = currentMsgs[i];
-      if (!m || m.deliveryStatus === 'pending') continue;
+      if (!m || m.deliveryStatus === 'pending' || m.sender === 'system') continue;
       const isHistoryError =
         m.translationErrorChannel === 'history_google' ||
         (!m.translationErrorChannel &&
@@ -2931,13 +2934,15 @@ export default function App() {
             const rawChatId = String(upd.chatId || '');
             let targetChatId = rawChatId;
             const targetAccountId = upd.accountId || currentAccId;
+            const isSystemEventMsg = upd.sender === 'system' || Boolean(upd.systemEventType);
             const isOfficial =
               rawChatId === '777000' ||
               rawChatId === 'tg_777000' ||
               rawChatId === '42777' ||
               rawChatId === 'tg_42777' ||
-              upd.senderName?.includes('官方') ||
-              upd.senderName?.includes('Telegram');
+              (!isSystemEventMsg &&
+                (upd.senderName?.includes('官方') ||
+                  upd.senderName?.includes('Telegram')));
 
             if (rawChatId) {
               const matched = currentChats.find(
@@ -3509,6 +3514,7 @@ export default function App() {
               callDuration: typeof upd.callDuration === 'number' ? upd.callDuration : undefined,
               isVideoCall: Boolean(upd.isVideoCall),
               telegramCallId: upd.telegramCallId,
+              ...(upd.systemEventType ? { systemEventType: upd.systemEventType } : {}),
               replyTo: upd.replyTo,
               forwardFrom: upd.forwardFrom,
               isPinned: Boolean(upd.isPinned),
@@ -3769,6 +3775,7 @@ export default function App() {
                   title: isOfficialNotice ? officialTitle : (upd.senderName || `Telegram (${targetChatId.replace('tg_', '')})`),
                   unreadCount:
                     incomingMsg.sender === 'me' ||
+                    incomingMsg.sender === 'system' ||
                     (targetChatId === activeChatIdRef.current &&
                       targetAccountId === activeAccountIdRef.current &&
                       isWindowActivelyFocused)
@@ -3800,7 +3807,7 @@ export default function App() {
                         c.accountId === activeAccountIdRef.current &&
                         isWindowActivelyFocused
                           ? 0
-                          : incomingMsg.sender === 'me'
+                          : incomingMsg.sender === 'me' || incomingMsg.sender === 'system'
                             ? (c.unreadCount || 0)
                             : (c.unreadCount || 0) + 1,
                     }
