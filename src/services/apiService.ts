@@ -31,7 +31,7 @@ import {
 
 declare const __APP_VERSION__: string | undefined;
 export const APP_VERSION =
-  typeof __APP_VERSION__ !== 'undefined' && __APP_VERSION__ ? __APP_VERSION__ : '1.1.9';
+  typeof __APP_VERSION__ !== 'undefined' && __APP_VERSION__ ? __APP_VERSION__ : '1.2.1';
 
 // ==================== SESSION TOKEN & TENANT AUTHENTICATION HELPERS ====================
 
@@ -5617,6 +5617,40 @@ export async function fetchTelegramStickersApi(
       ok: false,
       packs: [],
       error: err?.message || '网络异常，无法连接 Telegram 贴纸服务',
+    };
+  }
+}
+
+export async function searchTelegramStickersApi(
+  queryText: string,
+  accountId?: string
+): Promise<{ ok: boolean; packs: TelegramStickerPack[]; error?: string }> {
+  const q = queryText.trim();
+  if (!q) return { ok: true, packs: [] };
+  try {
+    const query = new URLSearchParams({ q });
+    if (accountId) query.set('accountId', accountId);
+    const res = await fetchWithTimeout(`/api/telegram/user/stickers/search?${query.toString()}`, {
+      headers: getAuthHeaders(accountId),
+      credentials: 'include',
+    }, 20000);
+    const data = await res.json().catch(() => null);
+    if (res.ok && data?.ok) {
+      return {
+        ok: true,
+        packs: Array.isArray(data.packs) ? data.packs : [],
+      };
+    }
+    return {
+      ok: false,
+      packs: [],
+      error: data?.error || `搜索云端贴纸失败 (HTTP ${res.status})`,
+    };
+  } catch (err: any) {
+    return {
+      ok: false,
+      packs: [],
+      error: err?.message || '网络异常，无法搜索 Telegram 云端贴纸',
     };
   }
 }

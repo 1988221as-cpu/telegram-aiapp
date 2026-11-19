@@ -590,6 +590,7 @@ interface ChatAreaProps {
   onAddContact?: (contact: TelegramContact) => void;
   onRemoveContact?: (contactId: string) => void;
   onJoinOrOpenChat?: (chat: Chat) => void;
+  onSelectChat?: (chatId: string) => void;
   onCloseChat?: () => void;
   onOpenCustomLLM?: () => void;
   activeRightPanel?: RightPanelTab | null;
@@ -755,6 +756,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
   onAddContact,
   onRemoveContact,
   onJoinOrOpenChat,
+  onSelectChat,
   onCloseChat,
   onOpenCustomLLM,
   activeRightPanel,
@@ -897,6 +899,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
   const [editingMessage, setEditingMessage] = useState<Message | null>(null);
   const [translateOnEdit, setTranslateOnEdit] = useState(false);
   const [hoveredMessageId, setHoveredMessageId] = useState<string | null>(null);
+  const lastRightClickRef = useRef<{ msgId: string; ts: number } | null>(null);
   const [activeReactionMsgId, setActiveReactionMsgId] = useState<string | null>(null);
   const [pastedImage, setPastedImage] = useState<{
     dataUrl: string;
@@ -1262,6 +1265,17 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
     e.preventDefault();
     e.stopPropagation();
 
+    const now = Date.now();
+    const prev = lastRightClickRef.current;
+    if (prev && prev.msgId === msg.id && now - prev.ts <= 450) {
+      lastRightClickRef.current = null;
+      setMessageContextMenu(null);
+      setHoveredMessageId(msg.id);
+      return;
+    }
+    lastRightClickRef.current = { msgId: msg.id, ts: now };
+    setHoveredMessageId(null);
+
     const menuWidth = 190;
     const menuHeight = 352;
     let x = e.clientX;
@@ -1294,6 +1308,19 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
       };
     }
   }, [messageContextMenu]);
+
+  useEffect(() => {
+    if (!hoveredMessageId) return;
+    const handleCloseQuickBar = () => {
+      setHoveredMessageId(null);
+    };
+    window.addEventListener('click', handleCloseQuickBar);
+    window.addEventListener('scroll', handleCloseQuickBar, true);
+    return () => {
+      window.removeEventListener('click', handleCloseQuickBar);
+      window.removeEventListener('scroll', handleCloseQuickBar, true);
+    };
+  }, [hoveredMessageId]);
 
   const confirmDeleteMessage = async () => {
     if (messageToDelete) {
@@ -4500,12 +4527,6 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
               <div
                 data-msg-id={msg.id}
                 onClick={isMultiSelectMode ? () => toggleSelectMessage(msg.id) : undefined}
-                onMouseEnter={() => {
-                  if (!isMultiSelectMode) setHoveredMessageId(msg.id);
-                }}
-                onMouseLeave={() => {
-                  setHoveredMessageId((prev) => (prev === msg.id ? null : prev));
-                }}
                 className={`w-full min-w-0 flex ${isMultiSelectMode ? 'items-center gap-2.5 cursor-pointer rounded-xl px-1.5 py-0.5 transition-colors ' + (isSelectedMulti ? 'bg-[#2481cc]/10 dark:bg-[#2ba0ff]/15 aurora:bg-[#14b8a6]/15 linen:bg-[#a86a43]/15' : 'hover:bg-black/5 dark:hover:bg-white/5 aurora:hover:bg-white/5') : 'flex-col'} ${
                   isMe ? (isMultiSelectMode ? 'justify-end' : 'items-end') : (isMultiSelectMode ? 'justify-start' : 'items-start')
                 } group relative ${hoveredMessageId === msg.id ? 'z-30' : ''} ${isSameSenderAsPrev ? 'mt-0.5' : 'mt-1'} ${isSameSenderAsNext ? 'mb-0.5' : 'mb-1'}`}
@@ -6273,6 +6294,34 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
             isBot: member.isBot,
           });
         }}
+        onSelectCommonGroup={(group) => {
+          const existing = availableChats.find((c) => c.id === group.id);
+          if (existing && onSelectChat) {
+            onSelectChat(existing.id);
+            return;
+          }
+          if (onJoinOrOpenChat) {
+            onJoinOrOpenChat({
+              id: group.id,
+              accountId: currentAccountId || chat.accountId,
+              title: group.title,
+              username: group.username,
+              avatarUrl: group.avatarUrl,
+              avatarBg: '#2481cc',
+              avatarInitial: (group.title || '群').slice(0, 2).toUpperCase(),
+              isGroup: !group.isChannel,
+              isChannel: Boolean(group.isChannel),
+              memberCount: group.memberCount,
+              lastMessage: '',
+              lastTime: '',
+              unreadCount: 0,
+              sourceLang: 'Auto',
+              targetLang: 'Auto',
+            });
+            return;
+          }
+          onSelectChat?.(group.id);
+        }}
       />
 
       {/* Voice Clone Studio Modal */}
@@ -6302,6 +6351,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
             top: `${messageContextMenu.y}px`,
           }}
           onClick={(e) => e.stopPropagation()}
+          onContextMenu={(e) => handleMessageContextMenu(e, messageContextMenu.message)}
         >
           {/* Quick Reaction Bar in Context Menu */}
           <div className="flex items-center justify-between px-2 py-1 mb-1 border-b border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] linen:border-[#e6dac6]">

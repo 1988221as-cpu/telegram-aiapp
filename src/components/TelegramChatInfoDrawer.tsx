@@ -23,8 +23,9 @@ import {
   Play,
   CornerUpLeft,
   Copy,
+  Users,
 } from 'lucide-react';
-import { Chat, Message, TelegramChatFullInfo, TelegramContact } from '../types';
+import { Chat, Message, TelegramChatFullInfo, TelegramCommonChatItem, TelegramContact } from '../types';
 import {
   fetchTelegramChatFullInfoApi,
   removeTelegramGroupMemberApi,
@@ -63,6 +64,7 @@ interface TelegramChatInfoDrawerProps {
     isOnline?: boolean;
     isBot?: boolean;
   }) => void;
+  onSelectCommonGroup?: (group: TelegramCommonChatItem) => void;
 }
 
 export const TelegramChatInfoDrawer: React.FC<TelegramChatInfoDrawerProps> = ({
@@ -81,8 +83,9 @@ export const TelegramChatInfoDrawer: React.FC<TelegramChatInfoDrawerProps> = ({
   onRefreshMediaUrls,
   onJumpToMessage,
   onSelectMember,
+  onSelectCommonGroup,
 }) => {
-  const [activeTab, setActiveTab] = useState<'media' | 'files' | 'voice' | 'links' | 'members'>('media');
+  const [activeTab, setActiveTab] = useState<'media' | 'files' | 'voice' | 'links' | 'members' | 'common_groups'>('media');
   const [isEditingRemark, setIsEditingRemark] = useState(false);
   const [remarkText, setRemarkText] = useState(chat?.title || '');
   const [isSavingRemark, setIsSavingRemark] = useState(false);
@@ -107,6 +110,17 @@ export const TelegramChatInfoDrawer: React.FC<TelegramChatInfoDrawerProps> = ({
   const copyTimerRef = useRef<number | null>(null);
   const [refreshedUrlsMap, setRefreshedUrlsMap] = useState<Record<string, string>>({});
   const attemptedRefreshUrlsRef = useRef<Set<string>>(new Set());
+
+  const commonChats =
+    !chat?.isGroup && !chat?.isChannel && Array.isArray(fullInfo?.commonChats)
+      ? fullInfo.commonChats
+      : [];
+
+  useEffect(() => {
+    if (activeTab === 'common_groups' && commonChats.length === 0) {
+      setActiveTab('media');
+    }
+  }, [activeTab, commonChats.length]);
 
   const resolveDisplayUrl = useCallback(
     (rawUrl?: string) => {
@@ -876,6 +890,18 @@ export const TelegramChatInfoDrawer: React.FC<TelegramChatInfoDrawerProps> = ({
             >
               链接 ({linkMessages.length})
             </button>
+            {!chat.isGroup && !chat.isChannel && commonChats.length > 0 && (
+              <button
+                onClick={() => setActiveTab('common_groups')}
+                className={`px-3 py-2.5 border-b-2 cursor-pointer transition-colors whitespace-nowrap ${
+                  activeTab === 'common_groups'
+                    ? 'border-[#2481cc] dark:border-[#2ba0ff] aurora:border-[#2dd4bf] linen:border-[#a86a43] text-[#2481cc] dark:text-[#7cc4ff] aurora:text-[#5eead4] linen:text-[#8c522d] font-semibold'
+                    : 'border-transparent text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a] hover:text-[#0f172a] dark:hover:text-[#eef4fb] aurora:hover:text-[#ecf6f8] linen:hover:text-[#2b2118]'
+                }`}
+              >
+                共同群 ({commonChats.length})
+              </button>
+            )}
             {(chat.isGroup || chat.isChannel) && (
               <button
                 onClick={() => setActiveTab('members')}
@@ -1116,6 +1142,54 @@ export const TelegramChatInfoDrawer: React.FC<TelegramChatInfoDrawerProps> = ({
                     </div>
                   ))
                 )}
+              </div>
+            )}
+
+            {activeTab === 'common_groups' && !chat.isGroup && !chat.isChannel && commonChats.length > 0 && (
+              <div className="space-y-1.5">
+                {commonChats.map((g) => {
+                  const safeAvatar = resolveDisplayUrl(g.avatarUrl);
+                  return (
+                    <button
+                      key={g.id}
+                      type="button"
+                      onClick={() => {
+                        if (onSelectCommonGroup) {
+                          onSelectCommonGroup(g);
+                          onClose();
+                        }
+                      }}
+                      title={onSelectCommonGroup ? `点击进入共同群：${g.title}` : g.title}
+                      className={`w-full flex items-center gap-2.5 p-2 rounded-xl bg-[#f8fafc] dark:bg-[#0e1726]/85 aurora:bg-[#101c23]/90 linen:bg-[#efe6d6]/90 border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] linen:border-[#cbbba2] hover:border-[#2481cc]/50 dark:hover:border-[#2ba0ff]/50 aurora:hover:border-[#2dd4bf]/50 linen:hover:border-[#a86a43]/60 transition-colors text-left ${
+                        onSelectCommonGroup ? 'cursor-pointer' : 'cursor-default'
+                      }`}
+                    >
+                      <div className="w-9 h-9 rounded-full shrink-0 overflow-hidden bg-[#2481cc]/15 dark:bg-[#2ba0ff]/20 aurora:bg-[#2dd4bf]/20 linen:bg-[#a86a43]/20 flex items-center justify-center text-xs font-semibold text-[#2481cc] dark:text-[#7cc4ff] aurora:text-[#5eead4] linen:text-[#8c522d]">
+                        {safeAvatar ? (
+                          <img
+                            src={safeAvatar}
+                            alt={g.title}
+                            className="w-full h-full object-cover"
+                            onError={(e) => {
+                              (e.currentTarget as HTMLImageElement).style.display = 'none';
+                            }}
+                          />
+                        ) : (
+                          <Users className="w-4 h-4" />
+                        )}
+                      </div>
+                      <div className="min-w-0 flex-1">
+                        <div className="text-xs font-medium text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118] truncate">
+                          {g.title}
+                        </div>
+                        <div className="text-[11px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a] truncate">
+                          {typeof g.memberCount === 'number' ? `${g.memberCount} 位成员` : '共同群组'}
+                          {g.username ? ` · ${g.username}` : ''}
+                        </div>
+                      </div>
+                    </button>
+                  );
+                })}
               </div>
             )}
 

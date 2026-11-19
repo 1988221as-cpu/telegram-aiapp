@@ -2,7 +2,7 @@ import React, { useState, useMemo, useEffect, useLayoutEffect, useCallback, useR
 import { createPortal } from 'react-dom';
 import { Smile, Sparkles, Search, X, Loader2, RefreshCw, AlertCircle } from 'lucide-react';
 import { TelegramStickerItem, TelegramStickerPack } from '../types';
-import { fetchTelegramStickersApi } from '../services/apiService';
+import { fetchTelegramStickersApi, searchTelegramStickersApi } from '../services/apiService';
 
 interface TelegramEmojiPickerProps {
   isOpen: boolean;
@@ -146,6 +146,10 @@ export const TelegramEmojiPicker: React.FC<TelegramEmojiPickerProps> = ({
   const [selectedPackId, setSelectedPackId] = useState<string>('all');
   const [isLoadingStickers, setIsLoadingStickers] = useState(false);
   const [stickersError, setStickersError] = useState<string | null>(null);
+  const [remoteSearchPacks, setRemoteSearchPacks] = useState<TelegramStickerPack[]>([]);
+  const [isSearchingRemote, setIsSearchingRemote] = useState(false);
+  const [remoteSearchError, setRemoteSearchError] = useState<string | null>(null);
+  const remoteSearchSeqRef = useRef(0);
   const pickerRef = useRef<HTMLDivElement>(null);
   const [popupPos, setPopupPos] = useState<{ top: number; left: number; width: number; maxHeight: number } | null>(null);
 
@@ -220,10 +224,59 @@ export const TelegramEmojiPicker: React.FC<TelegramEmojiPickerProps> = ({
   }, [accountId, selectedPackId]);
 
   useEffect(() => {
+    remoteSearchSeqRef.current += 1;
+    setStickerPacks([]);
+    setRemoteSearchPacks([]);
+    setSelectedPackId('all');
+    setStickersError(null);
+    setRemoteSearchError(null);
+    setIsSearchingRemote(false);
+  }, [accountId]);
+
+  useEffect(() => {
     if (isOpen && tab === 'stickers' && stickerPacks.length === 0 && !isLoadingStickers) {
       void loadOfficialStickers();
     }
   }, [isOpen, tab, stickerPacks.length, isLoadingStickers, loadOfficialStickers]);
+
+  const runRemoteStickerSearch = useCallback(async (rawQuery: string) => {
+    const q = rawQuery.trim();
+    if (!q) {
+      remoteSearchSeqRef.current += 1;
+      setRemoteSearchPacks([]);
+      setRemoteSearchError(null);
+      setIsSearchingRemote(false);
+      return;
+    }
+    const seq = ++remoteSearchSeqRef.current;
+    setIsSearchingRemote(true);
+    setRemoteSearchError(null);
+    const res = await searchTelegramStickersApi(q, accountId);
+    if (seq !== remoteSearchSeqRef.current) return;
+    setIsSearchingRemote(false);
+    if (!res.ok) {
+      setRemoteSearchPacks([]);
+      setRemoteSearchError(res.error || '云端贴纸搜索失败');
+      return;
+    }
+    setRemoteSearchPacks(res.packs);
+  }, [accountId]);
+
+  useEffect(() => {
+    if (!isOpen || tab !== 'stickers') return;
+    const q = searchQuery.trim();
+    if (!q) {
+      remoteSearchSeqRef.current += 1;
+      setRemoteSearchPacks([]);
+      setRemoteSearchError(null);
+      setIsSearchingRemote(false);
+      return;
+    }
+    const timer = window.setTimeout(() => {
+      void runRemoteStickerSearch(q);
+    }, 400);
+    return () => window.clearTimeout(timer);
+  }, [isOpen, tab, searchQuery, runRemoteStickerSearch]);
 
   // Filtered Emojis
   const filteredEmojis = useMemo(() => {
@@ -241,20 +294,60 @@ export const TelegramEmojiPicker: React.FC<TelegramEmojiPickerProps> = ({
     });
   }, [searchQuery, selectedEmojiCategory]);
 
+  // Active sticker packs list (default packs + cloud search results when searching)
+  const displayStickerPacks = useMemo(() => {
+    const q = searchQuery.trim();
+    if (!q) return stickerPacks;
+    const seen = new Set<string>();
+    const merged: TelegramStickerPack[] = [];
+    for (const p of remoteSearchPacks) {
+      if (!seen.has(p.id)) {
+        seen.add(p.id);
+        merged.push(p);
+      }
+    }
+    const lowerQ = q.toLowerCase();
+    for (const p of stickerPacks) {
+      if (seen.has(p.id)) continue;
+      const matchesPack =
+        p.title.toLowerCase().includes(lowerQ) ||
+        p.shortName.toLowerCase().includes(lowerQ) ||
+        p.stickers.some((st) => st.emoji.includes(lowerQ));
+      if (matchesPack) {
+        seen.add(p.id);
+        merged.push(p);
+      }
+    }
+    return merged;
+  }, [stickerPacks, remoteSearchPacks, searchQuery]);
+
   // Filtered Real Official Telegram Stickers
   const filteredStickers = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
     const list: Array<{ sticker: TelegramStickerItem; packTitle: string }> = [];
-    for (const pack of stickerPacks) {
+    const seenDocs = new Set<string>();
+    const remotePackIds = new Set(remoteSearchPacks.map((p) => p.id));
+
+    for (const pack of displayStickerPacks) {
       if (selectedPackId !== 'all' && pack.id !== selectedPackId) continue;
+      const isRemoteResultPack = remotePackIds.has(pack.id);
       for (const st of pack.stickers) {
-        if (!q || st.emoji.includes(q) || pack.title.toLowerCase().includes(q) || pack.shortName.toLowerCase().includes(q)) {
+        const docKey = `${st.setId}_${st.docId}`;
+        if (seenDocs.has(docKey)) continue;
+        if (
+          !q ||
+          isRemoteResultPack ||
+          st.emoji.includes(q) ||
+          pack.title.toLowerCase().includes(q) ||
+          pack.shortName.toLowerCase().includes(q)
+        ) {
+          seenDocs.add(docKey);
           list.push({ sticker: st, packTitle: pack.title });
         }
       }
     }
     return list;
-  }, [stickerPacks, selectedPackId, searchQuery]);
+  }, [displayStickerPacks, remoteSearchPacks, selectedPackId, searchQuery]);
 
   if (!isOpen) return null;
 
@@ -329,8 +422,17 @@ export const TelegramEmojiPicker: React.FC<TelegramEmojiPickerProps> = ({
           <input
             type="text"
             value={searchQuery}
-            onChange={(e) => setSearchQuery(e.target.value)}
-            placeholder={tab === 'emoji' ? '搜索表情 (输入关键词如: 笑, 赞, 爱心, 火...)' : '按 Emoji 或贴纸包名称搜索官方贴纸...'}
+            onChange={(e) => {
+              setSearchQuery(e.target.value);
+              if (tab === 'stickers') setSelectedPackId('all');
+            }}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' && tab === 'stickers' && searchQuery.trim()) {
+                e.preventDefault();
+                void runRemoteStickerSearch(searchQuery);
+              }
+            }}
+            placeholder={tab === 'emoji' ? '搜索表情 (输入关键词如: 笑, 赞, 爱心, 火...)' : '自由搜索全网电报贴纸 (输入关键词如: cat, love, 猫, 开心 或 Emoji)...'}
             className="w-full bg-[#f8fafc] dark:bg-[#08101a] aurora:bg-[#081014] linen:bg-[#efe6d6] text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118] text-xs pl-8 pr-7 py-1.5 rounded-xl border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] linen:border-[#cbbba2] focus:border-[#2481cc] dark:focus:border-[#2ba0ff] aurora:focus:border-[#2dd4bf] linen:focus:border-[#a86a43] focus:outline-none placeholder-[#94a3b8] dark:placeholder-[#4e657e] aurora:placeholder-[#5a7782] linen:placeholder-[#8f7e6c] transition-all"
             autoFocus
           />
@@ -415,9 +517,9 @@ export const TelegramEmojiPicker: React.FC<TelegramEmojiPickerProps> = ({
                     : 'border border-transparent text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a] hover:bg-[#f1f5f9] dark:hover:bg-[#132234] aurora:hover:bg-[#13252e] linen:hover:bg-[#efe4d3]'
                 }`}
               >
-                全部贴纸包 ({stickerPacks.length})
+                {searchQuery.trim() ? `搜索结果 (${displayStickerPacks.length})` : `全部贴纸包 (${displayStickerPacks.length})`}
               </button>
-              {stickerPacks.map((pack) => (
+              {displayStickerPacks.map((pack) => (
                 <button
                   key={pack.id}
                   type="button"
@@ -467,12 +569,16 @@ export const TelegramEmojiPicker: React.FC<TelegramEmojiPickerProps> = ({
               ))}
             </div>
           )
-        ) : isLoadingStickers ? (
+        ) : isLoadingStickers || (isSearchingRemote && filteredStickers.length === 0) ? (
           <div className="py-14 flex flex-col items-center justify-center text-center text-xs text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a]">
             <Loader2 className="w-6 h-6 animate-spin text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf] linen:text-[#a86a43] mb-2" />
-            <p>正在从 Telegram 官方云端同步已安装贴纸包...</p>
+            <p>
+              {isSearchingRemote
+                ? `正在 Telegram 云端搜索「${searchQuery.trim()}」相关贴纸...`
+                : '正在从 Telegram 官方云端同步贴纸库...'}
+            </p>
           </div>
-        ) : stickersError ? (
+        ) : stickersError && !searchQuery.trim() ? (
           <div className="py-10 px-4 flex flex-col items-center justify-center text-center text-xs text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a]">
             <AlertCircle className="w-7 h-7 text-amber-600 dark:text-amber-400 aurora:text-amber-400 mb-2" />
             <p className="text-rose-600 dark:text-rose-400 aurora:text-rose-400 font-medium mb-2">{stickersError}</p>
@@ -488,9 +594,11 @@ export const TelegramEmojiPicker: React.FC<TelegramEmojiPickerProps> = ({
           <div className="py-12 flex flex-col items-center justify-center text-center text-xs text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a]">
             <Sparkles className="w-8 h-8 stroke-1 text-[#94a3b8] dark:text-[#4e657e] aurora:text-[#5a7782] linen:text-[#9c8a75] mb-2" />
             <p>
-              {stickerPacks.length === 0
-                ? '当前 Telegram 账号尚未安装任何官方贴纸包'
-                : `未找到与「${searchQuery}」匹配的贴纸`}
+              {remoteSearchError && searchQuery.trim()
+                ? remoteSearchError
+                : searchQuery.trim()
+                  ? `云端暂未找到与「${searchQuery}」匹配的贴纸，可尝试英文关键词或 Emoji`
+                  : '当前 Telegram 账号暂无可用官方贴纸包'}
             </p>
             <button
               type="button"
@@ -503,7 +611,7 @@ export const TelegramEmojiPicker: React.FC<TelegramEmojiPickerProps> = ({
               }}
               className="mt-2 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf] linen:text-[#8c522d] hover:underline cursor-pointer"
             >
-              {searchQuery ? '查看全部已安装贴纸' : '刷新官方贴纸包'}
+              {searchQuery ? '返回热门与已安装贴纸' : '刷新官方贴纸包'}
             </button>
           </div>
         ) : (
@@ -542,7 +650,9 @@ export const TelegramEmojiPicker: React.FC<TelegramEmojiPickerProps> = ({
         <span>
           {tab === 'emoji'
             ? `共 ${EMOJI_DATABASE.length} 个原生表情`
-            : `${stickerPacks.length} 套贴纸包`}
+            : isSearchingRemote
+              ? '正在云端搜索...'
+              : `${displayStickerPacks.length} 套贴纸包 · ${filteredStickers.length} 张贴纸`}
         </span>
       </div>
     </div>

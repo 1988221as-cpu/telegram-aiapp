@@ -75,6 +75,15 @@ export interface TelegramChatParticipant {
   avatarUrl?: string;
 }
 
+export interface TelegramCommonChatItem {
+  id: string;
+  title: string;
+  username?: string;
+  memberCount?: number;
+  isChannel?: boolean;
+  avatarUrl?: string;
+}
+
 export interface TelegramChatFullInfo {
   ok: boolean;
   chatId: string;
@@ -98,6 +107,7 @@ export interface TelegramChatFullInfo {
   inviteLink?: string;
   participants?: TelegramChatParticipant[];
   participantsError?: string;
+  commonChats?: TelegramCommonChatItem[];
   code?: string;
   error?: string;
 }

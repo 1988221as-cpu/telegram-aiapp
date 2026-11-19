@@ -6002,6 +6002,7 @@ export default function App() {
           onUpdateChatTitle={handleUpdateChatTitle}
           onAddContact={handleAddContact}
           onJoinOrOpenChat={handleCreateGroup}
+          onSelectChat={(targetChatId) => void handleSelectChat(targetChatId)}
           onRemoveContact={handleRemoveContact}
           onChatInfoUpdated={(chatId, patch) => {
             setChats((prev) =>
