@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { createPortal } from 'react-dom';
 import {
   Search,
@@ -218,8 +218,18 @@ export const ChatList: React.FC<ChatListProps> = ({
   const [draggedChatId, setDraggedChatId] = useState<string | null>(null);
   const [dropChatTarget, setDropChatTarget] = useState<{ chatId: string; position: 'before' | 'after' } | null>(null);
   const [refreshedAvatars, setRefreshedAvatars] = useState<Record<string, string>>({});
+  const [failedChatAvatars, setFailedChatAvatars] = useState<Record<string, true>>({});
+  const [chatAvatarRetryNonce, setChatAvatarRetryNonce] = useState<Record<string, number>>({});
+  const chatAvatarRetryTimersRef = useRef<Record<string, number>>({});
   const [nowTick, setNowTick] = useState<number>(() => Date.now());
   const attemptedAvatarRefreshRef = useRef<Set<string>>(new Set());
+
+  useEffect(() => {
+    return () => {
+      Object.values(chatAvatarRetryTimersRef.current).forEach((t) => window.clearTimeout(t));
+      chatAvatarRetryTimersRef.current = {};
+    };
+  }, []);
 
   useEffect(() => {
     const timer = window.setInterval(() => setNowTick(Date.now()), 60000);
@@ -435,7 +445,7 @@ export const ChatList: React.FC<ChatListProps> = ({
     ? customFolders.find((f) => f.id === Number(activeFolder.slice(7))) || null
     : null;
 
-  const filteredChats = chats.filter((c) => {
+  const filteredChats = useMemo(() => chats.filter((c) => {
     const q = searchQuery.toLowerCase().trim();
     const qDigits = q.replace(/[\s\-\(\)\.+]/g, '');
     const matchesSearch =
@@ -466,46 +476,48 @@ export const ChatList: React.FC<ChatListProps> = ({
     if (activeFolder === 'bots') return Boolean(c.isBot);
 
     return true;
-  });
+  }), [chats, searchQuery, activeFolder, activeCustomFolder, matchesDialogFilter]);
 
   // Sort: Custom user drag order takes priority when present; otherwise folder/global pinned first, then by lastDate descending
-  const customOrderIndexMap = new Map<string, number>();
-  customChatOrder.forEach((id, idx) => customOrderIndexMap.set(id, idx));
-  const hasCustomOrder = customOrderIndexMap.size > 0;
+  const hasCustomOrder = customChatOrder.length > 0;
+  const sortedChats = useMemo(() => {
+    const customOrderIndexMap = new Map<string, number>();
+    customChatOrder.forEach((id, idx) => customOrderIndexMap.set(id, idx));
 
-  const sortedChats = [...filteredChats].sort((a, b) => {
-    if (hasCustomOrder) {
-      const aIdx = customOrderIndexMap.get(a.id);
-      const bIdx = customOrderIndexMap.get(b.id);
-      const aRanked = aIdx !== undefined;
-      const bRanked = bIdx !== undefined;
-      if (aRanked && bRanked) return aIdx! - bIdx!;
-      if (aRanked !== bRanked) return aRanked ? 1 : -1;
-    }
-    if (activeCustomFolder && Array.isArray(activeCustomFolder.pinnedPeerIds) && activeCustomFolder.pinnedPeerIds.length > 0) {
-      const aFolderPinIdx = activeCustomFolder.pinnedPeerIds.indexOf(a.id);
-      const bFolderPinIdx = activeCustomFolder.pinnedPeerIds.indexOf(b.id);
-      const aInFolderPin = aFolderPinIdx !== -1;
-      const bInFolderPin = bFolderPinIdx !== -1;
-      if (aInFolderPin !== bInFolderPin) return aInFolderPin ? -1 : 1;
-      if (aInFolderPin && bInFolderPin && aFolderPinIdx !== bFolderPinIdx) {
-        return aFolderPinIdx - bFolderPinIdx;
+    return [...filteredChats].sort((a, b) => {
+      if (hasCustomOrder) {
+        const aIdx = customOrderIndexMap.get(a.id);
+        const bIdx = customOrderIndexMap.get(b.id);
+        const aRanked = aIdx !== undefined;
+        const bRanked = bIdx !== undefined;
+        if (aRanked && bRanked) return aIdx! - bIdx!;
+        if (aRanked !== bRanked) return aRanked ? 1 : -1;
       }
-    } else if (!activeCustomFolder) {
-      const aPinned = Boolean(a.isPinned);
-      const bPinned = Boolean(b.isPinned);
-      if (aPinned !== bPinned) return aPinned ? -1 : 1;
-      if (aPinned && bPinned) {
-        const aOrder = typeof a.pinOrder === 'number' ? a.pinOrder : Number.MAX_SAFE_INTEGER;
-        const bOrder = typeof b.pinOrder === 'number' ? b.pinOrder : Number.MAX_SAFE_INTEGER;
-        if (aOrder !== bOrder) return aOrder - bOrder;
+      if (activeCustomFolder && Array.isArray(activeCustomFolder.pinnedPeerIds) && activeCustomFolder.pinnedPeerIds.length > 0) {
+        const aFolderPinIdx = activeCustomFolder.pinnedPeerIds.indexOf(a.id);
+        const bFolderPinIdx = activeCustomFolder.pinnedPeerIds.indexOf(b.id);
+        const aInFolderPin = aFolderPinIdx !== -1;
+        const bInFolderPin = bFolderPinIdx !== -1;
+        if (aInFolderPin !== bInFolderPin) return aInFolderPin ? -1 : 1;
+        if (aInFolderPin && bInFolderPin && aFolderPinIdx !== bFolderPinIdx) {
+          return aFolderPinIdx - bFolderPinIdx;
+        }
+      } else if (!activeCustomFolder) {
+        const aPinned = Boolean(a.isPinned);
+        const bPinned = Boolean(b.isPinned);
+        if (aPinned !== bPinned) return aPinned ? -1 : 1;
+        if (aPinned && bPinned) {
+          const aOrder = typeof a.pinOrder === 'number' ? a.pinOrder : Number.MAX_SAFE_INTEGER;
+          const bOrder = typeof b.pinOrder === 'number' ? b.pinOrder : Number.MAX_SAFE_INTEGER;
+          if (aOrder !== bOrder) return aOrder - bOrder;
+        }
       }
-    }
-    const aDate = typeof a.lastDate === 'number' ? a.lastDate : 0;
-    const bDate = typeof b.lastDate === 'number' ? b.lastDate : 0;
-    if (aDate !== bDate) return bDate - aDate;
-    return 0;
-  });
+      const aDate = typeof a.lastDate === 'number' ? a.lastDate : 0;
+      const bDate = typeof b.lastDate === 'number' ? b.lastDate : 0;
+      if (aDate !== bDate) return bDate - aDate;
+      return 0;
+    });
+  }, [filteredChats, customChatOrder, activeCustomFolder]);
 
   return (
     <div
@@ -797,7 +809,7 @@ export const ChatList: React.FC<ChatListProps> = ({
             </span>
           </div>
         ) : (
-          sortedChats.map((chat) => {
+          sortedChats.map((chat, chatIdx) => {
             const isSelected = chat.id === activeChatId;
             const canDragChat = Boolean(onReorderChats) && !searchQuery.trim();
             const isDraggingThis = draggedChatId === chat.id;
@@ -866,26 +878,44 @@ export const ChatList: React.FC<ChatListProps> = ({
                     ) : (
                       <>
                         <span className="text-white text-xs font-semibold select-none">{chat.avatarInitial}</span>
-                        {chat.avatarUrl && (
-                          <img
-                            draggable={false}
-                            src={resolveAvatarUrl(chat.avatarUrl)}
-                            alt={chat.title}
-                            referrerPolicy="no-referrer"
-                            className="w-full h-full object-cover absolute inset-0"
-                            onLoad={(e) => {
-                              e.currentTarget.style.display = '';
-                            }}
-                            onError={(e) => {
-                              const imgEl = e.currentTarget;
-                              void triggerAvatarRefresh(chat.avatarUrl, true).then((nextUrl) => {
-                                if (!nextUrl) {
-                                  imgEl.style.display = 'none';
-                                }
-                              });
-                            }}
-                          />
-                        )}
+                        {(() => {
+                          const effectiveAvatarUrl = resolveAvatarUrl(chat.avatarUrl);
+                          const retryCount = chatAvatarRetryNonce[chat.id] || 0;
+                          const failKey = `${chat.id}|${effectiveAvatarUrl || ''}|${retryCount}`;
+                          if (!effectiveAvatarUrl || failedChatAvatars[failKey]) return null;
+                          return (
+                            <img
+                              draggable={false}
+                              loading={chatIdx < 18 ? 'eager' : 'lazy'}
+                              decoding="async"
+                              src={effectiveAvatarUrl}
+                              alt={chat.title}
+                              referrerPolicy="no-referrer"
+                              className="w-full h-full object-cover absolute inset-0"
+                              onLoad={(e) => {
+                                e.currentTarget.style.display = '';
+                                setFailedChatAvatars((prev) => {
+                                  if (!(failKey in prev)) return prev;
+                                  const next = { ...prev };
+                                  delete next[failKey];
+                                  return next;
+                                });
+                              }}
+                              onError={() => {
+                                setFailedChatAvatars((prev) => ({ ...prev, [failKey]: true }));
+                                void triggerAvatarRefresh(chat.avatarUrl, true).then((nextUrl) => {
+                                  if (!nextUrl && retryCount < 2 && !chatAvatarRetryTimersRef.current[chat.id]) {
+                                    const delayMs = retryCount === 0 ? 2500 : 6500;
+                                    chatAvatarRetryTimersRef.current[chat.id] = window.setTimeout(() => {
+                                      delete chatAvatarRetryTimersRef.current[chat.id];
+                                      setChatAvatarRetryNonce((p) => ({ ...p, [chat.id]: (p[chat.id] || 0) + 1 }));
+                                    }, delayMs);
+                                  }
+                                });
+                              }}
+                            />
+                          );
+                        })()}
                       </>
                     )}
                   </div>

@@ -965,3 +965,301 @@ test('GET /api/system/performance-metrics enforces master auth, redacts PII/toke
     await new Promise<void>((resolve) => srv.close(() => resolve()));
   }
 });
+
+test('TELEGRAM_CLIENT_RETRY_OPTIONS disables floodSleepThreshold slot blocking and raises reconnectRetries', () => {
+  assert.equal((serverMod.TELEGRAM_CLIENT_RETRY_OPTIONS as any).floodSleepThreshold, 0);
+  assert.ok(serverMod.TELEGRAM_CLIENT_RETRY_OPTIONS.reconnectRetries >= 20);
+});
+
+test('Watchdog probes seemingly-online accounts after idle interval and rebuilds after consecutive probe failures (half-open detection)', async () => {
+  const uid = '88002';
+  const phone = '+8613800188002';
+  const accountId = `acc_tg_${uid}`;
+  const rt = serverMod.getOrCreateTelegramAccountRuntimeState({ userId: uid, phone, accountId });
+
+  const fakeClient = makeFakeClient({ initiallyConnected: true, isReconnecting: false });
+  const connObj: any = {
+    client: fakeClient,
+    phone,
+    userId: uid,
+    username: '',
+    firstName: 'HalfOpenTester',
+    avatarInitial: 'HO',
+    avatarBg: '#2481cc',
+    apiId: 12345,
+    apiHash: '0123456789abcdef0123456789abcdef',
+    connectedAt: 1_000,
+    proxyFingerprint: 'direct',
+    dialogs: [],
+  };
+  serverMod.connectedUserClients.set(accountId, connObj);
+  serverMod.connectedUserClients.set(uid, connObj);
+
+  try {
+    // 1. Freshly connected: healthy (no probe needed yet)
+    rt.lastConnectedAt = 10_000;
+    rt.lastAliveProbeAt = 10_000;
+    rt.reconnectProbeFailures = 0;
+    const evalFresh = serverMod.evaluateTelegramWatchdogAccountState({
+      conn: connObj,
+      runtime: rt,
+      proxyChanged: false,
+      now: 30_000,
+    });
+    assert.equal(evalFresh.action, 'healthy');
+
+    // 2. Stale alive probe (>= 75s): triggers low-frequency probe_online
+    const evalStale = serverMod.evaluateTelegramWatchdogAccountState({
+      conn: connObj,
+      runtime: rt,
+      proxyChanged: false,
+      now: 10_000 + serverMod.TELEGRAM_ONLINE_HEALTH_PROBE_INTERVAL_MS + 1_000,
+    });
+    assert.equal(evalStale.action, 'probe_online');
+
+    // 3. Mock DB active row & simulate 2 consecutive half-open probe failures -> triggers forceReconnect restore
+    const origPrepare = db.prepare.bind(db);
+    (db as any).prepare = (sql: string) => {
+      if (sql.includes('FROM telegram_user_sessions WHERE is_active = 1')) {
+        return {
+          all: async () => [{ phone, user_id: uid }],
+        };
+      }
+      return origPrepare(sql);
+    };
+    const restoreCalls: Array<{ forceReconnect?: boolean; reason?: string }> = [];
+    let simNow = 100_000;
+    rt.lastConnectedAt = 10_000;
+    rt.lastAliveProbeAt = 10_000;
+    rt.reconnectProbeFailures = 0;
+
+    try {
+      const firstTick = await serverMod.runTelegramConnectionWatchdogCycle({
+        deps: {
+          now: () => simNow,
+          probeClientHealth: async () => {
+            throw new Error('TIMEOUT');
+          },
+          restoreSessions: async (_bearer?: string, opts?: any) => {
+            restoreCalls.push({ forceReconnect: opts?.forceReconnect, reason: opts?.reason });
+            return 1;
+          },
+        },
+      });
+      assert.equal(firstTick, 0);
+      assert.equal(rt.reconnectProbeFailures, 1);
+      assert.equal(restoreCalls.length, 0);
+
+      simNow += serverMod.TELEGRAM_ONLINE_HEALTH_PROBE_INTERVAL_MS + 1_000;
+      const secondTick = await serverMod.runTelegramConnectionWatchdogCycle({
+        deps: {
+          now: () => simNow,
+          probeClientHealth: async () => {
+            throw new Error('TIMEOUT');
+          },
+          restoreSessions: async (_bearer?: string, opts?: any) => {
+            restoreCalls.push({ forceReconnect: opts?.forceReconnect, reason: opts?.reason });
+            return 1;
+          },
+        },
+      });
+      assert.equal(secondTick, 1);
+      assert.equal(restoreCalls.length, 1);
+      assert.equal(restoreCalls[0].forceReconnect, true);
+      assert.equal(restoreCalls[0].reason, 'watchdog_zombie_recovery');
+    } finally {
+      (db as any).prepare = origPrepare;
+    }
+  } finally {
+    serverMod.connectedUserClients.delete(accountId);
+    serverMod.connectedUserClients.delete(uid);
+    serverMod.telegramAccountRuntimeStates.delete(rt.accountKey);
+  }
+});
+
+test('Avatar disk cache serves saved photo offline & after RAM cache eviction', async () => {
+  serverMod.clearAvatarCachesForTesting();
+  const prevSecret = process.env.JWT_SECRET;
+  const secret = 'test-avatar-disk-secret-1234567890';
+  process.env.JWT_SECRET = secret;
+  const jwt = createTestJwt(secret, 'master');
+
+  const srv = http.createServer(serverMod.app);
+  await new Promise<void>((resolve) => srv.listen(0, '127.0.0.1', () => resolve()));
+  const { port } = srv.address() as AddressInfo;
+  const baseUrl = `http://127.0.0.1:${port}`;
+  let rpcCalls = 0;
+  const sampleJpeg = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x11, 0x22, 0x33, 0x44]);
+
+  const accId = 'acc_tg_882200';
+  const connObj: ConnectedTelegramUser = {
+    client: makeFakeClient({
+      initiallyConnected: true,
+      async downloadProfilePhotoImpl() {
+        rpcCalls += 1;
+        return sampleJpeg;
+      },
+    }),
+    phone: '+8613888220000',
+    userId: '882200',
+    username: '@disk_tester',
+    firstName: 'Disk',
+    avatarInitial: 'DK',
+    avatarBg: '#2481cc',
+    apiId: 12345,
+    apiHash: '0123456789abcdef0123456789abcdef',
+    connectedAt: Date.now(),
+    proxyFingerprint: 'direct',
+    dialogs: [],
+  };
+  serverMod.connectedUserClients.set(accId, connObj);
+  serverMod.connectedUserClients.set('882200', connObj);
+
+  try {
+    const signedUrl = `${baseUrl}${serverMod.signTelegramResourceUrl('/api/telegram/user/avatar/30001', accId)}`;
+    const r1 = await fetch(signedUrl, { headers: { Authorization: `Bearer ${jwt}` } });
+    assert.equal(r1.status, 200);
+    assert.equal(rpcCalls, 1);
+    const b1 = Buffer.from(await r1.arrayBuffer());
+    assert.deepEqual(b1, sampleJpeg);
+
+    // Simulate server restart / account offline: clear RAM cache and remove live client
+    serverMod.telegramAvatarCache.clear();
+    serverMod.connectedUserClients.delete(accId);
+    serverMod.connectedUserClients.delete('882200');
+
+    const r2 = await fetch(signedUrl, { headers: { Authorization: `Bearer ${jwt}` } });
+    assert.equal(r2.status, 200, 'Disk cache must serve avatar even when account is offline and RAM cache cleared');
+    assert.equal(rpcCalls, 1, 'Disk cache hit must not trigger MTProto RPC');
+    const b2 = Buffer.from(await r2.arrayBuffer());
+    assert.deepEqual(b2, sampleJpeg);
+  } finally {
+    serverMod.connectedUserClients.delete(accId);
+    serverMod.connectedUserClients.delete('882200');
+    serverMod.clearAvatarCachesForTesting();
+    if (prevSecret === undefined) delete process.env.JWT_SECRET;
+    else process.env.JWT_SECRET = prevSecret;
+    (srv as any).closeAllConnections?.();
+    await new Promise<void>((resolve) => srv.close(() => resolve()));
+  }
+});
+
+test('Account meta/groups and group/offline chat remarks persist in SQLite', async () => {
+  const prevSecret = process.env.JWT_SECRET;
+  const secret = 'test-meta-persist-secret-1234567890';
+  process.env.JWT_SECRET = secret;
+  const jwt = createTestJwt(secret, 'master');
+
+  const srv = http.createServer(serverMod.app);
+  await new Promise<void>((resolve) => srv.listen(0, '127.0.0.1', () => resolve()));
+  const { port } = srv.address() as AddressInfo;
+  const baseUrl = `http://127.0.0.1:${port}`;
+
+  try {
+    const putRes = await fetch(`${baseUrl}/api/telegram/user/accounts/meta`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${jwt}` },
+      body: JSON.stringify({
+        accountId: 'acc_tg_776655',
+        remark: '阿乐主号',
+        groupId: 'grp_test_1',
+        groups: [{ id: 'grp_test_1', name: '客服分组', color: '#2ba0ff', collapsed: false }],
+      }),
+    });
+    assert.equal(putRes.status, 200);
+    const putJson: any = await putRes.json();
+    assert.equal(putJson.ok, true);
+
+    const getRes = await fetch(`${baseUrl}/api/telegram/user/accounts/meta`, {
+      headers: { Authorization: `Bearer ${jwt}` },
+    });
+    assert.equal(getRes.status, 200);
+    const getJson: any = await getRes.json();
+    assert.equal(getJson.ok, true);
+    assert.equal(getJson.meta['acc_tg_776655']?.remark, '阿乐主号');
+    assert.equal(getJson.meta['acc_tg_776655']?.groupId, 'grp_test_1');
+    assert.ok(Array.isArray(getJson.groups) && getJson.groups.some((g: any) => g.id === 'grp_test_1' && g.name === '客服分组'));
+
+    // Offline / group chat remark persistence
+    const renameRes = await fetch(`${baseUrl}/api/telegram/user/contacts/rename`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${jwt}` },
+      body: JSON.stringify({
+        accountId: 'acc_tg_776655',
+        chatId: 'tg_-10099887766',
+        newTitle: 'VIP 1群备注',
+      }),
+    });
+    assert.equal(renameRes.status, 200);
+    const renameJson: any = await renameRes.json();
+    assert.equal(renameJson.ok, true);
+    assert.equal(renameJson.cloudSynced, false);
+    assert.equal(renameJson.localSaved, true);
+    assert.equal(renameJson.title, 'VIP 1群备注');
+
+    const row: any = await db
+      .prepare(`SELECT custom_title FROM chat_remarks WHERE account_id = ? AND chat_id = ?`)
+      .get('acc_tg_776655', 'tg_-10099887766');
+    assert.equal(row?.custom_title, 'VIP 1群备注');
+  } finally {
+    await db.prepare(`DELETE FROM telegram_account_meta WHERE account_id = ?`).run('acc_tg_776655').catch(() => {});
+    await db.prepare(`DELETE FROM telegram_account_groups WHERE id = ?`).run('grp_test_1').catch(() => {});
+    await db.prepare(`DELETE FROM chat_remarks WHERE account_id = ?`).run('acc_tg_776655').catch(() => {});
+    if (prevSecret === undefined) delete process.env.JWT_SECRET;
+    else process.env.JWT_SECRET = prevSecret;
+    (srv as any).closeAllConnections?.();
+    await new Promise<void>((resolve) => srv.close(() => resolve()));
+  }
+});
+
+test('prewarmAccountAvatarsOnce populates disk cache after login and skips already-cached peers on rerun', async () => {
+  serverMod.clearAvatarCachesForTesting();
+  let rpcCalls = 0;
+  const sampleJpeg = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0xaa, 0xbb, 0xcc, 0xdd]);
+  const accId = 'acc_tg_665544';
+  const connObj: ConnectedTelegramUser = {
+    client: makeFakeClient({
+      initiallyConnected: true,
+      async downloadProfilePhotoImpl() {
+        rpcCalls += 1;
+        return sampleJpeg;
+      },
+    }),
+    phone: '+8613666554400',
+    userId: '665544',
+    username: '@prewarm_tester',
+    firstName: 'Prewarm',
+    avatarInitial: 'PW',
+    avatarBg: '#2481cc',
+    apiId: 12345,
+    apiHash: '0123456789abcdef0123456789abcdef',
+    connectedAt: Date.now(),
+    proxyFingerprint: 'direct',
+    dialogs: [],
+  };
+  serverMod.connectedUserClients.set(accId, connObj);
+  serverMod.connectedUserClients.set('665544', connObj);
+
+  try {
+    const fakeDialogs = [
+      { id: 'tg_40001', rawId: '40001' },
+      { id: 'tg_40002', rawId: '40002' },
+    ];
+    const first = await serverMod.prewarmAccountAvatarsOnce(connObj, fakeDialogs, { delayMs: 0 });
+    assert.equal(first.warmed, 3, 'Should prewarm self + 2 dialog peers');
+    assert.equal(first.skippedCached, 0);
+    assert.equal(rpcCalls, 3);
+
+    // Clear RAM cache so disk cache check is exercised directly on 2nd run
+    serverMod.telegramAvatarCache.clear();
+    const second = await serverMod.prewarmAccountAvatarsOnce(connObj, fakeDialogs, { delayMs: 0 });
+    assert.equal(second.warmed, 0);
+    assert.equal(second.skippedCached, 3, 'Already-disk-cached avatars must be skipped with 0 MTProto calls');
+    assert.equal(rpcCalls, 3);
+  } finally {
+    serverMod.connectedUserClients.delete(accId);
+    serverMod.connectedUserClients.delete('665544');
+    serverMod.clearAvatarCachesForTesting();
+  }
+});
+

@@ -561,6 +561,32 @@ export async function initDatabase() {
       updated_at INTEGER NOT NULL,
       PRIMARY KEY (account_id, chat_id)
     );
+
+    -- 8. Persistent Account Remarks & Groups
+    CREATE TABLE IF NOT EXISTS telegram_account_meta (
+      account_id TEXT PRIMARY KEY,
+      remark TEXT,
+      group_id TEXT,
+      updated_at INTEGER NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS telegram_account_groups (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      color TEXT,
+      collapsed INTEGER DEFAULT 0,
+      sort_order INTEGER DEFAULT 0,
+      updated_at INTEGER NOT NULL
+    );
+
+    -- 9. Persistent Chat / Contact / Group Remarks
+    CREATE TABLE IF NOT EXISTS chat_remarks (
+      account_id TEXT NOT NULL,
+      chat_id TEXT NOT NULL,
+      custom_title TEXT NOT NULL,
+      updated_at INTEGER NOT NULL,
+      PRIMARY KEY (account_id, chat_id)
+    );
   `);
 
   try {

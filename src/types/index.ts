@@ -61,6 +61,7 @@ export interface Chat {
   readInboxMaxId?: number;
   phone?: string;
   isBlocked?: boolean;
+  hasCustomRemark?: boolean;
   translationEnabled?: boolean;
 }
 

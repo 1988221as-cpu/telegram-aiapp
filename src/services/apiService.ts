@@ -4907,7 +4907,15 @@ export async function renameTelegramContactApi(payload: {
   accountId?: string;
   chatId: string;
   newTitle: string;
-}): Promise<{ ok: boolean; cloudSynced?: boolean; newTitle?: string; error?: string }> {
+}): Promise<{
+  ok: boolean;
+  cloudSynced?: boolean;
+  localSaved?: boolean;
+  title?: string;
+  newTitle?: string;
+  hasCustomRemark?: boolean;
+  error?: string;
+}> {
   try {
     const res = await fetchWithTimeout('/api/telegram/user/contacts/rename', {
       method: 'POST',
@@ -4917,6 +4925,39 @@ export async function renameTelegramContactApi(payload: {
     return await res.json();
   } catch (err: any) {
     return { ok: false, error: err?.message || '同步云端联系人备注失败' };
+  }
+}
+
+export async function fetchTelegramAccountMetaApi(): Promise<{
+  ok: boolean;
+  meta?: Record<string, { remark?: string; groupId?: string; updatedAt?: number }>;
+  groups?: Array<{ id: string; name: string; color?: string; collapsed?: boolean }>;
+}> {
+  try {
+    const res = await fetchWithTimeout('/api/telegram/user/accounts/meta', {
+      headers: getAuthHeaders(),
+    }, 10000);
+    return await res.json();
+  } catch {
+    return { ok: false };
+  }
+}
+
+export async function saveTelegramAccountMetaApi(payload: {
+  accountId?: string;
+  remark?: string;
+  groupId?: string;
+  groups?: Array<{ id: string; name: string; color?: string; collapsed?: boolean }>;
+}): Promise<{ ok: boolean }> {
+  try {
+    const res = await fetchWithTimeout('/api/telegram/user/accounts/meta', {
+      method: 'PUT',
+      headers: getAuthHeaders(payload.accountId),
+      body: JSON.stringify(payload),
+    }, 10000);
+    return await res.json();
+  } catch {
+    return { ok: false };
   }
 }
 

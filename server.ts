@@ -2423,6 +2423,7 @@ export interface TelegramAccountRuntimeState {
   suspectedStuckWarningAt: number | null;
   reconnectProbeFailures: number;
   lastHealthProbeAt: number;
+  lastAliveProbeAt: number;
   lastConnectedAt: number | null;
   lastDisconnectedAt: number | null;
   lastFailureAt: number | null;
@@ -2549,6 +2550,7 @@ export function getOrCreateTelegramAccountRuntimeState(opts: {
     suspectedStuckWarningAt: null,
     reconnectProbeFailures: 0,
     lastHealthProbeAt: 0,
+    lastAliveProbeAt: 0,
     lastConnectedAt: null,
     lastDisconnectedAt: null,
     lastFailureAt: null,
@@ -2778,8 +2780,9 @@ export function getTelegramAccountConnectionSnapshot(
 
 export const TELEGRAM_CLIENT_RETRY_OPTIONS = {
   connectionRetries: 3,
-  reconnectRetries: 3,
+  reconnectRetries: 25,
   retryDelay: 1000,
+  floodSleepThreshold: 0,
 } as const;
 
 export function isTelegramClientGenerationCurrent(
@@ -2806,11 +2809,14 @@ export function syncAccountReconnectLifecycleMarkers(
   runtime.transportConnected = inspected.transportConnected;
   runtime.senderIsReconnecting = inspected.senderIsReconnecting;
   if (inspected.userConnected && inspected.transportConnected && !inspected.senderIsReconnecting) {
+    const wasTransitioning = runtime.reconnectingSinceAt !== null || runtime.connectingSinceAt !== null;
     runtime.lastConnectedAt = runtime.lastConnectedAt || now;
     runtime.reconnectingSinceAt = null;
     runtime.connectingSinceAt = null;
     runtime.suspectedStuckWarningAt = null;
-    runtime.reconnectProbeFailures = 0;
+    if (wasTransitioning) {
+      runtime.reconnectProbeFailures = 0;
+    }
     return;
   }
   if (inspected.senderIsReconnecting) {
@@ -3972,6 +3978,9 @@ export async function getOrFetchConnectedAccountDialogs(
         connected.dialogs = dialogs;
         connected.dialogsFetchedAt = Date.now();
       }
+      if (process.env.NODE_ENV !== 'test') {
+        scheduleAccountAvatarPrewarm(connected, dialogs);
+      }
       return dialogs;
     })
     .finally(() => {
@@ -4321,9 +4330,11 @@ export const TELEGRAM_MAX_MEDIA = Math.max(
   Number(process.env.TELEGRAM_MAX_MEDIA || process.env.TELEGRAM_MAX_MEDIA_BYTES) || 512 * 1024 * 1024
 );
 export const OUTBOUND_MEDIA_DIR = path.join(dbDir, 'outbound_media');
+export const AVATAR_CACHE_DIR = path.resolve(dbDir, 'avatar_cache');
 export const VOICEPRINT_SAMPLES_DIR = path.join(dbDir, 'voiceprint_samples');
 try {
   fs.mkdirSync(OUTBOUND_MEDIA_DIR, { recursive: true });
+  fs.mkdirSync(AVATAR_CACHE_DIR, { recursive: true });
   fs.mkdirSync(VOICEPRINT_SAMPLES_DIR, { recursive: true });
 } catch {}
 
@@ -25032,18 +25043,43 @@ app.get('/api/telegram/user/dialogs', requireTenantAuth, async (req: Request, re
       force: forceRefresh,
       limit: 150,
     });
-    const dialogLangPrefs = await loadDialogLangPrefs();
+    const loadDialogCustomRemarks = async () => {
+      const remarks = new Map<string, string>();
+      try {
+        const ph = dialogAccVariants.map(() => '?').join(', ');
+        const rows = (await db.prepare(`
+          SELECT chat_id, custom_title
+          FROM chat_remarks
+          WHERE account_id IN (${ph})
+        `).all(...dialogAccVariants)) as any[];
+        for (const r of rows || []) {
+          if (r?.chat_id && typeof r?.custom_title === 'string' && r.custom_title.trim()) {
+            remarks.set(String(r.chat_id), r.custom_title.trim());
+          }
+        }
+      } catch {}
+      return remarks;
+    };
+
+    const [dialogLangPrefs, dialogCustomRemarks] = await Promise.all([
+      loadDialogLangPrefs(),
+      loadDialogCustomRemarks(),
+    ]);
 
     const dialogs = rawDialogs.map((d: any) => {
       const pref = dialogLangPrefs.get(d.id);
-      return pref
-        ? {
-            ...d,
-            sourceLang: pref.sourceLang,
-            targetLang: pref.targetLang,
-            ...(typeof pref.translationEnabled === 'boolean' ? { translationEnabled: pref.translationEnabled } : {}),
-          }
-        : d;
+      const customTitle = dialogCustomRemarks.get(d.id) || dialogCustomRemarks.get(`tg_${d.rawId}`);
+      return {
+        ...d,
+        ...(customTitle ? { title: customTitle, hasCustomRemark: true } : {}),
+        ...(pref
+          ? {
+              sourceLang: pref.sourceLang,
+              targetLang: pref.targetLang,
+              ...(typeof pref.translationEnabled === 'boolean' ? { translationEnabled: pref.translationEnabled } : {}),
+            }
+          : {}),
+      };
     });
     if (!cached) {
       connected.dialogs = dialogs;
@@ -25292,9 +25328,45 @@ function stopTelegramCacheCleanupTimer(): void {
 // ==================== AVATAR SINGLE-FLIGHT + BOUNDED CONCURRENCY + 4-TIER ERROR CACHE ====================
 export const TELEGRAM_AVATAR_MAX_CONCURRENT = 2;
 export const TELEGRAM_AVATAR_MAX_QUEUE = 32;
+export const TELEGRAM_AVATAR_DISK_REFRESH_MS = 24 * 60 * 60 * 1000;
 export const TELEGRAM_AVATAR_NO_PHOTO_NEGATIVE_TTL_MS = 5 * 60 * 1000;
 export const TELEGRAM_AVATAR_RPC_ERROR_NEGATIVE_TTL_MS = 20 * 1000;
 export const TELEGRAM_AVATAR_NEGATIVE_CACHE_MAX = 5000;
+const telegramAvatarBgRefreshInFlight = new Set<string>();
+
+function resolveAvatarDiskPath(cacheKey: string): string | null {
+  const digest = crypto.createHash('sha256').update(cacheKey, 'utf8').digest('hex');
+  const targetPath = path.resolve(AVATAR_CACHE_DIR, `${digest}.jpg`);
+  if (!targetPath.startsWith(AVATAR_CACHE_DIR + path.sep)) return null;
+  return targetPath;
+}
+
+function readAvatarFromDiskCache(cacheKey: string): { buffer: Buffer; mime: string; isStale: boolean } | null {
+  try {
+    const filePath = resolveAvatarDiskPath(cacheKey);
+    if (!filePath || !fs.existsSync(filePath)) return null;
+    const stat = fs.statSync(filePath);
+    if (!stat.isFile() || stat.size <= 0) return null;
+    const buffer = fs.readFileSync(filePath);
+    if (!buffer || buffer.length <= 0) return null;
+    const isStale = Date.now() - stat.mtimeMs > TELEGRAM_AVATAR_DISK_REFRESH_MS;
+    return { buffer, mime: 'image/jpeg', isStale };
+  } catch {
+    return null;
+  }
+}
+
+function writeAvatarToDiskCache(cacheKey: string, buffer: Buffer): void {
+  try {
+    if (!buffer || buffer.length === 0) return;
+    const filePath = resolveAvatarDiskPath(cacheKey);
+    if (!filePath) return;
+    fs.mkdirSync(AVATAR_CACHE_DIR, { recursive: true });
+    const tmpPath = `${filePath}.${process.pid}.${Date.now()}.tmp`;
+    fs.writeFileSync(tmpPath, buffer);
+    fs.renameSync(tmpPath, filePath);
+  } catch {}
+}
 
 interface AvatarNegativeEntry {
   reason: 'no_photo' | 'rpc_error';
@@ -25345,6 +25417,18 @@ export function clearAvatarCachesForTesting(): void {
   telegramAvatarInFlight.clear();
   avatarAccountLimiters.clear();
   telegramAvatarCache.clear();
+  telegramAvatarBgRefreshInFlight.clear();
+  accountAvatarPrewarmLastAt.clear();
+  accountAvatarPrewarmRunning.clear();
+  if (process.env.NODE_ENV === 'test') {
+    try {
+      for (const name of fs.readdirSync(AVATAR_CACHE_DIR)) {
+        if (name.endsWith('.jpg') || name.endsWith('.tmp')) {
+          fs.unlinkSync(path.join(AVATAR_CACHE_DIR, name));
+        }
+      }
+    } catch {}
+  }
 }
 
 export function pruneAvatarNegativeCache(now = Date.now()): number {
@@ -25543,6 +25627,48 @@ export async function fetchTelegramAvatarWithLimiting(opts: {
     return { status: 200, buffer: cached.buffer, mime: cached.mime };
   }
 
+  const diskHit = readAvatarFromDiskCache(cacheKey);
+  if (diskHit) {
+    telegramAvatarCache.set(
+      cacheKey,
+      {
+        buffer: diskHit.buffer,
+        mime: diskHit.mime,
+        expiresAt: now + TELEGRAM_AVATAR_CACHE_TTL_MS,
+      },
+      now
+    );
+    if (diskHit.isStale && candidates.length > 0 && !telegramAvatarBgRefreshInFlight.has(cacheKey)) {
+      telegramAvatarBgRefreshInFlight.add(cacheKey);
+      void (async () => {
+        try {
+          const peerBg: any = /^-?\d+$/.test(cleanId) ? Number(cleanId) : cleanId;
+          const onlineCandidate = candidates.find((c) => c?.client?.connected);
+          if (!onlineCandidate?.client) return;
+          const fresh = await scheduleTelegramRpc(cacheAccountScope, 'P2', 'downloadProfilePhoto.bg', () =>
+            withTelegramTimeout(
+              onlineCandidate.client.downloadProfilePhoto(peerBg, { isBig: false }),
+              8000,
+              '后台刷新头像超时'
+            )
+          );
+          if (fresh && Buffer.isBuffer(fresh) && fresh.length > 0) {
+            const ts = Date.now();
+            writeAvatarToDiskCache(cacheKey, fresh);
+            telegramAvatarCache.set(
+              cacheKey,
+              { buffer: fresh, mime: 'image/jpeg', expiresAt: ts + TELEGRAM_AVATAR_CACHE_TTL_MS },
+              ts
+            );
+          }
+        } catch {} finally {
+          telegramAvatarBgRefreshInFlight.delete(cacheKey);
+        }
+      })();
+    }
+    return { status: 200, buffer: diskHit.buffer, mime: diskHit.mime };
+  }
+
   const neg = getAvatarNegativeCacheEntry(cacheKey, now);
   if (neg) {
     if (neg.reason === 'no_photo') {
@@ -25627,6 +25753,7 @@ export async function fetchTelegramAvatarWithLimiting(opts: {
           );
           if (photo && Buffer.isBuffer(photo) && photo.length > 0) {
             const finishTs = Date.now();
+            writeAvatarToDiskCache(cacheKey, photo);
             telegramAvatarCache.set(
               cacheKey,
               {
@@ -25702,6 +25829,81 @@ export async function fetchTelegramAvatarWithLimiting(opts: {
   return await downloadTask;
 }
 
+const accountAvatarPrewarmLastAt = new Map<string, number>();
+const accountAvatarPrewarmRunning = new Set<string>();
+export const TELEGRAM_AVATAR_PREWARM_COOLDOWN_MS = 30 * 60 * 1000;
+
+export async function prewarmAccountAvatarsOnce(
+  connected: ConnectedTelegramUser,
+  dialogs: any[],
+  opts?: { maxDialogs?: number; delayMs?: number }
+): Promise<{ warmed: number; skippedCached: number }> {
+  const uid = String(connected?.userId || '').trim();
+  if (!uid || !connected?.client) return { warmed: 0, skippedCached: 0 };
+  const cacheAccountScope = `acc_tg_${uid}`;
+  const maxDialogs = Math.max(1, Math.min(80, opts?.maxDialogs ?? 45));
+  const stepDelayMs = opts?.delayMs ?? 80;
+
+  const peerIds: string[] = [uid];
+  const seen = new Set<string>([uid]);
+  for (const d of (Array.isArray(dialogs) ? dialogs : []).slice(0, maxDialogs)) {
+    const raw = String(d?.rawId || String(d?.id || '').replace(/^tg_/, '') || '').trim();
+    if (!raw || seen.has(raw)) continue;
+    seen.add(raw);
+    peerIds.push(raw);
+  }
+
+  let warmed = 0;
+  let skippedCached = 0;
+  for (const cleanId of peerIds) {
+    if (!connected.client?.connected) break;
+    if (getTelegramFloodCooldown({ accountId: cacheAccountScope, userId: uid, phone: connected.phone })) {
+      break;
+    }
+    const cacheKey = `${cacheAccountScope}:${cleanId}`;
+    if (telegramAvatarCache.get(cacheKey, Date.now()) || readAvatarFromDiskCache(cacheKey)) {
+      skippedCached += 1;
+      continue;
+    }
+    if (getAvatarNegativeCacheEntry(cacheKey, Date.now())) {
+      skippedCached += 1;
+      continue;
+    }
+    const limiter = avatarAccountLimiters.get(cacheAccountScope);
+    if (limiter && (limiter.active > 0 || limiter.waiters.length > 0)) {
+      await new Promise((r) => setTimeout(r, 250));
+    }
+    const outcome = await fetchTelegramAvatarWithLimiting({
+      cacheAccountScope,
+      cleanId,
+      candidates: [connected],
+    });
+    if (outcome.status === 429) break;
+    if (outcome.status === 200) warmed += 1;
+    if (stepDelayMs > 0) {
+      await new Promise((r) => setTimeout(r, stepDelayMs));
+    }
+  }
+  return { warmed, skippedCached };
+}
+
+export function scheduleAccountAvatarPrewarm(connected: ConnectedTelegramUser, dialogs: any[]): void {
+  const uid = String(connected?.userId || '').trim();
+  if (!uid || !connected?.client) return;
+  const scope = `acc_tg_${uid}`;
+  const now = Date.now();
+  if (accountAvatarPrewarmRunning.has(scope)) return;
+  const lastAt = accountAvatarPrewarmLastAt.get(scope) || 0;
+  if (now - lastAt < TELEGRAM_AVATAR_PREWARM_COOLDOWN_MS) return;
+  accountAvatarPrewarmLastAt.set(scope, now);
+  accountAvatarPrewarmRunning.add(scope);
+  void prewarmAccountAvatarsOnce(connected, dialogs)
+    .catch(() => {})
+    .finally(() => {
+      accountAvatarPrewarmRunning.delete(scope);
+    });
+}
+
 app.get('/api/telegram/user/avatar/:chatId', async (req: Request, res: Response) => {
   try {
     if (!isAllowedClientOrigin(req)) {
@@ -25730,11 +25932,22 @@ app.get('/api/telegram/user/avatar/:chatId', async (req: Request, res: Response)
         candidates.push(uniqueConnected[0]);
       }
     }
+    const cacheAccountScope = accountId || (candidates[0] ? `acc_tg_${candidates[0].userId}` : '');
     if (candidates.length === 0) {
+      const fallbackScopes = accountId ? getScopedAccountIdVariants(accountId) : [];
+      for (const sc of fallbackScopes) {
+        const k = `${sc}:${cleanId}`;
+        const mem = telegramAvatarCache.get(k, Date.now());
+        const hit = mem ? { buffer: mem.buffer, mime: mem.mime } : readAvatarFromDiskCache(k);
+        if (hit?.buffer) {
+          res.setHeader('Content-Type', hit.mime || 'image/jpeg');
+          res.setHeader('Cache-Control', 'private, max-age=86400');
+          return res.send(hit.buffer);
+        }
+      }
       return res.status(404).send('Avatar not found');
     }
 
-    const cacheAccountScope = accountId || `acc_tg_${candidates[0].userId}`;
     const abortController = new AbortController();
     const onClose = () => {
       if (!res.writableEnded) {
@@ -25756,7 +25969,7 @@ app.get('/api/telegram/user/avatar/:chatId', async (req: Request, res: Response)
 
       if (outcome.status === 200 && outcome.buffer) {
         res.setHeader('Content-Type', outcome.mime || 'image/jpeg');
-        res.setHeader('Cache-Control', 'private, max-age=3600');
+        res.setHeader('Cache-Control', 'private, max-age=86400');
         return res.send(outcome.buffer);
       }
       if (outcome.status === 429) {
@@ -26432,6 +26645,96 @@ app.get('/api/telegram/user/active-accounts', requireTenantAuth, async (req: Req
     });
   } catch (err: any) {
     res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// 20.2.1 Persistent Account Meta (Remark & Group Assignment) & Account Groups
+app.get('/api/telegram/user/accounts/meta', requireTenantAuth, async (req: Request, res: Response) => {
+  try {
+    const authContext = (req as any).auth;
+    const isMaster = Boolean(authContext?.session?.isMaster);
+    const lockedAccountId = String(authContext?.effectiveAccountId || authContext?.session?.accountId || '').trim();
+    const allowedSet = !isMaster && lockedAccountId ? new Set(getScopedAccountIdVariants(lockedAccountId)) : null;
+    const metaRows = (await db
+      .prepare(`SELECT account_id, remark, group_id, updated_at FROM telegram_account_meta`)
+      .all()) as any[];
+    const groupRows = (await db
+      .prepare(`SELECT id, name, color, collapsed, sort_order FROM telegram_account_groups ORDER BY sort_order ASC, updated_at ASC`)
+      .all()) as any[];
+    const meta: Record<string, { remark?: string; groupId?: string; updatedAt?: number }> = {};
+    for (const r of metaRows || []) {
+      const aid = String(r.account_id || '').trim();
+      if (!aid || (allowedSet && !allowedSet.has(aid))) continue;
+      meta[aid] = {
+        ...(typeof r.remark === 'string' && r.remark.trim() ? { remark: r.remark.trim() } : {}),
+        ...(typeof r.group_id === 'string' && r.group_id.trim() ? { groupId: r.group_id.trim() } : {}),
+        updatedAt: Number(r.updated_at || 0),
+      };
+    }
+    const groups = (groupRows || []).map((g) => ({
+      id: String(g.id),
+      name: String(g.name),
+      ...(g.color ? { color: String(g.color) } : {}),
+      collapsed: Boolean(g.collapsed),
+    }));
+    return res.json({ ok: true, meta, groups });
+  } catch (err: any) {
+    return res.status(500).json({ ok: false, error: err?.message || '读取账号备注与分组失败' });
+  }
+});
+
+app.put('/api/telegram/user/accounts/meta', requireTenantAuth, async (req: Request, res: Response) => {
+  try {
+    const now = Date.now();
+    const { accountId: rawAccountId, remark, groupId, groups } = req.body || {};
+    if (typeof rawAccountId === 'string' && rawAccountId.trim()) {
+      const scope = resolveScopedAccountFromRequest(req, { allowBot: true });
+      if (!scope.ok) {
+        return res.status(scope.status).json({ ok: false, code: scope.code, error: scope.error });
+      }
+      const targetId = scope.accountId || rawAccountId.trim();
+      const nextRemark = remark === undefined ? undefined : (typeof remark === 'string' ? remark.trim() || null : null);
+      const nextGroupId = groupId === undefined ? undefined : (typeof groupId === 'string' ? groupId.trim() || null : null);
+      await db
+        .prepare(`
+          INSERT INTO telegram_account_meta (account_id, remark, group_id, updated_at)
+          VALUES (?, ?, ?, ?)
+          ON CONFLICT(account_id) DO UPDATE SET
+            remark = COALESCE(?, telegram_account_meta.remark),
+            group_id = COALESCE(?, telegram_account_meta.group_id),
+            updated_at = excluded.updated_at
+        `)
+        .run(
+          targetId,
+          nextRemark !== undefined ? nextRemark : null,
+          nextGroupId !== undefined ? nextGroupId : null,
+          now,
+          nextRemark !== undefined ? nextRemark : null,
+          nextGroupId !== undefined ? nextGroupId : null
+        );
+      if (remark === '' || remark === null) {
+        await db.prepare(`UPDATE telegram_account_meta SET remark = NULL, updated_at = ? WHERE account_id = ?`).run(now, targetId);
+      }
+      if (groupId === '' || groupId === null) {
+        await db.prepare(`UPDATE telegram_account_meta SET group_id = NULL, updated_at = ? WHERE account_id = ?`).run(now, targetId);
+      }
+    }
+    if (Array.isArray(groups)) {
+      await db.prepare(`DELETE FROM telegram_account_groups`).run();
+      for (let i = 0; i < groups.length; i++) {
+        const g = groups[i];
+        if (!g?.id || !g?.name) continue;
+        await db
+          .prepare(`
+            INSERT INTO telegram_account_groups (id, name, color, collapsed, sort_order, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+          `)
+          .run(String(g.id), String(g.name).trim().slice(0, 24), g.color ? String(g.color) : null, g.collapsed ? 1 : 0, i, now);
+      }
+    }
+    return res.json({ ok: true });
+  } catch (err: any) {
+    return res.status(500).json({ ok: false, error: err?.message || '保存账号备注与分组失败' });
   }
 });
 
@@ -29131,19 +29434,23 @@ app.post('/api/telegram/user/dialogs/read', requireTenantAuth, async (req: Reque
       return res.json({ ok: false, cloudSynced: false, error: '当前账号未在线连接 Telegram MTProto' });
     }
 
-    const { inputPeer } = await resolveTelegramInputPeer(connected.client, chatId, connected.userId);
+    const { inputPeer } = await resolveTelegramInputPeer(connected.client, chatId, connected.userId, 'P1');
     const numericMaxId = Number(maxId);
-    await connected.client.markAsRead(
-      inputPeer,
-      undefined,
-      Number.isInteger(numericMaxId) && numericMaxId > 0 ? { maxId: numericMaxId, clearMentions: true } : { clearMentions: true }
+    await scheduleTelegramRpc(accountId, 'P1', 'dialogs.markRead', () =>
+      connected.client.markAsRead(
+        inputPeer,
+        undefined,
+        Number.isInteger(numericMaxId) && numericMaxId > 0 ? { maxId: numericMaxId, clearMentions: true } : { clearMentions: true }
+      )
     );
     try {
-      await connected.client.invoke(
-        new Api.messages.MarkDialogUnread({
-          peer: new Api.InputDialogPeer({ peer: inputPeer }),
-          unread: false,
-        })
+      await scheduleTelegramRpc(accountId, 'P1', 'dialogs.clearUnreadFlag', () =>
+        connected.client.invoke(
+          new Api.messages.MarkDialogUnread({
+            peer: new Api.InputDialogPeer({ peer: inputPeer }),
+            unread: false,
+          })
+        )
       );
     } catch {}
     patchConnectedDialogCache(connected, chatId, { unreadCount: 0 });
@@ -29401,47 +29708,54 @@ app.post('/api/telegram/user/contacts/rename', requireTenantAuth, async (req: Re
     }
 
     const connected = resolveConnectedTelegramUser(accountId);
-    if (!connected || !connected.client) {
-      return res.status(400).json({ ok: false, error: '当前账号未在线连接 Telegram MTProto，无法同步云端联系人备注' });
-    }
+    let cloudSynced = false;
+    if (connected && connected.client) {
+      const inputUser = await resolveTelegramInputUser(connected.client, chatId).catch(() => null);
+      if (inputUser) {
+        let phoneStr = '';
+        try {
+          const entity: any = await connected.client.getEntity(inputUser);
+          if (entity?.phone) {
+            phoneStr = String(entity.phone);
+          }
+        } catch {}
 
-    const inputUser = await resolveTelegramInputUser(connected.client, chatId);
-    if (!inputUser) {
-      return res.status(400).json({
-        ok: false,
-        error: '仅支持为个人 Telegram 联系人设置云端备注名（群组/频道无法直接改备注）',
-      });
-    }
+        const parts = cleanTitle.split(/\s+/);
+        const firstName = parts[0] || cleanTitle;
+        const lastName = parts.length > 1 ? parts.slice(1).join(' ') : '';
 
-    let phoneStr = '';
-    try {
-      const entity: any = await connected.client.getEntity(inputUser);
-      if (entity?.phone) {
-        phoneStr = String(entity.phone);
+        await connected.client.invoke(
+          new Api.contacts.AddContact({
+            id: inputUser,
+            firstName,
+            lastName,
+            phone: phoneStr,
+          })
+        );
+        cloudSynced = true;
       }
-    } catch {}
+    }
 
-    const parts = cleanTitle.split(/\s+/);
-    const firstName = parts[0] || cleanTitle;
-    const lastName = parts.length > 1 ? parts.slice(1).join(' ') : '';
-
-    await connected.client.invoke(
-      new Api.contacts.AddContact({
-        id: inputUser,
-        firstName,
-        lastName,
-        phone: phoneStr,
-      })
-    );
-
+    const scopedAccountIdForDb = scopedAccountId || (connected?.userId ? `acc_tg_${connected.userId}` : accountId);
+    const canonicalChatId = canonicalizeCustomerChatId(chatId);
     try {
-      const scopedAccountIdForDb = scopedAccountId || `acc_tg_${connected.userId}`;
       const accVariants = getScopedAccountIdVariants(scopedAccountIdForDb);
+      if (connected?.userId && !accVariants.includes(`acc_tg_${connected.userId}`)) {
+        accVariants.push(`acc_tg_${connected.userId}`);
+      }
       const accPh = accVariants.map(() => '?').join(', ');
-      const canonicalChatId = canonicalizeCustomerChatId(chatId);
       const chatCandidates = Array.from(new Set([canonicalChatId, String(chatId || '').trim()].filter(Boolean)));
       const chatPh = chatCandidates.map(() => '?').join(', ');
       const now = Date.now();
+      await db
+        .prepare(`
+          INSERT INTO chat_remarks (account_id, chat_id, custom_title, updated_at)
+          VALUES (?, ?, ?, ?)
+          ON CONFLICT(account_id, chat_id) DO UPDATE SET
+            custom_title = excluded.custom_title,
+            updated_at = excluded.updated_at
+        `)
+        .run(scopedAccountIdForDb, canonicalChatId, cleanTitle, now);
       await db
         .prepare(`UPDATE account_customer_profiles SET client_name = ?, updated_at = ? WHERE account_id IN (${accPh}) AND chat_id IN (${chatPh})`)
         .run(cleanTitle, now, ...accVariants, ...chatCandidates);
@@ -29450,8 +29764,8 @@ app.post('/api/telegram/user/contacts/rename', requireTenantAuth, async (req: Re
         .run(cleanTitle, now, ...chatCandidates, ...accVariants);
     } catch {}
 
-    patchConnectedDialogCache(connected, chatId, { title: cleanTitle });
-    return res.json({ ok: true, cloudSynced: true, title: cleanTitle });
+    patchConnectedDialogCache(connected, chatId, { title: cleanTitle, hasCustomRemark: true });
+    return res.json({ ok: true, cloudSynced, localSaved: true, title: cleanTitle, hasCustomRemark: true });
   } catch (err: any) {
     return await handleMtprotoRouteError(res, err, {
       accountId: scopedAccountId,
@@ -33563,7 +33877,7 @@ export interface LocalIncomingUpdate {
 }
 export const pendingLocalUpdates: LocalIncomingUpdate[] = [];
 
-export function pushPendingLocalUpdate(upd: LocalIncomingUpdate, maxPerAccount = 200, maxTotal = 1000) {
+export function pushPendingLocalUpdate(upd: LocalIncomingUpdate, maxPerAccount = 600, maxTotal = 2400) {
   pendingLocalUpdates.push(upd);
   let accountCount = 0;
   for (let i = 0; i < pendingLocalUpdates.length; i++) {
@@ -34410,8 +34724,10 @@ export function attachTelegramClientMessageListener(client: TelegramClient, phon
             const peerChatId = `tg_${targetUid}`;
             let resolvedTitle: string | undefined = [firstName, lastName].filter(Boolean).join(' ').trim() || undefined;
             try {
-              const { inputPeer } = await resolveTelegramInputPeer(client, peerChatId, userId);
-              const ent: any = await client.getEntity(inputPeer);
+              const { inputPeer } = await resolveTelegramInputPeer(client, peerChatId, userId, 'P2');
+              const ent: any = await scheduleTelegramRpc(accountId, 'P2', 'raw.updateUserName.getEntity', () =>
+                client.getEntity(inputPeer)
+              );
               if (ent?.contact) {
                 const savedContactName = [ent?.firstName, ent?.lastName].filter(Boolean).join(' ').trim();
                 resolvedTitle = savedContactName || undefined;
@@ -34483,8 +34799,10 @@ export function attachTelegramClientMessageListener(client: TelegramClient, phon
               }
               try {
                 const peerChatId = `tg_${targetUid}`;
-                const { inputPeer } = await resolveTelegramInputPeer(client, peerChatId, userId);
-                const peerEntity: any = await client.getEntity(inputPeer);
+                const { inputPeer } = await resolveTelegramInputPeer(client, peerChatId, userId, 'P2');
+                const peerEntity: any = await scheduleTelegramRpc(accountId, 'P2', 'raw.updateUser.getEntity', () =>
+                  client.getEntity(inputPeer)
+                );
                 const fullName = [peerEntity?.firstName, peerEntity?.lastName].filter(Boolean).join(' ').trim();
                 const cleanU = peerEntity?.username ? String(peerEntity.username).replace(/^@/, '').trim() : '';
                 const formattedU = cleanU ? `@${cleanU}` : '';
@@ -34515,7 +34833,9 @@ export function attachTelegramClientMessageListener(client: TelegramClient, phon
           if (nowMs - lastSelfProfileSyncAt >= 3000) {
             lastSelfProfileSyncAt = nowMs;
             try {
-              const fullRes: any = await client.invoke(new Api.users.GetFullUser({ id: new Api.InputUserSelf() }));
+              const fullRes: any = await scheduleTelegramRpc(accountId, 'P2', 'raw.selfFullUser', () =>
+                client.invoke(new Api.users.GetFullUser({ id: new Api.InputUserSelf() }))
+              );
               const meU: any = Array.isArray(fullRes?.users)
                 ? fullRes.users.find((u: any) => u?.self || String(u?.id) === String(userId)) || fullRes.users[0]
                 : null;
@@ -34579,8 +34899,10 @@ export function attachTelegramClientMessageListener(client: TelegramClient, phon
           clearAvatarNegativeCacheForPeer(userId, rawNumId);
           invalidateTelegramSenderCache(accountId, rawNumId);
           try {
-            const { inputPeer } = await resolveTelegramInputPeer(client, peerChatId, userId);
-            const ent: any = await client.getEntity(inputPeer);
+            const { inputPeer } = await resolveTelegramInputPeer(client, peerChatId, userId, 'P2');
+            const ent: any = await scheduleTelegramRpc(accountId, 'P2', 'raw.updateChat.getEntity', () =>
+              client.getEntity(inputPeer)
+            );
             const nextTitle = String(ent?.title || '').trim();
             const cleanU = ent?.username ? String(ent.username).replace(/^@/, '').trim() : '';
             const connObj = connectedUserClients.get(accountId) || connectedUserClients.get(userId);
@@ -36351,8 +36673,10 @@ app.post('/api/internal/system-resume', async (req: Request, res: Response) => {
 
 export const TELEGRAM_SUSPECTED_STUCK_THRESHOLD_MS = 35_000;
 export const TELEGRAM_CONFIRMED_ZOMBIE_THRESHOLD_MS = 60_000;
+export const TELEGRAM_STUCK_RECONNECT_FORCE_ZOMBIE_MS = 90_000;
 export const TELEGRAM_ZOMBIE_PROBE_COOLDOWN_MS = 15_000;
 export const TELEGRAM_ZOMBIE_PROBE_FAILURES_REQUIRED = 2;
+export const TELEGRAM_ONLINE_HEALTH_PROBE_INTERVAL_MS = 75_000;
 
 export function evaluateTelegramWatchdogAccountState(opts: {
   conn: ConnectedTelegramUser | undefined;
@@ -36361,7 +36685,7 @@ export function evaluateTelegramWatchdogAccountState(opts: {
   bypassBackoff?: boolean;
   now?: number;
 }): {
-  action: 'healthy' | 'wait_native' | 'warn_and_probe' | 'confirmed_zombie' | 'reconnect_offline' | 'skip';
+  action: 'healthy' | 'probe_online' | 'wait_native' | 'warn_and_probe' | 'confirmed_zombie' | 'reconnect_offline' | 'skip';
   reconnectingDurationMs: number;
 } {
   const now = opts.now ?? Date.now();
@@ -36376,6 +36700,10 @@ export function evaluateTelegramWatchdogAccountState(opts: {
     runtime.lastError = null;
     runtime.lastErrorCategory = null;
     runtime.offlineReason = null;
+    const lastConfirmedAliveAt = Math.max(runtime.lastConnectedAt || 0, runtime.lastAliveProbeAt || 0);
+    if (!runtime.activeRestoreTask && now - lastConfirmedAliveAt >= TELEGRAM_ONLINE_HEALTH_PROBE_INTERVAL_MS) {
+      return { action: 'probe_online', reconnectingDurationMs: 0 };
+    }
     return { action: 'healthy', reconnectingDurationMs: 0 };
   }
 
@@ -36397,7 +36725,7 @@ export function evaluateTelegramWatchdogAccountState(opts: {
       if (
         reconnectingDurationMs >= TELEGRAM_CONFIRMED_ZOMBIE_THRESHOLD_MS &&
         runtime.reconnectProbeFailures >= TELEGRAM_ZOMBIE_PROBE_FAILURES_REQUIRED &&
-        !inspected.transportConnected
+        (!inspected.transportConnected || reconnectingDurationMs >= TELEGRAM_STUCK_RECONNECT_FORCE_ZOMBIE_MS)
       ) {
         return { action: 'confirmed_zombie', reconnectingDurationMs };
       }
@@ -36507,6 +36835,49 @@ export async function runTelegramConnectionWatchdogCycle(options?: {
     );
     if (activeFlood) {
       runtime.nextRetryAt = Math.max(runtime.nextRetryAt, activeFlood.floodWaitUntil);
+      continue;
+    }
+
+    if (evaluation.action === 'probe_online' && conn?.client) {
+      runtime.lastAliveProbeAt = now;
+      let aliveOk = false;
+      try {
+        await scheduleTelegramRpc(accountId, 'P1', 'watchdog.onlineProbe', () =>
+          probeClientHealthFn(conn.client)
+        );
+        aliveOk = true;
+      } catch (aliveErr: any) {
+        if (isTelegramSessionExpiredError(aliveErr)) {
+          await markTelegramSessionExpired({
+            accountId,
+            userId: uid || undefined,
+            phone: phone || undefined,
+            reason: formatTelegramError(aliveErr),
+          });
+          continue;
+        }
+        const floodSec = extractFloodWaitSeconds(aliveErr);
+        if (floodSec !== null) {
+          recordTelegramFloodWait(
+            { accountId, userId: uid || undefined, phone: phone || undefined },
+            floodSec,
+            'watchdog.onlineProbe',
+            now
+          );
+          continue;
+        }
+        aliveOk = false;
+      }
+      if (aliveOk) {
+        runtime.lastConnectedAt = now;
+        runtime.reconnectProbeFailures = 0;
+        continue;
+      }
+      runtime.reconnectProbeFailures += 1;
+      if (runtime.reconnectProbeFailures >= TELEGRAM_ZOMBIE_PROBE_FAILURES_REQUIRED && runtime.accountKey) {
+        confirmedZombieKeys.add(runtime.accountKey);
+        targetAccountKeys.push(runtime.accountKey);
+      }
       continue;
     }
 

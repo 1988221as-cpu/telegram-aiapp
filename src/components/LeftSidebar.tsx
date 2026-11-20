@@ -77,6 +77,14 @@ export const LeftSidebar: React.FC<LeftSidebarProps> = ({
   setActiveTab,
 }) => {
   const [failedAvatarKeys, setFailedAvatarKeys] = useState<Record<string, string>>({});
+  const [avatarRetryNonce, setAvatarRetryNonce] = useState<Record<string, number>>({});
+  const avatarRetryTimersRef = useRef<Record<string, number>>({});
+  useEffect(() => {
+    return () => {
+      Object.values(avatarRetryTimersRef.current).forEach((t) => window.clearTimeout(t));
+      avatarRetryTimersRef.current = {};
+    };
+  }, []);
   const [isToolsCollapsed, setIsToolsCollapsed] = useState<boolean>(() => {
     try {
       return localStorage.getItem(TOOLS_COLLAPSED_STORAGE_KEY) === 'true';
@@ -493,7 +501,8 @@ export const LeftSidebar: React.FC<LeftSidebarProps> = ({
             const canEditAccount = Boolean(onUpdateAccountMeta || onUpdateAccountRemark);
             const renderAccountItem = (acc: Account) => {
               const isSelected = acc.id === activeAccountId;
-              const avatarRenderKey = `${acc.avatarUrl || ''}|${acc.status}`;
+              const retryCount = avatarRetryNonce[acc.id] || 0;
+              const avatarRenderKey = `${acc.avatarUrl || ''}|${acc.status}|${retryCount}`;
               const canRenderAvatarImg = Boolean(acc.avatarUrl) && failedAvatarKeys[acc.id] !== avatarRenderKey;
               const remarkText = acc.remark?.trim() || '';
               const groupObj = acc.groupId ? accountGroups.find((g) => g.id === acc.groupId) : undefined;
@@ -568,28 +577,42 @@ export const LeftSidebar: React.FC<LeftSidebarProps> = ({
                     className="relative cursor-pointer focus:outline-none shrink-0"
                   >
                     <div
-                      className={`w-10 h-10 rounded-full flex items-center justify-center text-xs font-semibold transition-all overflow-hidden ${
+                      className={`relative w-10 h-10 rounded-full flex items-center justify-center text-xs font-semibold transition-all overflow-hidden ${
                         isSelected
                           ? 'ring-2 ring-[#2ba0ff] aurora:ring-[#2dd4bf] linen:ring-[#f3e6d3] ring-offset-1 ring-offset-[#f8fafc] dark:ring-offset-[#060b13] aurora:ring-offset-[#0b1318] linen:ring-offset-[#756252] scale-105 shadow-sm'
                           : 'opacity-75 hover:opacity-100 hover:scale-105'
                       }`}
                       style={{ backgroundColor: acc.avatarBg }}
                     >
-                      {canRenderAvatarImg ? (
+                      <span className="text-white text-xs font-bold select-none">{acc.avatarInitial}</span>
+                      {canRenderAvatarImg && (
                         <img
                           draggable={false}
                           src={acc.avatarUrl}
                           alt={remarkText || acc.name}
                           referrerPolicy="no-referrer"
-                          className="w-full h-full object-cover"
+                          className="w-full h-full object-cover absolute inset-0"
+                          onLoad={() => {
+                            setFailedAvatarKeys((prev) => {
+                              if (!(acc.id in prev)) return prev;
+                              const next = { ...prev };
+                              delete next[acc.id];
+                              return next;
+                            });
+                          }}
                           onError={() => {
                             setFailedAvatarKeys((prev) =>
                               prev[acc.id] === avatarRenderKey ? prev : { ...prev, [acc.id]: avatarRenderKey }
                             );
+                            if (retryCount < 2 && !avatarRetryTimersRef.current[acc.id]) {
+                              const delayMs = retryCount === 0 ? 2500 : 6500;
+                              avatarRetryTimersRef.current[acc.id] = window.setTimeout(() => {
+                                delete avatarRetryTimersRef.current[acc.id];
+                                setAvatarRetryNonce((p) => ({ ...p, [acc.id]: (p[acc.id] || 0) + 1 }));
+                              }, delayMs);
+                            }
                           }}
                         />
-                      ) : (
-                        <span className="text-white text-xs font-bold">{acc.avatarInitial}</span>
                       )}
                     </div>
 

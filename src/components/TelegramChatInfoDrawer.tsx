@@ -679,19 +679,17 @@ export const TelegramChatInfoDrawer: React.FC<TelegramChatInfoDrawerProps> = ({
                     已拉黑
                   </span>
                 )}
-                {!chat.isGroup && !chat.isChannel && (
-                  <button
-                    onClick={() => {
-                      setRemarkText(chat.title);
-                      setActionError(null);
-                      setIsEditingRemark(true);
-                    }}
-                    className="p-1 rounded-md text-[#64748b] hover:text-[#2481cc] dark:text-[#7b93ad] dark:hover:text-[#7cc4ff] aurora:text-[#7e9aa5] aurora:hover:text-[#5eead4] linen:text-[#6e5c4a] linen:hover:text-[#8c522d] hover:bg-[#e2e8f0]/60 dark:hover:bg-[#132234] aurora:hover:bg-[#13252e] linen:hover:bg-[#e5d9c5] cursor-pointer transition-colors"
-                    title="点击设置/修改好友备注"
-                  >
-                    <Edit3 className="w-3.5 h-3.5" />
-                  </button>
-                )}
+                <button
+                  onClick={() => {
+                    setRemarkText(chat.title);
+                    setActionError(null);
+                    setIsEditingRemark(true);
+                  }}
+                  className="p-1 rounded-md text-[#64748b] hover:text-[#2481cc] dark:text-[#7b93ad] dark:hover:text-[#7cc4ff] aurora:text-[#7e9aa5] aurora:hover:text-[#5eead4] linen:text-[#6e5c4a] linen:hover:text-[#8c522d] hover:bg-[#e2e8f0]/60 dark:hover:bg-[#132234] aurora:hover:bg-[#13252e] linen:hover:bg-[#e5d9c5] cursor-pointer transition-colors"
+                  title={chat.isGroup || chat.isChannel ? '点击设置本地群组/频道备注' : '点击设置/修改好友备注'}
+                >
+                  <Edit3 className="w-3.5 h-3.5" />
+                </button>
               </div>
             )}
 

@@ -110,7 +110,10 @@ import {
   getScopedContacts,
   saveScopedContacts,
   isSignedResourceUrl,
+  isSignedResourceUrlExpiringSoon,
   refreshSignedResourceUrlsApi,
+  fetchTelegramAccountMetaApi,
+  saveTelegramAccountMetaApi,
   checkAppUpdateApi,
   getDesktopUpdaterBridge,
   APP_VERSION,
@@ -184,17 +187,32 @@ function getBucketMessages(
   return [];
 }
 
+function resolveStableAvatarUrl(existingUrl?: string, incomingUrl?: string): string | undefined {
+  if (!incomingUrl) return existingUrl;
+  if (!existingUrl) return incomingUrl;
+  const stripQuery = (u: string) => u.split('?')[0];
+  if (
+    stripQuery(existingUrl) === stripQuery(incomingUrl) &&
+    !isSignedResourceUrlExpiringSoon(existingUrl, 24 * 60 * 60 * 1000)
+  ) {
+    return existingUrl;
+  }
+  return incomingUrl;
+}
+
 function mapCloudDialogToChat(d: any, accountId: string, existing?: Chat): Chat {
   const isChannel = Boolean(d.isChannel);
   const isBot = Boolean(d.isBot);
   const isGroup = Boolean(d.isGroup && !isChannel);
+  const preserveLocalRemark = Boolean(existing?.hasCustomRemark && !d.hasCustomRemark);
   return {
     ...(existing || {}),
     id: d.id,
     accountId,
-    title: d.title || existing?.title || 'Telegram 对话',
+    title: preserveLocalRemark ? existing!.title : (d.title || existing?.title || 'Telegram 对话'),
+    hasCustomRemark: Boolean(d.hasCustomRemark || existing?.hasCustomRemark),
     username: d.username !== undefined ? d.username : existing?.username,
-    avatarUrl: d.avatarUrl || existing?.avatarUrl,
+    avatarUrl: resolveStableAvatarUrl(existing?.avatarUrl, d.avatarUrl),
     avatarBg: d.avatarBg || existing?.avatarBg || '#2481cc',
     avatarInitial: d.avatarInitial || existing?.avatarInitial || 'TG',
     isGroup,
@@ -1282,12 +1300,39 @@ export default function App() {
   useEffect(() => {
     if (!isHydrated) return;
     secureSetItemSync('tg_pro_account_groups', accountGroups);
-  }, [accountGroups, isHydrated]);
+    if (!isMemberAuthenticated || !accountMetaHydratedRef.current) return;
+    const timer = setTimeout(() => {
+      void saveTelegramAccountMetaApi({ groups: accountGroups }).catch(() => {});
+    }, 350);
+    return () => clearTimeout(timer);
+  }, [accountGroups, isHydrated, isMemberAuthenticated]);
 
   useEffect(() => {
     if (!isHydrated) return;
-    secureSetItemSync('tg_pro_chats', chats);
+    const timer = setTimeout(() => {
+      secureSetItemSync('tg_pro_chats', chatsRef.current);
+    }, 350);
+    return () => clearTimeout(timer);
   }, [chats, isHydrated]);
+
+  useEffect(() => {
+    if (!isHydrated || typeof window === 'undefined') return;
+    const flushChatsNow = () => {
+      if (chatsRef.current.length > 0) {
+        secureSetItemSync('tg_pro_chats', chatsRef.current);
+      }
+    };
+    const onVis = () => {
+      if (document.visibilityState === 'hidden') flushChatsNow();
+    };
+    window.addEventListener('pagehide', flushChatsNow);
+    document.addEventListener('visibilitychange', onVis);
+    return () => {
+      window.removeEventListener('pagehide', flushChatsNow);
+      document.removeEventListener('visibilitychange', onVis);
+      flushChatsNow();
+    };
+  }, [isHydrated]);
 
   useEffect(() => {
     if (!isHydrated) return;
@@ -1617,12 +1662,21 @@ export default function App() {
   };
 
   const syncTelegramAccountStatus = async () => {
-    const [activeAccs, statusRes] = await Promise.all([
+    const shouldFetchAccountMeta = !accountMetaHydratedRef.current;
+    const [activeAccs, statusRes, accountMetaRes] = await Promise.all([
       fetchTelegramActiveAccounts(),
       fetchTelegramUserStatusApi(),
+      shouldFetchAccountMeta ? fetchTelegramAccountMetaApi() : Promise.resolve(null),
     ]);
     if (!isMountedRef.current || !isMemberAuthenticatedRef.current) {
       return;
+    }
+    const serverMetaMap = accountMetaRes?.ok && accountMetaRes.meta ? accountMetaRes.meta : null;
+    if (accountMetaRes?.ok) {
+      accountMetaHydratedRef.current = true;
+      if (Array.isArray(accountMetaRes.groups) && accountMetaRes.groups.length > 0) {
+        setAccountGroups((prev) => (prev.length > 0 ? prev : accountMetaRes.groups!));
+      }
     }
 
     const now = Date.now();
@@ -1865,19 +1919,31 @@ export default function App() {
             (identity.runtimeKey ? activeByRuntimeKey.get(identity.runtimeKey) : undefined) ||
             (identity.phone ? activeByRuntimeKey.get(`phone:${identity.phone}`) : undefined);
           const nextAvatarUrl =
-            activeMeta?.avatarUrl && shouldRefreshAvatarUrl(a.avatarUrl)
+            activeMeta?.avatarUrl &&
+            (shouldRefreshAvatarUrl(a.avatarUrl) ||
+              (a.avatarUrl && a.avatarUrl.split('?')[0] !== activeMeta.avatarUrl.split('?')[0]))
               ? activeMeta.avatarUrl
               : a.avatarUrl;
+          const serverAccMeta =
+            serverMetaMap?.[a.id] ||
+            (identity.canonicalAccountId ? serverMetaMap?.[identity.canonicalAccountId] : undefined);
           map.set(a.id, {
             ...a,
             status: realStatus,
             connectionPhase: nextPhase,
             bio: nextBio,
             avatarUrl: nextAvatarUrl,
+            ...(serverAccMeta?.remark && !a.remark ? { remark: serverAccMeta.remark } : {}),
+            ...(serverAccMeta?.groupId && !a.groupId ? { groupId: serverAccMeta.groupId } : {}),
             ...(meta ? meta : {}),
           });
         } else {
-          map.set(a.id, a);
+          const serverAccMeta = serverMetaMap?.[a.id];
+          map.set(a.id, {
+            ...a,
+            ...(serverAccMeta?.remark && !a.remark ? { remark: serverAccMeta.remark } : {}),
+            ...(serverAccMeta?.groupId && !a.groupId ? { groupId: serverAccMeta.groupId } : {}),
+          });
         }
       });
       if (activeAccs && activeAccs.length > 0) {
@@ -1896,6 +1962,9 @@ export default function App() {
           if (!map.has(acc.id) && !alreadyHasRuntime) {
             const realStatus = statusById.get(acc.id) || (acc.isConnected ? 'online' : 'away');
             const nextPhase = phaseById.get(acc.id) || (realStatus === 'online' ? 'online' : 'offline');
+            const serverAccMeta =
+              serverMetaMap?.[acc.id] ||
+              (accIdentity.canonicalAccountId ? serverMetaMap?.[accIdentity.canonicalAccountId] : undefined);
             map.set(acc.id, {
               id: acc.id,
               name: acc.name,
@@ -1909,6 +1978,8 @@ export default function App() {
               status: realStatus,
               connectionPhase: nextPhase,
               bio: realStatus === 'online' ? 'Telegram 账号 (已直连)' : 'Telegram 账号 (未连接)',
+              ...(serverAccMeta?.remark ? { remark: serverAccMeta.remark } : {}),
+              ...(serverAccMeta?.groupId ? { groupId: serverAccMeta.groupId } : {}),
             });
           }
         });
@@ -1930,6 +2001,11 @@ export default function App() {
   };
 
   const lastDialogsSyncAtRef = useRef<Record<string, number>>({});
+  const lastContactsFiltersSyncAtRef = useRef<Record<string, number>>({});
+  const accountMetaHydratedRef = useRef<boolean>(false);
+  const lastBgAccountPrewarmAtRef = useRef<Record<string, number>>({});
+  const bgPrewarmRunningRef = useRef<boolean>(false);
+  const preloadedBrowserAvatarUrlsRef = useRef<Set<string>>(new Set());
   const lastFloodToastAtRef = useRef<Record<string, number>>({});
   const dialogsMutationVersionRef = useRef<Record<string, number>>({});
   const recentDialogOverridesRef = useRef<
@@ -2061,6 +2137,97 @@ export default function App() {
     });
   };
 
+  const enqueueBrowserAvatarPreload = (urls: Array<string | undefined>) => {
+    if (typeof window === 'undefined' || typeof Image === 'undefined') return;
+    const targets: string[] = [];
+    for (const raw of urls) {
+      if (!raw || preloadedBrowserAvatarUrlsRef.current.has(raw)) continue;
+      preloadedBrowserAvatarUrlsRef.current.add(raw);
+      targets.push(raw);
+      if (targets.length >= 30) break;
+    }
+    if (targets.length === 0) return;
+    if (preloadedBrowserAvatarUrlsRef.current.size > 1500) {
+      preloadedBrowserAvatarUrlsRef.current.clear();
+    }
+    let idx = 0;
+    const worker = () => {
+      if (idx >= targets.length || !isMountedRef.current) return;
+      const url = targets[idx++];
+      const img = new Image();
+      img.referrerPolicy = 'no-referrer';
+      const next = () => window.setTimeout(worker, 40);
+      img.onload = next;
+      img.onerror = next;
+      img.src = url;
+    };
+    const concurrency = Math.min(3, targets.length);
+    for (let i = 0; i < concurrency; i++) {
+      window.setTimeout(worker, i * 35);
+    }
+  };
+
+  useEffect(() => {
+    if (!isMemberAuthenticated || !isHydrated) return;
+    const onlineAccs = accounts.filter((a) => a.status === 'online' && a.id.startsWith('acc_tg_'));
+    if (onlineAccs.length === 0) return;
+
+    const timer = window.setTimeout(() => {
+      if (!isMountedRef.current || !isMemberAuthenticatedRef.current) return;
+      enqueueBrowserAvatarPreload(onlineAccs.map((a) => a.avatarUrl));
+      const activeChatsUrls = chatsRef.current
+        .filter((c) => c.accountId === activeAccountIdRef.current && c.avatarUrl)
+        .slice(0, 20)
+        .map((c) => c.avatarUrl);
+      enqueueBrowserAvatarPreload(activeChatsUrls);
+
+      if (bgPrewarmRunningRef.current) return;
+      const BG_PREWARM_COOLDOWN_MS = 10 * 60 * 1000;
+      const nowTs = Date.now();
+      const candidates = onlineAccs
+        .map((a) => a.id)
+        .filter((id) => {
+          if (id === activeAccountIdRef.current) return false;
+          const lastAt = lastBgAccountPrewarmAtRef.current[id] || 0;
+          const hasLocalChats = chatsRef.current.some((c) => c.accountId === id && c.id.startsWith('tg_'));
+          return !hasLocalChats || nowTs - lastAt >= BG_PREWARM_COOLDOWN_MS;
+        });
+
+      const cachedBgUrls: Array<string | undefined> = [];
+      for (const a of onlineAccs) {
+        if (a.id === activeAccountIdRef.current) continue;
+        chatsRef.current
+          .filter((c) => c.accountId === a.id && c.avatarUrl)
+          .slice(0, 20)
+          .forEach((c) => cachedBgUrls.push(c.avatarUrl));
+      }
+      enqueueBrowserAvatarPreload(cachedBgUrls);
+
+      if (candidates.length === 0) return;
+      bgPrewarmRunningRef.current = true;
+      void (async () => {
+        try {
+          for (const accId of candidates) {
+            if (!isMountedRef.current || !isMemberAuthenticatedRef.current) break;
+            lastBgAccountPrewarmAtRef.current[accId] = Date.now();
+            const res = await fetchTelegramUserDialogsDetailedApi(accId);
+            if (!isMountedRef.current || !isMemberAuthenticatedRef.current) break;
+            if (res.ok && Array.isArray(res.dialogs) && res.dialogs.length > 0) {
+              lastDialogsSyncAtRef.current[accId] = Date.now();
+              mergeCloudDialogsForAccount(accId, res.dialogs, { isCached: Boolean(res.cached) });
+              enqueueBrowserAvatarPreload(res.dialogs.slice(0, 25).map((d: any) => d?.avatarUrl));
+            }
+            await new Promise((r) => setTimeout(r, 250));
+          }
+        } catch {} finally {
+          bgPrewarmRunningRef.current = false;
+        }
+      })();
+    }, 500);
+
+    return () => window.clearTimeout(timer);
+  }, [accounts, isMemberAuthenticated, isHydrated]);
+
   const notifyTelegramFloodCooldown = (accId: string, errorMsg?: string, retryAfterSeconds?: number) => {
     const now = Date.now();
     const lastShown = lastFloodToastAtRef.current[accId] || 0;
@@ -2147,11 +2314,23 @@ export default function App() {
       if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
       void runSync();
     }, 15000);
+    let lastResumeSyncAt = 0;
+    const handleVisibilityOrOnlineSync = () => {
+      if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
+      const nowMs = Date.now();
+      if (nowMs - lastResumeSyncAt < 5000) return;
+      lastResumeSyncAt = nowMs;
+      void runSync();
+    };
+    window.addEventListener('online', handleVisibilityOrOnlineSync);
+    document.addEventListener('visibilitychange', handleVisibilityOrOnlineSync);
 
     return () => {
       isMounted = false;
       clearTimeout(initialRetryTimer);
       clearInterval(statusPollTimer);
+      window.removeEventListener('online', handleVisibilityOrOnlineSync);
+      document.removeEventListener('visibilitychange', handleVisibilityOrOnlineSync);
     };
   }, [isMemberAuthenticated]);
 
@@ -2241,16 +2420,21 @@ export default function App() {
       } catch {}
     })();
     if (targetAccId.startsWith('acc_tg_')) {
-      fetchTelegramUserContactsApi(targetAccId).then((res) => {
-        if (isMounted && activeAccountIdRef.current === targetAccId && res.ok && Array.isArray(res.contacts)) {
-          handleSyncContacts(res.contacts, targetAccId);
-        }
-      }).catch(() => {});
-      fetchTelegramDialogFiltersApi(targetAccId).then((fRes) => {
-        if (isMounted && fRes.ok && Array.isArray(fRes.folders)) {
-          setFoldersByAccount((prev) => ({ ...prev, [targetAccId]: fRes.folders! }));
-        }
-      }).catch(() => {});
+      const CONTACTS_FILTERS_COOLDOWN_MS = 60_000;
+      const lastMetaSyncAt = lastContactsFiltersSyncAtRef.current[targetAccId] || 0;
+      if (Date.now() - lastMetaSyncAt >= CONTACTS_FILTERS_COOLDOWN_MS) {
+        lastContactsFiltersSyncAtRef.current[targetAccId] = Date.now();
+        fetchTelegramUserContactsApi(targetAccId).then((res) => {
+          if (isMounted && activeAccountIdRef.current === targetAccId && res.ok && Array.isArray(res.contacts)) {
+            handleSyncContacts(res.contacts, targetAccId);
+          }
+        }).catch(() => {});
+        fetchTelegramDialogFiltersApi(targetAccId).then((fRes) => {
+          if (isMounted && fRes.ok && Array.isArray(fRes.folders)) {
+            setFoldersByAccount((prev) => ({ ...prev, [targetAccId]: fRes.folders! }));
+          }
+        }).catch(() => {});
+      }
     }
 
     const LOW_FREQUENCY_DIALOG_FALLBACK_INTERVAL_MS = 180_000;
@@ -3066,6 +3250,33 @@ export default function App() {
           };
 
           const orderedMessageOps: PollMessageOp[] = [];
+          const pendingReadMarks = new Map<string, { accountId: string; chatId: string; maxId?: number }>();
+          const pendingChatUpdaters: Array<(prev: Chat[]) => Chat[]> = [];
+          const pendingMessageChatPatches = new Map<
+            string,
+            {
+              accountId: string;
+              chatId: string;
+              unreadDelta: number;
+              clearUnread: boolean;
+              lastMessage: string;
+              lastTime: string;
+              lastDate: number;
+              isOfficialNotice: boolean;
+              officialTitle: string;
+              fallbackSenderName?: string;
+            }
+          >();
+          const pendingLiveTranslations: Array<{
+            accountId: string;
+            chatId: string;
+            bucketKey: string;
+            msg: Message;
+            sourceLang: string;
+            targetLang: string;
+            trimmedText: string;
+            isGroup: boolean;
+          }> = [];
           // Shadow cache solely for within-poll-cycle side-effect dedup (never written into React state directly!)
           const inPollBucketShadow = new Map<string, Message[]>();
           const getInPollShadow = (accId: string, cId: string): Message[] => {
@@ -3161,7 +3372,7 @@ export default function App() {
                 newText,
               });
               if (editedLatestSummary !== null) {
-                setChats((prev) =>
+                pendingChatUpdaters.push((prev) =>
                   prev.map((c) =>
                     c.id === targetChatId && c.accountId === targetAccountId
                       ? { ...c, lastMessage: editedLatestSummary! }
@@ -3221,7 +3432,7 @@ export default function App() {
 
               const summaryEntries = Object.entries(deletedLastSummaryByChat);
               if (summaryEntries.length > 0) {
-                setChats((prev) =>
+                pendingChatUpdaters.push((prev) =>
                   prev.map((c) => {
                     if (c.accountId !== targetAccountId) return c;
                     const hit = deletedLastSummaryByChat[c.id];
@@ -3247,7 +3458,7 @@ export default function App() {
               ) {
                 return;
               }
-              setChats((prev) =>
+              pendingChatUpdaters.push((prev) =>
                 prev.map((c) =>
                   c.id === targetChatId && c.accountId === targetAccountId
                     ? {
@@ -3280,7 +3491,7 @@ export default function App() {
               ) {
                 return;
               }
-              setChats((prev) =>
+              pendingChatUpdaters.push((prev) =>
                 prev.map((c) =>
                   c.id === targetChatId &&
                   c.accountId === targetAccountId &&
@@ -3300,7 +3511,7 @@ export default function App() {
                 const isArchivedTarget = Number(upd.folderId || 0) === 1;
                 const orderIndexMap = new Map<string, number>();
                 (upd.pinnedChatOrder as string[]).forEach((cid, idx) => orderIndexMap.set(String(cid), idx));
-                setChats((prev) =>
+                pendingChatUpdaters.push((prev) =>
                   prev.map((c) => {
                     if (c.accountId !== targetAccountId || Boolean(c.isArchived) !== isArchivedTarget) return c;
                     const nextIdx = orderIndexMap.get(c.id);
@@ -3336,7 +3547,7 @@ export default function App() {
               ) {
                 return;
               }
-              setChats((prev) =>
+              pendingChatUpdaters.push((prev) =>
                 prev.map((c) =>
                   c.id === targetChatId && c.accountId === targetAccountId
                     ? { ...c, unreadCount: nextUnreadMark ? Math.max(1, c.unreadCount || 0) : 0 }
@@ -3357,7 +3568,7 @@ export default function App() {
               ) {
                 return;
               }
-              setChats((prev) =>
+              pendingChatUpdaters.push((prev) =>
                 prev.map((c) =>
                   c.id === targetChatId && c.accountId === targetAccountId
                     ? { ...c, isMuted: nextMuted }
@@ -3385,7 +3596,7 @@ export default function App() {
               if ((!existsInCurrent || upd.needsDialogRefresh) && targetAccountId === currentAccId) {
                 void triggerAccountDialogRefreshRef.current?.(targetAccountId, { force: true });
               }
-              setChats((prev) =>
+              pendingChatUpdaters.push((prev) =>
                 prev.map((c) =>
                   c.id === targetChatId && c.accountId === targetAccountId
                     ? { ...c, isArchived: nextArchived }
@@ -3442,12 +3653,14 @@ export default function App() {
               const nextUsername = typeof upd.profileUsername === 'string' ? upd.profileUsername : undefined;
               const nextAvatar =
                 typeof upd.profileAvatarUrl === 'string' && upd.profileAvatarUrl ? upd.profileAvatarUrl : undefined;
-              setChats((prev) =>
+              pendingChatUpdaters.push((prev) =>
                 prev.map((c) =>
                   c.id === targetChatId && c.accountId === targetAccountId
                     ? {
                         ...c,
-                        ...(nextTitle ? { title: nextTitle, avatarInitial: nextTitle.slice(0, 2).toUpperCase() } : {}),
+                        ...(nextTitle && !c.hasCustomRemark
+                          ? { title: nextTitle, avatarInitial: nextTitle.slice(0, 2).toUpperCase() }
+                          : {}),
                         ...(nextUsername !== undefined ? { username: nextUsername.replace(/^@/, '') } : {}),
                         ...(nextAvatar ? { avatarUrl: nextAvatar } : {}),
                       }
@@ -3486,7 +3699,7 @@ export default function App() {
             if (updType === 'read_outbox') {
               const maxId = Number(upd.readOutboxMaxId);
               if (!Number.isInteger(maxId) || maxId <= 0) return;
-              setChats((prev) =>
+              pendingChatUpdaters.push((prev) =>
                 prev.map((c) =>
                   c.id === targetChatId && c.accountId === targetAccountId
                     ? { ...c, readOutboxMaxId: Math.max(c.readOutboxMaxId || 0, maxId) }
@@ -3538,7 +3751,7 @@ export default function App() {
             if (updType === 'user_status') {
               const nextOnline = Boolean(upd.isOnline);
               const nextStatusText = typeof upd.statusText === 'string' ? upd.statusText : undefined;
-              setChats((prev) =>
+              pendingChatUpdaters.push((prev) =>
                 prev.map((c) =>
                   c.id === targetChatId && c.accountId === targetAccountId
                     ? { ...c, isOnline: nextOnline, ...(nextStatusText ? { statusText: nextStatusText } : {}) }
@@ -3579,7 +3792,7 @@ export default function App() {
 
             if (updType === 'peer_blocked') {
               const nextBlocked = Boolean(upd.isBlocked);
-              setChats((prev) =>
+              pendingChatUpdaters.push((prev) =>
                 prev.map((c) =>
                   c.id === targetChatId && c.accountId === targetAccountId
                     ? { ...c, isBlocked: nextBlocked }
@@ -3681,11 +3894,15 @@ export default function App() {
             ) {
               if (isAppWindowActivelyFocused()) {
                 pendingAutoReadOnFocusRef.current = null;
-                markTelegramDialogReadApi({
+                const readKey = `${targetAccountId}::${targetChatId}`;
+                const prevMark = pendingReadMarks.get(readKey);
+                const msgIdNum = typeof incomingMsg.telegramMessageId === 'number' ? incomingMsg.telegramMessageId : 0;
+                const nextMaxId = Math.max(prevMark?.maxId || 0, msgIdNum);
+                pendingReadMarks.set(readKey, {
                   accountId: targetAccountId,
                   chatId: targetChatId,
-                  maxId: incomingMsg.telegramMessageId,
-                }).catch(() => {});
+                  ...(nextMaxId > 0 ? { maxId: nextMaxId } : {}),
+                });
               } else {
                 const prevPending = pendingAutoReadOnFocusRef.current;
                 const nextMaxId = Math.max(
@@ -3767,54 +3984,16 @@ export default function App() {
               const inboundDedupeKey = `${targetAccountId}::${targetChatId}::${incomingMsg.id}::${inboundTargetLang}::${effectiveInboundEngine}`;
               attemptedInboundBackfillRef.current.add(inboundDedupeKey);
 
-              translateText(
-                incomingMsg.text,
-                inboundSourceLang,
-                inboundTargetLang,
-                currentLLMConfig,
-                effectiveInboundEngine,
-                currentTransSettings.googleApiKey,
-                undefined,
-                undefined,
-                undefined,
-                incomingIsGroup ? { purpose: 'group', isGroup: true } : { purpose: 'inbound' }
-              )
-                .then((trans) => {
-                  if (trans && trans.trim() && trans.trim().toLowerCase() !== trimmedIncomingText.toLowerCase()) {
-                    const withTrans: Message = {
-                      ...incomingMsg,
-                      translatedText: trans,
-                      translationError: undefined,
-                      translationErrorChannel: undefined,
-                    };
-                    updateMessageTranslationInDb(incomingMsg.id, trans, {
-                      chatId: targetChatId,
-                      telegramMessageId: incomingMsg.telegramMessageId,
-                      accountId: targetAccountId,
-                    }).catch(() => {});
-                    setMessagesMap((prevMap) => {
-                      const list = getBucketMessages(prevMap, targetAccountId, targetChatId);
-                      return {
-                        ...prevMap,
-                        [targetBucketKey]: list.map((m) => (m.id === incomingMsg.id ? withTrans : m)),
-                      };
-                    });
-                  }
-                })
-                .catch(() => {
-                  const withErr: Message = {
-                    ...incomingMsg,
-                    translationError: '翻译失败，请检查翻译通道',
-                    translationErrorChannel: engineToLiveErrorChannel(effectiveInboundEngine),
-                  };
-                  setMessagesMap((prevMap) => {
-                    const list = getBucketMessages(prevMap, targetAccountId, targetChatId);
-                    return {
-                      ...prevMap,
-                      [targetBucketKey]: list.map((m) => (m.id === incomingMsg.id ? withErr : m)),
-                    };
-                  });
-                });
+              pendingLiveTranslations.push({
+                accountId: targetAccountId,
+                chatId: targetChatId,
+                bucketKey: targetBucketKey,
+                msg: incomingMsg,
+                sourceLang: inboundSourceLang,
+                targetLang: inboundTargetLang,
+                trimmedText: trimmedIncomingText,
+                isGroup: incomingIsGroup,
+              });
             }
 
             if (incomingMsg.isCall && targetAccountId === currentAccId) {
@@ -3838,55 +4017,178 @@ export default function App() {
             }
 
             const isWindowActivelyFocused = isAppWindowActivelyFocused();
-            setChats((prev) => {
-              const exists = prev.some((c) => c.id === targetChatId && c.accountId === targetAccountId);
-              if (!exists) {
-                const newChat: Chat = {
-                  id: targetChatId,
-                  accountId: targetAccountId,
-                  title: isOfficialNotice ? officialTitle : (upd.senderName || `Telegram (${targetChatId.replace('tg_', '')})`),
-                  unreadCount:
-                    incomingMsg.sender === 'me' ||
-                    incomingMsg.sender === 'system' ||
-                    (targetChatId === activeChatIdRef.current &&
-                      targetAccountId === activeAccountIdRef.current &&
-                      isWindowActivelyFocused)
-                      ? 0
-                      : 1,
-                  lastMessage: summaryText,
-                  lastTime: incomingMsg.timestamp,
-                  lastDate: incomingEpochSec,
-                  avatarInitial: isOfficialNotice ? 'TG' : (upd.senderName || 'TG').slice(0, 2).toUpperCase(),
-                  avatarBg: '#2481cc',
-                  isGroup: false,
-                  isVerified: isOfficialNotice,
-                  sourceLang: 'Auto',
-                  targetLang: 'Auto',
-                };
-                return [newChat, ...prev];
-              }
-              return prev.map((c) =>
-                c.id === targetChatId && c.accountId === targetAccountId
-                  ? {
-                      ...c,
-                      title: isOfficialNotice ? officialTitle : c.title,
-                      isVerified: isOfficialNotice ? true : c.isVerified,
-                      lastMessage: summaryText,
-                      lastTime: incomingMsg.timestamp,
-                      lastDate: Math.max(c.lastDate || 0, incomingEpochSec),
-                      unreadCount:
-                        c.id === activeChatIdRef.current &&
-                        c.accountId === activeAccountIdRef.current &&
-                        isWindowActivelyFocused
-                          ? 0
-                          : incomingMsg.sender === 'me' || incomingMsg.sender === 'system'
-                            ? (c.unreadCount || 0)
-                            : (c.unreadCount || 0) + 1,
-                    }
-                  : c
-              );
+            const isViewingFocusedChat =
+              targetChatId === activeChatIdRef.current &&
+              targetAccountId === activeAccountIdRef.current &&
+              isWindowActivelyFocused;
+            const shouldIncrementUnread =
+              !isViewingFocusedChat && incomingMsg.sender !== 'me' && incomingMsg.sender !== 'system';
+            const patchKey = `${targetAccountId}::${targetChatId}`;
+            const prevPatch = pendingMessageChatPatches.get(patchKey);
+            pendingMessageChatPatches.set(patchKey, {
+              accountId: targetAccountId,
+              chatId: targetChatId,
+              unreadDelta: (prevPatch?.unreadDelta || 0) + (shouldIncrementUnread ? 1 : 0),
+              clearUnread: isViewingFocusedChat,
+              lastMessage: summaryText,
+              lastTime: incomingMsg.timestamp,
+              lastDate: Math.max(prevPatch?.lastDate || 0, incomingEpochSec),
+              isOfficialNotice: Boolean(prevPatch?.isOfficialNotice || isOfficialNotice),
+              officialTitle,
+              fallbackSenderName: prevPatch?.fallbackSenderName || upd.senderName,
             });
           });
+
+          // 1. Coalesced setChats: apply message summary/unread deltas + ordered event patches in ONE state transition
+          if (pendingMessageChatPatches.size > 0 || pendingChatUpdaters.length > 0) {
+            setChats((prev) => {
+              let next = prev;
+              if (pendingMessageChatPatches.size > 0) {
+                const seenKeys = new Set<string>();
+                next = next.map((c) => {
+                  const pKey = `${c.accountId}::${c.id}`;
+                  const patch = pendingMessageChatPatches.get(pKey);
+                  if (!patch) return c;
+                  seenKeys.add(pKey);
+                  return {
+                    ...c,
+                    title: patch.isOfficialNotice ? patch.officialTitle : c.title,
+                    isVerified: patch.isOfficialNotice ? true : c.isVerified,
+                    lastMessage: patch.lastMessage,
+                    lastTime: patch.lastTime,
+                    lastDate: Math.max(c.lastDate || 0, patch.lastDate),
+                    unreadCount: patch.clearUnread ? 0 : (c.unreadCount || 0) + patch.unreadDelta,
+                  };
+                });
+                const newChats: Chat[] = [];
+                for (const [pKey, patch] of pendingMessageChatPatches.entries()) {
+                  if (seenKeys.has(pKey)) continue;
+                  newChats.push({
+                    id: patch.chatId,
+                    accountId: patch.accountId,
+                    title: patch.isOfficialNotice
+                      ? patch.officialTitle
+                      : patch.fallbackSenderName || `Telegram (${patch.chatId.replace('tg_', '')})`,
+                    unreadCount: patch.clearUnread ? 0 : patch.unreadDelta,
+                    lastMessage: patch.lastMessage,
+                    lastTime: patch.lastTime,
+                    lastDate: patch.lastDate,
+                    avatarInitial: patch.isOfficialNotice
+                      ? 'TG'
+                      : (patch.fallbackSenderName || 'TG').slice(0, 2).toUpperCase(),
+                    avatarBg: '#2481cc',
+                    isGroup: false,
+                    isVerified: patch.isOfficialNotice,
+                    sourceLang: 'Auto',
+                    targetLang: 'Auto',
+                  });
+                }
+                if (newChats.length > 0) {
+                  next = [...newChats, ...next];
+                }
+              }
+              for (const fn of pendingChatUpdaters) {
+                next = fn(next);
+              }
+              return next;
+            });
+          }
+
+          // 2. Coalesced mark-as-read: at most 1 HTTP/RPC call per focused chat per poll cycle
+          for (const rm of pendingReadMarks.values()) {
+            markTelegramDialogReadApi({
+              accountId: rm.accountId,
+              chatId: rm.chatId,
+              ...(rm.maxId && rm.maxId > 0 ? { maxId: rm.maxId } : {}),
+            }).catch(() => {});
+          }
+
+          // 3. Coalesced batch live translation (ONLY populated when translation toggle is ON for that chat/group)
+          if (pendingLiveTranslations.length > 0) {
+            const effectiveInboundEngine = 'free_dual' as const;
+            const groupsByLang = new Map<string, typeof pendingLiveTranslations>();
+            for (const item of pendingLiveTranslations) {
+              const gKey = `${item.targetLang}::${item.sourceLang}::${item.isGroup ? 'g' : 'p'}`;
+              const arr = groupsByLang.get(gKey) || [];
+              arr.push(item);
+              groupsByLang.set(gKey, arr);
+            }
+            for (const items of groupsByLang.values()) {
+              for (let i = 0; i < items.length; i += 10) {
+                const chunk = items.slice(i, i + 10);
+                const first = chunk[0];
+                translateBatchTexts(
+                  chunk.map((c) => ({ id: c.msg.id, text: c.msg.text })),
+                  first.sourceLang,
+                  first.targetLang,
+                  effectiveInboundEngine,
+                  currentTransSettings.googleApiKey,
+                  first.isGroup ? { purpose: 'group', isGroup: true } : { purpose: 'inbound' }
+                )
+                  .then((translations) => {
+                    const patchByBucket = new Map<string, Map<string, Partial<Message>>>();
+                    chunk.forEach((c, idx) => {
+                      const itemRes = translations[idx];
+                      const trans = itemRes?.translatedText;
+                      if (trans && trans.trim() && trans.trim().toLowerCase() !== c.trimmedText.toLowerCase()) {
+                        updateMessageTranslationInDb(c.msg.id, trans, {
+                          chatId: c.chatId,
+                          telegramMessageId: c.msg.telegramMessageId,
+                          accountId: c.accountId,
+                        }).catch(() => {});
+                        const mMap = patchByBucket.get(c.bucketKey) || new Map<string, Partial<Message>>();
+                        mMap.set(c.msg.id, {
+                          translatedText: trans,
+                          translationError: undefined,
+                          translationErrorChannel: undefined,
+                        });
+                        patchByBucket.set(c.bucketKey, mMap);
+                      } else if (itemRes?.error) {
+                        const mMap = patchByBucket.get(c.bucketKey) || new Map<string, Partial<Message>>();
+                        mMap.set(c.msg.id, {
+                          translationError: itemRes.error,
+                          translationErrorChannel: engineToLiveErrorChannel(effectiveInboundEngine),
+                        });
+                        patchByBucket.set(c.bucketKey, mMap);
+                      }
+                    });
+                    if (patchByBucket.size > 0) {
+                      setMessagesMap((prevMap) => {
+                        let changed = false;
+                        const nextMap = { ...prevMap };
+                        for (const [bKey, idPatches] of patchByBucket.entries()) {
+                          const list = nextMap[bKey];
+                          if (!Array.isArray(list)) continue;
+                          nextMap[bKey] = list.map((m) => (idPatches.has(m.id) ? { ...m, ...idPatches.get(m.id)! } : m));
+                          changed = true;
+                        }
+                        return changed ? nextMap : prevMap;
+                      });
+                    }
+                  })
+                  .catch(() => {
+                    const errPatchByBucket = new Map<string, Map<string, Partial<Message>>>();
+                    for (const c of chunk) {
+                      const mMap = errPatchByBucket.get(c.bucketKey) || new Map<string, Partial<Message>>();
+                      mMap.set(c.msg.id, {
+                        translationError: '翻译失败，请检查翻译通道',
+                        translationErrorChannel: engineToLiveErrorChannel(effectiveInboundEngine),
+                      });
+                      errPatchByBucket.set(c.bucketKey, mMap);
+                    }
+                    setMessagesMap((prevMap) => {
+                      const nextMap = { ...prevMap };
+                      for (const [bKey, idPatches] of errPatchByBucket.entries()) {
+                        const list = nextMap[bKey];
+                        if (!Array.isArray(list)) continue;
+                        nextMap[bKey] = list.map((m) => (idPatches.has(m.id) ? { ...m, ...idPatches.get(m.id)! } : m));
+                      }
+                      return nextMap;
+                    });
+                  });
+              }
+            }
+          }
 
           // Apply all message updates in ONE single pure React state transition merged against latest prev
           let commitWaitPromise: Promise<boolean> | null = null;
@@ -4470,7 +4772,7 @@ export default function App() {
     setChats((prev) => {
       const updated = prev.map((c) =>
         c.id === chatId && (!targetAccountId || c.accountId === targetAccountId)
-          ? { ...c, title: trimmed }
+          ? { ...c, title: trimmed, hasCustomRemark: true }
           : c
       );
       secureSetItemSync('tg_pro_chats', updated);
@@ -5922,6 +6224,13 @@ export default function App() {
       },
       accountId
     );
+    if (isMemberAuthenticated) {
+      void saveTelegramAccountMetaApi({
+        accountId,
+        ...(meta.remark !== undefined ? { remark: cleanRemark || '' } : {}),
+        ...(meta.groupId !== undefined ? { groupId: meta.groupId || '' } : {}),
+      }).catch(() => {});
+    }
   };
 
   const handleReorderAccountGroups = (
@@ -5971,6 +6280,12 @@ export default function App() {
     setAccounts((prev) =>
       prev.map((a) => (a.id === accountId ? { ...a, groupId: normalizedGroupId } : a))
     );
+    if (isMemberAuthenticated) {
+      void saveTelegramAccountMetaApi({
+        accountId,
+        groupId: normalizedGroupId || '',
+      }).catch(() => {});
+    }
   };
 
   const handleReorderChats = (

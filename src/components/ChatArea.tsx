@@ -780,6 +780,11 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
   onRefreshMediaUrls,
 }) => {
   const [inputText, setInputText] = useState('');
+  const [visibleMsgWindow, setVisibleMsgWindow] = useState(200);
+  useEffect(() => {
+    pendingWindowAnchorRef.current = null;
+    setVisibleMsgWindow(200);
+  }, [chat?.id, currentAccountId]);
   const activeChatIdRef = useRef<string | null>(chat?.id || null);
   activeChatIdRef.current = chat?.id || null;
   const activeAccountIdRef = useRef<string | undefined>(currentAccountId);
@@ -1597,11 +1602,37 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
   const [attachmentMenuPos, setAttachmentMenuPos] = useState<{ top: number; left: number; maxHeight: number } | null>(null);
   const emojiButtonRef = useRef<HTMLButtonElement>(null);
   const scrollViewportRef = useRef<HTMLDivElement>(null);
+  const pendingWindowAnchorRef = useRef<{ prevHeight: number; prevTop: number } | null>(null);
   const suppressAutoScrollRef = useRef(false);
   const isNearBottomRef = useRef(true);
   const prevChatIdForScrollRef = useRef<string | null>(null);
   const prevMsgCountRef = useRef<number>(0);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+
+  const expandLocalMessageWindow = useCallback((step = 150) => {
+    const viewport = scrollViewportRef.current;
+    if (viewport && !pendingWindowAnchorRef.current) {
+      pendingWindowAnchorRef.current = {
+        prevHeight: viewport.scrollHeight,
+        prevTop: viewport.scrollTop,
+      };
+      suppressAutoScrollRef.current = true;
+    }
+    setVisibleMsgWindow((w) => w + step);
+  }, []);
+
+  useLayoutEffect(() => {
+    const anchor = pendingWindowAnchorRef.current;
+    if (!anchor) return;
+    pendingWindowAnchorRef.current = null;
+    const viewport = scrollViewportRef.current;
+    if (viewport) {
+      viewport.scrollTop = viewport.scrollHeight - anchor.prevHeight + anchor.prevTop;
+    }
+    requestAnimationFrame(() => {
+      suppressAutoScrollRef.current = false;
+    });
+  }, [visibleMsgWindow]);
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const audioPlaySeqRef = useRef(0);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
@@ -1962,6 +1993,9 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
       if (totalLoaded === 0 && !lastRes.hasMore) {
         showSyncNotice('已到达对话最早历史记录', 2500);
         return;
+      }
+      if (totalLoaded > 0) {
+        setVisibleMsgWindow((w) => Math.max(w, messages.length + totalLoaded));
       }
       requestAnimationFrame(() => {
         const el = scrollViewportRef.current;
@@ -2403,6 +2437,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
       setChatSearchQuery('');
       setCloudSearchResults(null);
     }
+    setVisibleMsgWindow((w) => Math.max(w, messages.length));
 
     const targetScopeKey = `${currentAccountId || 'default'}::${chat?.id || ''}`;
     requestAnimationFrame(() => {
@@ -2508,6 +2543,9 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
             m.telegramMessageId === pending.telegramMessageId)
       );
       if (matched) {
+        if (messages.length > visibleMsgWindow) {
+          setVisibleMsgWindow((w) => Math.max(w, messages.length));
+        }
         requestAnimationFrame(() => {
           const targetEl = scrollViewportRef.current?.querySelector(
             `[data-msg-id="${CSS.escape(matched.id)}"]`
@@ -4145,6 +4183,11 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
         uncontrolledMsgPatches[m.id] ? { ...m, ...uncontrolledMsgPatches[m.id] } : m
       )
     : baseDisplayedMessages;
+  const hiddenLoadedCount =
+    cloudSearchResults === null && !chatSearchQuery.trim() && displayedMessages.length > visibleMsgWindow
+      ? displayedMessages.length - visibleMsgWindow
+      : 0;
+  const renderedMessages = hiddenLoadedCount > 0 ? displayedMessages.slice(hiddenLoadedCount) : displayedMessages;
 
   const pinnedMessages = messages.filter((m) => m.isPinned);
   const safePinnedIndex = pinnedMessages.length > 0 ? pinnedBannerIndex % pinnedMessages.length : 0;
@@ -4205,19 +4248,17 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
               <span className="font-semibold text-[14px] text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118] truncate leading-tight">
                 {chat.title}
               </span>
-              {!chat.isGroup && !chat.isChannel && (
-                <button
-                  type="button"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    setChatInfoOpen(true);
-                  }}
-                  title="设置/修改好友备注"
-                  className="p-0.5 text-[#64748b] hover:text-[#2481cc] dark:text-[#7b93ad] dark:hover:text-[#2ba0ff] aurora:text-[#7e9aa5] aurora:hover:text-[#5eead4] linen:text-[#a86a43] linen:hover:text-[#7e4d2e] rounded-sm transition-colors cursor-pointer"
-                >
-                  <Edit2 className="w-3 h-3" />
-                </button>
-              )}
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setChatInfoOpen(true);
+                }}
+                title={chat.isGroup || chat.isChannel ? '设置本地群组/频道备注' : '设置/修改好友备注'}
+                className="p-0.5 text-[#64748b] hover:text-[#2481cc] dark:text-[#7b93ad] dark:hover:text-[#2ba0ff] aurora:text-[#7e9aa5] aurora:hover:text-[#5eead4] linen:text-[#a86a43] linen:hover:text-[#7e4d2e] rounded-sm transition-colors cursor-pointer"
+              >
+                <Edit2 className="w-3 h-3" />
+              </button>
               {chat.isVerified && (
                 <span className="w-3.5 h-3.5 bg-[#2481cc] dark:bg-[#2ba0ff] aurora:bg-[#14b8a6] linen:bg-[#a86a43] rounded-full flex items-center justify-center text-white shrink-0">
                   <Check className="w-2.5 h-2.5 stroke-[3]" />
@@ -4497,15 +4538,23 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
           <button
             type="button"
             onClick={() => {
-              const targetEl = scrollViewportRef.current?.querySelector(
-                `[data-msg-id="${CSS.escape(activePinnedMessage.id)}"]`
-              ) as HTMLElement | null;
-              if (targetEl) {
-                targetEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
-                setHighlightedMsgId(activePinnedMessage.id);
-                setTimeout(() => setHighlightedMsgId((cur) => (cur === activePinnedMessage.id ? null : cur)), 1800);
+              const runPinnedJump = () => {
+                const targetEl = scrollViewportRef.current?.querySelector(
+                  `[data-msg-id="${CSS.escape(activePinnedMessage.id)}"]`
+                ) as HTMLElement | null;
+                if (targetEl) {
+                  targetEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                  setHighlightedMsgId(activePinnedMessage.id);
+                  setTimeout(() => setHighlightedMsgId((cur) => (cur === activePinnedMessage.id ? null : cur)), 1800);
+                } else {
+                  showSyncNotice('该置顶消息不在当前已加载窗口，可点击上方“加载更早历史消息”拉取', 3000);
+                }
+              };
+              if (hiddenLoadedCount > 0) {
+                setVisibleMsgWindow((w) => Math.max(w, displayedMessages.length));
+                requestAnimationFrame(() => setTimeout(runPinnedJump, 40));
               } else {
-                showSyncNotice('该置顶消息不在当前已加载窗口，可点击上方“加载更早历史消息”拉取', 3000);
+                runPinnedJump();
               }
             }}
             className="flex items-center gap-2 min-w-0 flex-1 text-left cursor-pointer hover:opacity-85 transition-opacity"
@@ -4721,6 +4770,14 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
           if (
             el.scrollHeight > el.clientHeight + 40 &&
             el.scrollTop <= 80 &&
+            hiddenLoadedCount > 0 &&
+            cloudSearchResults === null &&
+            !pendingWindowAnchorRef.current
+          ) {
+            expandLocalMessageWindow(150);
+          } else if (
+            el.scrollHeight > el.clientHeight + 40 &&
+            el.scrollTop <= 80 &&
             chat.id.startsWith('tg_') &&
             currentAccountId !== 'acc_telegram_bot' &&
             hasMoreHistory &&
@@ -4748,13 +4805,25 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
           </div>
         )}
 
-        {displayedMessages.map((msg, idx) => {
+        {hiddenLoadedCount > 0 && (
+          <div className="flex items-center justify-center my-1">
+            <button
+              type="button"
+              onClick={() => expandLocalMessageWindow(150)}
+              className="px-3 py-1 rounded-full bg-white/85 dark:bg-[#0e1726]/85 border border-[#e2e8f0] dark:border-[#1e3148] text-[11px] font-medium text-[#64748b] dark:text-[#7b93ad] hover:text-[#2481cc] dark:hover:text-[#2ba0ff] cursor-pointer transition-colors"
+            >
+              展开更早 {Math.min(150, hiddenLoadedCount)} 条消息（共 {hiddenLoadedCount} 条已折叠）
+            </button>
+          </div>
+        )}
+
+        {renderedMessages.map((msg, idx) => {
           const isMe = msg.sender === 'me';
           const isSystemNotice = msg.sender === 'system';
           const isGroupPeer = Boolean(chat.isGroup && !isMe && !isSystemNotice);
           const dayKey = getMessageDayKey(msg);
-          const prevMsg = idx > 0 ? displayedMessages[idx - 1] : null;
-          const nextMsg = idx < displayedMessages.length - 1 ? displayedMessages[idx + 1] : null;
+          const prevMsg = idx > 0 ? renderedMessages[idx - 1] : null;
+          const nextMsg = idx < renderedMessages.length - 1 ? renderedMessages[idx + 1] : null;
           const prevDayKey = prevMsg ? getMessageDayKey(prevMsg) : null;
           const nextDayKey = nextMsg ? getMessageDayKey(nextMsg) : null;
           const showDayDivider = idx === 0 || dayKey !== prevDayKey;
