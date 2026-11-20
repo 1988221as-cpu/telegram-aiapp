@@ -40,6 +40,26 @@ let legacyMigratedSeedBytes: Uint8Array | null = null;
 let legacySeedChecked = false;
 const inMemoryCache = new Map<string, any>();
 const pendingAsyncWrites = new Map<string, Promise<void>>();
+const pendingAsyncWriteOutcomes = new Map<string, Promise<{ ok: boolean; ciphertext?: string; aborted?: boolean; error?: string }>>();
+const failedAsyncWriteKeys = new Map<string, string>();
+const lastCommittedCiphertext = new Map<string, string>();
+const keyWriteSeq = new Map<string, number>();
+let cryptoStorageEpoch = 0;
+
+export interface CryptoSyncWriteResult {
+  ok: boolean;
+  mode: 'dpapi' | 'webcrypto_async' | 'node_fallback' | 'none';
+  ciphertext?: string;
+  writePromise?: Promise<boolean>;
+  error?: string;
+}
+
+export interface CryptoFlushResult {
+  ok: boolean;
+  failedKeys: string[];
+  verifiedKeys: string[];
+  aborted: boolean;
+}
 
 function bytesToBase64(bytes: Uint8Array): string {
   let binary = '';
@@ -585,38 +605,139 @@ export function secureGetItemSync<T = any>(storageKey: string): T | null {
   return null;
 }
 
-function enqueueAsyncAesGcmPersist(storageKey: string, data: any): void {
+export function getCryptoStorageEpoch(): number {
+  return cryptoStorageEpoch;
+}
+
+function enqueueAsyncAesGcmPersist(
+  storageKey: string,
+  data: any
+): Promise<{ ok: boolean; ciphertext?: string; aborted?: boolean; error?: string }> {
+  const capturedEpoch = cryptoStorageEpoch;
+  const seq = (keyWriteSeq.get(storageKey) || 0) + 1;
+  keyWriteSeq.set(storageKey, seq);
+  failedAsyncWriteKeys.delete(storageKey);
+
   const prev = pendingAsyncWrites.get(storageKey) || Promise.resolve();
-  const next = prev
+  const outcomePromise: Promise<{ ok: boolean; ciphertext?: string; aborted?: boolean; error?: string }> = prev
     .catch(() => {})
     .then(async () => {
-      // Only write if cache was not subsequently purged/removed
-      if (!inMemoryCache.has(storageKey)) return;
+      // Abort cleanly if cache was cleared/purged or key removed/superseded
+      if (
+        capturedEpoch !== cryptoStorageEpoch ||
+        keyWriteSeq.get(storageKey) !== seq ||
+        !inMemoryCache.has(storageKey)
+      ) {
+        return { ok: false, aborted: true };
+      }
       const latestData = inMemoryCache.get(storageKey);
       const encrypted = await encryptDataAsync(latestData !== undefined ? latestData : data);
-      if (inMemoryCache.has(storageKey)) {
-        localStorage.setItem(storageKey, encrypted);
+      if (
+        capturedEpoch !== cryptoStorageEpoch ||
+        keyWriteSeq.get(storageKey) !== seq ||
+        !inMemoryCache.has(storageKey)
+      ) {
+        return { ok: false, aborted: true };
       }
+      if (typeof localStorage === 'undefined') {
+        failedAsyncWriteKeys.set(storageKey, 'localStorage unavailable');
+        return { ok: false, error: 'localStorage unavailable' };
+      }
+      localStorage.setItem(storageKey, encrypted);
+      const verified = localStorage.getItem(storageKey) === encrypted && isTrueAesGcmCiphertext(encrypted);
+      if (!verified) {
+        failedAsyncWriteKeys.set(storageKey, 'localStorage ciphertext readback mismatch');
+        return { ok: false, error: 'localStorage ciphertext readback mismatch' };
+      }
+      lastCommittedCiphertext.set(storageKey, encrypted);
+      failedAsyncWriteKeys.delete(storageKey);
+      return { ok: true, ciphertext: encrypted };
     })
-    .catch((err) => {
+    .catch((err: any) => {
+      const msg = String(err?.message || err || 'async_encrypt_failed');
+      if (capturedEpoch === cryptoStorageEpoch && keyWriteSeq.get(storageKey) === seq) {
+        failedAsyncWriteKeys.set(storageKey, msg);
+      }
       console.warn('[WebCryptoStorage] Async AES-256-GCM persist warning:', err);
-    })
+      return { ok: false, error: msg };
+    });
+
+  const voidNext = outcomePromise
+    .then(() => undefined)
     .finally(() => {
-      if (pendingAsyncWrites.get(storageKey) === next) {
+      if (pendingAsyncWrites.get(storageKey) === voidNext) {
         pendingAsyncWrites.delete(storageKey);
       }
+      if (pendingAsyncWriteOutcomes.get(storageKey) === outcomePromise) {
+        pendingAsyncWriteOutcomes.delete(storageKey);
+      }
     });
-  pendingAsyncWrites.set(storageKey, next);
+
+  pendingAsyncWrites.set(storageKey, voidNext);
+  pendingAsyncWriteOutcomes.set(storageKey, outcomePromise);
+  return outcomePromise;
+}
+
+/**
+ * Flushes all pending async AES-256-GCM writes and verifies that each committed
+ * target key matches the exact ciphertext written in the current epoch.
+ */
+export async function flushPendingCryptoWritesWithResult(targetKeys?: string[]): Promise<CryptoFlushResult> {
+  const startEpoch = cryptoStorageEpoch;
+  const scopedList = Array.isArray(targetKeys) && targetKeys.length > 0 ? Array.from(new Set(targetKeys)) : null;
+
+  // Drain any writes queued for these keys (or all keys if unscoped)
+  for (let round = 0; round < 4; round++) {
+    const keysToDrain = scopedList
+      ? scopedList.filter((k) => pendingAsyncWriteOutcomes.has(k) || pendingAsyncWrites.has(k))
+      : Array.from(new Set([...pendingAsyncWriteOutcomes.keys(), ...pendingAsyncWrites.keys()]));
+    if (keysToDrain.length === 0) break;
+    await Promise.allSettled(
+      keysToDrain.map((k) => pendingAsyncWriteOutcomes.get(k) || pendingAsyncWrites.get(k) || Promise.resolve())
+    );
+  }
+
+  if (cryptoStorageEpoch !== startEpoch) {
+    return {
+      ok: false,
+      failedKeys: scopedList || [],
+      verifiedKeys: [],
+      aborted: true,
+    };
+  }
+
+  const keysToVerify = scopedList || Array.from(new Set([...failedAsyncWriteKeys.keys()]));
+  const failedKeys: string[] = [];
+  const verifiedKeys: string[] = [];
+
+  for (const key of keysToVerify) {
+    if (failedAsyncWriteKeys.has(key)) {
+      failedKeys.push(key);
+      continue;
+    }
+    const expectedCiphertext = lastCommittedCiphertext.get(key);
+    const currentRaw = typeof localStorage !== 'undefined' ? localStorage.getItem(key) : null;
+    if (expectedCiphertext && currentRaw === expectedCiphertext) {
+      verifiedKeys.push(key);
+    } else if (scopedList) {
+      // Caller explicitly asked to verify commit of targetKey in this epoch
+      failedKeys.push(key);
+    }
+  }
+
+  return {
+    ok: failedKeys.length === 0,
+    failedKeys,
+    verifiedKeys,
+    aborted: false,
+  };
 }
 
 /**
  * Flushes all pending async AES-256-GCM writes to localStorage.
  */
 export async function flushPendingCryptoWrites(): Promise<void> {
-  const inflight = Array.from(pendingAsyncWrites.values());
-  if (inflight.length > 0) {
-    await Promise.allSettled(inflight);
-  }
+  await flushPendingCryptoWritesWithResult();
 }
 
 if (typeof window !== 'undefined' && typeof window.addEventListener === 'function') {
@@ -637,9 +758,74 @@ if (typeof window !== 'undefined' && typeof window.addEventListener === 'functio
  */
 export async function secureSetItemAsync(storageKey: string, data: any): Promise<void> {
   if (typeof window === 'undefined') return;
+  const capturedEpoch = cryptoStorageEpoch;
+  const seq = (keyWriteSeq.get(storageKey) || 0) + 1;
+  keyWriteSeq.set(storageKey, seq);
   inMemoryCache.set(storageKey, data);
+  failedAsyncWriteKeys.delete(storageKey);
   const encrypted = await encryptDataAsync(data);
+  if (
+    capturedEpoch !== cryptoStorageEpoch ||
+    keyWriteSeq.get(storageKey) !== seq ||
+    !inMemoryCache.has(storageKey)
+  ) {
+    return;
+  }
   localStorage.setItem(storageKey, encrypted);
+  if (localStorage.getItem(storageKey) === encrypted && isTrueAesGcmCiphertext(encrypted)) {
+    lastCommittedCiphertext.set(storageKey, encrypted);
+  }
+}
+
+/**
+ * Saves an item into in-memory cache synchronously and returns explicit commit result:
+ * - In Electron: synchronous DPAPI + AES-256-GCM via main process IPC + ciphertext readback verification.
+ * - In Browser: serialized WebCrypto AES-256-GCM write returning tracked writePromise.
+ * - In insecure context without DPAPI/WebCrypto: keeps in memory only; fails closed (`ok: false`).
+ */
+export function secureSetItemSyncWithResult(storageKey: string, data: any): CryptoSyncWriteResult {
+  if (typeof window === 'undefined' && typeof localStorage === 'undefined') {
+    return { ok: false, mode: 'none', error: 'storage unavailable' };
+  }
+
+  inMemoryCache.set(storageKey, data);
+  failedAsyncWriteKeys.delete(storageKey);
+
+  const bridge = getElectronBridge();
+  if (bridge) {
+    try {
+      const jsonStr = typeof data === 'string' ? data : JSON.stringify(data);
+      const gcmCipher = bridge.encryptSync(jsonStr);
+      if (gcmCipher && isTrueAesGcmCiphertext(gcmCipher)) {
+        keyWriteSeq.set(storageKey, (keyWriteSeq.get(storageKey) || 0) + 1);
+        localStorage.setItem(storageKey, gcmCipher);
+        const verified = localStorage.getItem(storageKey) === gcmCipher;
+        if (!verified) {
+          failedAsyncWriteKeys.set(storageKey, 'localStorage write readback mismatch');
+          return { ok: false, mode: 'dpapi', error: 'localStorage write readback mismatch' };
+        }
+        lastCommittedCiphertext.set(storageKey, gcmCipher);
+        return { ok: true, mode: 'dpapi', ciphertext: gcmCipher };
+      }
+      failedAsyncWriteKeys.set(storageKey, 'Electron DPAPI encryptSync returned invalid ciphertext');
+      return { ok: false, mode: 'dpapi', error: 'Electron DPAPI encryptSync returned invalid ciphertext' };
+    } catch (err: any) {
+      const errMsg = String(err?.message || err || 'dpapi_write_failed');
+      failedAsyncWriteKeys.set(storageKey, errMsg);
+      return { ok: false, mode: 'dpapi', error: errMsg };
+    }
+  }
+
+  if (hasWebCryptoSubtle()) {
+    const outcomePromise = enqueueAsyncAesGcmPersist(storageKey, data);
+    return {
+      ok: true,
+      mode: 'webcrypto_async',
+      writePromise: outcomePromise.then((res) => Boolean(res.ok && !res.aborted)),
+    };
+  }
+
+  return { ok: false, mode: 'none', error: 'AES-256-GCM 写入通道不可用' };
 }
 
 /**
@@ -649,23 +835,7 @@ export async function secureSetItemAsync(storageKey: string, data: any): Promise
  * - In insecure context without DPAPI/WebCrypto: keeps in memory only; never writes downgraded XOR ciphertext.
  */
 export function secureSetItemSync(storageKey: string, data: any): void {
-  if (typeof window === 'undefined' && typeof localStorage === 'undefined') return;
-
-  inMemoryCache.set(storageKey, data);
-
-  const bridge = getElectronBridge();
-  if (bridge) {
-    const jsonStr = typeof data === 'string' ? data : JSON.stringify(data);
-    const gcmCipher = bridge.encryptSync(jsonStr);
-    if (gcmCipher && isTrueAesGcmCiphertext(gcmCipher)) {
-      localStorage.setItem(storageKey, gcmCipher);
-    }
-    return;
-  }
-
-  if (hasWebCryptoSubtle()) {
-    enqueueAsyncAesGcmPersist(storageKey, data);
-  }
+  void secureSetItemSyncWithResult(storageKey, data);
 }
 
 /**
@@ -701,8 +871,12 @@ export async function secureGetItemAsync<T = any>(storageKey: string): Promise<T
  * Removes an item from both the in-memory decryption cache and localStorage.
  */
 export function secureRemoveItem(storageKey: string): void {
+  keyWriteSeq.set(storageKey, (keyWriteSeq.get(storageKey) || 0) + 1);
   inMemoryCache.delete(storageKey);
   pendingAsyncWrites.delete(storageKey);
+  pendingAsyncWriteOutcomes.delete(storageKey);
+  failedAsyncWriteKeys.delete(storageKey);
+  lastCommittedCiphertext.delete(storageKey);
   if (typeof localStorage !== 'undefined') {
     try {
       localStorage.removeItem(storageKey);
@@ -715,8 +889,13 @@ export function secureRemoveItem(storageKey: string): void {
  * immediately read from the updated localStorage values and key store.
  */
 export function clearCryptoStorageCache(): void {
+  cryptoStorageEpoch++;
   inMemoryCache.clear();
   pendingAsyncWrites.clear();
+  pendingAsyncWriteOutcomes.clear();
+  failedAsyncWriteKeys.clear();
+  lastCommittedCiphertext.clear();
+  keyWriteSeq.clear();
   cachedCryptoKey = null;
   initPromise = null;
 }

@@ -19,10 +19,12 @@ import {
   downloadDatabaseBackup,
   uploadDatabaseRestore,
   purgeDatabaseApi,
+  flushLocalMessagesPersist,
 } from '../services/apiService';
 import {
   clearCryptoStorageCache,
   flushPendingCryptoWrites,
+  flushPendingCryptoWritesWithResult,
   secureGetItemAsync,
   secureSetItemAsync,
 } from '../services/cryptoStorage';
@@ -190,7 +192,15 @@ export const DatabaseModal: React.FC<DatabaseModalProps> = ({ isOpen, onClose, o
     try {
       setBackupLoading(true);
       setActionNotice(null);
-      await flushPendingCryptoWrites();
+      const msgFlush = await flushLocalMessagesPersist();
+      const cryptoFlush = await flushPendingCryptoWritesWithResult();
+      if (!msgFlush.ok || !cryptoFlush.ok) {
+        setActionNotice({
+          success: false,
+          message: '本地加密消息或密文缓存尚有未完成写入且校验失败，已中止导出以免生成不完整备份',
+        });
+        return;
+      }
       const sqliteSnapshot = await downloadDatabaseBackup('client-encrypt');
 
       const localPayload: Record<string, string | null> = {};

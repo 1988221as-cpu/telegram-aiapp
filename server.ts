@@ -15,6 +15,7 @@ import { fileURLToPath } from 'url';
 import { createRequire } from 'module';
 import dotenv from 'dotenv';
 import busboy from 'busboy';
+import { monitorEventLoopDelay } from 'perf_hooks';
 
 export const isElectronMainProcess = Boolean(
   (process as any).versions?.electron && process.env.ELECTRON_RUN_AS_NODE !== '1'
@@ -2417,6 +2418,11 @@ export interface TelegramAccountRuntimeState {
   isAuthorized: boolean;
   transportConnected: boolean;
   senderIsReconnecting: boolean;
+  reconnectingSinceAt: number | null;
+  connectingSinceAt: number | null;
+  suspectedStuckWarningAt: number | null;
+  reconnectProbeFailures: number;
+  lastHealthProbeAt: number;
   lastConnectedAt: number | null;
   lastDisconnectedAt: number | null;
   lastFailureAt: number | null;
@@ -2427,6 +2433,7 @@ export interface TelegramAccountRuntimeState {
   offlineReason: string | null;
   proxyFingerprint: string;
   activeRestoreTask: Promise<boolean> | null;
+  abortActiveRestore: (() => void) | null;
 }
 
 export const telegramAccountRuntimeStates = new Map<string, TelegramAccountRuntimeState>();
@@ -2537,6 +2544,11 @@ export function getOrCreateTelegramAccountRuntimeState(opts: {
     isAuthorized: true,
     transportConnected: false,
     senderIsReconnecting: false,
+    reconnectingSinceAt: null,
+    connectingSinceAt: null,
+    suspectedStuckWarningAt: null,
+    reconnectProbeFailures: 0,
+    lastHealthProbeAt: 0,
     lastConnectedAt: null,
     lastDisconnectedAt: null,
     lastFailureAt: null,
@@ -2547,6 +2559,7 @@ export function getOrCreateTelegramAccountRuntimeState(opts: {
     offlineReason: null,
     proxyFingerprint: '',
     activeRestoreTask: null,
+    abortActiveRestore: null,
   };
   if (accountKey) {
     telegramAccountRuntimeStates.set(accountKey, created);
@@ -2763,6 +2776,61 @@ export function getTelegramAccountConnectionSnapshot(
   };
 }
 
+export const TELEGRAM_CLIENT_RETRY_OPTIONS = {
+  connectionRetries: 3,
+  reconnectRetries: 3,
+  retryDelay: 1000,
+} as const;
+
+export function isTelegramClientGenerationCurrent(
+  client: TelegramClient | null | undefined,
+  meta: { userId?: string; phone?: string; accountId?: string }
+): boolean {
+  if (!client) return false;
+  const anyClient = client as any;
+  if (anyClient._destroyed) return false;
+  const stampedGen = anyClient._tgProGenerationId;
+  if (typeof stampedGen !== 'number') return true;
+  const runtimeKey = resolveTelegramAccountRuntimeKey(meta);
+  if (!runtimeKey) return true;
+  const runtime = telegramAccountRuntimeStates.get(runtimeKey);
+  if (!runtime) return true;
+  return runtime.generationId === stampedGen;
+}
+
+export function syncAccountReconnectLifecycleMarkers(
+  runtime: TelegramAccountRuntimeState,
+  inspected: ReturnType<typeof inspectGramJsClientState>,
+  now = Date.now()
+): void {
+  runtime.transportConnected = inspected.transportConnected;
+  runtime.senderIsReconnecting = inspected.senderIsReconnecting;
+  if (inspected.userConnected && inspected.transportConnected && !inspected.senderIsReconnecting) {
+    runtime.lastConnectedAt = runtime.lastConnectedAt || now;
+    runtime.reconnectingSinceAt = null;
+    runtime.connectingSinceAt = null;
+    runtime.suspectedStuckWarningAt = null;
+    runtime.reconnectProbeFailures = 0;
+    return;
+  }
+  if (inspected.senderIsReconnecting) {
+    if (runtime.reconnectingSinceAt === null) {
+      runtime.reconnectingSinceAt = now;
+    }
+  } else {
+    runtime.reconnectingSinceAt = null;
+    runtime.suspectedStuckWarningAt = null;
+    runtime.reconnectProbeFailures = 0;
+  }
+  if (inspected.senderIsConnecting) {
+    if (runtime.connectingSinceAt === null) {
+      runtime.connectingSinceAt = now;
+    }
+  } else {
+    runtime.connectingSinceAt = null;
+  }
+}
+
 export function attachTelegramConnectionStateTracker(
   client: TelegramClient | null | undefined,
   meta: { userId?: string; phone?: string; accountId?: string }
@@ -2774,8 +2842,7 @@ export function attachTelegramConnectionStateTracker(
 
   const runtime = getOrCreateTelegramAccountRuntimeState(meta);
   const inspected = inspectGramJsClientState(client);
-  runtime.transportConnected = inspected.transportConnected;
-  runtime.senderIsReconnecting = inspected.senderIsReconnecting;
+  syncAccountReconnectLifecycleMarkers(runtime, inspected, Date.now());
   if (inspected.userConnected && inspected.transportConnected) {
     runtime.lastConnectedAt = Date.now();
   }
@@ -2928,6 +2995,410 @@ export function pruneExpiredTelegramFloodCooldowns(now = Date.now()): number {
   }
   return pruned;
 }
+
+// ==================== SYSTEM PERFORMANCE METRICS & WRAPPED RPC TELEMETRY ====================
+const performanceQueueStatsProviders = new Map<string, () => any>();
+
+export function registerPerformanceQueueStatsProvider(name: string, provider: () => any): void {
+  performanceQueueStatsProviders.set(name, provider);
+}
+
+export function sanitizePerformanceMetricError(rawErr?: any): string | null {
+  if (rawErr === undefined || rawErr === null) return null;
+  let text = String(rawErr?.errorMessage || rawErr?.message || rawErr || '').trim();
+  if (!text) return null;
+  // Strip stack traces & multi-line internals
+  text = text.split(/\r?\n/)[0].replace(/\s+/g, ' ').trim();
+  // Redact tokens, bot secrets, hashes, phone numbers, and session strings
+  text = text.replace(/Bearer\s+[A-Za-z0-9._\-]+/gi, 'Bearer [REDACTED]');
+  text = text.replace(/bot\d+:[A-Za-z0-9_\-]+/gi, 'bot[REDACTED]');
+  text = text.replace(/\+\d[\d\s\-]{5,}\d/g, '[PHONE_REDACTED]');
+  text = text.replace(/\b[0-9a-f]{32,}\b/gi, '[HEX_REDACTED]');
+  text = text.replace(/\b[A-Za-z0-9+/=_\-]{36,}\b/g, '[TOKEN_REDACTED]');
+  if (text.length > 160) {
+    text = text.slice(0, 157) + '...';
+  }
+  return text || null;
+}
+
+let eventLoopDelayHistogram: ReturnType<typeof monitorEventLoopDelay> | null = null;
+let perfMonitorStartedAt = Date.now();
+let perfLastCpuUsage = process.cpuUsage();
+let perfLastCpuAt = Date.now();
+let perfLastCpuSnapshot: { sampled: boolean; userPct: number | null; systemPct: number | null } = {
+  sampled: false,
+  userPct: null,
+  systemPct: null,
+};
+
+function ensureEventLoopDelayMonitorStarted(): ReturnType<typeof monitorEventLoopDelay> | null {
+  if (!eventLoopDelayHistogram) {
+    try {
+      eventLoopDelayHistogram = monitorEventLoopDelay({ resolution: 20 });
+      eventLoopDelayHistogram.enable();
+      perfMonitorStartedAt = Date.now();
+    } catch {
+      eventLoopDelayHistogram = null;
+    }
+  }
+  return eventLoopDelayHistogram;
+}
+ensureEventLoopDelayMonitorStarted();
+
+const wrappedRpcMetrics = {
+  totalCalls: 0,
+  successCalls: 0,
+  failedCalls: 0,
+  timeoutCalls: 0,
+  totalDurationMs: 0,
+  maxDurationMs: 0,
+  lastError: null as string | null,
+  lastErrorAt: null as number | null,
+  lastOp: null as string | null,
+};
+
+export function recordWrappedRpcMetric(
+  opLabel: string,
+  durationMs: number,
+  ok: boolean,
+  err?: any,
+  isTimeout = false
+): void {
+  const safeDur = Number.isFinite(durationMs) && durationMs >= 0 ? durationMs : 0;
+  wrappedRpcMetrics.totalCalls += 1;
+  wrappedRpcMetrics.totalDurationMs += safeDur;
+  if (safeDur > wrappedRpcMetrics.maxDurationMs) {
+    wrappedRpcMetrics.maxDurationMs = safeDur;
+  }
+  wrappedRpcMetrics.lastOp = opLabel ? String(opLabel).slice(0, 64) : null;
+  if (ok) {
+    wrappedRpcMetrics.successCalls += 1;
+  } else {
+    wrappedRpcMetrics.failedCalls += 1;
+    if (isTimeout) wrappedRpcMetrics.timeoutCalls += 1;
+    const sanitized = sanitizePerformanceMetricError(err);
+    if (sanitized) {
+      wrappedRpcMetrics.lastError = sanitized;
+      wrappedRpcMetrics.lastErrorAt = Date.now();
+    }
+  }
+}
+
+export function resetWrappedRpcMetricsForTesting(): void {
+  wrappedRpcMetrics.totalCalls = 0;
+  wrappedRpcMetrics.successCalls = 0;
+  wrappedRpcMetrics.failedCalls = 0;
+  wrappedRpcMetrics.timeoutCalls = 0;
+  wrappedRpcMetrics.totalDurationMs = 0;
+  wrappedRpcMetrics.maxDurationMs = 0;
+  wrappedRpcMetrics.lastError = null;
+  wrappedRpcMetrics.lastErrorAt = null;
+  wrappedRpcMetrics.lastOp = null;
+  perfLastCpuUsage = process.cpuUsage();
+  perfLastCpuAt = Date.now();
+  perfLastCpuSnapshot = { sampled: false, userPct: null, systemPct: null };
+}
+
+export function getSystemPerformanceMetricsSnapshot(now = Date.now()) {
+  const hist = ensureEventLoopDelayMonitorStarted();
+  const monitorAgeMs = Math.max(0, now - perfMonitorStartedAt);
+  const elCount = Number((hist as any)?.count || 0);
+  const elSampled = Boolean(hist && monitorAgeMs >= 500 && elCount > 0);
+  const nsToMs = (ns: number) =>
+    Number.isFinite(ns) && ns < 1e13 ? Math.round((ns / 1e6) * 100) / 100 : null;
+
+  const eventLoop = elSampled && hist
+    ? {
+        sampled: true,
+        sampleCount: elCount,
+        minMs: nsToMs(hist.min),
+        meanMs: nsToMs(hist.mean),
+        maxMs: nsToMs(hist.max),
+        p50Ms: nsToMs(hist.percentile(50)),
+        p95Ms: nsToMs(hist.percentile(95)),
+        p99Ms: nsToMs(hist.percentile(99)),
+      }
+    : {
+        sampled: false,
+        sampleCount: elCount,
+        minMs: null,
+        meanMs: null,
+        maxMs: null,
+        p50Ms: null,
+        p95Ms: null,
+        p99Ms: null,
+      };
+
+  const cpuElapsedMs = Math.max(0, now - perfLastCpuAt);
+  if (cpuElapsedMs >= 500) {
+    const delta = process.cpuUsage(perfLastCpuUsage);
+    perfLastCpuUsage = process.cpuUsage();
+    perfLastCpuAt = now;
+    const elapsedUs = cpuElapsedMs * 1000;
+    perfLastCpuSnapshot = {
+      sampled: true,
+      userPct: Math.round(((delta.user / elapsedUs) * 100) * 100) / 100,
+      systemPct: Math.round(((delta.system / elapsedUs) * 100) * 100) / 100,
+    };
+  }
+
+  const mem = process.memoryUsage();
+  const queues: Record<string, any> = {};
+  for (const [k, provider] of performanceQueueStatsProviders.entries()) {
+    try {
+      queues[k] = provider();
+    } catch {}
+  }
+
+  return {
+    ok: true,
+    timestamp: now,
+    uptimeSeconds: Math.round(process.uptime()),
+    eventLoop,
+    cpu: perfLastCpuSnapshot,
+    memory: {
+      rssMb: Math.round((mem.rss / (1024 * 1024)) * 10) / 10,
+      heapUsedMb: Math.round((mem.heapUsed / (1024 * 1024)) * 10) / 10,
+      heapTotalMb: Math.round((mem.heapTotal / (1024 * 1024)) * 10) / 10,
+      externalMb: Math.round((mem.external / (1024 * 1024)) * 10) / 10,
+    },
+    rpc: {
+      scope: 'withTelegramTimeout_wrapped_only',
+      description: '仅统计经 withTelegramTimeout 包装的操作与调度器记录，不包含 GramJS 内部隐式网络请求',
+      totalCalls: wrappedRpcMetrics.totalCalls,
+      successCalls: wrappedRpcMetrics.successCalls,
+      failedCalls: wrappedRpcMetrics.failedCalls,
+      timeoutCalls: wrappedRpcMetrics.timeoutCalls,
+      avgDurationMs:
+        wrappedRpcMetrics.totalCalls > 0
+          ? Math.round((wrappedRpcMetrics.totalDurationMs / wrappedRpcMetrics.totalCalls) * 100) / 100
+          : 0,
+      maxDurationMs: Math.round(wrappedRpcMetrics.maxDurationMs * 100) / 100,
+      lastOp: wrappedRpcMetrics.lastOp,
+      lastError: wrappedRpcMetrics.lastError,
+      lastErrorAt: wrappedRpcMetrics.lastErrorAt,
+    },
+    queues,
+  };
+}
+
+// ==================== PRE-GRAMJS TELEGRAM RPC PRIORITY SCHEDULER (P0 / P1 / P2) ====================
+export type TelegramRpcPriority = 'P0' | 'P1' | 'P2';
+
+export const TELEGRAM_RPC_MAX_CONCURRENT = 4;
+export const TELEGRAM_RPC_P2_MAX_CONCURRENT = 2;
+export const TELEGRAM_RPC_MAX_QUEUED = 256;
+
+interface ScheduledRpcTask {
+  id: number;
+  priority: TelegramRpcPriority;
+  label: string;
+  fn: () => Promise<any>;
+  resolve: (val: any) => void;
+  reject: (err: any) => void;
+  signal?: AbortSignal;
+  abortHandler?: () => void;
+  enqueuedAt: number;
+}
+
+interface AccountRpcSchedulerBucket {
+  inFlight: number;
+  p2InFlight: number;
+  p0: ScheduledRpcTask[];
+  p1: ScheduledRpcTask[];
+  p2: ScheduledRpcTask[];
+}
+
+const accountRpcSchedulerBuckets = new Map<string, AccountRpcSchedulerBucket>();
+let rpcSchedulerTaskSeq = 0;
+const rpcSchedulerTelemetry = {
+  enqueuedTotal: 0,
+  completedTotal: 0,
+  failedTotal: 0,
+  droppedTotal: 0,
+  abortedTotal: 0,
+  maxQueueDepth: 0,
+};
+
+function getOrCreateRpcBucket(accountScope: string): AccountRpcSchedulerBucket {
+  const normalizedKey =
+    resolveTelegramAccountRuntimeKey({ accountId: accountScope }) || String(accountScope || 'global').trim() || 'global';
+  let bucket = accountRpcSchedulerBuckets.get(normalizedKey);
+  if (!bucket) {
+    bucket = { inFlight: 0, p2InFlight: 0, p0: [], p1: [], p2: [] };
+    accountRpcSchedulerBuckets.set(normalizedKey, bucket);
+  }
+  return bucket;
+}
+
+function getBucketTotalQueued(bucket: AccountRpcSchedulerBucket): number {
+  return bucket.p0.length + bucket.p1.length + bucket.p2.length;
+}
+
+function detachRpcAbortListener(task: ScheduledRpcTask): void {
+  if (task.signal && task.abortHandler) {
+    try {
+      task.signal.removeEventListener('abort', task.abortHandler);
+    } catch {}
+    task.abortHandler = undefined;
+  }
+}
+
+function drainRpcSchedulerBucket(accountKey: string, bucket: AccountRpcSchedulerBucket): void {
+  while (bucket.inFlight < TELEGRAM_RPC_MAX_CONCURRENT) {
+    let nextTask: ScheduledRpcTask | undefined;
+    if (bucket.p0.length > 0) {
+      nextTask = bucket.p0.shift();
+    } else if (bucket.p1.length > 0) {
+      nextTask = bucket.p1.shift();
+    } else if (bucket.p2.length > 0 && bucket.p2InFlight < TELEGRAM_RPC_P2_MAX_CONCURRENT) {
+      nextTask = bucket.p2.shift();
+    }
+    if (!nextTask) break;
+
+    detachRpcAbortListener(nextTask);
+    if (nextTask.signal?.aborted) {
+      rpcSchedulerTelemetry.abortedTotal += 1;
+      const err: any = new Error('RPC 请求已取消');
+      err.code = 'RPC_ABORTED';
+      nextTask.reject(err);
+      continue;
+    }
+
+    bucket.inFlight += 1;
+    if (nextTask.priority === 'P2') {
+      bucket.p2InFlight += 1;
+    }
+
+    const activeTask = nextTask;
+    Promise.resolve()
+      .then(() => activeTask.fn())
+      .then(
+        (res) => {
+          rpcSchedulerTelemetry.completedTotal += 1;
+          activeTask.resolve(res);
+        },
+        (err) => {
+          rpcSchedulerTelemetry.failedTotal += 1;
+          activeTask.reject(err);
+        }
+      )
+      .finally(() => {
+        bucket.inFlight = Math.max(0, bucket.inFlight - 1);
+        if (activeTask.priority === 'P2') {
+          bucket.p2InFlight = Math.max(0, bucket.p2InFlight - 1);
+        }
+        drainRpcSchedulerBucket(accountKey, bucket);
+        if (bucket.inFlight === 0 && getBucketTotalQueued(bucket) === 0) {
+          accountRpcSchedulerBuckets.delete(accountKey);
+        }
+      });
+  }
+}
+
+export function scheduleTelegramRpc<T>(
+  accountScope: string,
+  priority: TelegramRpcPriority,
+  label: string,
+  fn: () => Promise<T>,
+  options?: { signal?: AbortSignal }
+): Promise<T> {
+  if (options?.signal?.aborted) {
+    const err: any = new Error('RPC 请求已取消');
+    err.code = 'RPC_ABORTED';
+    return Promise.reject(err);
+  }
+  const normalizedKey =
+    resolveTelegramAccountRuntimeKey({ accountId: accountScope }) || String(accountScope || 'global').trim() || 'global';
+  const bucket = getOrCreateRpcBucket(normalizedKey);
+  const currentTotalQueued = getBucketTotalQueued(bucket);
+
+  if (currentTotalQueued >= TELEGRAM_RPC_MAX_QUEUED) {
+    if ((priority === 'P0' || priority === 'P1') && bucket.p2.length > 0) {
+      const evicted = bucket.p2.pop()!;
+      detachRpcAbortListener(evicted);
+      rpcSchedulerTelemetry.droppedTotal += 1;
+      const evictErr: any = new Error('低优先级 RPC 任务因高优消息抢占被丢弃');
+      evictErr.code = 'TELEGRAM_RPC_QUEUE_FULL';
+      evicted.reject(evictErr);
+    } else {
+      rpcSchedulerTelemetry.droppedTotal += 1;
+      const err: any = new Error(`Telegram RPC 调度队列已满（${TELEGRAM_RPC_MAX_QUEUED}）`);
+      err.code = 'TELEGRAM_RPC_QUEUE_FULL';
+      return Promise.reject(err);
+    }
+  }
+
+  return new Promise<T>((resolve, reject) => {
+    const task: ScheduledRpcTask = {
+      id: ++rpcSchedulerTaskSeq,
+      priority,
+      label,
+      fn,
+      resolve,
+      reject,
+      signal: options?.signal,
+      enqueuedAt: Date.now(),
+    };
+
+    if (options?.signal) {
+      const onAbort = () => {
+        for (const q of [bucket.p0, bucket.p1, bucket.p2]) {
+          const idx = q.indexOf(task);
+          if (idx >= 0) {
+            q.splice(idx, 1);
+            detachRpcAbortListener(task);
+            rpcSchedulerTelemetry.abortedTotal += 1;
+            const err: any = new Error('RPC 请求已取消');
+            err.code = 'RPC_ABORTED';
+            reject(err);
+            return;
+          }
+        }
+      };
+      task.abortHandler = onAbort;
+      options.signal.addEventListener('abort', onAbort, { once: true });
+    }
+
+    if (priority === 'P0') bucket.p0.push(task);
+    else if (priority === 'P1') bucket.p1.push(task);
+    else bucket.p2.push(task);
+
+    rpcSchedulerTelemetry.enqueuedTotal += 1;
+    const depth = getBucketTotalQueued(bucket);
+    if (depth > rpcSchedulerTelemetry.maxQueueDepth) {
+      rpcSchedulerTelemetry.maxQueueDepth = depth;
+    }
+
+    drainRpcSchedulerBucket(normalizedKey, bucket);
+  });
+}
+
+export function getTelegramRpcSchedulerStats() {
+  let queuedP0 = 0;
+  let queuedP1 = 0;
+  let queuedP2 = 0;
+  let inFlight = 0;
+  for (const b of accountRpcSchedulerBuckets.values()) {
+    queuedP0 += b.p0.length;
+    queuedP1 += b.p1.length;
+    queuedP2 += b.p2.length;
+    inFlight += b.inFlight;
+  }
+  return {
+    activeBuckets: accountRpcSchedulerBuckets.size,
+    inFlight,
+    queuedP0,
+    queuedP1,
+    queuedP2,
+    maxConcurrentPerAccount: TELEGRAM_RPC_MAX_CONCURRENT,
+    p2MaxConcurrentPerAccount: TELEGRAM_RPC_P2_MAX_CONCURRENT,
+    maxQueuePerAccount: TELEGRAM_RPC_MAX_QUEUED,
+    ...rpcSchedulerTelemetry,
+  };
+}
+
+registerPerformanceQueueStatsProvider('telegramRpcScheduler', getTelegramRpcSchedulerStats);
 
 function formatTelegramFileSize(bytes?: number): string {
   const n = Number(bytes || 0);
@@ -3269,12 +3740,17 @@ export async function fetchTelegramUserDialogs(
 ) {
   const ownerUserId = explicitUserId || ((client as any)?._selfId ? String((client as any)._selfId) : '');
   const accountScope = ownerUserId ? `acc_tg_${ownerUserId}` : '';
+  const rpcScope = accountScope || ownerUserId || 'global';
   try {
-    const mainDialogs = await client.getDialogs({ limit, folder: 0 });
+    const mainDialogs = await scheduleTelegramRpc(rpcScope, 'P1', 'messages.GetDialogs.main', () =>
+      client.getDialogs({ limit, folder: 0 })
+    );
     let archivedDialogs: any[] = [];
     let archivedFetchFailed = false;
     try {
-      archivedDialogs = await client.getDialogs({ limit: Math.max(limit, 200), folder: 1 });
+      archivedDialogs = await scheduleTelegramRpc(rpcScope, 'P1', 'messages.GetDialogs.archived', () =>
+        client.getDialogs({ limit: Math.max(limit, 200), folder: 1 })
+      );
     } catch (archivedErr: any) {
       if (isTelegramSessionExpiredError(archivedErr) || extractFloodWaitSeconds(archivedErr) !== null) {
         throw archivedErr;
@@ -3526,10 +4002,15 @@ async function refreshDialogEntityCacheSafely(
     } catch {}
     if (!includeArchived) return;
   }
+  const rpcScope = uid ? `acc_tg_${uid}` : 'global';
   try {
-    await client.getDialogs({ limit });
+    await scheduleTelegramRpc(rpcScope, 'P1', 'messages.GetDialogs.refreshCache', () =>
+      client.getDialogs({ limit })
+    );
     if (includeArchived) {
-      await client.getDialogs({ limit: Math.min(Math.max(limit, 100), 200), folder: 1 }).catch(() => {});
+      await scheduleTelegramRpc(rpcScope, 'P1', 'messages.GetDialogs.refreshArchivedCache', () =>
+        client.getDialogs({ limit: Math.min(Math.max(limit, 100), 200), folder: 1 })
+      ).catch(() => {});
     }
   } catch (err: any) {
     if (floodCtx) {
@@ -6091,6 +6572,23 @@ app.get('/api/database/status', requireTenantAuth, async (req: Request, res: Res
   }
 });
 
+// 1.1 System Performance & Queue Telemetry Metrics (Master member scoped, sanitized)
+app.get('/api/system/performance-metrics', requireTenantAuth, async (req: Request, res: Response) => {
+  try {
+    const authContext = (req as any).auth;
+    const session = authContext?.session;
+    if (!session || session.isBot || authContext?.isBot || !session.isMaster) {
+      return res.status(403).json({ ok: false, error: '权限不足：仅主账号会员有权查看系统性能遥测指标' });
+    }
+    return res.json(getSystemPerformanceMetricsSnapshot());
+  } catch (error: any) {
+    return res.status(500).json({
+      ok: false,
+      error: sanitizePerformanceMetricError(error) || '获取性能遥测失败',
+    });
+  }
+});
+
 // 1.1 Export Database Snapshot (Protected: Authenticated Desktop Member Only, Blocks Bot Webhook, Never leaks plaintext on direct download)
 app.get('/api/database/backup', requireTenantAuth, async (req: Request, res: Response) => {
   try {
@@ -6890,13 +7388,537 @@ export async function upsertScopedCustomerProfile(params: {
   }
 }
 
-export async function upsertSyncedMessageToDb(
-  rawMsg: any,
-  fallbackChatId = '',
-  fallbackAccountId = 'acc_1'
+// ==================== CAUSAL BOUNDED SQLITE MESSAGE WRITE QUEUE ====================
+export type MessageDbWritePriority = 'HIGH' | 'NORMAL' | 'LOW';
+export type MessageDbWriteKind =
+  | 'upsert'
+  | 'edit'
+  | 'delete_channel'
+  | 'delete_non_channel'
+  | 'pin'
+  | 'reactions'
+  | 'stt'
+  | 'clear_chat'
+  | 'sync_empty_clear';
+
+export const MESSAGE_DB_QUEUE_MAX_SIZE = 2000;
+export const MESSAGE_DB_QUEUE_HIGH_WATER = 1400;
+export const MESSAGE_DB_QUEUE_BATCH_SIZE = 50;
+export const MESSAGE_DB_QUEUE_BATCH_WINDOW_MS = 35;
+export const MESSAGE_DELETE_BARRIER_TTL_MS = 20_000;
+export const MESSAGE_DELETE_BARRIER_MAX = 5000;
+
+interface MessageDbWriteTask {
+  seq: number;
+  priority: MessageDbWritePriority;
+  kind: MessageDbWriteKind;
+  accountId: string;
+  accountKey: string;
+  canonicalChatId: string;
+  tgMsgIds: number[];
+  causalKey: string;
+  snapshotTakenAt?: number;
+  enqueuedAt: number;
+  exec: () => Promise<any>;
+  resolve: (val: any) => void;
+  reject: (err: any) => void;
+}
+
+const msgDbHighQueue: MessageDbWriteTask[] = [];
+const msgDbNormalQueue: MessageDbWriteTask[] = [];
+const msgDbLowQueue: MessageDbWriteTask[] = [];
+let msgDbQueueSeq = 0;
+let msgDbFlushTimer: NodeJS.Timeout | null = null;
+let msgDbActiveFlushPromise: Promise<void> | null = null;
+
+// Short-lived deletion barrier so stale in-flight LOW history sync snapshots cannot resurrect deleted messages
+const recentDeletedTgBarriers = new Map<string, number>();
+const recentClearedChatBarriers = new Map<string, number>();
+
+const messageDbWriteQueueStats = {
+  enqueuedTotal: 0,
+  committedTotal: 0,
+  failedTotal: 0,
+  batchCommitsTotal: 0,
+  busyRetriesTotal: 0,
+  droppedLowTotal: 0,
+  suppressedResurrectionTotal: 0,
+  maxQueueDepth: 0,
+};
+
+function normalizeMsgDbAccountKey(accountId?: string): string {
+  const raw = String(accountId || '').trim();
+  if (!raw) return 'default';
+  return resolveTelegramAccountRuntimeKey({ accountId: raw }) || raw;
+}
+
+function normalizeMsgDbCanonicalChatId(chatId?: string): string {
+  const raw = String(chatId || '').trim();
+  if (!raw) return '';
+  if (raw.startsWith('tg_') || raw.startsWith('chat_')) return raw;
+  return /^-?\d+$/.test(raw) ? `tg_${raw}` : raw;
+}
+
+export function isMessageBlockedByDeleteBarrier(
+  accountId: string | undefined,
+  chatId: string | undefined,
+  tgMsgId: number | undefined,
+  snapshotTakenAt?: number,
+  now = Date.now()
+): boolean {
+  const accKey = normalizeMsgDbAccountKey(accountId);
+  const canonicalChat = normalizeMsgDbCanonicalChatId(chatId);
+  const refTs = snapshotTakenAt ?? now;
+
+  if (canonicalChat) {
+    const clearKey = `${accKey}::${canonicalChat}`;
+    const clearTs = recentClearedChatBarriers.get(clearKey);
+    if (clearTs !== undefined) {
+      if (now - clearTs > MESSAGE_DELETE_BARRIER_TTL_MS) {
+        recentClearedChatBarriers.delete(clearKey);
+      } else if (refTs <= clearTs) {
+        return true;
+      }
+    }
+  }
+
+  if (tgMsgId && Number.isInteger(tgMsgId) && tgMsgId > 0) {
+    if (canonicalChat) {
+      const chBarrierKey = `${accKey}::${canonicalChat}::tg_${tgMsgId}`;
+      const chTs = recentDeletedTgBarriers.get(chBarrierKey);
+      if (chTs !== undefined) {
+        if (now - chTs > MESSAGE_DELETE_BARRIER_TTL_MS) {
+          recentDeletedTgBarriers.delete(chBarrierKey);
+        } else if (refTs <= chTs) {
+          return true;
+        }
+      }
+    }
+    const nonChBarrierKey = `${accKey}::nonchannel::tg_${tgMsgId}`;
+    const isChannelChat = Boolean(
+      canonicalChat && (canonicalChat.startsWith('tg_-100') || canonicalChat.startsWith('-100'))
+    );
+    if (!isChannelChat) {
+      const ncTs = recentDeletedTgBarriers.get(nonChBarrierKey);
+      if (ncTs !== undefined) {
+        if (now - ncTs > MESSAGE_DELETE_BARRIER_TTL_MS) {
+          recentDeletedTgBarriers.delete(nonChBarrierKey);
+        } else if (refTs <= ncTs) {
+          return true;
+        }
+      }
+    }
+  }
+  return false;
+}
+
+export function recordMessageDeleteResurrectionBarrier(opts: {
+  accountId?: string;
+  chatId?: string;
+  tgMsgIds?: number[];
+  clearChat?: boolean;
+  now?: number;
+}): void {
+  const now = opts.now ?? Date.now();
+  const accKey = normalizeMsgDbAccountKey(opts.accountId);
+  const canonicalChat = normalizeMsgDbCanonicalChatId(opts.chatId);
+
+  if (opts.clearChat && canonicalChat) {
+    recentClearedChatBarriers.set(`${accKey}::${canonicalChat}`, now);
+    // Cancel pending stale LOW history upserts for the cleared chat
+    for (let i = msgDbLowQueue.length - 1; i >= 0; i--) {
+      const t = msgDbLowQueue[i];
+      if (t.accountKey === accKey && t.canonicalChatId === canonicalChat && t.kind === 'upsert') {
+        msgDbLowQueue.splice(i, 1);
+        t.resolve(false);
+      }
+    }
+  }
+
+  if (Array.isArray(opts.tgMsgIds) && opts.tgMsgIds.length > 0) {
+    const idSet = new Set(opts.tgMsgIds.map((n) => Number(n)).filter((n) => Number.isInteger(n) && n > 0));
+    for (const tgId of idSet) {
+      const bKey = canonicalChat
+        ? `${accKey}::${canonicalChat}::tg_${tgId}`
+        : `${accKey}::nonchannel::tg_${tgId}`;
+      recentDeletedTgBarriers.set(bKey, now);
+    }
+    // Purge pending LOW upserts referencing the same deleted telegramMessageIds
+    for (let i = msgDbLowQueue.length - 1; i >= 0; i--) {
+      const t = msgDbLowQueue[i];
+      if (t.accountKey !== accKey || t.kind !== 'upsert') continue;
+      if (canonicalChat && t.canonicalChatId && t.canonicalChatId !== canonicalChat) continue;
+      if (t.tgMsgIds.some((id) => idSet.has(id))) {
+        msgDbLowQueue.splice(i, 1);
+        t.resolve(false);
+      }
+    }
+  }
+
+  if (recentDeletedTgBarriers.size > MESSAGE_DELETE_BARRIER_MAX) {
+    for (const [k, ts] of recentDeletedTgBarriers.entries()) {
+      if (now - ts > MESSAGE_DELETE_BARRIER_TTL_MS) recentDeletedTgBarriers.delete(k);
+    }
+    while (recentDeletedTgBarriers.size > MESSAGE_DELETE_BARRIER_MAX) {
+      const oldest = recentDeletedTgBarriers.keys().next().value;
+      if (oldest === undefined) break;
+      recentDeletedTgBarriers.delete(oldest);
+    }
+  }
+}
+
+export function clearMessageDeleteBarriersForTesting(): void {
+  recentDeletedTgBarriers.clear();
+  recentClearedChatBarriers.clear();
+}
+
+function areMsgDbTasksCausallyDependent(earlier: MessageDbWriteTask, later: MessageDbWriteTask): boolean {
+  if (earlier.accountKey !== later.accountKey) return false;
+  if (
+    earlier.kind === 'clear_chat' ||
+    earlier.kind === 'sync_empty_clear' ||
+    later.kind === 'clear_chat' ||
+    later.kind === 'sync_empty_clear'
+  ) {
+    if (!earlier.canonicalChatId || !later.canonicalChatId || earlier.canonicalChatId === later.canonicalChatId) {
+      return true;
+    }
+  }
+  if (earlier.kind === 'delete_non_channel' || later.kind === 'delete_non_channel') {
+    const other = earlier.kind === 'delete_non_channel' ? later : earlier;
+    const delTask = earlier.kind === 'delete_non_channel' ? earlier : later;
+    const isOtherChannel = Boolean(
+      other.canonicalChatId &&
+        (other.canonicalChatId.startsWith('tg_-100') || other.canonicalChatId.startsWith('-100'))
+    );
+    if (!isOtherChannel) {
+      if (other.tgMsgIds.length === 0 || delTask.tgMsgIds.some((id) => other.tgMsgIds.includes(id))) {
+        return true;
+      }
+    }
+  }
+  if (earlier.canonicalChatId && later.canonicalChatId && earlier.canonicalChatId !== later.canonicalChatId) {
+    return false;
+  }
+  if (earlier.causalKey && later.causalKey && earlier.causalKey === later.causalKey) {
+    return true;
+  }
+  if (earlier.tgMsgIds.length > 0 && later.tgMsgIds.length > 0) {
+    const set = new Set(earlier.tgMsgIds);
+    if (later.tgMsgIds.some((id) => set.has(id))) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function getMsgDbPendingTotal(): number {
+  return msgDbHighQueue.length + msgDbNormalQueue.length + msgDbLowQueue.length;
+}
+
+function removeTaskFromQueues(task: MessageDbWriteTask): void {
+  for (const q of [msgDbHighQueue, msgDbNormalQueue, msgDbLowQueue]) {
+    const idx = q.indexOf(task);
+    if (idx >= 0) {
+      q.splice(idx, 1);
+      return;
+    }
+  }
+}
+
+function dequeueCausalOrderedBatch(maxBatch = MESSAGE_DB_QUEUE_BATCH_SIZE): MessageDbWriteTask[] {
+  const picked: MessageDbWriteTask[] = [];
+  const pickedSet = new Set<MessageDbWriteTask>();
+
+  const pullPrerequisitesAndTask = (root: MessageDbWriteTask) => {
+    if (pickedSet.has(root)) return;
+    const stack: MessageDbWriteTask[] = [root];
+    const closure: MessageDbWriteTask[] = [];
+    const seen = new Set<MessageDbWriteTask>([root]);
+
+    while (stack.length > 0) {
+      const cur = stack.pop()!;
+      closure.push(cur);
+      const allPending = [...msgDbHighQueue, ...msgDbNormalQueue, ...msgDbLowQueue];
+      for (const candidate of allPending) {
+        if (pickedSet.has(candidate) || seen.has(candidate)) continue;
+        if (candidate.seq < cur.seq && areMsgDbTasksCausallyDependent(candidate, cur)) {
+          seen.add(candidate);
+          stack.push(candidate);
+        }
+      }
+    }
+
+    closure.sort((a, b) => a.seq - b.seq);
+    for (const item of closure) {
+      if (!pickedSet.has(item)) {
+        removeTaskFromQueues(item);
+        pickedSet.add(item);
+        picked.push(item);
+      }
+    }
+  };
+
+  for (const q of [msgDbHighQueue, msgDbNormalQueue, msgDbLowQueue]) {
+    while (q.length > 0 && picked.length < maxBatch) {
+      pullPrerequisitesAndTask(q[0]);
+    }
+    if (picked.length >= maxBatch) break;
+  }
+
+  picked.sort((a, b) => a.seq - b.seq);
+  return picked;
+}
+
+function isSqliteBusyError(err: any): boolean {
+  const code = String(err?.code || '').toUpperCase();
+  const msg = String(err?.message || err || '').toUpperCase();
+  return code.includes('SQLITE_BUSY') || msg.includes('SQLITE_BUSY') || msg.includes('DATABASE IS LOCKED');
+}
+
+async function runMessageDbBatchWithRetries(batch: MessageDbWriteTask[]): Promise<void> {
+  if (batch.length === 0) return;
+
+  const attemptBatchTx = async () => {
+    const runTx = db.transaction(async () => {
+      const results: Array<{ ok: boolean; value?: any; error?: any }> = [];
+      for (const task of batch) {
+        const res = await task.exec();
+        results.push({ ok: true, value: res });
+      }
+      return results;
+    });
+    return await runTx();
+  };
+
+  let lastErr: any = null;
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      const results = await attemptBatchTx();
+      messageDbWriteQueueStats.batchCommitsTotal += 1;
+      for (let i = 0; i < batch.length; i++) {
+        messageDbWriteQueueStats.committedTotal += 1;
+        batch[i].resolve(results[i]?.value ?? true);
+      }
+      return;
+    } catch (err: any) {
+      lastErr = err;
+      if (isSqliteBusyError(err) && attempt < 3) {
+        messageDbWriteQueueStats.busyRetriesTotal += 1;
+        await new Promise((r) => setTimeout(r, attempt * 35));
+        continue;
+      }
+      break;
+    }
+  }
+
+  // Batch failed fatally or exhausted SQLITE_BUSY retries -> isolate row faults cleanly
+  for (const task of batch) {
+    let settled = false;
+    let taskErr: any = lastErr;
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      try {
+        const val = await task.exec();
+        messageDbWriteQueueStats.committedTotal += 1;
+        task.resolve(val);
+        settled = true;
+        break;
+      } catch (singleErr: any) {
+        taskErr = singleErr;
+        if (isSqliteBusyError(singleErr) && attempt < 2) {
+          messageDbWriteQueueStats.busyRetriesTotal += 1;
+          await new Promise((r) => setTimeout(r, 30));
+          continue;
+        }
+        break;
+      }
+    }
+    if (!settled) {
+      messageDbWriteQueueStats.failedTotal += 1;
+      task.reject(taskErr);
+    }
+  }
+}
+
+async function drainMessageDbWriteQueue(): Promise<void> {
+  if (msgDbFlushTimer) {
+    clearTimeout(msgDbFlushTimer);
+    msgDbFlushTimer = null;
+  }
+  while (getMsgDbPendingTotal() > 0) {
+    const batch = dequeueCausalOrderedBatch(MESSAGE_DB_QUEUE_BATCH_SIZE);
+    if (batch.length === 0) break;
+    await runMessageDbBatchWithRetries(batch);
+  }
+}
+
+function scheduleMessageDbFlush(immediate = false): Promise<void> {
+  if (immediate || getMsgDbPendingTotal() >= MESSAGE_DB_QUEUE_BATCH_SIZE) {
+    if (msgDbFlushTimer) {
+      clearTimeout(msgDbFlushTimer);
+      msgDbFlushTimer = null;
+    }
+    if (!msgDbActiveFlushPromise) {
+      msgDbActiveFlushPromise = drainMessageDbWriteQueue().finally(() => {
+        msgDbActiveFlushPromise = null;
+        if (getMsgDbPendingTotal() > 0) {
+          scheduleMessageDbFlush(false);
+        }
+      });
+    }
+    return msgDbActiveFlushPromise;
+  }
+
+  if (!msgDbActiveFlushPromise && !msgDbFlushTimer) {
+    msgDbFlushTimer = setTimeout(() => {
+      msgDbFlushTimer = null;
+      void scheduleMessageDbFlush(true);
+    }, MESSAGE_DB_QUEUE_BATCH_WINDOW_MS);
+  }
+  return msgDbActiveFlushPromise || Promise.resolve();
+}
+
+export function enqueueMessageDbWrite<T = any>(opts: {
+  priority: MessageDbWritePriority;
+  kind: MessageDbWriteKind;
+  accountId?: string;
+  chatId?: string;
+  tgMsgIds?: number[];
+  msgId?: string;
+  snapshotTakenAt?: number;
+  exec: () => Promise<T>;
+}): Promise<T> {
+  const accountId = String(opts.accountId || 'acc_1').trim() || 'acc_1';
+  const accountKey = normalizeMsgDbAccountKey(accountId);
+  const canonicalChatId = normalizeMsgDbCanonicalChatId(opts.chatId);
+  const tgMsgIds = Array.isArray(opts.tgMsgIds)
+    ? opts.tgMsgIds.map((n) => Number(n)).filter((n) => Number.isInteger(n) && n > 0)
+    : [];
+  const primaryTgId = tgMsgIds.length === 1 ? tgMsgIds[0] : 0;
+  const causalKey = primaryTgId
+    ? `${accountKey}::${canonicalChatId || 'any'}::tg_${primaryTgId}`
+    : opts.msgId
+      ? `${accountKey}::${canonicalChatId || 'any'}::id_${opts.msgId}`
+      : `${accountKey}::${canonicalChatId || 'any'}::${opts.kind}`;
+
+  // Record delete/clear barriers synchronously upon enqueue so in-flight LOW snapshots are blocked right away
+  if (opts.kind === 'delete_channel' || opts.kind === 'delete_non_channel') {
+    recordMessageDeleteResurrectionBarrier({
+      accountId,
+      chatId: opts.kind === 'delete_channel' ? canonicalChatId : '',
+      tgMsgIds,
+    });
+  } else if (opts.kind === 'clear_chat') {
+    recordMessageDeleteResurrectionBarrier({
+      accountId,
+      chatId: canonicalChatId,
+      clearChat: true,
+    });
+  }
+
+  const totalPending = getMsgDbPendingTotal();
+  if (totalPending >= MESSAGE_DB_QUEUE_MAX_SIZE) {
+    if (opts.priority === 'LOW') {
+      messageDbWriteQueueStats.droppedLowTotal += 1;
+      return Promise.resolve(false as any);
+    }
+    if (msgDbLowQueue.length > 0) {
+      const dropped = msgDbLowQueue.shift()!;
+      messageDbWriteQueueStats.droppedLowTotal += 1;
+      dropped.resolve(false as any);
+    }
+  }
+
+  return new Promise<T>((resolve, reject) => {
+    const task: MessageDbWriteTask = {
+      seq: ++msgDbQueueSeq,
+      priority: opts.priority,
+      kind: opts.kind,
+      accountId,
+      accountKey,
+      canonicalChatId,
+      tgMsgIds,
+      causalKey,
+      snapshotTakenAt: opts.snapshotTakenAt,
+      enqueuedAt: Date.now(),
+      exec: opts.exec,
+      resolve,
+      reject,
+    };
+
+    if (opts.priority === 'HIGH') msgDbHighQueue.push(task);
+    else if (opts.priority === 'NORMAL') msgDbNormalQueue.push(task);
+    else msgDbLowQueue.push(task);
+
+    messageDbWriteQueueStats.enqueuedTotal += 1;
+    const depth = getMsgDbPendingTotal();
+    if (depth > messageDbWriteQueueStats.maxQueueDepth) {
+      messageDbWriteQueueStats.maxQueueDepth = depth;
+    }
+
+    const needImmediate =
+      opts.priority === 'HIGH' ||
+      depth >= MESSAGE_DB_QUEUE_BATCH_SIZE ||
+      depth >= MESSAGE_DB_QUEUE_HIGH_WATER;
+    void scheduleMessageDbFlush(needImmediate);
+  });
+}
+
+export async function flushMessageDbWriteQueue(opts?: { timeoutMs?: number }): Promise<void> {
+  const timeoutMs = opts?.timeoutMs ?? 5000;
+  const doFlush = async () => {
+    while (getMsgDbPendingTotal() > 0 || msgDbActiveFlushPromise) {
+      await scheduleMessageDbFlush(true);
+      if (getMsgDbPendingTotal() === 0 && !msgDbActiveFlushPromise) break;
+    }
+  };
+  await Promise.race([
+    doFlush(),
+    new Promise<void>((resolve) => setTimeout(resolve, timeoutMs).unref?.()),
+  ]);
+}
+
+export async function flushMessageDbWriteQueueForChat(
+  accountId?: string,
+  chatId?: string,
+  opts?: { timeoutMs?: number }
+): Promise<void> {
+  const accKey = normalizeMsgDbAccountKey(accountId);
+  const canonicalChat = normalizeMsgDbCanonicalChatId(chatId);
+  const hasMatching = () => {
+    for (const q of [msgDbHighQueue, msgDbNormalQueue, msgDbLowQueue]) {
+      for (const t of q) {
+        if (accountId && t.accountKey !== accKey) continue;
+        if (canonicalChat && t.canonicalChatId && t.canonicalChatId !== canonicalChat) continue;
+        return true;
+      }
+    }
+    return Boolean(msgDbActiveFlushPromise);
+  };
+  if (!hasMatching()) return;
+  await flushMessageDbWriteQueue({ timeoutMs: opts?.timeoutMs ?? 3000 });
+}
+
+export function getMessageDbWriteQueueStats() {
+  return {
+    pendingHigh: msgDbHighQueue.length,
+    pendingNormal: msgDbNormalQueue.length,
+    pendingLow: msgDbLowQueue.length,
+    pendingTotal: getMsgDbPendingTotal(),
+    inFlight: Boolean(msgDbActiveFlushPromise),
+    highWater: MESSAGE_DB_QUEUE_HIGH_WATER,
+    maxSize: MESSAGE_DB_QUEUE_MAX_SIZE,
+    activeDeleteBarriers: recentDeletedTgBarriers.size + recentClearedChatBarriers.size,
+    ...messageDbWriteQueueStats,
+  };
+}
+
+registerPerformanceQueueStatsProvider('messageDbWriteQueue', getMessageDbWriteQueueStats);
+
+async function executeUpsertSyncedMessageToDbInternal(
+  msg: UnifiedChatMessage,
+  rawMsg: any
 ): Promise<boolean> {
-  const msg = normalizeStoredMessageRecord(rawMsg, fallbackChatId, fallbackAccountId);
-  if (!msg) return false;
   try {
     const altChatId = msg.chatId.startsWith('tg_') ? msg.chatId.replace(/^tg_/, '') : `tg_${msg.chatId}`;
     const accVariants = getScopedAccountIdVariants(msg.accountId);
@@ -7088,6 +8110,60 @@ export async function upsertSyncedMessageToDb(
   }
 }
 
+export async function upsertSyncedMessageToDb(
+  rawMsg: any,
+  fallbackChatId = '',
+  fallbackAccountId = 'acc_1',
+  options?: {
+    priority?: MessageDbWritePriority;
+    bypassQueue?: boolean;
+    snapshotTakenAt?: number;
+    source?: string;
+  }
+): Promise<boolean> {
+  const msg = normalizeStoredMessageRecord(rawMsg, fallbackChatId, fallbackAccountId);
+  if (!msg) return false;
+  if (
+    options?.priority === 'LOW' &&
+    isMessageBlockedByDeleteBarrier(
+      msg.accountId,
+      msg.chatId,
+      msg.telegramMessageId ?? undefined,
+      options?.snapshotTakenAt ?? msg.createdAt
+    )
+  ) {
+    messageDbWriteQueueStats.suppressedResurrectionTotal += 1;
+    return false;
+  }
+  if (options?.bypassQueue) {
+    return await executeUpsertSyncedMessageToDbInternal(msg, rawMsg);
+  }
+  return await enqueueMessageDbWrite({
+    priority: options?.priority || 'NORMAL',
+    kind: 'upsert',
+    accountId: msg.accountId,
+    chatId: msg.chatId,
+    tgMsgIds: msg.telegramMessageId ? [msg.telegramMessageId] : [],
+    msgId: msg.id,
+    snapshotTakenAt: options?.snapshotTakenAt,
+    exec: async () => {
+      if (
+        options?.priority === 'LOW' &&
+        isMessageBlockedByDeleteBarrier(
+          msg.accountId,
+          msg.chatId,
+          msg.telegramMessageId ?? undefined,
+          options?.snapshotTakenAt ?? msg.createdAt
+        )
+      ) {
+        messageDbWriteQueueStats.suppressedResurrectionTotal += 1;
+        return false;
+      }
+      return await executeUpsertSyncedMessageToDbInternal(msg, rawMsg);
+    },
+  });
+}
+
 export function mergeUnifiedConversationMessages(lists: Array<Array<any>>): UnifiedChatMessage[] {
   const merged: UnifiedChatMessage[] = [];
   const byId = new Map<string, number>();
@@ -7228,7 +8304,7 @@ export async function resolveUnifiedChatMessages(params: {
 
   if (persistClientMessages && normalizedClient.length > 0) {
     for (const cm of normalizedClient.slice(-30)) {
-      await upsertSyncedMessageToDb(cm, chatId, accountId);
+      await upsertSyncedMessageToDb(cm, chatId, accountId, { priority: 'LOW', source: 'client_sync' });
     }
   }
 
@@ -7314,7 +8390,7 @@ export async function resolveUnifiedEvolutionCorpus(params: {
   if (normalizedClient.length > 0) {
     for (const cm of normalizedClient.slice(-30)) {
       if (cm.chatId && cm.chatId !== 'client_synced') {
-        await upsertSyncedMessageToDb(cm, cm.chatId, cm.accountId);
+        await upsertSyncedMessageToDb(cm, cm.chatId, cm.accountId, { priority: 'LOW', source: 'evolution_sync' });
       }
     }
   }
@@ -8597,7 +9673,8 @@ export async function deliverOutboundTelegramMessage(
     const { inputPeer: resolvedPeer } = await resolveTelegramInputPeer(
       personalAccount.client,
       String(chatId),
-      personalAccount.userId
+      personalAccount.userId,
+      'P0'
     );
 
     if (isAudio) {
@@ -8611,12 +9688,14 @@ export async function deliverOutboundTelegramMessage(
         const voiceFile = new CustomFile('voice.ogg', oggBuffer.length, '', oggBuffer);
         const voiceEchoText = (sttText || text || '').trim() || '🎤 语音消息';
         markOutboundMessageSent(chatId, voiceEchoText, effectiveAccountId);
-        const sentVoice: any = await personalAccount.client.sendFile(resolvedPeer, {
-          file: voiceFile,
-          voiceNote: true,
-          caption: sttText || text || undefined,
-          ...(resolvedReplyToTgId ? { replyTo: resolvedReplyToTgId } : {}),
-        });
+        const sentVoice: any = await scheduleTelegramRpc(effectiveAccountId, 'P0', 'sendFile.voice', () =>
+          personalAccount.client.sendFile(resolvedPeer, {
+            file: voiceFile,
+            voiceNote: true,
+            caption: sttText || text || undefined,
+            ...(resolvedReplyToTgId ? { replyTo: resolvedReplyToTgId } : {}),
+          })
+        );
         const sentVoiceTgId = Number(sentVoice?.id) || undefined;
         if (sentVoiceTgId) markOutboundTelegramMessageIdSent(chatId, sentVoiceTgId, effectiveAccountId);
         const dialogState = await syncOutboundTelegramDialogState({
@@ -8679,11 +9758,13 @@ export async function deliverOutboundTelegramMessage(
 
         const photoEchoText = (explicitCaption || '').trim() || '🖼️ 图片消息';
         markOutboundMessageSent(chatId, photoEchoText, effectiveAccountId);
-        const sentPhoto: any = await personalAccount.client.sendFile(resolvedPeer, {
-          file: photoFile,
-          caption: explicitCaption || undefined,
-          ...(resolvedReplyToTgId ? { replyTo: resolvedReplyToTgId } : {}),
-        });
+        const sentPhoto: any = await scheduleTelegramRpc(effectiveAccountId, 'P0', 'sendFile.photo', () =>
+          personalAccount.client.sendFile(resolvedPeer, {
+            file: photoFile,
+            caption: explicitCaption || undefined,
+            ...(resolvedReplyToTgId ? { replyTo: resolvedReplyToTgId } : {}),
+          })
+        );
         const sentPhotoTgId = Number(sentPhoto?.id) || undefined;
         if (sentPhotoTgId) markOutboundTelegramMessageIdSent(chatId, sentPhotoTgId, effectiveAccountId);
         const dialogState = await syncOutboundTelegramDialogState({
@@ -8745,13 +9826,15 @@ export async function deliverOutboundTelegramMessage(
 
         const videoEchoText = (explicitCaption || '').trim() || '🎬 视频';
         markOutboundMessageSent(chatId, videoEchoText, effectiveAccountId);
-        const sentVideo: any = await personalAccount.client.sendFile(resolvedPeer, {
-          file: videoFile,
-          supportsStreaming: true,
-          workers: source.size > 10 * 1024 * 1024 ? 4 : 1,
-          caption: explicitCaption || undefined,
-          ...(resolvedReplyToTgId ? { replyTo: resolvedReplyToTgId } : {}),
-        });
+        const sentVideo: any = await scheduleTelegramRpc(effectiveAccountId, 'P0', 'sendFile.video', () =>
+          personalAccount.client.sendFile(resolvedPeer, {
+            file: videoFile,
+            supportsStreaming: true,
+            workers: source.size > 10 * 1024 * 1024 ? 4 : 1,
+            caption: explicitCaption || undefined,
+            ...(resolvedReplyToTgId ? { replyTo: resolvedReplyToTgId } : {}),
+          })
+        );
         const sentVideoTgId = Number(sentVideo?.id) || undefined;
         if (sentVideoTgId) markOutboundTelegramMessageIdSent(chatId, sentVideoTgId, effectiveAccountId);
         const dialogState = await syncOutboundTelegramDialogState({
@@ -8804,13 +9887,15 @@ export async function deliverOutboundTelegramMessage(
         const docCaption = text !== `[文件] ${fileName}` ? (text || undefined) : undefined;
         const fileEchoText = (docCaption || '').trim() || `📎 ${resolvedDocName || '文件附件'}`;
         markOutboundMessageSent(chatId, fileEchoText, effectiveAccountId);
-        const sentDoc: any = await personalAccount.client.sendFile(resolvedPeer, {
-          file: docFile,
-          caption: docCaption,
-          forceDocument: true,
-          workers: source.size > 10 * 1024 * 1024 ? 4 : 1,
-          ...(resolvedReplyToTgId ? { replyTo: resolvedReplyToTgId } : {}),
-        });
+        const sentDoc: any = await scheduleTelegramRpc(effectiveAccountId, 'P0', 'sendFile.document', () =>
+          personalAccount.client.sendFile(resolvedPeer, {
+            file: docFile,
+            caption: docCaption,
+            forceDocument: true,
+            workers: source.size > 10 * 1024 * 1024 ? 4 : 1,
+            ...(resolvedReplyToTgId ? { replyTo: resolvedReplyToTgId } : {}),
+          })
+        );
         const sentDocTgId = Number(sentDoc?.id) || undefined;
         if (sentDocTgId) markOutboundTelegramMessageIdSent(chatId, sentDocTgId, effectiveAccountId);
         const dialogState = await syncOutboundTelegramDialogState({
@@ -8855,10 +9940,12 @@ export async function deliverOutboundTelegramMessage(
 
     console.log(`[MTProto Outbound] Personal account sending text message to ${rawTgId}: "${outText.slice(0, 30)}..."`);
     markOutboundMessageSent(chatId, outText, effectiveAccountId);
-    const sentMsg: any = await personalAccount.client.sendMessage(resolvedPeer, {
-      message: outText,
-      ...(resolvedReplyToTgId ? { replyTo: resolvedReplyToTgId } : {}),
-    });
+    const sentMsg: any = await scheduleTelegramRpc(effectiveAccountId, 'P0', 'messages.SendMessage', () =>
+      personalAccount.client.sendMessage(resolvedPeer, {
+        message: outText,
+        ...(resolvedReplyToTgId ? { replyTo: resolvedReplyToTgId } : {}),
+      })
+    );
     const sentTextTgId = Number(sentMsg?.id) || undefined;
     if (sentTextTgId) markOutboundTelegramMessageIdSent(chatId, sentTextTgId, effectiveAccountId);
     const dialogState = await syncOutboundTelegramDialogState({
@@ -9033,7 +10120,8 @@ app.post('/api/messages', requireTenantAuth, parseMultipartMessageUpload, async 
           telegramMessageId: deliveryResult.telegramMessageId ?? outboundPayload?.telegramMessageId,
         },
         String(outboundPayload.chatId),
-        effectiveAccountId
+        effectiveAccountId,
+        { priority: 'HIGH', source: 'outbound_send' }
       );
     }
 
@@ -9139,7 +10227,8 @@ app.post('/api/messages/:id/retry', requireTenantAuth, parseMultipartMessageUplo
           telegramMessageId: retryResult.telegramMessageId ?? outboundPayload.telegramMessageId,
         },
         String(outboundPayload.chatId),
-        targetAcc
+        targetAcc,
+        { priority: 'HIGH', source: 'retry_send' }
       );
       return res.status(retryResult.sessionExpired ? 401 : retryResult.floodWait ? 429 : 200).json({
         success: retryResult.delivered,
@@ -9217,58 +10306,68 @@ app.post('/api/messages/:id/retry', requireTenantAuth, parseMultipartMessageUplo
 
     const nextStatus = dbRetryResult.delivered ? 'delivered' : 'failed';
     try {
-      if (isMaster) {
-        await db
-          .prepare(
-            `UPDATE messages SET
-               delivery_status = ?,
-               telegram_message_id = COALESCE(?, telegram_message_id),
-               audio_url = CASE WHEN ? != '' THEN ? ELSE audio_url END,
-               image_url = CASE WHEN ? != '' THEN ? ELSE image_url END,
-               video_url = CASE WHEN ? != '' THEN ? ELSE video_url END,
-               file_url = CASE WHEN ? != '' THEN ? ELSE file_url END
-             WHERE id = ?`
-          )
-          .run(
-            nextStatus,
-            dbRetryResult.telegramMessageId ?? null,
-            dbOutboundPayload.audioUrl || '',
-            dbOutboundPayload.audioUrl || '',
-            dbOutboundPayload.imageUrl || '',
-            dbOutboundPayload.imageUrl || '',
-            dbOutboundPayload.videoUrl || '',
-            dbOutboundPayload.videoUrl || '',
-            dbOutboundPayload.fileUrl || '',
-            dbOutboundPayload.fileUrl || '',
-            id
-          );
-      } else {
-        await db
-          .prepare(
-            `UPDATE messages SET
-               delivery_status = ?,
-               telegram_message_id = COALESCE(?, telegram_message_id),
-               audio_url = CASE WHEN ? != '' THEN ? ELSE audio_url END,
-               image_url = CASE WHEN ? != '' THEN ? ELSE image_url END,
-               video_url = CASE WHEN ? != '' THEN ? ELSE video_url END,
-               file_url = CASE WHEN ? != '' THEN ? ELSE file_url END
-             WHERE id = ? AND account_id = ?`
-          )
-          .run(
-            nextStatus,
-            dbRetryResult.telegramMessageId ?? null,
-            dbOutboundPayload.audioUrl || '',
-            dbOutboundPayload.audioUrl || '',
-            dbOutboundPayload.imageUrl || '',
-            dbOutboundPayload.imageUrl || '',
-            dbOutboundPayload.videoUrl || '',
-            dbOutboundPayload.videoUrl || '',
-            dbOutboundPayload.fileUrl || '',
-            dbOutboundPayload.fileUrl || '',
-            id,
-            effectiveAccountId
-          );
-      }
+      await enqueueMessageDbWrite({
+        priority: 'HIGH',
+        kind: 'upsert',
+        accountId: msg.account_id || effectiveAccountId,
+        chatId: msg.chat_id,
+        tgMsgIds: dbRetryResult.telegramMessageId ? [Number(dbRetryResult.telegramMessageId)] : [],
+        msgId: id,
+        exec: async () => {
+          if (isMaster) {
+            await db
+              .prepare(
+                `UPDATE messages SET
+                   delivery_status = ?,
+                   telegram_message_id = COALESCE(?, telegram_message_id),
+                   audio_url = CASE WHEN ? != '' THEN ? ELSE audio_url END,
+                   image_url = CASE WHEN ? != '' THEN ? ELSE image_url END,
+                   video_url = CASE WHEN ? != '' THEN ? ELSE video_url END,
+                   file_url = CASE WHEN ? != '' THEN ? ELSE file_url END
+                 WHERE id = ?`
+              )
+              .run(
+                nextStatus,
+                dbRetryResult.telegramMessageId ?? null,
+                dbOutboundPayload.audioUrl || '',
+                dbOutboundPayload.audioUrl || '',
+                dbOutboundPayload.imageUrl || '',
+                dbOutboundPayload.imageUrl || '',
+                dbOutboundPayload.videoUrl || '',
+                dbOutboundPayload.videoUrl || '',
+                dbOutboundPayload.fileUrl || '',
+                dbOutboundPayload.fileUrl || '',
+                id
+              );
+          } else {
+            await db
+              .prepare(
+                `UPDATE messages SET
+                   delivery_status = ?,
+                   telegram_message_id = COALESCE(?, telegram_message_id),
+                   audio_url = CASE WHEN ? != '' THEN ? ELSE audio_url END,
+                   image_url = CASE WHEN ? != '' THEN ? ELSE image_url END,
+                   video_url = CASE WHEN ? != '' THEN ? ELSE video_url END,
+                   file_url = CASE WHEN ? != '' THEN ? ELSE file_url END
+                 WHERE id = ? AND account_id = ?`
+              )
+              .run(
+                nextStatus,
+                dbRetryResult.telegramMessageId ?? null,
+                dbOutboundPayload.audioUrl || '',
+                dbOutboundPayload.audioUrl || '',
+                dbOutboundPayload.imageUrl || '',
+                dbOutboundPayload.imageUrl || '',
+                dbOutboundPayload.videoUrl || '',
+                dbOutboundPayload.videoUrl || '',
+                dbOutboundPayload.fileUrl || '',
+                dbOutboundPayload.fileUrl || '',
+                id,
+                effectiveAccountId
+              );
+          }
+        },
+      });
     } catch {}
 
     res.status(dbRetryResult.sessionExpired ? 401 : dbRetryResult.floodWait ? 429 : 200).json({
@@ -9342,25 +10441,33 @@ export function resolveTelegramMessageNumericId(messageId?: string, explicitTele
 async function resolveTelegramInputPeer(
   client: TelegramClient,
   rawChatId: string,
-  selfUserId?: string
+  selfUserId?: string,
+  priority: TelegramRpcPriority = 'P1'
 ): Promise<{ inputPeer: Api.TypeInputPeer; rawPeer: any }> {
   const clean = String(rawChatId || '').replace(/^tg_/, '').trim();
   if (!clean || clean === 'me' || (selfUserId && clean === selfUserId)) {
     return { inputPeer: new Api.InputPeerSelf(), rawPeer: 'me' };
   }
+  const rpcScope = selfUserId ? `acc_tg_${selfUserId}` : 'global';
   const rawPeer: any = /^-?\d+$/.test(clean) ? Number(clean) : clean;
   try {
-    const inputPeer = await client.getInputEntity(rawPeer);
+    const inputPeer = await scheduleTelegramRpc(rpcScope, priority, 'resolveInputPeer', () =>
+      client.getInputEntity(rawPeer)
+    );
     return { inputPeer, rawPeer };
   } catch {
     // Refresh dialog entity cache once before failing (protected by FLOOD_WAIT breaker & in-flight dedup)
     await refreshDialogEntityCacheSafely(client, 60);
     try {
-      const inputPeer = await client.getInputEntity(rawPeer);
+      const inputPeer = await scheduleTelegramRpc(rpcScope, priority, 'resolveInputPeer', () =>
+        client.getInputEntity(rawPeer)
+      );
       return { inputPeer, rawPeer };
     } catch {
       await refreshDialogEntityCacheSafely(client, 150, true);
-      const inputPeer = await client.getInputEntity(rawPeer);
+      const inputPeer = await scheduleTelegramRpc(rpcScope, priority, 'resolveInputPeer', () =>
+        client.getInputEntity(rawPeer)
+      );
       return { inputPeer, rawPeer };
     }
   }
@@ -9458,8 +10565,10 @@ app.delete('/api/messages/:id', requireTenantAuth, async (req: Request, res: Res
             error: '当前账号未在线连接 Telegram MTProto，无法从云端撤回删除消息',
           });
         }
-        const { inputPeer } = await resolveTelegramInputPeer(connected.client, chatId, connected.userId);
-        await connected.client.deleteMessages(inputPeer, [tgMsgId], { revoke });
+        const { inputPeer } = await resolveTelegramInputPeer(connected.client, chatId, connected.userId, 'P0');
+        await scheduleTelegramRpc(effectiveAccountId, 'P0', 'messages.DeleteMessages', () =>
+          connected.client.deleteMessages(inputPeer, [tgMsgId], { revoke })
+        );
         cloudSynced = true;
       }
     }
@@ -9467,32 +10576,44 @@ app.delete('/api/messages/:id', requireTenantAuth, async (req: Request, res: Res
     let changes = 0;
     const altChatId = chatId ? (chatId.startsWith('tg_') ? chatId.replace(/^tg_/, '') : `tg_${chatId}`) : '';
     const accPlaceholders = accVariants.map(() => '?').join(', ');
+    const isChannelChat = Boolean(chatId && (chatId.startsWith('tg_-100') || chatId.startsWith('-100')));
 
-    if (msg) {
-      const whereParts = ['id = ?'];
-      const params: any[] = [id];
-      if (chatId) {
-        whereParts.push('(chat_id = ? OR chat_id = ?)');
-        params.push(chatId, altChatId);
-      }
-      if (enforceAccountScope) {
-        whereParts.push(`account_id IN (${accPlaceholders})`);
-        params.push(...accVariants);
-      }
-      const result = await db.prepare(`DELETE FROM messages WHERE ${whereParts.join(' AND ')}`).run(...params);
-      changes = (result as any)?.changes ?? 0;
-    }
-
-    if (tgMsgId && chatId) {
-      const whereParts = ['(chat_id = ? OR chat_id = ?)', 'telegram_message_id = ?'];
-      const params: any[] = [chatId, altChatId, tgMsgId];
-      if (enforceAccountScope) {
-        whereParts.push(`account_id IN (${accPlaceholders})`);
-        params.push(...accVariants);
-      }
-      const result = await db.prepare(`DELETE FROM messages WHERE ${whereParts.join(' AND ')}`).run(...params);
-      changes += (result as any)?.changes ?? 0;
-    }
+    changes = await enqueueMessageDbWrite<number>({
+      priority: 'HIGH',
+      kind: isChannelChat ? 'delete_channel' : 'delete_non_channel',
+      accountId: effectiveAccountId,
+      chatId,
+      tgMsgIds: tgMsgId ? [tgMsgId] : [],
+      msgId: id,
+      exec: async () => {
+        let totalDel = 0;
+        if (msg) {
+          const whereParts = ['id = ?'];
+          const params: any[] = [id];
+          if (chatId) {
+            whereParts.push('(chat_id = ? OR chat_id = ?)');
+            params.push(chatId, altChatId);
+          }
+          if (enforceAccountScope) {
+            whereParts.push(`account_id IN (${accPlaceholders})`);
+            params.push(...accVariants);
+          }
+          const result = await db.prepare(`DELETE FROM messages WHERE ${whereParts.join(' AND ')}`).run(...params);
+          totalDel += (result as any)?.changes ?? 0;
+        }
+        if (tgMsgId && chatId) {
+          const whereParts = ['(chat_id = ? OR chat_id = ?)', 'telegram_message_id = ?'];
+          const params: any[] = [chatId, altChatId, tgMsgId];
+          if (enforceAccountScope) {
+            whereParts.push(`account_id IN (${accPlaceholders})`);
+            params.push(...accVariants);
+          }
+          const result = await db.prepare(`DELETE FROM messages WHERE ${whereParts.join(' AND ')}`).run(...params);
+          totalDel += (result as any)?.changes ?? 0;
+        }
+        return totalDel;
+      },
+    });
 
     res.json({ success: true, deleted: true, cloudSynced, revoke, id, changes });
   } catch (err: any) {
@@ -9548,30 +10669,41 @@ app.patch('/api/messages/:id/translation', requireTenantAuth, async (req: Reques
     }
     const setSql = setClauses.join(', ');
 
-    let totalChanges = 0;
-    const idWhere = ['id = ?'];
-    const idParams: any[] = [...setValues, id];
-    if (chatId) {
-      idWhere.push('(chat_id = ? OR chat_id = ?)');
-      idParams.push(chatId, altChatId);
-    }
-    if (enforceAccountScope) {
-      idWhere.push(`account_id IN (${accPlaceholders})`);
-      idParams.push(...accVariants);
-    }
-    const idRes = await db.prepare(`UPDATE messages SET ${setSql} WHERE ${idWhere.join(' AND ')}`).run(...idParams);
-    totalChanges += Number((idRes as any)?.changes || 0);
+    const totalChanges = await enqueueMessageDbWrite<number>({
+      priority: 'NORMAL',
+      kind: 'stt',
+      accountId: effectiveAccountId,
+      chatId,
+      tgMsgIds: tgMsgId ? [Number(tgMsgId)] : [],
+      msgId: id,
+      exec: async () => {
+        let changesSum = 0;
+        const idWhere = ['id = ?'];
+        const idParams: any[] = [...setValues, id];
+        if (chatId) {
+          idWhere.push('(chat_id = ? OR chat_id = ?)');
+          idParams.push(chatId, altChatId);
+        }
+        if (enforceAccountScope) {
+          idWhere.push(`account_id IN (${accPlaceholders})`);
+          idParams.push(...accVariants);
+        }
+        const idRes = await db.prepare(`UPDATE messages SET ${setSql} WHERE ${idWhere.join(' AND ')}`).run(...idParams);
+        changesSum += Number((idRes as any)?.changes || 0);
 
-    if (tgMsgId && chatId) {
-      const tgWhere = ['(chat_id = ? OR chat_id = ?)', 'telegram_message_id = ?'];
-      const tgParams: any[] = [...setValues, chatId, altChatId, tgMsgId];
-      if (enforceAccountScope) {
-        tgWhere.push(`account_id IN (${accPlaceholders})`);
-        tgParams.push(...accVariants);
-      }
-      const tgRes = await db.prepare(`UPDATE messages SET ${setSql} WHERE ${tgWhere.join(' AND ')}`).run(...tgParams);
-      totalChanges += Number((tgRes as any)?.changes || 0);
-    }
+        if (tgMsgId && chatId) {
+          const tgWhere = ['(chat_id = ? OR chat_id = ?)', 'telegram_message_id = ?'];
+          const tgParams: any[] = [...setValues, chatId, altChatId, tgMsgId];
+          if (enforceAccountScope) {
+            tgWhere.push(`account_id IN (${accPlaceholders})`);
+            tgParams.push(...accVariants);
+          }
+          const tgRes = await db.prepare(`UPDATE messages SET ${setSql} WHERE ${tgWhere.join(' AND ')}`).run(...tgParams);
+          changesSum += Number((tgRes as any)?.changes || 0);
+        }
+        return changesSum;
+      },
+    });
 
     res.json({ ok: true, updated: totalChanges > 0, changes: totalChanges });
   } catch (err: any) {
@@ -16263,6 +17395,7 @@ export async function extractRecentTwoWayMessages(
 
   if (customerId) {
     try {
+      await flushMessageDbWriteQueueForChat(accountId, customerId);
       const sql = accVariants.length > 0
         ? `SELECT id, sender, text, stt_text, image_caption, timestamp, created_at
            FROM messages
@@ -21560,6 +22693,7 @@ export async function withTelegramTimeout<T>(
   timeoutMessage = '连接 Telegram 服务器超时，请检查网络或代理设置后重试',
   options?: TelegramTimeoutOptions
 ): Promise<T> {
+  const opStartedAt = Date.now();
   const controller = new AbortController();
   let timer: NodeJS.Timeout | null = null;
   let settled = false;
@@ -21587,6 +22721,7 @@ export async function withTelegramTimeout<T>(
         ? promiseOrFactory({ signal: controller.signal })
         : promiseOrFactory;
   } catch (syncErr) {
+    recordWrappedRpcMetric(timeoutMessage, Date.now() - opStartedAt, false, syncErr, false);
     return Promise.reject(syncErr);
   }
 
@@ -21610,6 +22745,7 @@ export async function withTelegramTimeout<T>(
       settled = true;
       detachListeners();
       const abortErr = new Error('操作已取消');
+      recordWrappedRpcMetric(timeoutMessage, Date.now() - opStartedAt, false, abortErr, false);
       controller.abort(abortErr);
       runCleanupOnce('abort');
       reject(abortErr);
@@ -21620,6 +22756,7 @@ export async function withTelegramTimeout<T>(
       settled = true;
       detachListeners();
       const shutdownErr = new Error('服务正在关闭，连接任务已取消');
+      recordWrappedRpcMetric(timeoutMessage, Date.now() - opStartedAt, false, shutdownErr, false);
       controller.abort(shutdownErr);
       runCleanupOnce('shutdown');
       reject(shutdownErr);
@@ -21640,6 +22777,7 @@ export async function withTelegramTimeout<T>(
       settled = true;
       detachListeners();
       const timeoutErr = new Error(timeoutMessage);
+      recordWrappedRpcMetric(timeoutMessage, Date.now() - opStartedAt, false, timeoutErr, true);
       controller.abort(timeoutErr);
       runCleanupOnce('timeout');
       reject(timeoutErr);
@@ -21650,12 +22788,14 @@ export async function withTelegramTimeout<T>(
         if (settled) return;
         settled = true;
         detachListeners();
+        recordWrappedRpcMetric(timeoutMessage, Date.now() - opStartedAt, true);
         resolve(val);
       },
       (err) => {
         if (settled) return;
         settled = true;
         detachListeners();
+        recordWrappedRpcMetric(timeoutMessage, Date.now() - opStartedAt, false, err, false);
         reject(err);
       }
     );
@@ -22153,6 +23293,9 @@ function configureTelegramClientErrorGuard(
     // GramJS LogLevel 'warn' still enables LogLevel.ERROR, which prints raw `Error: TIMEOUT` via console.error in _updateLoop.
     client.setLogLevel('none' as any);
     client.onError = async (err: any) => {
+      if (meta && !isTelegramClientGenerationCurrent(client, meta)) {
+        return;
+      }
       const msg = String(err?.errorMessage || err?.message || err || '');
       if (isTelegramSessionExpiredError(err)) {
         console.warn(`[Telegram Client Session Expired] (${context}):`, msg);
@@ -22202,12 +23345,20 @@ export async function destroyTelegramClientSafely(
   // Mark userDisconnected & halt transport/reconnect timers immediately before async destroy
   silenceGramJsSenderReconnect(client);
   const destroyTask = (async () => {
-    try {
-      await client.destroy();
-    } catch {
+    const innerDestroy = async () => {
       try {
-        await client.disconnect();
-      } catch {}
+        await client.destroy();
+      } catch {
+        try {
+          await client.disconnect();
+        } catch {}
+      }
+    };
+    try {
+      await Promise.race([
+        innerDestroy(),
+        new Promise<void>((resolve) => setTimeout(resolve, 3000).unref?.()),
+      ]);
     } finally {
       try {
         anyClient._destroyed = true;
@@ -22376,6 +23527,7 @@ app.post('/api/telegram/user/send-code', requireTenantAuth, async (req: Request,
     const stringSession = new StringSession('');
     const telegramProxy = getConfiguredTelegramProxy();
     const client = new TelegramClient(stringSession, useApiId, useApiHash, {
+      ...TELEGRAM_CLIENT_RETRY_OPTIONS,
       connectionRetries: 5,
       useWSS: false,
       autoReconnect: true,
@@ -22821,11 +23973,16 @@ async function finishQrLogin(sessionObj: QrSessionContext, user: any) {
     accountId: `acc_tg_${user.id}`,
   });
   qrRuntime.generationId += 1;
+  (sessionObj.client as any)._tgProGenerationId = qrRuntime.generationId;
   qrRuntime.isInitialConnecting = false;
   qrRuntime.isRestoring = false;
   qrRuntime.isAuthorized = true;
   qrRuntime.transportConnected = true;
   qrRuntime.senderIsReconnecting = false;
+  qrRuntime.reconnectingSinceAt = null;
+  qrRuntime.connectingSinceAt = null;
+  qrRuntime.suspectedStuckWarningAt = null;
+  qrRuntime.reconnectProbeFailures = 0;
   qrRuntime.lastConnectedAt = now;
   qrRuntime.retryCount = 0;
   qrRuntime.nextRetryAt = 0;
@@ -22890,6 +24047,7 @@ app.post('/api/telegram/user/qr-token', requireTenantAuth, async (req: Request, 
     const stringSession = new StringSession('');
     const telegramProxy = getConfiguredTelegramProxy();
     const client = new TelegramClient(stringSession, useApiId, useApiHash, {
+      ...TELEGRAM_CLIENT_RETRY_OPTIONS,
       connectionRetries: 5,
       useWSS: false,
       autoReconnect: true,
@@ -23364,11 +24522,16 @@ app.post('/api/telegram/user/verify-code', requireTenantAuth, authAttemptLimiter
       accountId: `acc_tg_${me.id}`,
     });
     phoneRuntime.generationId += 1;
+    (client as any)._tgProGenerationId = phoneRuntime.generationId;
     phoneRuntime.isInitialConnecting = false;
     phoneRuntime.isRestoring = false;
     phoneRuntime.isAuthorized = true;
     phoneRuntime.transportConnected = true;
     phoneRuntime.senderIsReconnecting = false;
+    phoneRuntime.reconnectingSinceAt = null;
+    phoneRuntime.connectingSinceAt = null;
+    phoneRuntime.suspectedStuckWarningAt = null;
+    phoneRuntime.reconnectProbeFailures = 0;
     phoneRuntime.lastConnectedAt = now;
     phoneRuntime.retryCount = 0;
     phoneRuntime.nextRetryAt = 0;
@@ -23474,7 +24637,10 @@ app.get('/api/telegram/user/status', requireTenantAuth, async (req: Request, res
         phone: normPhone || undefined,
         accountId: canonicalId,
       });
+      syncAccountReconnectLifecycleMarkers(runtime, inspectGramJsClientState(u.client), Date.now());
       const snap = getTelegramAccountConnectionSnapshot(u, runtime);
+      const reconnectingDurationMs =
+        runtime.reconnectingSinceAt !== null ? Math.max(0, Date.now() - runtime.reconnectingSinceAt) : 0;
       inMemoryActiveList.push({
         id: canonicalId,
         phone: u.phone,
@@ -23487,6 +24653,7 @@ app.get('/api/telegram/user/status', requireTenantAuth, async (req: Request, res
         isConnected: snap.isConnected,
         isConnecting: snap.isConnecting,
         isReconnecting: snap.isReconnecting,
+        reconnectSuspectedStuck: Boolean(runtime.suspectedStuckWarningAt !== null || reconnectingDurationMs >= 35_000),
         status: snap.phase,
         retryCount: runtime.retryCount,
         nextRetryAt: runtime.nextRetryAt,
@@ -24079,6 +25246,8 @@ export const telegramMediaCache = new BoundedByteLruCache<{
 
 export function pruneServerRuntimeCaches(now = Date.now()) {
   const avatarRemoved = telegramAvatarCache.pruneExpired(now);
+  const avatarNegativeRemoved = pruneAvatarNegativeCache(now);
+  const senderCacheRemoved = pruneTelegramSenderCache(now);
   const mediaRemoved = telegramMediaCache.pruneExpired(now);
   const stickerRemoved = telegramStickerThumbCache.pruneExpired(now);
   const floodRemoved = pruneExpiredTelegramFloodCooldowns(now);
@@ -24090,6 +25259,8 @@ export function pruneServerRuntimeCaches(now = Date.now()) {
   const credsRemoved = pruneInMemoryCloudTelegramCreds(now);
   return {
     avatarRemoved,
+    avatarNegativeRemoved,
+    senderCacheRemoved,
     mediaRemoved,
     stickerRemoved,
     floodRemoved,
@@ -24118,6 +25289,419 @@ function stopTelegramCacheCleanupTimer(): void {
   }
 }
 
+// ==================== AVATAR SINGLE-FLIGHT + BOUNDED CONCURRENCY + 4-TIER ERROR CACHE ====================
+export const TELEGRAM_AVATAR_MAX_CONCURRENT = 2;
+export const TELEGRAM_AVATAR_MAX_QUEUE = 32;
+export const TELEGRAM_AVATAR_NO_PHOTO_NEGATIVE_TTL_MS = 5 * 60 * 1000;
+export const TELEGRAM_AVATAR_RPC_ERROR_NEGATIVE_TTL_MS = 20 * 1000;
+export const TELEGRAM_AVATAR_NEGATIVE_CACHE_MAX = 5000;
+
+interface AvatarNegativeEntry {
+  reason: 'no_photo' | 'rpc_error';
+  expiresAt: number;
+}
+
+interface AvatarFetchOutcome {
+  status: 200 | 404 | 429 | 503;
+  buffer?: Buffer;
+  mime?: string;
+  retryAfterSeconds?: number;
+  errorType?: 'no_photo' | 'flood_wait' | 'timeout' | 'offline' | 'rpc_error' | 'queue_full';
+}
+
+const telegramAvatarNegativeCache = new Map<string, AvatarNegativeEntry>();
+const telegramAvatarInFlight = new Map<string, Promise<AvatarFetchOutcome>>();
+
+interface AvatarSlotWaiter {
+  resolve: () => void;
+  reject: (err: any) => void;
+  signal?: AbortSignal;
+  abortHandler?: () => void;
+}
+interface AvatarAccountLimiterState {
+  active: number;
+  waiters: AvatarSlotWaiter[];
+}
+const avatarAccountLimiters = new Map<string, AvatarAccountLimiterState>();
+const avatarLimiterStats = {
+  completedTotal: 0,
+  rejectedQueueFullTotal: 0,
+  abortedWaitersTotal: 0,
+  negativeCacheHitsNoPhoto: 0,
+  negativeCacheHitsRpcError: 0,
+  singleFlightHitsTotal: 0,
+};
+
+export function clearAvatarNegativeCacheForPeer(userId: string, peerId: string): void {
+  const cleanPeer = String(peerId || '').replace(/^tg_/, '').trim();
+  if (!cleanPeer) return;
+  for (const k of [cleanPeer, `acc_tg_${userId}:${cleanPeer}`, `${userId}:${cleanPeer}`, `shared:${cleanPeer}`]) {
+    telegramAvatarNegativeCache.delete(k);
+  }
+}
+
+export function clearAvatarCachesForTesting(): void {
+  telegramAvatarNegativeCache.clear();
+  telegramAvatarInFlight.clear();
+  avatarAccountLimiters.clear();
+  telegramAvatarCache.clear();
+}
+
+export function pruneAvatarNegativeCache(now = Date.now()): number {
+  let removed = 0;
+  for (const [k, entry] of telegramAvatarNegativeCache.entries()) {
+    if (!entry || entry.expiresAt <= now) {
+      telegramAvatarNegativeCache.delete(k);
+      removed++;
+    }
+  }
+  return removed;
+}
+
+function setAvatarNegativeCache(cacheKey: string, reason: 'no_photo' | 'rpc_error', now = Date.now()): void {
+  const ttl =
+    reason === 'no_photo'
+      ? TELEGRAM_AVATAR_NO_PHOTO_NEGATIVE_TTL_MS
+      : TELEGRAM_AVATAR_RPC_ERROR_NEGATIVE_TTL_MS;
+  if (telegramAvatarNegativeCache.size >= TELEGRAM_AVATAR_NEGATIVE_CACHE_MAX) {
+    pruneAvatarNegativeCache(now);
+    while (telegramAvatarNegativeCache.size >= TELEGRAM_AVATAR_NEGATIVE_CACHE_MAX) {
+      const oldest = telegramAvatarNegativeCache.keys().next().value;
+      if (oldest === undefined) break;
+      telegramAvatarNegativeCache.delete(oldest);
+    }
+  }
+  telegramAvatarNegativeCache.set(cacheKey, { reason, expiresAt: now + ttl });
+}
+
+export function getAvatarNegativeCacheEntry(cacheKey: string, now = Date.now()): AvatarNegativeEntry | null {
+  const entry = telegramAvatarNegativeCache.get(cacheKey);
+  if (!entry) return null;
+  if (entry.expiresAt <= now) {
+    telegramAvatarNegativeCache.delete(cacheKey);
+    return null;
+  }
+  return entry;
+}
+
+export function getAvatarLimiterStats() {
+  let active = 0;
+  let queued = 0;
+  for (const state of avatarAccountLimiters.values()) {
+    active += state.active;
+    queued += state.waiters.length;
+  }
+  return {
+    active,
+    queued,
+    inFlightSingleFlight: telegramAvatarInFlight.size,
+    negativeCacheEntries: telegramAvatarNegativeCache.size,
+    maxConcurrentPerAccount: TELEGRAM_AVATAR_MAX_CONCURRENT,
+    maxQueuePerAccount: TELEGRAM_AVATAR_MAX_QUEUE,
+    ...avatarLimiterStats,
+  };
+}
+
+registerPerformanceQueueStatsProvider('avatarLimiter', getAvatarLimiterStats);
+
+function acquireAvatarSlot(accountScope: string, signal?: AbortSignal): Promise<() => void> {
+  if (signal?.aborted) {
+    const err: any = new Error('Client aborted avatar request');
+    err.code = 'AVATAR_ABORTED';
+    return Promise.reject(err);
+  }
+  let state = avatarAccountLimiters.get(accountScope);
+  if (!state) {
+    state = { active: 0, waiters: [] };
+    avatarAccountLimiters.set(accountScope, state);
+  }
+
+  const makeRelease = () => {
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      const st = avatarAccountLimiters.get(accountScope);
+      if (!st) return;
+      st.active = Math.max(0, st.active - 1);
+      while (st.waiters.length > 0 && st.active < TELEGRAM_AVATAR_MAX_CONCURRENT) {
+        const nextWaiter = st.waiters.shift()!;
+        if (nextWaiter.signal && nextWaiter.abortHandler) {
+          try {
+            nextWaiter.signal.removeEventListener('abort', nextWaiter.abortHandler);
+          } catch {}
+        }
+        if (nextWaiter.signal?.aborted) {
+          avatarLimiterStats.abortedWaitersTotal += 1;
+          const abortErr: any = new Error('Client aborted avatar request');
+          abortErr.code = 'AVATAR_ABORTED';
+          nextWaiter.reject(abortErr);
+          continue;
+        }
+        st.active += 1;
+        nextWaiter.resolve();
+        break;
+      }
+      if (st.active === 0 && st.waiters.length === 0) {
+        avatarAccountLimiters.delete(accountScope);
+      }
+    };
+  };
+
+  if (state.active < TELEGRAM_AVATAR_MAX_CONCURRENT) {
+    state.active += 1;
+    return Promise.resolve(makeRelease());
+  }
+
+  if (state.waiters.length >= TELEGRAM_AVATAR_MAX_QUEUE) {
+    avatarLimiterStats.rejectedQueueFullTotal += 1;
+    const err: any = new Error('Avatar download queue is full');
+    err.code = 'AVATAR_QUEUE_FULL';
+    return Promise.reject(err);
+  }
+
+  return new Promise<() => void>((resolve, reject) => {
+    const waiter: AvatarSlotWaiter = {
+      resolve: () => resolve(makeRelease()),
+      reject,
+      signal,
+    };
+    if (signal) {
+      const onAbort = () => {
+        const st = avatarAccountLimiters.get(accountScope);
+        if (st) {
+          const idx = st.waiters.indexOf(waiter);
+          if (idx >= 0) {
+            st.waiters.splice(idx, 1);
+            if (st.active === 0 && st.waiters.length === 0) {
+              avatarAccountLimiters.delete(accountScope);
+            }
+          }
+        }
+        avatarLimiterStats.abortedWaitersTotal += 1;
+        const abortErr: any = new Error('Client aborted avatar request');
+        abortErr.code = 'AVATAR_ABORTED';
+        reject(abortErr);
+      };
+      waiter.abortHandler = onAbort;
+      signal.addEventListener('abort', onAbort, { once: true });
+    }
+    state!.waiters.push(waiter);
+  });
+}
+
+function classifyAvatarErrorKind(err: any): {
+  kind: 'flood_wait' | 'no_photo' | 'timeout' | 'offline' | 'rpc_error' | 'queue_full';
+  retryAfterSeconds?: number;
+} {
+  const floodSecs = extractFloodWaitSeconds(err);
+  if (floodSecs !== null) {
+    return { kind: 'flood_wait', retryAfterSeconds: floodSecs };
+  }
+  const code = String(err?.code || '').toUpperCase();
+  const msg = String(err?.errorMessage || err?.message || err || '').toUpperCase();
+  if (code === 'AVATAR_QUEUE_FULL' || code === 'TELEGRAM_RPC_QUEUE_FULL') {
+    return { kind: 'queue_full', retryAfterSeconds: 3 };
+  }
+  if (
+    msg.includes('USER_ID_INVALID') ||
+    msg.includes('PEER_ID_INVALID') ||
+    msg.includes('CHANNEL_INVALID') ||
+    msg.includes('CHAT_ID_INVALID') ||
+    msg.includes('USERNAME_NOT_OCCUPIED') ||
+    msg.includes('CHANNEL_PRIVATE') ||
+    msg.includes('USER_PRIVACY_RESTRICTED')
+  ) {
+    return { kind: 'no_photo' };
+  }
+  if (
+    msg.includes('NOT CONNECTED') ||
+    msg.includes('ECONNREFUSED') ||
+    msg.includes('ECONNRESET') ||
+    msg.includes('CLIENT ABORTED')
+  ) {
+    return { kind: 'offline', retryAfterSeconds: 5 };
+  }
+  if (msg.includes('TIMEOUT') || msg.includes('ETIMEDOUT') || msg.includes('超时')) {
+    return { kind: 'timeout', retryAfterSeconds: 5 };
+  }
+  return { kind: 'rpc_error', retryAfterSeconds: 5 };
+}
+
+export async function fetchTelegramAvatarWithLimiting(opts: {
+  cacheAccountScope: string;
+  cleanId: string;
+  candidates: ConnectedTelegramUser[];
+  signal?: AbortSignal;
+}): Promise<AvatarFetchOutcome> {
+  const { cacheAccountScope, cleanId, candidates, signal } = opts;
+  const cacheKey = `${cacheAccountScope}:${cleanId}`;
+  const now = Date.now();
+
+  const cached = telegramAvatarCache.get(cacheKey, now);
+  if (cached) {
+    return { status: 200, buffer: cached.buffer, mime: cached.mime };
+  }
+
+  const neg = getAvatarNegativeCacheEntry(cacheKey, now);
+  if (neg) {
+    if (neg.reason === 'no_photo') {
+      avatarLimiterStats.negativeCacheHitsNoPhoto += 1;
+      return { status: 404, errorType: 'no_photo' };
+    }
+    avatarLimiterStats.negativeCacheHitsRpcError += 1;
+    return { status: 503, retryAfterSeconds: 5, errorType: 'rpc_error' };
+  }
+
+  const peer: any = /^-?\d+$/.test(cleanId) ? Number(cleanId) : cleanId;
+  const primaryCandidate = candidates[0];
+  if (primaryCandidate) {
+    const activeFlood = getTelegramFloodCooldown(
+      { accountId: cacheAccountScope, userId: primaryCandidate.userId, phone: primaryCandidate.phone },
+      now
+    );
+    if (activeFlood) {
+      return { status: 429, retryAfterSeconds: activeFlood.retryAfterSeconds, errorType: 'flood_wait' };
+    }
+  }
+
+  const existingFlight = telegramAvatarInFlight.get(cacheKey);
+  if (existingFlight) {
+    avatarLimiterStats.singleFlightHitsTotal += 1;
+    return await existingFlight;
+  }
+
+  let releaseSlot: (() => void) | null = null;
+  try {
+    releaseSlot = await acquireAvatarSlot(cacheAccountScope, signal);
+  } catch (slotErr: any) {
+    if (slotErr?.code === 'AVATAR_ABORTED') {
+      return { status: 503, retryAfterSeconds: 3, errorType: 'offline' };
+    }
+    return { status: 503, retryAfterSeconds: 3, errorType: 'queue_full' };
+  }
+
+  // Re-check caches after acquiring queued slot in case single-flight resolved it meanwhile
+  const cachedAfterWait = telegramAvatarCache.get(cacheKey, Date.now());
+  if (cachedAfterWait) {
+    releaseSlot();
+    return { status: 200, buffer: cachedAfterWait.buffer, mime: cachedAfterWait.mime };
+  }
+  const negAfterWait = getAvatarNegativeCacheEntry(cacheKey, Date.now());
+  if (negAfterWait) {
+    releaseSlot();
+    return negAfterWait.reason === 'no_photo'
+      ? { status: 404, errorType: 'no_photo' }
+      : { status: 503, retryAfterSeconds: 5, errorType: 'rpc_error' };
+  }
+  const existingFlightAfterWait = telegramAvatarInFlight.get(cacheKey);
+  if (existingFlightAfterWait) {
+    releaseSlot();
+    avatarLimiterStats.singleFlightHitsTotal += 1;
+    return await existingFlightAfterWait;
+  }
+
+  const downloadTask = (async (): Promise<AvatarFetchOutcome> => {
+    try {
+      let sawTransientTimeoutOrOffline: AvatarFetchOutcome | null = null;
+      let sawRpcError = false;
+      let sawNoPhotoSuccess = false;
+
+      for (const connected of candidates) {
+        if (!connected.client) continue;
+        const floodCheck = getTelegramFloodCooldown({
+          accountId: cacheAccountScope,
+          userId: connected.userId,
+          phone: connected.phone,
+        });
+        if (floodCheck) {
+          return { status: 429, retryAfterSeconds: floodCheck.retryAfterSeconds, errorType: 'flood_wait' };
+        }
+        try {
+          const photo = await scheduleTelegramRpc(cacheAccountScope, 'P2', 'downloadProfilePhoto', () =>
+            withTelegramTimeout(
+              connected.client.downloadProfilePhoto(peer, { isBig: false }),
+              8000,
+              '下载 Telegram 头像超时'
+            )
+          );
+          if (photo && Buffer.isBuffer(photo) && photo.length > 0) {
+            const finishTs = Date.now();
+            telegramAvatarCache.set(
+              cacheKey,
+              {
+                buffer: photo,
+                mime: 'image/jpeg',
+                expiresAt: finishTs + TELEGRAM_AVATAR_CACHE_TTL_MS,
+              },
+              finishTs
+            );
+            telegramAvatarNegativeCache.delete(cacheKey);
+            avatarLimiterStats.completedTotal += 1;
+            return { status: 200, buffer: photo, mime: 'image/jpeg' };
+          }
+          // Connected client successfully answered with no profile photo
+          sawNoPhotoSuccess = true;
+        } catch (avatarErr: any) {
+          const floodEntry = recordTelegramFloodWait(
+            { accountId: cacheAccountScope, userId: connected.userId, phone: connected.phone },
+            avatarErr,
+            'downloadProfilePhoto'
+          );
+          if (floodEntry) {
+            return {
+              status: 429,
+              retryAfterSeconds: floodEntry.retryAfterSeconds,
+              errorType: 'flood_wait',
+            };
+          }
+          const classified = classifyAvatarErrorKind(avatarErr);
+          if (classified.kind === 'flood_wait') {
+            return { status: 429, retryAfterSeconds: classified.retryAfterSeconds || 30, errorType: 'flood_wait' };
+          }
+          if (classified.kind === 'no_photo') {
+            sawNoPhotoSuccess = true;
+            continue;
+          }
+          if (
+            classified.kind === 'timeout' ||
+            classified.kind === 'offline' ||
+            classified.kind === 'queue_full'
+          ) {
+            // NEVER negative-cache timeouts, disconnections, or backpressure!
+            sawTransientTimeoutOrOffline = {
+              status: 503,
+              retryAfterSeconds: classified.retryAfterSeconds || 5,
+              errorType: classified.kind,
+            };
+            continue;
+          }
+          sawRpcError = true;
+        }
+      }
+
+      if (sawTransientTimeoutOrOffline) {
+        return sawTransientTimeoutOrOffline;
+      }
+      if (sawNoPhotoSuccess && !sawRpcError) {
+        setAvatarNegativeCache(cacheKey, 'no_photo', Date.now());
+        return { status: 404, errorType: 'no_photo' };
+      }
+      if (sawRpcError) {
+        setAvatarNegativeCache(cacheKey, 'rpc_error', Date.now());
+        return { status: 503, retryAfterSeconds: 5, errorType: 'rpc_error' };
+      }
+      return { status: 404, errorType: 'no_photo' };
+    } finally {
+      telegramAvatarInFlight.delete(cacheKey);
+      releaseSlot?.();
+    }
+  })();
+
+  telegramAvatarInFlight.set(cacheKey, downloadTask);
+  return await downloadTask;
+}
+
 app.get('/api/telegram/user/avatar/:chatId', async (req: Request, res: Response) => {
   try {
     if (!isAllowedClientOrigin(req)) {
@@ -24131,8 +25715,6 @@ app.get('/api/telegram/user/avatar/:chatId', async (req: Request, res: Response)
     const cleanId = chatId.replace(/^tg_/, '');
     const accountId = typeof req.query.accountId === 'string' ? req.query.accountId.trim() : '';
 
-    // 1. Resolve matching active Telegram user client strictly isolated by accountId
-    const peer: any = /^-?\d+$/.test(cleanId) ? Number(cleanId) : cleanId;
     const primaryConnected = accountId ? resolveConnectedTelegramUser(accountId) : undefined;
     const candidates: ConnectedTelegramUser[] = [];
     if (primaryConnected) {
@@ -24153,53 +25735,49 @@ app.get('/api/telegram/user/avatar/:chatId', async (req: Request, res: Response)
     }
 
     const cacheAccountScope = accountId || `acc_tg_${candidates[0].userId}`;
-    const cacheKey = `${cacheAccountScope}:${cleanId}`;
-    const now = Date.now();
-
-    // 2. Check bounded LRU avatar cache strictly scoped by account
-    const cached = telegramAvatarCache.get(cacheKey, now);
-    if (cached) {
-      res.setHeader('Content-Type', cached.mime);
-      res.setHeader('Cache-Control', 'private, max-age=3600');
-      return res.send(cached.buffer);
-    }
-
-    for (const connected of candidates) {
-      if (connected.client) {
-        if (getTelegramFloodCooldown({ accountId: cacheAccountScope, userId: connected.userId, phone: connected.phone })) {
-          continue;
-        }
-        try {
-          const photo = await connected.client.downloadProfilePhoto(peer, { isBig: false });
-          if (photo && Buffer.isBuffer(photo) && photo.length > 0) {
-            telegramAvatarCache.set(
-              cacheKey,
-              {
-                buffer: photo,
-                mime: 'image/jpeg',
-                expiresAt: now + TELEGRAM_AVATAR_CACHE_TTL_MS,
-              },
-              now
-            );
-            res.setHeader('Content-Type', 'image/jpeg');
-            res.setHeader('Cache-Control', 'private, max-age=3600');
-            return res.send(photo);
-          }
-        } catch (avatarErr: any) {
-          recordTelegramFloodWait(
-            { accountId: cacheAccountScope, userId: connected.userId, phone: connected.phone },
-            avatarErr,
-            'downloadProfilePhoto'
-          );
-          // peer might not exist on this client
-        }
+    const abortController = new AbortController();
+    const onClose = () => {
+      if (!res.writableEnded) {
+        abortController.abort();
       }
-    }
+    };
+    req.on('close', onClose);
+    res.once('close', onClose);
 
-    // 3. Avatar not found or user offline
-    return res.status(404).send('Avatar not found');
+    try {
+      const outcome = await fetchTelegramAvatarWithLimiting({
+        cacheAccountScope,
+        cleanId,
+        candidates,
+        signal: abortController.signal,
+      });
+
+      if (res.writableEnded) return;
+
+      if (outcome.status === 200 && outcome.buffer) {
+        res.setHeader('Content-Type', outcome.mime || 'image/jpeg');
+        res.setHeader('Cache-Control', 'private, max-age=3600');
+        return res.send(outcome.buffer);
+      }
+      if (outcome.status === 429) {
+        res.setHeader('Retry-After', String(outcome.retryAfterSeconds || 30));
+        res.setHeader('Cache-Control', 'no-store');
+        return res.status(429).send('Rate limited');
+      }
+      if (outcome.status === 503) {
+        res.setHeader('Retry-After', String(outcome.retryAfterSeconds || 5));
+        res.setHeader('Cache-Control', 'no-store');
+        return res.status(503).send('Avatar temporarily unavailable');
+      }
+      return res.status(404).send('Avatar not found');
+    } finally {
+      req.off('close', onClose);
+      res.off('close', onClose);
+    }
   } catch (err: any) {
-    return res.status(404).send('Avatar not found');
+    if (!res.writableEnded) {
+      return res.status(503).send('Avatar temporarily unavailable');
+    }
   }
 });
 
@@ -24925,6 +26503,8 @@ app.post('/api/telegram/user/disconnect', requireTenantAuth, async (req: Request
             const telegramProxy = getConfiguredTelegramProxy();
             const tempClient = new TelegramClient(new StringSession(decrypted), creds.apiId, creds.apiHash, {
               connectionRetries: 2,
+              reconnectRetries: 0,
+              autoReconnect: false,
               ...TELEGRAM_DESKTOP_CLIENT_PARAMS,
               ...(telegramProxy ? { proxy: telegramProxy } : {}),
             });
@@ -26820,10 +28400,12 @@ app.post('/api/telegram/user/messages/edit', requireTenantAuth, async (req: Requ
       if (!connected || !connected.client) {
         return res.status(400).json({ ok: false, error: '当前账号未在线连接 Telegram MTProto，无法编辑云端消息' });
       }
-      const { inputPeer } = await resolveTelegramInputPeer(connected.client, chatId, connected.userId);
-      await connected.client.editMessage(inputPeer, {
-        message: tgMsgId,
-        text: String(newText).trim(),
+      await scheduleTelegramRpc(accountId || `acc_tg_${connected.userId}`, 'P0', 'messages.EditMessage', async () => {
+        const { inputPeer } = await resolveTelegramInputPeer(connected.client, chatId, connected.userId);
+        await connected.client.editMessage(inputPeer, {
+          message: tgMsgId,
+          text: String(newText).trim(),
+        });
       });
     }
 
@@ -26833,30 +28415,40 @@ app.post('/api/telegram/user/messages/edit', requireTenantAuth, async (req: Requ
       const accVariants = scopedAcc ? getScopedAccountIdVariants(scopedAcc) : [];
       const hasTranslatedPatch = typeof translatedText === 'string';
       const nextTransVal = hasTranslatedPatch ? translatedText : '';
-      if (accVariants.length > 0) {
-        const accPlaceholders = accVariants.map(() => '?').join(', ');
-        if (hasTranslatedPatch) {
-          await db
-            .prepare(
-              `UPDATE messages SET text = ?, translated_text = ?, is_edited = 1 WHERE (id = ? OR ((chat_id = ? OR chat_id = ?) AND telegram_message_id = ?)) AND account_id IN (${accPlaceholders})`
-            )
-            .run(String(newText).trim(), nextTransVal, messageId || '', String(chatId), altChatId, tgMsgId, ...accVariants);
-        } else {
-          await db
-            .prepare(
-              `UPDATE messages SET text = ?, is_edited = 1 WHERE (id = ? OR ((chat_id = ? OR chat_id = ?) AND telegram_message_id = ?)) AND account_id IN (${accPlaceholders})`
-            )
-            .run(String(newText).trim(), messageId || '', String(chatId), altChatId, tgMsgId, ...accVariants);
-        }
-      } else if (hasTranslatedPatch) {
-        await db
-          .prepare('UPDATE messages SET text = ?, translated_text = ?, is_edited = 1 WHERE id = ?')
-          .run(String(newText).trim(), nextTransVal, messageId || '');
-      } else {
-        await db
-          .prepare('UPDATE messages SET text = ?, is_edited = 1 WHERE id = ?')
-          .run(String(newText).trim(), messageId || '');
-      }
+      await enqueueMessageDbWrite({
+        priority: 'HIGH',
+        kind: 'edit',
+        accountId: scopedAcc || 'acc_1',
+        chatId: String(chatId),
+        tgMsgIds: [tgMsgId],
+        msgId: messageId ? String(messageId) : undefined,
+        exec: async () => {
+          if (accVariants.length > 0) {
+            const accPlaceholders = accVariants.map(() => '?').join(', ');
+            if (hasTranslatedPatch) {
+              await db
+                .prepare(
+                  `UPDATE messages SET text = ?, translated_text = ?, is_edited = 1 WHERE (id = ? OR ((chat_id = ? OR chat_id = ?) AND telegram_message_id = ?)) AND account_id IN (${accPlaceholders})`
+                )
+                .run(String(newText).trim(), nextTransVal, messageId || '', String(chatId), altChatId, tgMsgId, ...accVariants);
+            } else {
+              await db
+                .prepare(
+                  `UPDATE messages SET text = ?, is_edited = 1 WHERE (id = ? OR ((chat_id = ? OR chat_id = ?) AND telegram_message_id = ?)) AND account_id IN (${accPlaceholders})`
+                )
+                .run(String(newText).trim(), messageId || '', String(chatId), altChatId, tgMsgId, ...accVariants);
+            }
+          } else if (hasTranslatedPatch) {
+            await db
+              .prepare('UPDATE messages SET text = ?, translated_text = ?, is_edited = 1 WHERE id = ?')
+              .run(String(newText).trim(), nextTransVal, messageId || '');
+          } else {
+            await db
+              .prepare('UPDATE messages SET text = ?, is_edited = 1 WHERE id = ?')
+              .run(String(newText).trim(), messageId || '');
+          }
+        },
+      });
     } catch {}
 
     return res.json({ ok: true, cloudSynced: true, telegramMessageId: tgMsgId });
@@ -26889,15 +28481,17 @@ app.post('/api/telegram/user/messages/react', requireTenantAuth, async (req: Req
       return res.status(400).json({ ok: false, error: '该消息缺少 Telegram 云端消息 ID，无法发送表情回应' });
     }
 
-    const { inputPeer } = await resolveTelegramInputPeer(connected.client, chatId, connected.userId);
-    await connected.client.invoke(
-      new Api.messages.SendReaction({
-        peer: inputPeer,
-        msgId: tgMsgId,
-        reaction: remove || !emoji ? [] : [new Api.ReactionEmoji({ emoticon: String(emoji) })],
-        addToRecent: !remove && Boolean(emoji),
-      })
-    );
+    await scheduleTelegramRpc(accountId || `acc_tg_${connected.userId}`, 'P0', 'messages.SendReaction', async () => {
+      const { inputPeer } = await resolveTelegramInputPeer(connected.client, chatId, connected.userId);
+      await connected.client.invoke(
+        new Api.messages.SendReaction({
+          peer: inputPeer,
+          msgId: tgMsgId,
+          reaction: remove || !emoji ? [] : [new Api.ReactionEmoji({ emoticon: String(emoji) })],
+          addToRecent: !remove && Boolean(emoji),
+        })
+      );
+    });
 
     try {
       const cleanEmoji = String(emoji || '').trim();
@@ -26906,44 +28500,54 @@ app.post('/api/telegram/user/messages/react', requireTenantAuth, async (req: Req
       const scopedAcc = accountId || `acc_tg_${connected.userId}`;
       const accVariants = getScopedAccountIdVariants(scopedAcc);
       const accPlaceholders = accVariants.map(() => '?').join(', ');
-      const existingRow = (await db
-        .prepare(
-          `SELECT id, reactions_json FROM messages
-           WHERE (id = ? OR ((chat_id = ? OR chat_id = ?) AND telegram_message_id = ?))
-             AND account_id IN (${accPlaceholders})
-           LIMIT 1`
-        )
-        .get(messageId || '', canonicalChatId, altChatId, tgMsgId, ...accVariants)) as any;
+      await enqueueMessageDbWrite({
+        priority: 'HIGH',
+        kind: 'reactions',
+        accountId: scopedAcc,
+        chatId: canonicalChatId,
+        tgMsgIds: [tgMsgId],
+        msgId: messageId ? String(messageId) : undefined,
+        exec: async () => {
+          const existingRow = (await db
+            .prepare(
+              `SELECT id, reactions_json FROM messages
+               WHERE (id = ? OR ((chat_id = ? OR chat_id = ?) AND telegram_message_id = ?))
+                 AND account_id IN (${accPlaceholders})
+               LIMIT 1`
+            )
+            .get(messageId || '', canonicalChatId, altChatId, tgMsgId, ...accVariants)) as any;
 
-      if (existingRow?.id) {
-        const parsed = parseStoredReactionsJson(existingRow.reactions_json);
-        const reactions: Record<string, number> = { ...(parsed.reactions || {}) };
-        let myReactions: string[] = [...(parsed.myReactions || [])];
-        if (cleanEmoji) {
-          if (remove) {
-            if (myReactions.includes(cleanEmoji) || reactions[cleanEmoji]) {
-              const nextCnt = Math.max(0, (reactions[cleanEmoji] || 1) - 1);
-              if (nextCnt === 0) delete reactions[cleanEmoji];
-              else reactions[cleanEmoji] = nextCnt;
+          if (existingRow?.id) {
+            const parsed = parseStoredReactionsJson(existingRow.reactions_json);
+            const reactions: Record<string, number> = { ...(parsed.reactions || {}) };
+            let myReactions: string[] = [...(parsed.myReactions || [])];
+            if (cleanEmoji) {
+              if (remove) {
+                if (myReactions.includes(cleanEmoji) || reactions[cleanEmoji]) {
+                  const nextCnt = Math.max(0, (reactions[cleanEmoji] || 1) - 1);
+                  if (nextCnt === 0) delete reactions[cleanEmoji];
+                  else reactions[cleanEmoji] = nextCnt;
+                }
+                myReactions = myReactions.filter((e) => e !== cleanEmoji);
+              } else {
+                if (!myReactions.includes(cleanEmoji)) {
+                  reactions[cleanEmoji] = (reactions[cleanEmoji] || 0) + 1;
+                  myReactions.push(cleanEmoji);
+                }
+              }
+            } else if (remove) {
+              for (const prevMine of myReactions) {
+                const nextCnt = Math.max(0, (reactions[prevMine] || 1) - 1);
+                if (nextCnt === 0) delete reactions[prevMine];
+                else reactions[prevMine] = nextCnt;
+              }
+              myReactions = [];
             }
-            myReactions = myReactions.filter((e) => e !== cleanEmoji);
-          } else {
-            if (!myReactions.includes(cleanEmoji)) {
-              reactions[cleanEmoji] = (reactions[cleanEmoji] || 0) + 1;
-              myReactions.push(cleanEmoji);
-            }
+            const serialized = serializeStoredReactionsJson({ reactions, myReactions });
+            await db.prepare('UPDATE messages SET reactions_json = ? WHERE id = ?').run(serialized, existingRow.id);
           }
-        } else if (remove) {
-          for (const prevMine of myReactions) {
-            const nextCnt = Math.max(0, (reactions[prevMine] || 1) - 1);
-            if (nextCnt === 0) delete reactions[prevMine];
-            else reactions[prevMine] = nextCnt;
-          }
-          myReactions = [];
-        }
-        const serialized = serializeStoredReactionsJson({ reactions, myReactions });
-        await db.prepare('UPDATE messages SET reactions_json = ? WHERE id = ?').run(serialized, existingRow.id);
-      }
+        },
+      });
     } catch {}
 
     return res.json({ ok: true, cloudSynced: true, telegramMessageId: tgMsgId });
@@ -26976,33 +28580,45 @@ app.post('/api/telegram/user/messages/pin', requireTenantAuth, async (req: Reque
       return res.status(400).json({ ok: false, error: '该消息缺少 Telegram 云端消息 ID，无法置顶' });
     }
 
-    const { inputPeer } = await resolveTelegramInputPeer(connected.client, chatId, connected.userId);
-    await connected.client.invoke(
-      new Api.messages.UpdatePinnedMessage({
-        peer: inputPeer,
-        id: tgMsgId,
-        unpin: !pin,
-        silent: false,
-      })
-    );
+    await scheduleTelegramRpc(accountId || `acc_tg_${connected.userId}`, 'P0', 'messages.UpdatePinnedMessage', async () => {
+      const { inputPeer } = await resolveTelegramInputPeer(connected.client, chatId, connected.userId);
+      await connected.client.invoke(
+        new Api.messages.UpdatePinnedMessage({
+          peer: inputPeer,
+          id: tgMsgId,
+          unpin: !pin,
+          silent: false,
+        })
+      );
+    });
 
     try {
       const altChatId = String(chatId).startsWith('tg_') ? String(chatId).replace(/^tg_/, '') : `tg_${chatId}`;
       const scopedAcc = accountId || (req as any).auth?.effectiveAccountId || '';
       const accVariants = scopedAcc ? getScopedAccountIdVariants(scopedAcc) : [];
       const pinnedFlag = pin ? 1 : 0;
-      if (accVariants.length > 0) {
-        const accPlaceholders = accVariants.map(() => '?').join(', ');
-        await db
-          .prepare(
-            `UPDATE messages SET is_pinned = ? WHERE (id = ? OR ((chat_id = ? OR chat_id = ?) AND telegram_message_id = ?)) AND account_id IN (${accPlaceholders})`
-          )
-          .run(pinnedFlag, messageId || '', String(chatId), altChatId, tgMsgId, ...accVariants);
-      } else {
-        await db
-          .prepare('UPDATE messages SET is_pinned = ? WHERE id = ?')
-          .run(pinnedFlag, messageId || '');
-      }
+      await enqueueMessageDbWrite({
+        priority: 'HIGH',
+        kind: 'pin',
+        accountId: scopedAcc || 'acc_1',
+        chatId: String(chatId),
+        tgMsgIds: [tgMsgId],
+        msgId: messageId ? String(messageId) : undefined,
+        exec: async () => {
+          if (accVariants.length > 0) {
+            const accPlaceholders = accVariants.map(() => '?').join(', ');
+            await db
+              .prepare(
+                `UPDATE messages SET is_pinned = ? WHERE (id = ? OR ((chat_id = ? OR chat_id = ?) AND telegram_message_id = ?)) AND account_id IN (${accPlaceholders})`
+              )
+              .run(pinnedFlag, messageId || '', String(chatId), altChatId, tgMsgId, ...accVariants);
+          } else {
+            await db
+              .prepare('UPDATE messages SET is_pinned = ? WHERE id = ?')
+              .run(pinnedFlag, messageId || '');
+          }
+        },
+      });
     } catch {}
 
     return res.json({ ok: true, cloudSynced: true, pinned: Boolean(pin), telegramMessageId: tgMsgId });
@@ -27361,23 +28977,34 @@ app.post('/api/telegram/user/dialogs/clear-history', requireTenantAuth, async (r
       return res.status(400).json({ ok: false, error: '当前账号未在线连接 Telegram MTProto，无法清空云端记录' });
     }
 
-    const { inputPeer } = await resolveTelegramInputPeer(connected.client, chatId, connected.userId);
-    await connected.client.invoke(
-      new Api.messages.DeleteHistory({
-        peer: inputPeer,
-        maxId: 0,
-        justClear: true,
-        revoke: Boolean(revoke),
-      })
-    );
+    await scheduleTelegramRpc(accountId || `acc_tg_${connected.userId}`, 'P0', 'messages.DeleteHistory.clear', async () => {
+      const { inputPeer } = await resolveTelegramInputPeer(connected.client, chatId, connected.userId);
+      await connected.client.invoke(
+        new Api.messages.DeleteHistory({
+          peer: inputPeer,
+          maxId: 0,
+          justClear: true,
+          revoke: Boolean(revoke),
+        })
+      );
+    });
 
     try {
       const altChatId = String(chatId).startsWith('tg_') ? String(chatId).replace(/^tg_/, '') : `tg_${chatId}`;
-      const accVariants = getScopedAccountIdVariants(accountId || `acc_tg_${connected.userId}`);
+      const effectiveAcc = accountId || `acc_tg_${connected.userId}`;
+      const accVariants = getScopedAccountIdVariants(effectiveAcc);
       const accPlaceholders = accVariants.map(() => '?').join(', ');
-      await db
-        .prepare(`DELETE FROM messages WHERE (chat_id = ? OR chat_id = ?) AND account_id IN (${accPlaceholders})`)
-        .run(String(chatId), altChatId, ...accVariants);
+      await enqueueMessageDbWrite({
+        priority: 'HIGH',
+        kind: 'clear_chat',
+        accountId: effectiveAcc,
+        chatId: String(chatId),
+        exec: async () => {
+          await db
+            .prepare(`DELETE FROM messages WHERE (chat_id = ? OR chat_id = ?) AND account_id IN (${accPlaceholders})`)
+            .run(String(chatId), altChatId, ...accVariants);
+        },
+      });
     } catch {}
     patchConnectedDialogCache(connected, chatId, { lastMessage: '暂无消息', unreadCount: 0 });
 
@@ -27406,24 +29033,40 @@ app.post('/api/telegram/user/dialogs/delete', requireTenantAuth, async (req: Req
       return res.status(400).json({ ok: false, error: '当前账号未在线连接 Telegram MTProto，无法删除/退出云端对话' });
     }
 
-    const { inputPeer } = await resolveTelegramInputPeer(connected.client, chatId, connected.userId);
-    if (inputPeer instanceof Api.InputPeerChannel) {
-      await connected.client.invoke(new Api.channels.LeaveChannel({ channel: inputPeer }));
-    } else if (inputPeer instanceof Api.InputPeerChat) {
-      let leftChatOk = false;
-      try {
-        await connected.client.invoke(
-          new Api.messages.DeleteChatUser({
-            chatId: inputPeer.chatId,
-            userId: new Api.InputUserSelf(),
-            revokeHistory: Boolean(revoke),
-          })
-        );
-        leftChatOk = true;
-      } catch {
-        // 若此前已退群（如 USER_NOT_PARTICIPANT），继续执行 DeleteHistory 移除云端对话
-      }
-      try {
+    await scheduleTelegramRpc(accountId || `acc_tg_${connected.userId}`, 'P0', 'dialogs.Delete', async () => {
+      const { inputPeer } = await resolveTelegramInputPeer(connected.client, chatId, connected.userId);
+      if (inputPeer instanceof Api.InputPeerChannel) {
+        await connected.client.invoke(new Api.channels.LeaveChannel({ channel: inputPeer }));
+      } else if (inputPeer instanceof Api.InputPeerChat) {
+        let leftChatOk = false;
+        try {
+          await connected.client.invoke(
+            new Api.messages.DeleteChatUser({
+              chatId: inputPeer.chatId,
+              userId: new Api.InputUserSelf(),
+              revokeHistory: Boolean(revoke),
+            })
+          );
+          leftChatOk = true;
+        } catch {
+          // 若此前已退群（如 USER_NOT_PARTICIPANT），继续执行 DeleteHistory 移除云端对话
+        }
+        try {
+          await connected.client.invoke(
+            new Api.messages.DeleteHistory({
+              peer: inputPeer,
+              maxId: 0,
+              justClear: false,
+              revoke: Boolean(revoke),
+            })
+          );
+        } catch (delHistErr: any) {
+          if (!leftChatOk) {
+            throw delHistErr;
+          }
+          console.warn('[Telegram DeleteHistory after LeaveChat Warning]:', delHistErr?.message || delHistErr);
+        }
+      } else {
         await connected.client.invoke(
           new Api.messages.DeleteHistory({
             peer: inputPeer,
@@ -27432,36 +29075,31 @@ app.post('/api/telegram/user/dialogs/delete', requireTenantAuth, async (req: Req
             revoke: Boolean(revoke),
           })
         );
-      } catch (delHistErr: any) {
-        if (!leftChatOk) {
-          throw delHistErr;
-        }
-        console.warn('[Telegram DeleteHistory after LeaveChat Warning]:', delHistErr?.message || delHistErr);
       }
-    } else {
-      await connected.client.invoke(
-        new Api.messages.DeleteHistory({
-          peer: inputPeer,
-          maxId: 0,
-          justClear: false,
-          revoke: Boolean(revoke),
-        })
-      );
-    }
+    });
 
     try {
       const altChatId = String(chatId).startsWith('tg_') ? String(chatId).replace(/^tg_/, '') : `tg_${chatId}`;
-      const accVariants = getScopedAccountIdVariants(accountId || `acc_tg_${connected.userId}`);
+      const effectiveAcc = accountId || `acc_tg_${connected.userId}`;
+      const accVariants = getScopedAccountIdVariants(effectiveAcc);
       const accPlaceholders = accVariants.map(() => '?').join(', ');
-      await db
-        .prepare(`DELETE FROM messages WHERE (chat_id = ? OR chat_id = ?) AND account_id IN (${accPlaceholders})`)
-        .run(String(chatId), altChatId, ...accVariants);
-      await db
-        .prepare(`DELETE FROM account_customer_profiles WHERE (chat_id = ? OR chat_id = ?) AND account_id IN (${accPlaceholders})`)
-        .run(String(chatId), altChatId, ...accVariants);
-      await db
-        .prepare(`DELETE FROM customer_profiles WHERE (chat_id = ? OR chat_id = ?) AND account_id IN (${accPlaceholders})`)
-        .run(String(chatId), altChatId, ...accVariants);
+      await enqueueMessageDbWrite({
+        priority: 'HIGH',
+        kind: 'clear_chat',
+        accountId: effectiveAcc,
+        chatId: String(chatId),
+        exec: async () => {
+          await db
+            .prepare(`DELETE FROM messages WHERE (chat_id = ? OR chat_id = ?) AND account_id IN (${accPlaceholders})`)
+            .run(String(chatId), altChatId, ...accVariants);
+          await db
+            .prepare(`DELETE FROM account_customer_profiles WHERE (chat_id = ? OR chat_id = ?) AND account_id IN (${accPlaceholders})`)
+            .run(String(chatId), altChatId, ...accVariants);
+          await db
+            .prepare(`DELETE FROM customer_profiles WHERE (chat_id = ? OR chat_id = ?) AND account_id IN (${accPlaceholders})`)
+            .run(String(chatId), altChatId, ...accVariants);
+        },
+      });
     } catch {}
     removeConnectedDialogFromCache(connected, chatId);
 
@@ -27587,11 +29225,13 @@ app.post('/api/telegram/user/messages/batch-delete', requireTenantAuth, async (r
         if (!connected || !connected.client) {
           return res.status(400).json({ ok: false, error: '当前账号未在线连接 Telegram MTProto，无法批量删除云端消息' });
         }
-        const { inputPeer } = await resolveTelegramInputPeer(connected.client, chatId, connected.userId);
-        for (let i = 0; i < tgIds.length; i += 100) {
-          const chunk = tgIds.slice(i, i + 100);
-          await connected.client.deleteMessages(inputPeer, chunk, { revoke: Boolean(revoke) });
-        }
+        await scheduleTelegramRpc(accountId || `acc_tg_${connected.userId}`, 'P0', 'messages.DeleteMessages.batch', async () => {
+          const { inputPeer } = await resolveTelegramInputPeer(connected.client, chatId, connected.userId);
+          for (let i = 0; i < tgIds.length; i += 100) {
+            const chunk = tgIds.slice(i, i + 100);
+            await connected.client.deleteMessages(inputPeer, chunk, { revoke: Boolean(revoke) });
+          }
+        });
         cloudSynced = true;
       }
     }
@@ -27601,31 +29241,44 @@ app.post('/api/telegram/user/messages/batch-delete', requireTenantAuth, async (r
       const accVariants = accountId ? getScopedAccountIdVariants(accountId) : [];
       const enforceAcc = accVariants.length > 0 && (!isMaster || Boolean(req.body?.accountId || req.headers['x-account-id']));
       const accPlaceholders = accVariants.map(() => '?').join(', ');
-      for (const item of normalizedItems) {
-        const embeddedChat = extractEmbeddedChatIdFromMessageId(item.id);
-        if (embeddedChat && !isSameCanonicalChatId(String(chatId), embeddedChat)) {
-          continue;
-        }
-        if (enforceAcc) {
-          await db
-            .prepare(`DELETE FROM messages WHERE id = ? AND (chat_id = ? OR chat_id = ?) AND account_id IN (${accPlaceholders})`)
-            .run(item.id, String(chatId), altChatId, ...accVariants);
-          if (item.tgId) {
-            await db
-              .prepare(`DELETE FROM messages WHERE (chat_id = ? OR chat_id = ?) AND telegram_message_id = ? AND account_id IN (${accPlaceholders})`)
-              .run(String(chatId), altChatId, item.tgId, ...accVariants);
+      const delKind =
+        String(chatId).startsWith('tg_-100') || String(chatId).startsWith('-100')
+          ? 'delete_channel'
+          : 'delete_non_channel';
+      await enqueueMessageDbWrite({
+        priority: 'HIGH',
+        kind: delKind,
+        accountId: accountId || 'acc_1',
+        chatId: String(chatId),
+        tgMsgIds: tgIds,
+        exec: async () => {
+          for (const item of normalizedItems) {
+            const embeddedChat = extractEmbeddedChatIdFromMessageId(item.id);
+            if (embeddedChat && !isSameCanonicalChatId(String(chatId), embeddedChat)) {
+              continue;
+            }
+            if (enforceAcc) {
+              await db
+                .prepare(`DELETE FROM messages WHERE id = ? AND (chat_id = ? OR chat_id = ?) AND account_id IN (${accPlaceholders})`)
+                .run(item.id, String(chatId), altChatId, ...accVariants);
+              if (item.tgId) {
+                await db
+                  .prepare(`DELETE FROM messages WHERE (chat_id = ? OR chat_id = ?) AND telegram_message_id = ? AND account_id IN (${accPlaceholders})`)
+                  .run(String(chatId), altChatId, item.tgId, ...accVariants);
+              }
+            } else {
+              await db
+                .prepare('DELETE FROM messages WHERE id = ? AND (chat_id = ? OR chat_id = ?)')
+                .run(item.id, String(chatId), altChatId);
+              if (item.tgId) {
+                await db
+                  .prepare('DELETE FROM messages WHERE (chat_id = ? OR chat_id = ?) AND telegram_message_id = ?')
+                  .run(String(chatId), altChatId, item.tgId);
+              }
+            }
           }
-        } else {
-          await db
-            .prepare('DELETE FROM messages WHERE id = ? AND (chat_id = ? OR chat_id = ?)')
-            .run(item.id, String(chatId), altChatId);
-          if (item.tgId) {
-            await db
-              .prepare('DELETE FROM messages WHERE (chat_id = ? OR chat_id = ?) AND telegram_message_id = ?')
-              .run(String(chatId), altChatId, item.tgId);
-          }
-        }
-      }
+        },
+      });
     } catch {}
 
     return res.json({
@@ -30498,7 +32151,152 @@ function getTelegramMessageSenderName(m: any, isOut: boolean): string {
   return '';
 }
 
-async function resolveTelegramMessageSenderInfo(
+// ==================== SENDER INFO BOUNDED LRU + SINGLE-FLIGHT + CONCURRENCY LIMITER ====================
+export const TELEGRAM_SENDER_CACHE_MAX_ENTRIES = 5000;
+export const TELEGRAM_SENDER_CACHE_POSITIVE_TTL_MS = 10 * 60 * 1000;
+export const TELEGRAM_SENDER_CACHE_ERROR_TTL_MS = 15 * 1000;
+export const TELEGRAM_SENDER_MAX_CONCURRENT = 4;
+
+export interface TelegramSenderInfoResult {
+  senderId: string;
+  senderName: string;
+  senderAvatarUrl?: string;
+}
+
+interface TelegramSenderCacheEntry {
+  value: TelegramSenderInfoResult;
+  expiresAt: number;
+  isErrorFallback: boolean;
+}
+
+const telegramSenderInfoCache = new Map<string, TelegramSenderCacheEntry>();
+const telegramSenderInFlight = new Map<string, Promise<TelegramSenderInfoResult>>();
+const senderAccountLimiters = new Map<string, { active: number; waiters: Array<() => void> }>();
+const senderCacheStats = {
+  hitsTotal: 0,
+  missesTotal: 0,
+  singleFlightHitsTotal: 0,
+  errorFallbacksTotal: 0,
+  evictionsTotal: 0,
+};
+
+function acquireSenderSlot(accountScope: string): Promise<() => void> {
+  let state = senderAccountLimiters.get(accountScope);
+  if (!state) {
+    state = { active: 0, waiters: [] };
+    senderAccountLimiters.set(accountScope, state);
+  }
+  const makeRelease = () => {
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      const st = senderAccountLimiters.get(accountScope);
+      if (!st) return;
+      st.active = Math.max(0, st.active - 1);
+      while (st.waiters.length > 0 && st.active < TELEGRAM_SENDER_MAX_CONCURRENT) {
+        const next = st.waiters.shift()!;
+        st.active += 1;
+        next();
+      }
+      if (st.active === 0 && st.waiters.length === 0) {
+        senderAccountLimiters.delete(accountScope);
+      }
+    };
+  };
+  if (state.active < TELEGRAM_SENDER_MAX_CONCURRENT) {
+    state.active += 1;
+    return Promise.resolve(makeRelease());
+  }
+  return new Promise<() => void>((resolve) => {
+    state!.waiters.push(() => resolve(makeRelease()));
+  });
+}
+
+function getCachedSenderEntry(key: string, now = Date.now()): TelegramSenderInfoResult | null {
+  const entry = telegramSenderInfoCache.get(key);
+  if (!entry) return null;
+  if (entry.expiresAt <= now) {
+    telegramSenderInfoCache.delete(key);
+    return null;
+  }
+  // LRU touch
+  telegramSenderInfoCache.delete(key);
+  telegramSenderInfoCache.set(key, entry);
+  return entry.value;
+}
+
+function setCachedSenderEntry(
+  key: string,
+  value: TelegramSenderInfoResult,
+  isErrorFallback: boolean,
+  now = Date.now()
+): void {
+  const ttl = isErrorFallback
+    ? TELEGRAM_SENDER_CACHE_ERROR_TTL_MS
+    : TELEGRAM_SENDER_CACHE_POSITIVE_TTL_MS;
+  if (telegramSenderInfoCache.has(key)) {
+    telegramSenderInfoCache.delete(key);
+  } else if (telegramSenderInfoCache.size >= TELEGRAM_SENDER_CACHE_MAX_ENTRIES) {
+    pruneTelegramSenderCache(now);
+    while (telegramSenderInfoCache.size >= TELEGRAM_SENDER_CACHE_MAX_ENTRIES) {
+      const oldest = telegramSenderInfoCache.keys().next().value;
+      if (oldest === undefined) break;
+      telegramSenderInfoCache.delete(oldest);
+      senderCacheStats.evictionsTotal += 1;
+    }
+  }
+  telegramSenderInfoCache.set(key, { value, expiresAt: now + ttl, isErrorFallback });
+}
+
+export function pruneTelegramSenderCache(now = Date.now()): number {
+  let removed = 0;
+  for (const [k, entry] of telegramSenderInfoCache.entries()) {
+    if (!entry || entry.expiresAt <= now) {
+      telegramSenderInfoCache.delete(k);
+      removed += 1;
+    }
+  }
+  return removed;
+}
+
+export function invalidateTelegramSenderCache(accountId: string, peerId: string): void {
+  const cleanPeer = String(peerId || '').replace(/^tg_/, '').trim();
+  if (!cleanPeer) return;
+  const accKey = normalizeMsgDbAccountKey(accountId);
+  telegramSenderInfoCache.delete(`${accKey}:${cleanPeer}`);
+  if (accountId) {
+    telegramSenderInfoCache.delete(`${accountId}:${cleanPeer}`);
+  }
+}
+
+export function clearTelegramSenderCacheForTesting(): void {
+  telegramSenderInfoCache.clear();
+  telegramSenderInFlight.clear();
+  senderAccountLimiters.clear();
+}
+
+export function getTelegramSenderCacheStats() {
+  let activeSlots = 0;
+  let queuedSlots = 0;
+  for (const st of senderAccountLimiters.values()) {
+    activeSlots += st.active;
+    queuedSlots += st.waiters.length;
+  }
+  return {
+    entries: telegramSenderInfoCache.size,
+    maxEntries: TELEGRAM_SENDER_CACHE_MAX_ENTRIES,
+    inFlightSingleFlight: telegramSenderInFlight.size,
+    activeSlots,
+    queuedSlots,
+    maxConcurrentPerAccount: TELEGRAM_SENDER_MAX_CONCURRENT,
+    ...senderCacheStats,
+  };
+}
+
+registerPerformanceQueueStatsProvider('senderInfoCache', getTelegramSenderCacheStats);
+
+export async function resolveTelegramMessageSenderInfo(
   m: any,
   isOut: boolean,
   accountId: string,
@@ -30506,37 +32304,108 @@ async function resolveTelegramMessageSenderInfo(
 ): Promise<{ senderId: string; senderName: string; senderAvatarUrl?: string }> {
   if (isOut) return { senderId: '', senderName: '' };
   const peerId = extractTelegramSenderPeerId(m);
+  const accKey = normalizeMsgDbAccountKey(accountId || 'global');
+  const globalKey = peerId ? `${accKey}:${peerId}` : '';
+
   if (peerId && senderCache?.has(peerId)) {
+    senderCacheStats.hitsTotal += 1;
     return senderCache.get(peerId)!;
   }
-  let senderEntity = m?.sender;
-  if (!senderEntity && typeof m?.getSender === 'function') {
-    try {
-      senderEntity = await m.getSender();
-    } catch {}
+  if (globalKey) {
+    const globalHit = getCachedSenderEntry(globalKey);
+    if (globalHit) {
+      senderCacheStats.hitsTotal += 1;
+      senderCache?.set(peerId, globalHit);
+      return globalHit;
+    }
   }
-  const resolvedId = peerId || (senderEntity?.id ? String(senderEntity.id) : '');
-  const postAuthor = typeof m?.postAuthor === 'string' ? m.postAuthor.trim() : '';
-  const entityName = senderEntity
-    ? [senderEntity.firstName, senderEntity.lastName].filter(Boolean).join(' ').trim() ||
-      senderEntity.title ||
-      senderEntity.username ||
-      ''
-    : '';
-  const senderName = String(postAuthor || entityName || '').trim();
-  const senderAvatarUrl =
-    resolvedId && accountId && accountId !== 'acc_telegram_bot'
-      ? signTelegramResourceUrl(`/api/telegram/user/avatar/${encodeURIComponent(resolvedId)}`, accountId)
-      : undefined;
-  const result = {
-    senderId: resolvedId,
-    senderName,
-    ...(senderAvatarUrl ? { senderAvatarUrl } : {}),
+
+  const buildResult = (resolvedId: string, entity: any): { result: TelegramSenderInfoResult; hasName: boolean } => {
+    const postAuthor = typeof m?.postAuthor === 'string' ? m.postAuthor.trim() : '';
+    const entityName = entity
+      ? [entity.firstName, entity.lastName].filter(Boolean).join(' ').trim() ||
+        entity.title ||
+        entity.username ||
+        ''
+      : '';
+    const senderName = String(postAuthor || entityName || '').trim();
+    const senderAvatarUrl =
+      resolvedId && accountId && accountId !== 'acc_telegram_bot'
+        ? signTelegramResourceUrl(`/api/telegram/user/avatar/${encodeURIComponent(resolvedId)}`, accountId)
+        : undefined;
+    return {
+      result: {
+        senderId: resolvedId,
+        senderName,
+        ...(senderAvatarUrl ? { senderAvatarUrl } : {}),
+      },
+      hasName: Boolean(senderName),
+    };
   };
-  if (resolvedId && senderCache && (senderName || !senderEntity)) {
-    senderCache.set(resolvedId, result);
+
+  // Fast inline path when GramJS already hydrated m.sender (zero RPC needed)
+  if (m?.sender) {
+    const resolvedId = peerId || (m.sender?.id ? String(m.sender.id) : '');
+    const { result, hasName } = buildResult(resolvedId, m.sender);
+    if (resolvedId && hasName) {
+      senderCache?.set(resolvedId, result);
+      if (globalKey) setCachedSenderEntry(globalKey, result, false);
+    }
+    return result;
   }
-  return result;
+
+  if (globalKey && telegramSenderInFlight.has(globalKey)) {
+    senderCacheStats.singleFlightHitsTotal += 1;
+    const coalesced = await telegramSenderInFlight.get(globalKey)!;
+    if (peerId) senderCache?.set(peerId, coalesced);
+    return coalesced;
+  }
+
+  senderCacheStats.missesTotal += 1;
+  const runResolve = async (): Promise<TelegramSenderInfoResult> => {
+    let senderEntity: any = null;
+    let rpcErrored = false;
+    if (typeof m?.getSender === 'function') {
+      const release = await acquireSenderSlot(accKey);
+      try {
+        senderEntity = await scheduleTelegramRpc(accKey, 'P2', 'resolveSender.getSender', () =>
+          withTelegramTimeout(m.getSender(), 5000, '解析发送者信息超时')
+        );
+      } catch {
+        rpcErrored = true;
+      } finally {
+        release();
+      }
+    }
+    const resolvedId = peerId || (senderEntity?.id ? String(senderEntity.id) : '');
+    const { result, hasName } = buildResult(resolvedId, senderEntity);
+    if (resolvedId) {
+      const isFallback = rpcErrored || !hasName;
+      if (isFallback) senderCacheStats.errorFallbacksTotal += 1;
+      if (senderCache && hasName) {
+        senderCache.set(resolvedId, result);
+      }
+      if (globalKey) {
+        setCachedSenderEntry(globalKey, result, isFallback);
+      }
+    }
+    return result;
+  };
+
+  if (!globalKey) {
+    return await runResolve();
+  }
+  const promise = runResolve().finally(() => {
+    if (telegramSenderInFlight.get(globalKey) === promise) {
+      telegramSenderInFlight.delete(globalKey);
+    }
+  });
+  telegramSenderInFlight.set(globalKey, promise);
+  const finalResult = await promise;
+  if (peerId && finalResult.senderName) {
+    senderCache?.set(peerId, finalResult);
+  }
+  return finalResult;
 }
 
 function extractTelegramMediaFields(
@@ -30711,7 +32580,18 @@ export async function syncTelegramUserChatMessages(
       iterParams.filter = options.filter;
     }
 
-    const messages = await client.getMessages(peerTarget, iterParams);
+    const syncStartedAt = Date.now();
+    const accountId = `acc_tg_${explicitUserId || (client as any)._selfId || 'user'}`;
+    const canonicalId =
+      rawId === 'me' && explicitUserId
+        ? `tg_${explicitUserId}`
+        : rawChatId.startsWith('tg_')
+          ? rawChatId
+          : `tg_${rawChatId}`;
+
+    const messages = await scheduleTelegramRpc(accountId, 'P1', 'messages.GetHistory', () =>
+      client.getMessages(peerTarget, iterParams)
+    );
     const rawMessagesList = Array.isArray(messages) ? messages : [];
     const rawIds = rawMessagesList
       .map((m: any) => Number(m?.id || 0))
@@ -30723,23 +32603,17 @@ export async function syncTelegramUserChatMessages(
         typeof (messages as any)?.total === 'number' ? (messages as any).total : undefined;
     }
 
-    const canonicalId =
-      rawId === 'me' && explicitUserId
-        ? `tg_${explicitUserId}`
-        : rawChatId.startsWith('tg_')
-          ? rawChatId
-          : `tg_${rawChatId}`;
-    const accountId = `acc_tg_${explicitUserId || (client as any)._selfId || 'user'}`;
-
     const allFetched: any[] = [...rawMessagesList];
 
     // On initial sync (not pagination/search/filter), also include up to 5 latest pinned messages so older pinned banners appear
     if (!options?.offsetId && !options?.search && !options?.filter) {
       try {
-        const pinnedMsgs = await client.getMessages(peerTarget, {
-          limit: 5,
-          filter: new Api.InputMessagesFilterPinned(),
-        });
+        const pinnedMsgs = await scheduleTelegramRpc(accountId, 'P1', 'messages.GetHistory.pinned', () =>
+          client.getMessages(peerTarget, {
+            limit: 5,
+            filter: new Api.InputMessagesFilterPinned(),
+          })
+        );
         if (Array.isArray(pinnedMsgs)) {
           const existingIds = new Set(allFetched.map((m) => Number(m?.id)).filter(Boolean));
           for (const pm of pinnedMsgs) {
@@ -30757,14 +32631,27 @@ export async function syncTelegramUserChatMessages(
           const altChatId = canonicalId.startsWith('tg_') ? canonicalId.replace(/^tg_/, '') : `tg_${canonicalId}`;
           const accVariants = getScopedAccountIdVariants(accountId);
           const accPlaceholders = accVariants.map(() => '?').join(', ');
-          await db
-            .prepare(
-              `DELETE FROM messages
-               WHERE (chat_id = ? OR chat_id = ?)
-                 AND account_id IN (${accPlaceholders})
-                 AND COALESCE(delivery_status, 'delivered') = 'delivered'`
-            )
-            .run(canonicalId, altChatId, ...accVariants);
+          await enqueueMessageDbWrite({
+            priority: 'LOW',
+            kind: 'sync_empty_clear',
+            accountId,
+            chatId: canonicalId,
+            snapshotTakenAt: syncStartedAt,
+            exec: async () => {
+              if (isMessageBlockedByDeleteBarrier(accountId, canonicalId, undefined, syncStartedAt)) {
+                return;
+              }
+              await db
+                .prepare(
+                  `DELETE FROM messages
+                   WHERE (chat_id = ? OR chat_id = ?)
+                     AND account_id IN (${accPlaceholders})
+                     AND COALESCE(delivery_status, 'delivered') = 'delivered'
+                     AND COALESCE(created_at, 0) <= ?`
+                )
+                .run(canonicalId, altChatId, ...accVariants, syncStartedAt);
+            },
+          });
         } catch {}
       }
       return [];
@@ -30784,9 +32671,11 @@ export async function syncTelegramUserChatMessages(
     }
     if (missingReplyIds.size > 0) {
       try {
-        const extraReplies = await client.getMessages(peerTarget, {
-          ids: Array.from(missingReplyIds).slice(0, 30),
-        });
+        const extraReplies = await scheduleTelegramRpc(accountId, 'P1', 'messages.GetMessages.replies', () =>
+          client.getMessages(peerTarget, {
+            ids: Array.from(missingReplyIds).slice(0, 30),
+          })
+        );
         for (const rm of extraReplies || []) {
           if (rm && rm.id) msgById.set(Number(rm.id), rm);
         }
@@ -30891,11 +32780,17 @@ export async function syncTelegramUserChatMessages(
       });
     }
 
-    // Save to unified database cache (skip when searching or filtering media subset only)
+    // Save to unified database cache (LOW priority batched queue with delete resurrection barrier)
     if (!options?.search && !options?.filter) {
-      for (const msg of synced) {
-        await upsertSyncedMessageToDb(msg, canonicalId, accountId);
-      }
+      await Promise.allSettled(
+        synced.map((msg) =>
+          upsertSyncedMessageToDb(msg, canonicalId, accountId, {
+            priority: 'LOW',
+            snapshotTakenAt: syncStartedAt,
+            source: 'history_sync',
+          })
+        )
+      );
     }
 
     return synced.sort((a, b) => a.createdAt - b.createdAt);
@@ -30916,6 +32811,7 @@ export async function querySqlitePaginatedMessagesFallback(
   const safeLimit = Math.min(Math.max(Number(options?.limit) || 30, 1), 100);
   const altChatId = chatId.startsWith('tg_') ? chatId.replace(/^tg_/, '') : `tg_${chatId}`;
   const effectiveAcc = String(accountId || '').trim();
+  await flushMessageDbWriteQueueForChat(effectiveAcc || undefined, chatId, { timeoutMs: 2500 });
   const selfTgMatch = effectiveAcc.match(/^acc_tg_(\d+)$/);
   const chatIdCandidates = Array.from(
     new Set(
@@ -31970,9 +33866,13 @@ export function attachTelegramClientMessageListener(client: TelegramClient, phon
       return;
     }
     (client as any)._hasTgProListener = true;
+    const listenerAccountId = `acc_tg_${userId}`;
 
     client.addEventHandler(async (event: any) => {
       try {
+        if (!isTelegramClientGenerationCurrent(client, { userId, phone, accountId: listenerAccountId })) {
+          return;
+        }
         const message = event.message;
         if (!message) return;
 
@@ -32106,8 +34006,11 @@ export function attachTelegramClientMessageListener(client: TelegramClient, phon
           }
         }
 
-        // Persist real-time MTProto message into unified conversation store so customer analysis/evolution/transcripts never read stale empty tables
-        void upsertSyncedMessageToDb(realtimeUpdate, canonicalChatId, accountId);
+        // Persist real-time MTProto message into unified conversation store via HIGH-priority queue (zero main-thread stall)
+        void upsertSyncedMessageToDb(realtimeUpdate, canonicalChatId, accountId, {
+          priority: 'HIGH',
+          source: 'realtime_new_message',
+        });
 
         // Check if Autopilot is enabled for this chat strictly scoped by accountId (NEVER run Autopilot on official notifications or group join/leave notices)
         const isAutopilotOn =
@@ -32178,9 +34081,19 @@ export function attachTelegramClientMessageListener(client: TelegramClient, phon
                   }
                   effectiveIncomingText = sttRes.text.trim();
                   try {
-                    await db
-                      .prepare(`UPDATE messages SET stt_text = ? WHERE id = ?`)
-                      .run(effectiveIncomingText, messageId);
+                    await enqueueMessageDbWrite({
+                      priority: 'NORMAL',
+                      kind: 'edit',
+                      accountId,
+                      chatId: canonicalChatId,
+                      tgMsgIds: Number(message.id) > 0 ? [Number(message.id)] : [],
+                      msgId: messageId,
+                      exec: async () => {
+                        await db
+                          .prepare(`UPDATE messages SET stt_text = ? WHERE id = ?`)
+                          .run(effectiveIncomingText, messageId);
+                      },
+                    });
                   } catch {}
                   pushPendingLocalUpdate({
                     ...realtimeUpdate,
@@ -32398,7 +34311,9 @@ export function attachTelegramClientMessageListener(client: TelegramClient, phon
                 const rawPeer: any = /^-?\d+$/.test(cleanPeer) ? Number(cleanPeer) : cleanPeer;
                 markOutboundMessageSent(canonicalChatId, replyText, accountId);
                 try {
-                  await client.sendMessage(rawPeer, { message: replyText });
+                  await scheduleTelegramRpc(accountId, 'P0', 'autopilot.sendMessage', () =>
+                    client.sendMessage(rawPeer, { message: replyText })
+                  );
                 } catch (autoSendErr: any) {
                   recordTelegramFloodWait({ accountId, userId }, autoSendErr, 'autopilot.sendMessage');
                   throw autoSendErr;
@@ -32419,12 +34334,21 @@ export function attachTelegramClientMessageListener(client: TelegramClient, phon
                 const replyTime = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false });
 
                 try {
-                  await db.prepare(`
-                    INSERT INTO messages (
-                      id, chat_id, account_id, sender, sender_name, text, translated_text,
-                      timestamp, created_at, delivery_status
-                    ) VALUES (?, ?, ?, 'me', '我方 (AI托管)', ?, ?, ?, ?, 'delivered')
-                  `).run(replyMsgId, canonicalChatId, accountId, replyText, replyZh, replyTime, Date.now());
+                  await enqueueMessageDbWrite({
+                    priority: 'HIGH',
+                    kind: 'upsert',
+                    accountId,
+                    chatId: canonicalChatId,
+                    msgId: replyMsgId,
+                    exec: async () => {
+                      await db.prepare(`
+                        INSERT INTO messages (
+                          id, chat_id, account_id, sender, sender_name, text, translated_text,
+                          timestamp, created_at, delivery_status
+                        ) VALUES (?, ?, ?, 'me', '我方 (AI托管)', ?, ?, ?, ?, 'delivered')
+                      `).run(replyMsgId, canonicalChatId, accountId, replyText, replyZh, replyTime, Date.now());
+                    },
+                  });
                 } catch {}
 
                 pushPendingLocalUpdate({
@@ -32466,6 +34390,9 @@ export function attachTelegramClientMessageListener(client: TelegramClient, phon
     client.addEventHandler(async (update: any) => {
       try {
         const accountId = `acc_tg_${userId}`;
+        if (!isTelegramClientGenerationCurrent(client, { userId, phone, accountId })) {
+          return;
+        }
         if (update instanceof Api.UpdateUserName) {
           const firstName = String(update.firstName || '').trim();
           const lastName = String(update.lastName || '').trim();
@@ -32543,6 +34470,8 @@ export function attachTelegramClientMessageListener(client: TelegramClient, phon
           telegramAvatarCache.delete(`acc_tg_${userId}:${targetUid}`);
           telegramAvatarCache.delete(`${userId}:${targetUid}`);
           telegramAvatarCache.delete(`shared:${targetUid}`);
+          clearAvatarNegativeCacheForPeer(userId, targetUid);
+          invalidateTelegramSenderCache(accountId, targetUid);
           if (targetUid !== String(userId)) {
             const nowMs = Date.now();
             const prevSync = peerMetaSyncAt.get(`u:${targetUid}`) || 0;
@@ -32647,6 +34576,8 @@ export function attachTelegramClientMessageListener(client: TelegramClient, phon
           telegramAvatarCache.delete(rawNumId);
           telegramAvatarCache.delete(`acc_tg_${userId}:${rawNumId}`);
           telegramAvatarCache.delete(`${userId}:${rawNumId}`);
+          clearAvatarNegativeCacheForPeer(userId, rawNumId);
+          invalidateTelegramSenderCache(accountId, rawNumId);
           try {
             const { inputPeer } = await resolveTelegramInputPeer(client, peerChatId, userId);
             const ent: any = await client.getEntity(inputPeer);
@@ -32714,18 +34645,25 @@ export function attachTelegramClientMessageListener(client: TelegramClient, phon
             createdAt: Date.now(),
             isEdited: true,
           });
-          try {
-            const altChatId = peerChatId.replace(/^tg_/, '');
-            await db
-              .prepare(
-                `UPDATE messages
-                 SET text = CASE WHEN ? != '' THEN ? ELSE text END,
-                     image_caption = CASE WHEN (is_image = 1 OR is_video = 1) THEN ? ELSE image_caption END,
-                     is_edited = 1
-                 WHERE (chat_id = ? OR chat_id = ?) AND telegram_message_id = ? AND account_id = ?`
-              )
-              .run(editedText, editedText, editedText, peerChatId, altChatId, tgMsgId, accountId);
-          } catch {}
+          await enqueueMessageDbWrite({
+            priority: 'NORMAL',
+            kind: 'edit',
+            accountId,
+            chatId: peerChatId,
+            tgMsgIds: [tgMsgId],
+            exec: async () => {
+              const altChatId = peerChatId.replace(/^tg_/, '');
+              await db
+                .prepare(
+                  `UPDATE messages
+                   SET text = CASE WHEN ? != '' THEN ? ELSE text END,
+                       image_caption = CASE WHEN (is_image = 1 OR is_video = 1) THEN ? ELSE image_caption END,
+                       is_edited = 1
+                   WHERE (chat_id = ? OR chat_id = ?) AND telegram_message_id = ? AND account_id = ?`
+                )
+                .run(editedText, editedText, editedText, peerChatId, altChatId, tgMsgId, accountId);
+            },
+          }).catch(() => {});
           return;
         }
 
@@ -32744,14 +34682,20 @@ export function attachTelegramClientMessageListener(client: TelegramClient, phon
             timestamp: '',
             createdAt: Date.now(),
           });
-          try {
-            const placeholders = delIds.map(() => '?').join(', ');
-            await db
-              .prepare(
-                `DELETE FROM messages WHERE account_id = ? AND chat_id NOT LIKE 'tg_-100%' AND chat_id NOT LIKE '-100%' AND telegram_message_id IN (${placeholders})`
-              )
-              .run(accountId, ...delIds);
-          } catch {}
+          await enqueueMessageDbWrite({
+            priority: 'NORMAL',
+            kind: 'delete_non_channel',
+            accountId,
+            tgMsgIds: delIds,
+            exec: async () => {
+              const placeholders = delIds.map(() => '?').join(', ');
+              await db
+                .prepare(
+                  `DELETE FROM messages WHERE account_id = ? AND chat_id NOT LIKE 'tg_-100%' AND chat_id NOT LIKE '-100%' AND telegram_message_id IN (${placeholders})`
+                )
+                .run(accountId, ...delIds);
+            },
+          }).catch(() => {});
           return;
         }
 
@@ -32771,15 +34715,22 @@ export function attachTelegramClientMessageListener(client: TelegramClient, phon
             timestamp: '',
             createdAt: Date.now(),
           });
-          try {
-            const placeholders = delIds.map(() => '?').join(', ');
-            if (channelChatId) {
-              const alt = channelChatId.replace(/^tg_/, '');
-              await db
-                .prepare(`DELETE FROM messages WHERE account_id = ? AND (chat_id = ? OR chat_id = ?) AND telegram_message_id IN (${placeholders})`)
-                .run(accountId, channelChatId, alt, ...delIds);
-            }
-          } catch {}
+          if (channelChatId) {
+            await enqueueMessageDbWrite({
+              priority: 'NORMAL',
+              kind: 'delete_channel',
+              accountId,
+              chatId: channelChatId,
+              tgMsgIds: delIds,
+              exec: async () => {
+                const placeholders = delIds.map(() => '?').join(', ');
+                const alt = channelChatId.replace(/^tg_/, '');
+                await db
+                  .prepare(`DELETE FROM messages WHERE account_id = ? AND (chat_id = ? OR chat_id = ?) AND telegram_message_id IN (${placeholders})`)
+                  .run(accountId, channelChatId, alt, ...delIds);
+              },
+            }).catch(() => {});
+          }
           return;
         }
 
@@ -33127,13 +35078,20 @@ export function attachTelegramClientMessageListener(client: TelegramClient, phon
             timestamp: '',
             createdAt: Date.now(),
           });
-          try {
-            const alt = peerChatId.replace(/^tg_/, '');
-            const placeholders = pinIds.map(() => '?').join(', ');
-            await db
-              .prepare(`UPDATE messages SET is_pinned = ? WHERE account_id = ? AND (chat_id = ? OR chat_id = ?) AND telegram_message_id IN (${placeholders})`)
-              .run(pinnedVal ? 1 : 0, accountId, peerChatId, alt, ...pinIds);
-          } catch {}
+          await enqueueMessageDbWrite({
+            priority: 'NORMAL',
+            kind: 'pin',
+            accountId,
+            chatId: peerChatId,
+            tgMsgIds: pinIds,
+            exec: async () => {
+              const alt = peerChatId.replace(/^tg_/, '');
+              const placeholders = pinIds.map(() => '?').join(', ');
+              await db
+                .prepare(`UPDATE messages SET is_pinned = ? WHERE account_id = ? AND (chat_id = ? OR chat_id = ?) AND telegram_message_id IN (${placeholders})`)
+                .run(pinnedVal ? 1 : 0, accountId, peerChatId, alt, ...pinIds);
+            },
+          }).catch(() => {});
           return;
         }
 
@@ -33158,20 +35116,27 @@ export function attachTelegramClientMessageListener(client: TelegramClient, phon
             timestamp: '',
             createdAt: Date.now(),
           });
-          try {
-            const alt = peerChatId.replace(/^tg_/, '');
-            const accVariants = getScopedAccountIdVariants(accountId);
-            const accPlaceholders = accVariants.map(() => '?').join(', ');
-            const serialized = serializeStoredReactionsJson({
-              reactions: nextReactions,
-              myReactions: nextMyReactions,
-            });
-            await db
-              .prepare(
-                `UPDATE messages SET reactions_json = ? WHERE account_id IN (${accPlaceholders}) AND (chat_id = ? OR chat_id = ?) AND telegram_message_id = ?`
-              )
-              .run(serialized, ...accVariants, peerChatId, alt, tgMsgId);
-          } catch {}
+          await enqueueMessageDbWrite({
+            priority: 'NORMAL',
+            kind: 'reactions',
+            accountId,
+            chatId: peerChatId,
+            tgMsgIds: [tgMsgId],
+            exec: async () => {
+              const alt = peerChatId.replace(/^tg_/, '');
+              const accVariants = getScopedAccountIdVariants(accountId);
+              const accPlaceholders = accVariants.map(() => '?').join(', ');
+              const serialized = serializeStoredReactionsJson({
+                reactions: nextReactions,
+                myReactions: nextMyReactions,
+              });
+              await db
+                .prepare(
+                  `UPDATE messages SET reactions_json = ? WHERE account_id IN (${accPlaceholders}) AND (chat_id = ? OR chat_id = ?) AND telegram_message_id = ?`
+                )
+                .run(serialized, ...accVariants, peerChatId, alt, tgMsgId);
+            },
+          }).catch(() => {});
           return;
         }
 
@@ -33313,7 +35278,10 @@ export function attachTelegramClientMessageListener(client: TelegramClient, phon
               }
             }
           }
-          void upsertSyncedMessageToDb(serviceUpdate, canonicalChatId, accountId);
+          void upsertSyncedMessageToDb(serviceUpdate, canonicalChatId, accountId, {
+            priority: 'HIGH',
+            source: 'raw_service',
+          });
           return;
         }
 
@@ -33546,7 +35514,7 @@ export async function restoreTelegramUserSessionsOnStartup(
           accountId,
         });
 
-        // Per-account single-flight coordination
+        // Per-account single-flight coordination with bounded preemption wait
         if (runtime.activeRestoreTask) {
           if (!forceReconnect) {
             return await runtime.activeRestoreTask;
@@ -33554,7 +35522,13 @@ export async function restoreTelegramUserSessionsOnStartup(
           // Preempt older generation only when explicitly forcing reconnect
           runtime.generationId += 1;
           try {
-            await runtime.activeRestoreTask;
+            runtime.abortActiveRestore?.();
+          } catch {}
+          try {
+            await Promise.race([
+              runtime.activeRestoreTask.catch(() => false),
+              new Promise<void>((r) => setTimeout(r, 1500).unref?.()),
+            ]);
           } catch {}
         }
 
@@ -33588,6 +35562,10 @@ export async function restoreTelegramUserSessionsOnStartup(
             }
             candidateDisposePromise = Promise.resolve(destroyFn(orphan)).catch(() => {});
             return candidateDisposePromise;
+          };
+          runtime.abortActiveRestore = () => {
+            restoreAbortController.abort();
+            void disposeCandidate();
           };
 
           const activeFlood = getTelegramFloodCooldown(
@@ -33709,11 +35687,16 @@ export async function restoreTelegramUserSessionsOnStartup(
                 );
                 if (runtime.generationId !== myGeneration) return false;
                 if (inPlaceAuth) {
+                  (existingConn.client as any)._tgProGenerationId = myGeneration;
                   existingConn.connectedAt = nowFn();
                   existingConn.proxyFingerprint = proxyFingerprint;
                   runtime.isAuthorized = true;
                   runtime.transportConnected = true;
                   runtime.senderIsReconnecting = false;
+                  runtime.reconnectingSinceAt = null;
+                  runtime.connectingSinceAt = null;
+                  runtime.suspectedStuckWarningAt = null;
+                  runtime.reconnectProbeFailures = 0;
                   runtime.lastConnectedAt = nowFn();
                   runtime.retryCount = 0;
                   runtime.nextRetryAt = 0;
@@ -33781,12 +35764,13 @@ export async function restoreTelegramUserSessionsOnStartup(
             candidateClient = options?.deps?.createClient
               ? options.deps.createClient(decryptedSession, useApiId, useApiHash, telegramProxy)
               : new TelegramClient(new StringSession(decryptedSession), useApiId, useApiHash, {
-                  connectionRetries: 3,
+                  ...TELEGRAM_CLIENT_RETRY_OPTIONS,
                   useWSS: false,
                   autoReconnect: true,
                   ...TELEGRAM_DESKTOP_CLIENT_PARAMS,
                   ...(telegramProxy ? { proxy: telegramProxy } : {}),
                 });
+            (candidateClient as any)._tgProGenerationId = myGeneration;
 
             configureTelegramClientErrorGuard(candidateClient, cleanPhone, {
               userId: uidStr || undefined,
@@ -33917,6 +35901,10 @@ export async function restoreTelegramUserSessionsOnStartup(
             runtime.isAuthorized = true;
             runtime.transportConnected = true;
             runtime.senderIsReconnecting = false;
+            runtime.reconnectingSinceAt = null;
+            runtime.connectingSinceAt = null;
+            runtime.suspectedStuckWarningAt = null;
+            runtime.reconnectProbeFailures = 0;
             runtime.lastConnectedAt = nowFn();
             runtime.retryCount = 0;
             runtime.nextRetryAt = 0;
@@ -33926,6 +35914,7 @@ export async function restoreTelegramUserSessionsOnStartup(
             runtime.proxyFingerprint = proxyFingerprint;
 
             // Mark candidate committed BEFORE clearing local pointer so disposeCandidate can never destroy committed client
+            (candidateClient as any)._tgProGenerationId = myGeneration;
             candidateCommitted = true;
             candidateClient = null;
 
@@ -34010,6 +35999,7 @@ export async function restoreTelegramUserSessionsOnStartup(
             if (runtime.generationId === myGeneration) {
               runtime.isRestoring = false;
               runtime.isInitialConnecting = false;
+              runtime.abortActiveRestore = null;
             }
             if (task && runtime.activeRestoreTask === task) {
               runtime.activeRestoreTask = null;
@@ -34214,12 +36204,17 @@ export async function handleSystemResumeWakeup(source = 'power_resume'): Promise
       const snap = getTelegramAccountConnectionSnapshot(conn, runtime, { now: Date.now() });
       if (!snap.isConnected) return;
       try {
-        await withTelegramTimeout(conn.client.getMe(), 5000, '唤醒后连接探活超时');
+        await scheduleTelegramRpc(connAccountId, 'P0', 'resume.getMe', () =>
+          withTelegramTimeout(conn.client.getMe(), 5000, '唤醒后连接探活超时')
+        );
         runtime.lastConnectedAt = Date.now();
         runtime.retryCount = 0;
         runtime.lastError = null;
         runtime.lastErrorCategory = null;
         runtime.offlineReason = null;
+        runtime.reconnectingSinceAt = null;
+        runtime.suspectedStuckWarningAt = null;
+        runtime.reconnectProbeFailures = 0;
       } catch (probeErr: any) {
         if (isTelegramSessionExpiredError(probeErr)) {
           let canonicalUid = conn.userId ? String(conn.userId).trim() : '';
@@ -34354,12 +36349,85 @@ app.post('/api/internal/system-resume', async (req: Request, res: Response) => {
   }
 });
 
+export const TELEGRAM_SUSPECTED_STUCK_THRESHOLD_MS = 35_000;
+export const TELEGRAM_CONFIRMED_ZOMBIE_THRESHOLD_MS = 60_000;
+export const TELEGRAM_ZOMBIE_PROBE_COOLDOWN_MS = 15_000;
+export const TELEGRAM_ZOMBIE_PROBE_FAILURES_REQUIRED = 2;
+
+export function evaluateTelegramWatchdogAccountState(opts: {
+  conn: ConnectedTelegramUser | undefined;
+  runtime: TelegramAccountRuntimeState;
+  proxyChanged: boolean;
+  bypassBackoff?: boolean;
+  now?: number;
+}): {
+  action: 'healthy' | 'wait_native' | 'warn_and_probe' | 'confirmed_zombie' | 'reconnect_offline' | 'skip';
+  reconnectingDurationMs: number;
+} {
+  const now = opts.now ?? Date.now();
+  const { conn, runtime, proxyChanged, bypassBackoff } = opts;
+  const inspected = inspectGramJsClientState(conn?.client);
+  syncAccountReconnectLifecycleMarkers(runtime, inspected, now);
+  const snap = getTelegramAccountConnectionSnapshot(conn, runtime, { now });
+
+  if (snap.isConnected && !proxyChanged) {
+    runtime.retryCount = 0;
+    runtime.nextRetryAt = 0;
+    runtime.lastError = null;
+    runtime.lastErrorCategory = null;
+    runtime.offlineReason = null;
+    return { action: 'healthy', reconnectingDurationMs: 0 };
+  }
+
+  if (runtime.activeRestoreTask) {
+    return { action: 'skip', reconnectingDurationMs: 0 };
+  }
+
+  const reconnectingDurationMs =
+    runtime.reconnectingSinceAt !== null ? Math.max(0, now - runtime.reconnectingSinceAt) : 0;
+
+  if ((snap.isReconnecting || snap.isConnecting) && !proxyChanged) {
+    if (inspected.senderIsReconnecting && reconnectingDurationMs >= TELEGRAM_SUSPECTED_STUCK_THRESHOLD_MS) {
+      if (runtime.suspectedStuckWarningAt === null) {
+        runtime.suspectedStuckWarningAt = now;
+        console.warn(
+          `[Telegram Watchdog Suspected Stuck] account=${runtime.accountKey} reconnectingDurationMs=${reconnectingDurationMs}`
+        );
+      }
+      if (
+        reconnectingDurationMs >= TELEGRAM_CONFIRMED_ZOMBIE_THRESHOLD_MS &&
+        runtime.reconnectProbeFailures >= TELEGRAM_ZOMBIE_PROBE_FAILURES_REQUIRED &&
+        !inspected.transportConnected
+      ) {
+        return { action: 'confirmed_zombie', reconnectingDurationMs };
+      }
+      if (now - runtime.lastHealthProbeAt >= TELEGRAM_ZOMBIE_PROBE_COOLDOWN_MS) {
+        return { action: 'warn_and_probe', reconnectingDurationMs };
+      }
+    }
+    return { action: 'wait_native', reconnectingDurationMs };
+  }
+
+  if (!bypassBackoff && !proxyChanged && runtime.nextRetryAt > now) {
+    return { action: 'skip', reconnectingDurationMs };
+  }
+
+  return { action: 'reconnect_offline', reconnectingDurationMs };
+}
+
 export async function runTelegramConnectionWatchdogCycle(options?: {
   bypassBackoff?: boolean;
   reason?: string;
+  deps?: {
+    probeTransport?: typeof probeTelegramTransportEndpoint;
+    probeClientHealth?: (client: TelegramClient) => Promise<void>;
+    restoreSessions?: typeof restoreTelegramUserSessionsOnStartup;
+    now?: () => number;
+  };
 }): Promise<number> {
-  const now = Date.now();
-  if (lastWatchdogTickAt > 0 && now - lastWatchdogTickAt > 60_000 && !options?.bypassBackoff) {
+  const nowFn = options?.deps?.now || Date.now;
+  const now = nowFn();
+  if (lastWatchdogTickAt > 0 && now - lastWatchdogTickAt > 60_000 && !options?.bypassBackoff && !options?.deps) {
     // Detected OS sleep/suspend wall-clock jump > 60s
     lastWatchdogTickAt = now;
     if (now - lastSystemResumeAt > 10_000) {
@@ -34371,7 +36439,7 @@ export async function runTelegramConnectionWatchdogCycle(options?: {
   if (telegramSessionRestoreState.inProgress || activeRestorePromise) return 0;
   // Require either active user JWT or configured env/RAM credentials before attempting reconnect
   const hasCredsPath = Boolean(
-    lastActiveUserJwt || getEnvTelegramApiCredentials() || getInMemoryTelegramApiCredentials()
+    lastActiveUserJwt || getEnvTelegramApiCredentials() || getInMemoryTelegramApiCredentials() || options?.deps?.restoreSessions
   );
   if (!hasCredsPath) return 0;
 
@@ -34385,8 +36453,16 @@ export async function runTelegramConnectionWatchdogCycle(options?: {
   }
   if (!Array.isArray(activeRows) || activeRows.length === 0) return 0;
 
-  const currentProxyFingerprint = getTelegramProxyFingerprint(getConfiguredTelegramProxy());
+  const configuredProxy = getConfiguredTelegramProxy();
+  const currentProxyFingerprint = getTelegramProxyFingerprint(configuredProxy);
+  const probeTransportFn = options?.deps?.probeTransport || probeTelegramTransportEndpoint;
+  const probeClientHealthFn =
+    options?.deps?.probeClientHealth ||
+    ((client: TelegramClient) => withTelegramTimeout(client.getMe(), 4000, 'Watchdog 探活超时').then(() => undefined));
+  const restoreFn = options?.deps?.restoreSessions || restoreTelegramUserSessionsOnStartup;
+
   const targetAccountKeys: string[] = [];
+  const confirmedZombieKeys = new Set<string>();
 
   for (const row of activeRows) {
     const uid = row?.user_id ? String(row.user_id).trim() : '';
@@ -34399,47 +36475,80 @@ export async function runTelegramConnectionWatchdogCycle(options?: {
     );
     if (isExpired) continue;
 
+    const accountId = uid ? `acc_tg_${uid}` : phone;
     const runtime = getOrCreateTelegramAccountRuntimeState({
       userId: uid || undefined,
       phone: phone || undefined,
-      accountId: uid ? `acc_tg_${uid}` : phone,
+      accountId,
     });
-    const conn = resolveConnectedTelegramUser(uid ? `acc_tg_${uid}` : phone, phone, uid);
-    const snap = getTelegramAccountConnectionSnapshot(conn, runtime, { now });
+    const conn = resolveConnectedTelegramUser(accountId, phone, uid);
 
-    // Missing/empty proxyFingerprint is treated as UNKNOWN, never assumed matching
     const hasKnownMatchingProxy = Boolean(
       conn?.proxyFingerprint && conn.proxyFingerprint === currentProxyFingerprint
     );
     const proxyChanged = Boolean(conn && !hasKnownMatchingProxy);
 
-    // Healthy online account with matching proxy -> reset backoff counters & skip
-    if (snap.isConnected && !proxyChanged) {
-      runtime.retryCount = 0;
-      runtime.nextRetryAt = 0;
-      runtime.lastError = null;
-      runtime.lastErrorCategory = null;
-      runtime.offlineReason = null;
-      continue;
-    }
+    const evaluation = evaluateTelegramWatchdogAccountState({
+      conn,
+      runtime,
+      proxyChanged,
+      bypassBackoff: options?.bypassBackoff,
+      now,
+    });
 
-    // Active per-account restore or GramJS native auto-reconnect (same proxy) -> let it finish
-    if (runtime.activeRestoreTask || ((snap.isReconnecting || snap.isConnecting) && !proxyChanged)) {
-      continue;
-    }
-
-    // Per-account tiered backoff (never freezes other accounts!)
-    if (!options?.bypassBackoff && !proxyChanged && runtime.nextRetryAt > now) {
+    if (evaluation.action === 'healthy' || evaluation.action === 'wait_native' || evaluation.action === 'skip') {
       continue;
     }
 
     // Never bypass active official Telegram FLOOD_WAIT cooldown during Watchdog (even on bypassBackoff wakeup)
     const activeFlood = getTelegramFloodCooldown(
-      { accountId: uid ? `acc_tg_${uid}` : phone, userId: uid || undefined, phone: phone || undefined },
+      { accountId, userId: uid || undefined, phone: phone || undefined },
       now
     );
     if (activeFlood) {
       runtime.nextRetryAt = Math.max(runtime.nextRetryAt, activeFlood.floodWaitUntil);
+      continue;
+    }
+
+    if (evaluation.action === 'warn_and_probe' && conn?.client) {
+      runtime.lastHealthProbeAt = now;
+      let probePassed = false;
+      try {
+        if (configuredProxy) {
+          await probeTransportFn({
+            proxy: configuredProxy,
+            connectTimeoutMs: 4000,
+            handshakeTimeoutMs: 5000,
+          });
+        }
+        await scheduleTelegramRpc(accountId, 'P0', 'watchdog.healthProbe', () => probeClientHealthFn(conn.client));
+        probePassed = true;
+      } catch {
+        probePassed = false;
+      }
+      if (probePassed) {
+        runtime.reconnectProbeFailures = 0;
+        runtime.suspectedStuckWarningAt = null;
+        continue;
+      }
+      runtime.reconnectProbeFailures += 1;
+      const recheck = evaluateTelegramWatchdogAccountState({
+        conn,
+        runtime,
+        proxyChanged,
+        bypassBackoff: options?.bypassBackoff,
+        now,
+      });
+      if (recheck.action !== 'confirmed_zombie') {
+        continue;
+      }
+    }
+
+    if (evaluation.action === 'confirmed_zombie' || runtime.reconnectProbeFailures >= TELEGRAM_ZOMBIE_PROBE_FAILURES_REQUIRED) {
+      if (runtime.accountKey) {
+        confirmedZombieKeys.add(runtime.accountKey);
+        targetAccountKeys.push(runtime.accountKey);
+      }
       continue;
     }
 
@@ -34452,14 +36561,18 @@ export async function runTelegramConnectionWatchdogCycle(options?: {
     return 0;
   }
 
-  return await restoreTelegramUserSessionsOnStartup(lastActiveUserJwt || undefined, {
-    targetAccountKeys,
-    forceReconnect: targetAccountKeys.some((k) => {
+  const shouldForceReconnect =
+    confirmedZombieKeys.size > 0 ||
+    targetAccountKeys.some((k) => {
       const rt = telegramAccountRuntimeStates.get(k);
       const conn = rt ? resolveConnectedTelegramUser(rt.accountId, rt.phone, rt.userId) : undefined;
       return Boolean(conn && (!conn.proxyFingerprint || conn.proxyFingerprint !== currentProxyFingerprint));
-    }),
-    reason: options?.reason || 'watchdog',
+    });
+
+  return await restoreFn(lastActiveUserJwt || undefined, {
+    targetAccountKeys,
+    forceReconnect: shouldForceReconnect,
+    reason: confirmedZombieKeys.size > 0 ? 'watchdog_zombie_recovery' : options?.reason || 'watchdog',
   });
 }
 
@@ -34525,6 +36638,7 @@ export async function gracefulShutdownServer(reason = 'shutdown'): Promise<void>
     telegramAccountRuntimeStates.clear();
   } catch {}
 
+  await flushMessageDbWriteQueue({ timeoutMs: 3000 });
   await checkpointSqliteWal();
 
   if (activeHttpServer) {

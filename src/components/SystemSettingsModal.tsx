@@ -116,7 +116,7 @@ export const SystemSettingsModal: React.FC<SystemSettingsModalProps> = ({
     }
 
     if (andReconnect) {
-      const reconRes = await reconnectTelegramSessionsApi(false, true);
+      const reconRes = await reconnectTelegramSessionsApi(true, true);
       setIsSavingProxy(false);
       if (reconRes.ok) {
         setProxyFeedback({ ok: true, text: `${saveRes.message || '代理已保存'}；${reconRes.message || '已触发重连'}` });

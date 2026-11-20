@@ -23,6 +23,9 @@ import { clearAccountPendingMediaBlobs, purgeAllPendingMediaBlobs } from './pend
 import {
   secureGetItemSync,
   secureSetItemSync,
+  secureSetItemSyncWithResult,
+  flushPendingCryptoWritesWithResult,
+  getCryptoStorageEpoch,
   secureRemoveItem,
   secureGetItemAsync,
   decryptDataAsync,
@@ -3259,6 +3262,54 @@ export function isMessageDeleted(messageId: string, accountId?: string, chatId?:
 
 const MAX_DELETED_MESSAGE_IDS = 5000;
 
+export interface LocalMessagesPersistFlushResult {
+  ok: boolean;
+  flushedSyncCount: number;
+  failedKeys: string[];
+  abortedByPurge: boolean;
+}
+
+interface DirtyLocalMessageBucket {
+  storageKey: string;
+  accountId: string;
+  chatId: string;
+  messages: Message[];
+  queuedAt: number;
+  gen: number;
+  chatEpoch: number;
+}
+
+let localPersistGeneration = 0;
+const deletedChatEpochs = new Map<string, number>();
+const dirtyLocalMessageBuckets = new Map<string, DirtyLocalMessageBucket>();
+let localPersistTimer: ReturnType<typeof setTimeout> | null = null;
+let localPersistFirstQueuedAt = 0;
+let inFlightLocalFlushPromise: Promise<LocalMessagesPersistFlushResult> | null = null;
+const trackedPendingTombstonePromises = new Map<string, Promise<boolean>>();
+const trackedFailedTombstoneKeys = new Set<string>();
+
+const LOCAL_PERSIST_DEBOUNCE_MS = 250;
+const LOCAL_PERSIST_MAX_WAIT_MS = 1200;
+
+function makeChatEpochKey(accountId: string, chatId: string): string {
+  return `${accountId || ''}::${chatId || ''}`;
+}
+
+function getCurrentChatEpoch(accountId: string, chatId: string): number {
+  return deletedChatEpochs.get(makeChatEpochKey(accountId, chatId)) || 0;
+}
+
+function bumpChatEpoch(accountId: string, chatId: string): void {
+  const key = makeChatEpochKey(accountId, chatId);
+  deletedChatEpochs.set(key, (deletedChatEpochs.get(key) || 0) + 1);
+}
+
+function resolveBucketStorageKey(chatId: string, accountId?: string): { acc: string; scopedKey: string } {
+  const acc = accountId || currentActiveAccountId || '';
+  const scopedKey = acc ? `tg_desktop_msgs_${acc}_${chatId}` : `tg_desktop_msgs_${chatId}`;
+  return { acc, scopedKey };
+}
+
 export function recordDeletedMessageIds(messageIds: string[], accountId?: string, chatId?: string): void {
   if (!Array.isArray(messageIds) || messageIds.length === 0) return;
   try {
@@ -3270,8 +3321,41 @@ export function recordDeletedMessageIds(messageIds: string[], accountId?: string
     }
     const arr = Array.from(set);
     const trimmed = arr.length > MAX_DELETED_MESSAGE_IDS ? arr.slice(-MAX_DELETED_MESSAGE_IDS) : arr;
-    secureSetItemSync(scopedKey, trimmed);
-  } catch {}
+    const writeRes = secureSetItemSyncWithResult(scopedKey, trimmed);
+    if (!writeRes.ok) {
+      trackedFailedTombstoneKeys.add(scopedKey);
+      trackedPendingTombstonePromises.delete(scopedKey);
+      return;
+    }
+    trackedFailedTombstoneKeys.delete(scopedKey);
+    if (writeRes.writePromise) {
+      const tracked = writeRes.writePromise
+        .then((ok) => {
+          if (!ok) {
+            trackedFailedTombstoneKeys.add(scopedKey);
+          } else {
+            trackedFailedTombstoneKeys.delete(scopedKey);
+          }
+          return ok;
+        })
+        .catch(() => {
+          trackedFailedTombstoneKeys.add(scopedKey);
+          return false;
+        })
+        .finally(() => {
+          if (trackedPendingTombstonePromises.get(scopedKey) === tracked) {
+            trackedPendingTombstonePromises.delete(scopedKey);
+          }
+        });
+      trackedPendingTombstonePromises.set(scopedKey, tracked);
+    } else {
+      trackedPendingTombstonePromises.delete(scopedKey);
+    }
+  } catch {
+    try {
+      trackedFailedTombstoneKeys.add(getDeletedMessageStorageKey(accountId));
+    } catch {}
+  }
 }
 
 export function recordDeletedMessageId(messageId: string, accountId?: string, chatId?: string): void {
@@ -3335,11 +3419,238 @@ function capMessagesForLocalCache(list: Message[]): Message[] {
   return sliced.map(sanitizeMessageForLocalStorage);
 }
 
+function getPendingBucketMessagesIfCurrent(
+  scopedKey: string,
+  acc: string,
+  chatId: string
+): Message[] | null {
+  const pending = dirtyLocalMessageBuckets.get(scopedKey);
+  if (!pending) return null;
+  if (pending.gen !== localPersistGeneration) return null;
+  if (pending.chatEpoch !== getCurrentChatEpoch(acc, chatId)) return null;
+  return pending.messages;
+}
+
+function scheduleLocalMessagesPersist(
+  chatId: string,
+  messages: Message[],
+  accountId?: string,
+  options?: { immediate?: boolean }
+): void {
+  const { acc, scopedKey } = resolveBucketStorageKey(chatId, accountId);
+  const filtered = Array.isArray(messages)
+    ? messages.filter((m) => m && !isMessageDeleted(m.id, acc, m.chatId || chatId))
+    : [];
+  const capped = capMessagesForLocalCache(filtered);
+  const now = Date.now();
+  dirtyLocalMessageBuckets.set(scopedKey, {
+    storageKey: scopedKey,
+    accountId: acc,
+    chatId,
+    messages: capped,
+    queuedAt: now,
+    gen: localPersistGeneration,
+    chatEpoch: getCurrentChatEpoch(acc, chatId),
+  });
+
+  if (options?.immediate) {
+    if (localPersistTimer) {
+      clearTimeout(localPersistTimer);
+      localPersistTimer = null;
+    }
+    localPersistFirstQueuedAt = 0;
+    void flushLocalMessagesPersist();
+    return;
+  }
+
+  if (localPersistFirstQueuedAt === 0) {
+    localPersistFirstQueuedAt = now;
+  }
+  const elapsed = now - localPersistFirstQueuedAt;
+  if (elapsed >= LOCAL_PERSIST_MAX_WAIT_MS) {
+    if (localPersistTimer) {
+      clearTimeout(localPersistTimer);
+      localPersistTimer = null;
+    }
+    localPersistFirstQueuedAt = 0;
+    void flushLocalMessagesPersist();
+    return;
+  }
+
+  if (localPersistTimer) {
+    clearTimeout(localPersistTimer);
+  }
+  const remainingMaxWait = Math.max(20, LOCAL_PERSIST_MAX_WAIT_MS - elapsed);
+  const delay = Math.min(LOCAL_PERSIST_DEBOUNCE_MS, remainingMaxWait);
+  localPersistTimer = setTimeout(() => {
+    localPersistTimer = null;
+    localPersistFirstQueuedAt = 0;
+    void flushLocalMessagesPersist();
+  }, delay);
+}
+
+async function flushLocalMessagesPersistInternal(): Promise<LocalMessagesPersistFlushResult> {
+  const startGen = localPersistGeneration;
+  const startCryptoEpoch = getCryptoStorageEpoch();
+  if (localPersistTimer) {
+    clearTimeout(localPersistTimer);
+    localPersistTimer = null;
+  }
+  localPersistFirstQueuedAt = 0;
+
+  let flushedSyncCount = 0;
+  const failedKeySet = new Set<string>();
+  const targetCryptoKeys = new Set<string>();
+  const bucketWritePromises: Promise<boolean>[] = [];
+
+  const buckets = Array.from(dirtyLocalMessageBuckets.entries());
+  for (const [bucketStorageKey, bucket] of buckets) {
+    // Remove only if still holding the exact queued snapshot reference
+    if (dirtyLocalMessageBuckets.get(bucketStorageKey) === bucket) {
+      dirtyLocalMessageBuckets.delete(bucketStorageKey);
+    }
+    if (
+      bucket.gen !== localPersistGeneration ||
+      bucket.chatEpoch !== getCurrentChatEpoch(bucket.accountId, bucket.chatId)
+    ) {
+      continue;
+    }
+    const writeRes = secureSetItemSyncWithResult(bucket.storageKey, bucket.messages);
+    targetCryptoKeys.add(bucket.storageKey);
+    if (!writeRes.ok) {
+      failedKeySet.add(bucket.storageKey);
+    } else if (writeRes.mode === 'dpapi' || writeRes.mode === 'node_fallback') {
+      flushedSyncCount++;
+    } else if (writeRes.writePromise) {
+      bucketWritePromises.push(
+        writeRes.writePromise.then((ok) => {
+          if (!ok) failedKeySet.add(bucket.storageKey);
+          return ok;
+        })
+      );
+    }
+  }
+
+  // Drain pending tombstone async writes and capture their outcomes
+  const tombstoneEntries = Array.from(trackedPendingTombstonePromises.entries());
+  if (tombstoneEntries.length > 0) {
+    await Promise.allSettled(
+      tombstoneEntries.map(async ([tombKey, promise]) => {
+        targetCryptoKeys.add(tombKey);
+        const ok = await promise.catch(() => false);
+        if (!ok) {
+          trackedFailedTombstoneKeys.add(tombKey);
+        }
+      })
+    );
+  }
+
+  // Retry any tombstone keys that previously failed so transient glitches can recover cleanly
+  for (const failedTombKey of Array.from(trackedFailedTombstoneKeys)) {
+    const cachedTombList = secureGetItemSync<string[]>(failedTombKey);
+    if (Array.isArray(cachedTombList)) {
+      const retryRes = secureSetItemSyncWithResult(failedTombKey, cachedTombList);
+      targetCryptoKeys.add(failedTombKey);
+      if (retryRes.ok && !retryRes.writePromise) {
+        trackedFailedTombstoneKeys.delete(failedTombKey);
+      } else if (retryRes.ok && retryRes.writePromise) {
+        const retryOk = await retryRes.writePromise.catch(() => false);
+        if (retryOk) {
+          trackedFailedTombstoneKeys.delete(failedTombKey);
+        } else {
+          failedKeySet.add(failedTombKey);
+        }
+      } else {
+        failedKeySet.add(failedTombKey);
+      }
+    } else {
+      failedKeySet.add(failedTombKey);
+    }
+  }
+
+  if (bucketWritePromises.length > 0) {
+    await Promise.allSettled(bucketWritePromises);
+  }
+
+  const cryptoFlush = await flushPendingCryptoWritesWithResult(
+    targetCryptoKeys.size > 0 ? Array.from(targetCryptoKeys) : undefined
+  );
+
+  for (const fk of cryptoFlush.failedKeys) {
+    failedKeySet.add(fk);
+  }
+  for (const fk of trackedFailedTombstoneKeys) {
+    failedKeySet.add(fk);
+  }
+
+  const abortedByPurge =
+    localPersistGeneration !== startGen ||
+    getCryptoStorageEpoch() !== startCryptoEpoch ||
+    cryptoFlush.aborted;
+
+  return {
+    ok: !abortedByPurge && failedKeySet.size === 0 && cryptoFlush.ok,
+    flushedSyncCount,
+    failedKeys: Array.from(failedKeySet),
+    abortedByPurge,
+  };
+}
+
+export async function flushLocalMessagesPersist(): Promise<LocalMessagesPersistFlushResult> {
+  if (inFlightLocalFlushPromise) {
+    await inFlightLocalFlushPromise.catch(() => {});
+  }
+  const exec = (async (): Promise<LocalMessagesPersistFlushResult> => {
+    let aggregateOk = true;
+    let totalSyncCount = 0;
+    const allFailedKeys = new Set<string>();
+    let anyAborted = false;
+
+    for (let round = 0; round < 3; round++) {
+      const roundRes = await flushLocalMessagesPersistInternal();
+      totalSyncCount += roundRes.flushedSyncCount;
+      roundRes.failedKeys.forEach((k) => allFailedKeys.add(k));
+      if (roundRes.abortedByPurge) anyAborted = true;
+      if (!roundRes.ok) aggregateOk = false;
+      if (dirtyLocalMessageBuckets.size === 0 || anyAborted) break;
+    }
+
+    return {
+      ok: aggregateOk && !anyAborted && allFailedKeys.size === 0,
+      flushedSyncCount: totalSyncCount,
+      failedKeys: Array.from(allFailedKeys),
+      abortedByPurge: anyAborted,
+    };
+  })();
+
+  inFlightLocalFlushPromise = exec;
+  try {
+    return await exec;
+  } finally {
+    if (inFlightLocalFlushPromise === exec) {
+      inFlightLocalFlushPromise = null;
+    }
+  }
+}
+
+if (typeof window !== 'undefined' && typeof window.addEventListener === 'function') {
+  window.addEventListener('pagehide', () => {
+    void flushLocalMessagesPersist();
+  });
+  if (typeof document !== 'undefined' && typeof document.addEventListener === 'function') {
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'hidden') {
+        void flushLocalMessagesPersist();
+      }
+    });
+  }
+}
+
 export function getLocalMessages(chatId: string, accountId?: string): Message[] {
   try {
-    const acc = accountId || currentActiveAccountId;
-    const scopedKey = acc ? `tg_desktop_msgs_${acc}_${chatId}` : null;
-    let list = scopedKey ? secureGetItemSync<Message[]>(scopedKey) : null;
+    const { acc, scopedKey } = resolveBucketStorageKey(chatId, accountId);
+    const pendingList = getPendingBucketMessagesIfCurrent(scopedKey, acc, chatId);
+    let list = pendingList ?? (acc ? secureGetItemSync<Message[]>(scopedKey) : null);
     if (!list || !Array.isArray(list) || list.length === 0) {
       // Safe fallback to legacy unscoped key: filter strictly by accountId to avoid cross-account leakage
       const legacyList = secureGetItemSync<Message[]>(`tg_desktop_msgs_${chatId}`);
@@ -3366,10 +3677,9 @@ export function deleteLocalMessage(chatId: string, messageId: string, accountId?
   try {
     const acc = accountId || currentActiveAccountId;
     recordDeletedMessageId(messageId, acc, chatId);
-    const scopedKey = acc ? `tg_desktop_msgs_${acc}_${chatId}` : `tg_desktop_msgs_${chatId}`;
     const existing = getLocalMessages(chatId, acc);
     const updated = existing.filter((m) => m.id !== messageId);
-    secureSetItemSync(scopedKey, capMessagesForLocalCache(updated));
+    scheduleLocalMessagesPersist(chatId, updated, acc, { immediate: true });
   } catch (e) {
     console.error('Failed to delete encrypted message from local storage', e);
   }
@@ -3378,11 +3688,7 @@ export function deleteLocalMessage(chatId: string, messageId: string, accountId?
 export function setLocalMessages(chatId: string, messages: Message[], accountId?: string): void {
   try {
     const acc = accountId || currentActiveAccountId;
-    const scopedKey = acc ? `tg_desktop_msgs_${acc}_${chatId}` : `tg_desktop_msgs_${chatId}`;
-    const filtered = Array.isArray(messages)
-      ? messages.filter((m) => !isMessageDeleted(m.id, acc, m.chatId || chatId))
-      : [];
-    secureSetItemSync(scopedKey, capMessagesForLocalCache(filtered));
+    scheduleLocalMessagesPersist(chatId, messages, acc);
   } catch (e) {
     console.error('Failed to persist encrypted messages to local storage', e);
   }
@@ -3390,7 +3696,9 @@ export function setLocalMessages(chatId: string, messages: Message[], accountId?
 
 export function clearLocalMessages(chatId: string, existingMessages: Message[] = [], accountId?: string): void {
   try {
-    const acc = accountId || currentActiveAccountId;
+    const { acc, scopedKey } = resolveBucketStorageKey(chatId, accountId);
+    bumpChatEpoch(acc, chatId);
+    dirtyLocalMessageBuckets.delete(scopedKey);
     const currentStored = getLocalMessages(chatId, acc);
     const allToRecord = [...existingMessages, ...currentStored];
     if (allToRecord.length > 0) {
@@ -3401,10 +3709,12 @@ export function clearLocalMessages(chatId: string, existingMessages: Message[] =
       );
     }
     if (acc) {
-      localStorage.removeItem(`tg_desktop_msgs_${acc}_${chatId}`);
+      secureRemoveItem(`tg_desktop_msgs_${acc}_${chatId}`);
     }
-    localStorage.removeItem(`tg_desktop_msgs_${chatId}`);
-    localStorage.removeItem(`tg_local_msgs_${chatId}`);
+    secureRemoveItem(`tg_desktop_msgs_${chatId}`);
+    if (typeof localStorage !== 'undefined') {
+      localStorage.removeItem(`tg_local_msgs_${chatId}`);
+    }
   } catch (e) {
     console.error('Failed to clear encrypted messages from local storage', e);
   }
@@ -3453,68 +3763,59 @@ export function saveLocalMessage(chatId: string, message: Message, accountId?: s
   const acc = accountId || message.accountId || currentActiveAccountId;
   if (isMessageDeleted(message.id, acc, message.chatId || chatId)) return;
   try {
-    const scopedKey = acc ? `tg_desktop_msgs_${acc}_${chatId}` : `tg_desktop_msgs_${chatId}`;
     const existing = getLocalMessages(chatId, acc);
     const incomingTgId = resolveClientTelegramMessageId(message);
+    const incomingClientMsgId = (message as any).clientMessageId;
     const existingIdx = existing.findIndex((m) => {
       if (m.id === message.id) return true;
+      if (incomingClientMsgId && (m as any).clientMessageId === incomingClientMsgId) return true;
       const existingTgId = resolveClientTelegramMessageId(m);
       if (existingTgId !== undefined && incomingTgId !== undefined) {
         return existingTgId === incomingTgId;
-      }
-      // Only text-match when at least one side is an unsynced optimistic local record
-      if (
-        m.sender === message.sender &&
-        m.text &&
-        message.text &&
-        m.text.trim() === message.text.trim()
-      ) {
-        const sameMinute = m.timestamp === message.timestamp;
-        const closeInTime =
-          typeof m.createdAt === 'number' &&
-          typeof message.createdAt === 'number' &&
-          Math.abs(m.createdAt - message.createdAt) < 120000;
-        if (sameMinute || closeInTime) return true;
       }
       return false;
     });
 
     if (existingIdx === -1) {
-      existing.push(message);
-      secureSetItemSync(scopedKey, capMessagesForLocalCache(existing));
+      const entryToSave = acc && !message.accountId ? { ...message, accountId: acc } : message;
+      existing.push(entryToSave);
+      scheduleLocalMessagesPersist(chatId, existing, acc);
     } else {
       let changed = false;
+      const next = [...existing];
+      const currentItem = { ...next[existingIdx] };
       if (
         message.sttText !== undefined &&
-        message.sttText !== existing[existingIdx].sttText
+        message.sttText !== currentItem.sttText
       ) {
-        existing[existingIdx].sttText = message.sttText;
+        currentItem.sttText = message.sttText;
         changed = true;
       }
       if (
         message.translatedText !== undefined &&
-        message.translatedText !== existing[existingIdx].translatedText
+        message.translatedText !== currentItem.translatedText
       ) {
-        existing[existingIdx].translatedText = message.translatedText;
+        currentItem.translatedText = message.translatedText;
         changed = true;
       }
-      if ('translationError' in message && message.translationError !== existing[existingIdx].translationError) {
-        existing[existingIdx].translationError = message.translationError;
+      if ('translationError' in message && message.translationError !== currentItem.translationError) {
+        currentItem.translationError = message.translationError;
         changed = true;
       }
       if (
         'translationErrorChannel' in message &&
-        message.translationErrorChannel !== existing[existingIdx].translationErrorChannel
+        message.translationErrorChannel !== currentItem.translationErrorChannel
       ) {
-        existing[existingIdx].translationErrorChannel = message.translationErrorChannel;
+        currentItem.translationErrorChannel = message.translationErrorChannel;
         changed = true;
       }
-      if (incomingTgId !== undefined && !existing[existingIdx].telegramMessageId) {
-        existing[existingIdx].telegramMessageId = incomingTgId;
+      if (incomingTgId !== undefined && !currentItem.telegramMessageId) {
+        currentItem.telegramMessageId = incomingTgId;
         changed = true;
       }
       if (changed) {
-        secureSetItemSync(scopedKey, capMessagesForLocalCache(existing));
+        next[existingIdx] = currentItem;
+        scheduleLocalMessagesPersist(chatId, next, acc);
       }
     }
   } catch (e) {
@@ -3629,6 +3930,21 @@ export function clearAccountLocalCache(accountId: string, unsharedChatIds: strin
     );
     const msgsPrefix = `tg_desktop_msgs_${accountId}_`;
     const profilePrefix = `tg_desktop_profile_${accountId}_`;
+
+    for (const [bKey, bucket] of Array.from(dirtyLocalMessageBuckets.entries())) {
+      if (accVariants.includes(bucket.accountId) || bKey.startsWith(msgsPrefix)) {
+        bumpChatEpoch(bucket.accountId, bucket.chatId);
+        dirtyLocalMessageBuckets.delete(bKey);
+      }
+    }
+    for (const chatId of unsharedChatIds) {
+      bumpChatEpoch(cleanAcc, chatId);
+    }
+
+    const delStorageKey = getDeletedMessageStorageKey(accountId);
+    trackedPendingTombstonePromises.delete(delStorageKey);
+    trackedFailedTombstoneKeys.delete(delStorageKey);
+
     const keysToRemove: string[] = [
       `tg_deleted_message_ids_${accountId}`,
       `tg_pro_client_prefs::${accountId}`,
@@ -3688,6 +4004,17 @@ export function clearAccountLocalCache(accountId: string, unsharedChatIds: strin
 
 export function purgeAllLocalChatData(): void {
   try {
+    localPersistGeneration++;
+    if (localPersistTimer) {
+      clearTimeout(localPersistTimer);
+      localPersistTimer = null;
+    }
+    localPersistFirstQueuedAt = 0;
+    dirtyLocalMessageBuckets.clear();
+    deletedChatEpochs.clear();
+    trackedPendingTombstonePromises.clear();
+    trackedFailedTombstoneKeys.clear();
+
     const keysToRemove: string[] = [];
     for (let i = 0; i < localStorage.length; i++) {
       const key = localStorage.key(i) || '';
