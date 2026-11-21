@@ -19,6 +19,10 @@ export interface Account {
   retryCount?: number;
   nextRetryAt?: number;
   lastConnectedAt?: number | null;
+  floodWaitUntil?: number;
+  floodWaitMethod?: string;
+  peerFloodRestricted?: boolean;
+  peerFloodReason?: string;
 }
 
 export interface AccountGroup {
@@ -157,6 +161,7 @@ export interface TelegramStickerPack {
 
 export interface Message {
   id: string;
+  clientMessageId?: string;
   telegramMessageId?: number;
   chatId: string;
   accountId: string;
@@ -188,7 +193,9 @@ export interface Message {
   timestamp: string;
   createdAt?: number;
   status: 'sending' | 'sent' | 'read';
-  deliveryStatus?: 'delivered' | 'failed' | 'retrying' | 'pending';
+  deliveryStatus?: 'delivered' | 'failed' | 'retrying' | 'pending' | 'paused';
+  queuePauseReason?: string;
+  floodWaitUntil?: number;
   replyTo?: { id: string; telegramMessageId?: number; senderName?: string; text: string };
   reactions?: Record<string, number>;
   myReactions?: string[];

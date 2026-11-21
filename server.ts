@@ -2864,8 +2864,63 @@ export function attachTelegramConnectionStateTracker(
   }
 }
 
-// ==================== TELEGRAM ACCOUNT-LEVEL FLOOD_WAIT CIRCUIT BREAKER ====================
+// ==================== TELEGRAM ACCOUNT-LEVEL FLOOD_WAIT & PEER_FLOOD CIRCUIT BREAKER ====================
 export const TELEGRAM_DIALOGS_CACHE_TTL_MS = 30_000;
+export const FLOOD_WAIT_AUTO_WAIT_MAX_SEC = Math.max(
+  5,
+  Number(process.env.FLOOD_WAIT_AUTO_WAIT_MAX_SEC) || 60
+);
+export const OUTBOUND_MAX_QUEUE_AGE_SEC = Math.max(
+  30,
+  Number(process.env.OUTBOUND_MAX_QUEUE_AGE_SEC) || 300
+);
+export const TELEGRAM_MEDIA_DISK_CACHE_MAX_BYTES = Math.max(
+  1024 * 1024,
+  Number(process.env.TELEGRAM_MEDIA_DISK_CACHE_MAX_BYTES) || 512 * 1024 * 1024
+);
+
+export const outboundRuntimeConfig = {
+  floodWaitAutoWaitMaxSec: FLOOD_WAIT_AUTO_WAIT_MAX_SEC,
+  outboundMaxQueueAgeSec: OUTBOUND_MAX_QUEUE_AGE_SEC,
+  accountMinGapMinMs: 100,
+  accountMinGapMaxMs: 300,
+  crossGroupGapMinMs: 400,
+  crossGroupGapMaxMs: 800,
+  sameGroupGapMinMs: 2500,
+  sameGroupGapMaxMs: 4000,
+  bgGroupBatchMinMs: 1500,
+  bgGroupBatchMaxMs: 2500,
+  mediaDiskCacheMaxBytes: TELEGRAM_MEDIA_DISK_CACHE_MAX_BYTES,
+};
+
+export function isTelegramGroupChatId(chatId?: string | null, connected?: ConnectedTelegramUser): boolean {
+  const raw = String(chatId || '').trim();
+  if (!raw) return false;
+  const clean = raw.replace(/^tg_/, '');
+  if (connected && Array.isArray(connected.dialogs)) {
+    const matched: any = connected.dialogs.find(
+      (d: any) => d && (String(d.id) === raw || String(d.id) === `tg_${clean}` || String(d.rawId || '') === clean)
+    );
+    if (matched) {
+      return Boolean(matched.isGroup || matched.isChannel);
+    }
+  }
+  return clean.startsWith('-');
+}
+
+export function isPeerFloodError(err: any): boolean {
+  const raw = String(err?.errorMessage || err?.message || err || '').toUpperCase();
+  return raw.includes('PEER_FLOOD') || raw.includes('ALLOW_PAYMENT_REQUIRED');
+}
+
+export interface TelegramPeerFloodEntry {
+  accountKey: string;
+  reason: string;
+  method?: string;
+  triggeredAt: number;
+}
+
+export const telegramAccountPeerFloods = new Map<string, TelegramPeerFloodEntry>();
 
 export interface TelegramFloodCooldownEntry {
   accountKey: string;
@@ -2998,6 +3053,53 @@ export function clearTelegramFloodCooldown(ctx?: {
   const keys = resolveFloodCooldownKeys(ctx);
   for (const k of keys) {
     telegramAccountFloodCooldowns.delete(k);
+  }
+}
+
+export function recordTelegramPeerFlood(
+  ctx: { accountId?: string; userId?: string; phone?: string } | undefined,
+  err: any,
+  method?: string,
+  now = Date.now()
+): TelegramPeerFloodEntry | null {
+  if (!isPeerFloodError(err)) return null;
+  const keys = resolveFloodCooldownKeys(ctx);
+  if (keys.length === 0) return null;
+  const reason = '触发 Telegram PEER_FLOOD 限制：已停止向陌生人/非联系人发送，请等待官方解除限制';
+  const entry: TelegramPeerFloodEntry = {
+    accountKey: keys[0],
+    reason,
+    method,
+    triggeredAt: now,
+  };
+  for (const k of keys) {
+    telegramAccountPeerFloods.set(k, { ...entry, accountKey: k });
+  }
+  console.warn(
+    `[Telegram PEER_FLOOD Circuit Breaker] Account [${keys.join(', ')}] restricted for non-contacts (method=${method || 'unknown'})`
+  );
+  return entry;
+}
+
+export function getTelegramPeerFloodStatus(
+  ctx?: { accountId?: string; userId?: string; phone?: string }
+): TelegramPeerFloodEntry | null {
+  const keys = resolveFloodCooldownKeys(ctx);
+  for (const k of keys) {
+    const entry = telegramAccountPeerFloods.get(k);
+    if (entry) return entry;
+  }
+  return null;
+}
+
+export function clearTelegramPeerFlood(ctx?: {
+  accountId?: string;
+  userId?: string;
+  phone?: string;
+}): void {
+  const keys = resolveFloodCooldownKeys(ctx);
+  for (const k of keys) {
+    telegramAccountPeerFloods.delete(k);
   }
 }
 
@@ -6777,6 +6879,7 @@ app.post('/api/database/purge', requireTenantAuth, async (req: Request, res: Res
 
 export interface UnifiedChatMessage {
   id: string;
+  clientMessageId?: string;
   telegramMessageId?: number;
   chatId: string;
   accountId: string;
@@ -6804,6 +6907,8 @@ export interface UnifiedChatMessage {
   timestamp: string;
   createdAt: number;
   deliveryStatus: string;
+  queuePauseReason?: string;
+  floodWaitUntil?: number;
   replyTo?: { id: string; telegramMessageId?: number; senderName?: string; text: string };
   reactions?: Record<string, number>;
   myReactions?: string[];
@@ -6927,8 +7032,14 @@ export function normalizeStoredMessageRecord(
   const senderId = String(raw.senderId ?? raw.sender_id ?? '').trim();
   const rawSenderAvatarUrl = String(raw.senderAvatarUrl ?? raw.sender_avatar_url ?? '').trim();
 
+  const clientMessageId = String(raw.clientMessageId ?? raw.client_message_id ?? '').trim();
+  const queuePauseReason = String(raw.queuePauseReason ?? raw.queue_pause_reason ?? '').trim();
+  const floodWaitUntilRaw = Number(raw.floodWaitUntil ?? raw.flood_wait_until ?? 0);
+  const floodWaitUntil = Number.isFinite(floodWaitUntilRaw) && floodWaitUntilRaw > 0 ? floodWaitUntilRaw : undefined;
+
   return {
     id,
+    ...(clientMessageId ? { clientMessageId } : {}),
     telegramMessageId,
     chatId,
     accountId: String(raw.accountId || raw.account_id || fallbackAccountId || 'acc_1'),
@@ -6959,6 +7070,8 @@ export function normalizeStoredMessageRecord(
     ),
     createdAt,
     deliveryStatus: String(raw.deliveryStatus ?? raw.delivery_status ?? 'delivered'),
+    ...(queuePauseReason ? { queuePauseReason } : {}),
+    ...(floodWaitUntil ? { floodWaitUntil } : {}),
     ...(parsedReplyTo ? { replyTo: parsedReplyTo } : {}),
     ...(parsedReactions.reactions ? { reactions: parsedReactions.reactions } : {}),
     ...(parsedReactions.myReactions ? { myReactions: parsedReactions.myReactions } : {}),
@@ -7946,6 +8059,7 @@ async function executeUpsertSyncedMessageToDbInternal(
     const accVariants = getScopedAccountIdVariants(msg.accountId);
     const accPlaceholders = accVariants.map(() => '?').join(', ');
     const reactionsJson = serializeStoredReactionsJson(rawMsg);
+    let existingMatchId: string | null = null;
     if (msg.telegramMessageId) {
       const existingByTg = (await db
         .prepare(
@@ -7954,99 +8068,122 @@ async function executeUpsertSyncedMessageToDbInternal(
            LIMIT 1`
         )
         .get(msg.chatId, altChatId, ...accVariants, msg.telegramMessageId)) as any;
-
       if (existingByTg?.id && existingByTg.id !== msg.id) {
-        const replyToJson = msg.replyTo ? JSON.stringify(msg.replyTo) : null;
-        const safeAudioUrl = sanitizeDbMediaUrl(msg.audioUrl);
-        const safeImageUrl = sanitizeDbMediaUrl(msg.imageUrl);
-        const safeVideoUrl = sanitizeDbMediaUrl(msg.videoUrl);
-        const safeFileUrl = sanitizeDbMediaUrl(msg.fileUrl);
-        const safeSenderName =
-          msg.senderName && !['客户', '对方', '我方', 'Telegram 联系人'].includes(msg.senderName)
-            ? msg.senderName
-            : '';
-        const safeSenderId = msg.senderId || '';
-        await db
-          .prepare(
-            `UPDATE messages SET
-               sender = CASE WHEN ? = 'system' THEN 'system' ELSE sender END,
-               sender_name = CASE WHEN ? != '' THEN ? ELSE sender_name END,
-               sender_id = CASE WHEN ? != '' THEN ? ELSE sender_id END,
-               text = CASE WHEN ? != '' THEN ? ELSE text END,
-               translated_text = CASE WHEN ? != '' THEN ? ELSE translated_text END,
-               stt_text = CASE WHEN ? != '' THEN ? ELSE stt_text END,
-               voice_tone = CASE WHEN ? != '' THEN ? ELSE voice_tone END,
-               is_audio = CASE WHEN ? = 1 THEN 1 ELSE is_audio END,
-               audio_duration = CASE WHEN ? > 0 THEN ? ELSE audio_duration END,
-               audio_url = CASE WHEN ? != '' THEN ? ELSE audio_url END,
-               is_image = CASE WHEN ? = 1 THEN 1 ELSE is_image END,
-               image_caption = CASE WHEN ? != '' THEN ? ELSE image_caption END,
-               image_url = CASE WHEN ? != '' THEN ? ELSE image_url END,
-               is_video = CASE WHEN ? = 1 THEN 1 ELSE is_video END,
-               video_duration = CASE WHEN ? > 0 THEN ? ELSE video_duration END,
-               video_url = CASE WHEN ? != '' THEN ? ELSE video_url END,
-               is_file = CASE WHEN ? = 1 THEN 1 ELSE is_file END,
-               file_name = CASE WHEN ? != '' THEN ? ELSE file_name END,
-               file_size = CASE WHEN ? != '' THEN ? ELSE file_size END,
-               file_url = CASE WHEN ? != '' THEN ? ELSE file_url END,
-               delivery_status = CASE WHEN ? != '' THEN ? ELSE delivery_status END,
-               reply_to_json = COALESCE(?, reply_to_json),
-               is_edited = CASE WHEN ? = 1 THEN 1 ELSE is_edited END,
-               is_pinned = ?,
-               forward_from = COALESCE(?, forward_from),
-               reactions_json = COALESCE(?, reactions_json),
-               system_event_type = CASE WHEN ? != '' THEN ? ELSE system_event_type END
-             WHERE id = ?`
-          )
-          .run(
-            msg.sender,
-            safeSenderName,
-            safeSenderName,
-            safeSenderId,
-            safeSenderId,
-            msg.text,
-            msg.text,
-            msg.translatedText,
-            msg.translatedText,
-            msg.sttText,
-            msg.sttText,
-            msg.voiceTone,
-            msg.voiceTone,
-            msg.isAudio ? 1 : 0,
-            msg.audioDuration,
-            msg.audioDuration,
-            safeAudioUrl,
-            safeAudioUrl,
-            msg.isImage ? 1 : 0,
-            msg.imageCaption,
-            msg.imageCaption,
-            safeImageUrl,
-            safeImageUrl,
-            msg.isVideo ? 1 : 0,
-            msg.videoDuration,
-            msg.videoDuration,
-            safeVideoUrl,
-            safeVideoUrl,
-            msg.isFile ? 1 : 0,
-            msg.fileName,
-            msg.fileName,
-            msg.fileSize,
-            msg.fileSize,
-            safeFileUrl,
-            safeFileUrl,
-            msg.deliveryStatus,
-            msg.deliveryStatus,
-            replyToJson,
-            msg.isEdited ? 1 : 0,
-            msg.isPinned ? 1 : 0,
-            msg.forwardFrom || null,
-            reactionsJson,
-            msg.systemEventType || '',
-            msg.systemEventType || '',
-            existingByTg.id
-          );
-        return true;
+        existingMatchId = existingByTg.id;
       }
+    }
+    if (!existingMatchId && msg.clientMessageId) {
+      const existingByClient = (await db
+        .prepare(
+          `SELECT id FROM messages
+           WHERE account_id IN (${accPlaceholders}) AND client_message_id = ?
+           LIMIT 1`
+        )
+        .get(...accVariants, msg.clientMessageId)) as any;
+      if (existingByClient?.id && existingByClient.id !== msg.id) {
+        existingMatchId = existingByClient.id;
+      }
+    }
+
+    if (existingMatchId) {
+      const replyToJson = msg.replyTo ? JSON.stringify(msg.replyTo) : null;
+      const safeAudioUrl = sanitizeDbMediaUrl(msg.audioUrl);
+      const safeImageUrl = sanitizeDbMediaUrl(msg.imageUrl);
+      const safeVideoUrl = sanitizeDbMediaUrl(msg.videoUrl);
+      const safeFileUrl = sanitizeDbMediaUrl(msg.fileUrl);
+      const safeSenderName =
+        msg.senderName && !['客户', '对方', '我方', 'Telegram 联系人'].includes(msg.senderName)
+          ? msg.senderName
+          : '';
+      const safeSenderId = msg.senderId || '';
+      await db
+        .prepare(
+          `UPDATE messages SET
+             sender = CASE WHEN ? = 'system' THEN 'system' ELSE sender END,
+             sender_name = CASE WHEN ? != '' THEN ? ELSE sender_name END,
+             sender_id = CASE WHEN ? != '' THEN ? ELSE sender_id END,
+             text = CASE WHEN ? != '' THEN ? ELSE text END,
+             translated_text = CASE WHEN ? != '' THEN ? ELSE translated_text END,
+             stt_text = CASE WHEN ? != '' THEN ? ELSE stt_text END,
+             voice_tone = CASE WHEN ? != '' THEN ? ELSE voice_tone END,
+             is_audio = CASE WHEN ? = 1 THEN 1 ELSE is_audio END,
+             audio_duration = CASE WHEN ? > 0 THEN ? ELSE audio_duration END,
+             audio_url = CASE WHEN ? != '' THEN ? ELSE audio_url END,
+             is_image = CASE WHEN ? = 1 THEN 1 ELSE is_image END,
+             image_caption = CASE WHEN ? != '' THEN ? ELSE image_caption END,
+             image_url = CASE WHEN ? != '' THEN ? ELSE image_url END,
+             is_video = CASE WHEN ? = 1 THEN 1 ELSE is_video END,
+             video_duration = CASE WHEN ? > 0 THEN ? ELSE video_duration END,
+             video_url = CASE WHEN ? != '' THEN ? ELSE video_url END,
+             is_file = CASE WHEN ? = 1 THEN 1 ELSE is_file END,
+             file_name = CASE WHEN ? != '' THEN ? ELSE file_name END,
+             file_size = CASE WHEN ? != '' THEN ? ELSE file_size END,
+             file_url = CASE WHEN ? != '' THEN ? ELSE file_url END,
+             delivery_status = CASE WHEN ? != '' THEN ? ELSE delivery_status END,
+             telegram_message_id = COALESCE(?, telegram_message_id),
+             client_message_id = COALESCE(NULLIF(?, ''), client_message_id),
+             queue_pause_reason = ?,
+             flood_wait_until = ?,
+             reply_to_json = COALESCE(?, reply_to_json),
+             is_edited = CASE WHEN ? = 1 THEN 1 ELSE is_edited END,
+             is_pinned = ?,
+             forward_from = COALESCE(?, forward_from),
+             reactions_json = COALESCE(?, reactions_json),
+             system_event_type = CASE WHEN ? != '' THEN ? ELSE system_event_type END
+           WHERE id = ?`
+        )
+        .run(
+          msg.sender,
+          safeSenderName,
+          safeSenderName,
+          safeSenderId,
+          safeSenderId,
+          msg.text,
+          msg.text,
+          msg.translatedText,
+          msg.translatedText,
+          msg.sttText,
+          msg.sttText,
+          msg.voiceTone,
+          msg.voiceTone,
+          msg.isAudio ? 1 : 0,
+          msg.audioDuration,
+          msg.audioDuration,
+          safeAudioUrl,
+          safeAudioUrl,
+          msg.isImage ? 1 : 0,
+          msg.imageCaption,
+          msg.imageCaption,
+          safeImageUrl,
+          safeImageUrl,
+          msg.isVideo ? 1 : 0,
+          msg.videoDuration,
+          msg.videoDuration,
+          safeVideoUrl,
+          safeVideoUrl,
+          msg.isFile ? 1 : 0,
+          msg.fileName,
+          msg.fileName,
+          msg.fileSize,
+          msg.fileSize,
+          safeFileUrl,
+          safeFileUrl,
+          msg.deliveryStatus,
+          msg.deliveryStatus,
+          msg.telegramMessageId ?? null,
+          msg.clientMessageId || '',
+          msg.queuePauseReason ?? null,
+          msg.floodWaitUntil ?? null,
+          replyToJson,
+          msg.isEdited ? 1 : 0,
+          msg.isPinned ? 1 : 0,
+          msg.forwardFrom || null,
+          reactionsJson,
+          msg.systemEventType || '',
+          msg.systemEventType || '',
+          existingMatchId
+        );
+      return true;
     }
 
     const replyToJson = msg.replyTo ? JSON.stringify(msg.replyTo) : null;
@@ -8058,8 +8195,9 @@ async function executeUpsertSyncedMessageToDbInternal(
           is_image, image_url, image_caption, is_video, video_url, video_duration,
           is_file, file_name, file_size, file_url,
           timestamp, created_at, delivery_status, telegram_message_id,
+          client_message_id, queue_pause_reason, flood_wait_until,
           reply_to_json, is_edited, is_pinned, forward_from, reactions_json, system_event_type
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
           sender = CASE WHEN excluded.sender = 'system' THEN 'system' ELSE messages.sender END,
           sender_name = CASE WHEN excluded.sender_name != '' AND excluded.sender_name NOT IN ('客户', '对方', '我方', 'Telegram 联系人') THEN excluded.sender_name ELSE messages.sender_name END,
@@ -8083,6 +8221,9 @@ async function executeUpsertSyncedMessageToDbInternal(
           file_url = CASE WHEN excluded.file_url != '' THEN excluded.file_url ELSE messages.file_url END,
           delivery_status = CASE WHEN excluded.delivery_status != '' THEN excluded.delivery_status ELSE messages.delivery_status END,
           telegram_message_id = COALESCE(excluded.telegram_message_id, messages.telegram_message_id),
+          client_message_id = COALESCE(NULLIF(excluded.client_message_id, ''), messages.client_message_id),
+          queue_pause_reason = excluded.queue_pause_reason,
+          flood_wait_until = excluded.flood_wait_until,
           reply_to_json = COALESCE(excluded.reply_to_json, messages.reply_to_json),
           is_edited = CASE WHEN excluded.is_edited = 1 THEN 1 ELSE messages.is_edited END,
           is_pinned = excluded.is_pinned,
@@ -8118,6 +8259,9 @@ async function executeUpsertSyncedMessageToDbInternal(
         msg.createdAt,
         msg.deliveryStatus,
         msg.telegramMessageId ?? null,
+        msg.clientMessageId || null,
+        msg.queuePauseReason ?? null,
+        msg.floodWaitUntil ?? null,
         replyToJson,
         msg.isEdited ? 1 : 0,
         msg.isPinned ? 1 : 0,
@@ -8302,6 +8446,9 @@ export async function resolveUnifiedChatMessages(params: {
           is_file as isFile, file_name as fileName, file_size as fileSize, file_url as fileUrl,
           timestamp, created_at as createdAt, delivery_status as deliveryStatus,
           telegram_message_id as telegramMessageId,
+          client_message_id as clientMessageId,
+          queue_pause_reason as queuePauseReason,
+          flood_wait_until as floodWaitUntil,
           reply_to_json as replyToJson, is_edited as isEdited, is_pinned as isPinned,
           forward_from as forwardFrom, reactions_json as reactionsJson,
           system_event_type as systemEventType
@@ -8740,6 +8887,9 @@ app.get('/api/messages/:chatId', requireTenantAuth, async (req: Request, res: Re
           is_file as isFile, file_name as fileName, file_size as fileSize, file_url as fileUrl,
           timestamp, created_at as createdAt, delivery_status as deliveryStatus,
           telegram_message_id as telegramMessageId,
+          client_message_id as clientMessageId,
+          queue_pause_reason as queuePauseReason,
+          flood_wait_until as floodWaitUntil,
           reply_to_json as replyToJson,
           is_edited as isEdited,
           is_pinned as isPinned,
@@ -8764,6 +8914,9 @@ app.get('/api/messages/:chatId', requireTenantAuth, async (req: Request, res: Re
           is_file as isFile, file_name as fileName, file_size as fileSize, file_url as fileUrl,
           timestamp, created_at as createdAt, delivery_status as deliveryStatus,
           telegram_message_id as telegramMessageId,
+          client_message_id as clientMessageId,
+          queue_pause_reason as queuePauseReason,
+          flood_wait_until as floodWaitUntil,
           reply_to_json as replyToJson,
           is_edited as isEdited,
           is_pinned as isPinned,
@@ -9486,6 +9639,50 @@ async function validateOutboundMediaInputForBot(
   return { ok: false, error: `安全拦截：不支持或非法的${label}媒体路径，已禁止访问本地文件系统` };
 }
 
+export async function isKnownContactOrGroupPeer(
+  connected: ConnectedTelegramUser | undefined,
+  chatId: string
+): Promise<boolean> {
+  const raw = String(chatId || '').trim();
+  const clean = raw.replace(/^tg_/, '');
+  if (!clean || clean === 'me' || clean === 'self' || clean === '777000' || clean === '42777') {
+    return true;
+  }
+  if (isTelegramGroupChatId(raw, connected)) {
+    return true;
+  }
+  if (connected && Array.isArray(connected.dialogs)) {
+    const dlg: any = connected.dialogs.find(
+      (d: any) => d && (String(d.id) === raw || String(d.id) === `tg_${clean}` || String(d.rawId || '') === clean)
+    );
+    if (dlg) {
+      if (dlg.isGroup || dlg.isChannel || dlg.isContact || dlg.mutualContact) {
+        return true;
+      }
+      if (dlg.isContact === false && !dlg.isGroup && !dlg.isChannel) {
+        return false;
+      }
+    }
+  }
+  if (connected?.client && typeof (connected.client as any).getEntity === 'function') {
+    try {
+      const peerArg: any = /^-?\d+$/.test(clean) ? Number(clean) : clean;
+      const entity: any = await (connected.client as any).getEntity(peerArg);
+      if (entity) {
+        if (
+          entity.className === 'Chat' ||
+          entity.className === 'Channel' ||
+          entity.contact === true ||
+          entity.mutualContact === true
+        ) {
+          return true;
+        }
+      }
+    } catch {}
+  }
+  return false;
+}
+
 export async function deliverOutboundTelegramMessage(
   payload: any,
   effectiveAccountId: string,
@@ -9498,6 +9695,7 @@ export async function deliverOutboundTelegramMessage(
   error?: string;
   sessionExpired?: boolean;
   floodWait?: boolean;
+  peerFlood?: boolean;
   retryAfterSeconds?: number;
   floodWaitUntil?: number;
 }> {
@@ -9679,6 +9877,15 @@ export async function deliverOutboundTelegramMessage(
       userId: personalAccount.userId,
       phone: personalAccount.phone,
     };
+    const activePeerFlood = getTelegramPeerFloodStatus(floodCtx);
+    if (activePeerFlood && !(await isKnownContactOrGroupPeer(personalAccount, String(chatId)))) {
+      return {
+        delivered: false,
+        channel: 'mtproto',
+        peerFlood: true,
+        error: activePeerFlood.reason,
+      };
+    }
     const activeFlood = getTelegramFloodCooldown(floodCtx);
     if (activeFlood) {
       return {
@@ -9732,6 +9939,15 @@ export async function deliverOutboundTelegramMessage(
       } catch (voiceErr: any) {
         const errMsg = formatTelegramError(voiceErr);
         console.error(`[MTProto Voice Send Error]:`, errMsg);
+        const peerFloodEntry = recordTelegramPeerFlood(floodCtx, voiceErr, 'sendFile.voice');
+        if (peerFloodEntry) {
+          return {
+            delivered: false,
+            channel: 'mtproto',
+            peerFlood: true,
+            error: peerFloodEntry.reason,
+          };
+        }
         const floodEntry = recordTelegramFloodWait(floodCtx, voiceErr, 'sendFile.voice');
         if (floodEntry) {
           return {
@@ -9801,6 +10017,15 @@ export async function deliverOutboundTelegramMessage(
       } catch (photoErr: any) {
         const errMsg = formatTelegramError(photoErr);
         console.error(`[MTProto Photo Send Error]:`, errMsg);
+        const peerFloodEntry = recordTelegramPeerFlood(floodCtx, photoErr, 'sendFile.photo');
+        if (peerFloodEntry) {
+          return {
+            delivered: false,
+            channel: 'mtproto',
+            peerFlood: true,
+            error: peerFloodEntry.reason,
+          };
+        }
         const floodEntry = recordTelegramFloodWait(floodCtx, photoErr, 'sendFile.photo');
         if (floodEntry) {
           return {
@@ -9871,6 +10096,15 @@ export async function deliverOutboundTelegramMessage(
       } catch (vidErr: any) {
         const errMsg = formatTelegramError(vidErr);
         console.error(`[MTProto Video Send Error]:`, errMsg);
+        const peerFloodEntry = recordTelegramPeerFlood(floodCtx, vidErr, 'sendFile.video');
+        if (peerFloodEntry) {
+          return {
+            delivered: false,
+            channel: 'mtproto',
+            peerFlood: true,
+            error: peerFloodEntry.reason,
+          };
+        }
         const floodEntry = recordTelegramFloodWait(floodCtx, vidErr, 'sendFile.video');
         if (floodEntry) {
           return {
@@ -9932,6 +10166,15 @@ export async function deliverOutboundTelegramMessage(
       } catch (fileErr: any) {
         const errMsg = formatTelegramError(fileErr);
         console.error(`[MTProto File Send Error]:`, errMsg);
+        const peerFloodEntry = recordTelegramPeerFlood(floodCtx, fileErr, 'sendFile.document');
+        if (peerFloodEntry) {
+          return {
+            delivered: false,
+            channel: 'mtproto',
+            peerFlood: true,
+            error: peerFloodEntry.reason,
+          };
+        }
         const floodEntry = recordTelegramFloodWait(floodCtx, fileErr, 'sendFile.document');
         if (floodEntry) {
           return {
@@ -9982,6 +10225,15 @@ export async function deliverOutboundTelegramMessage(
     const errMsg = formatTelegramError(tgSyncErr);
     console.warn(`[Telegram Outbound Push Error]:`, errMsg);
     if (effectiveAccountId !== 'acc_telegram_bot') {
+      const peerFloodEntry = recordTelegramPeerFlood({ accountId: effectiveAccountId }, tgSyncErr, 'messages.SendMessage');
+      if (peerFloodEntry) {
+        return {
+          delivered: false,
+          channel: 'mtproto',
+          peerFlood: true,
+          error: peerFloodEntry.reason,
+        };
+      }
       const floodEntry = recordTelegramFloodWait({ accountId: effectiveAccountId }, tgSyncErr, 'messages.SendMessage');
       if (floodEntry) {
         return {
@@ -10016,6 +10268,7 @@ export async function deliverOutboundTelegramMessage(
 
 const OUTBOUND_MESSAGE_WHITELIST_KEYS = [
   'id',
+  'clientMessageId',
   'chatId',
   'accountId',
   'sender',
@@ -10030,6 +10283,9 @@ const OUTBOUND_MESSAGE_WHITELIST_KEYS = [
   'replyToMsgId',
   'telegramMessageId',
   'deliveryStatus',
+  'queuePauseReason',
+  'floodWaitUntil',
+  'asyncQueue',
   'isAudio',
   'audioDuration',
   'audioUrl',
@@ -10065,6 +10321,27 @@ export function sanitizeOutboundMessageClientPayload(rawPayload: Record<string, 
     }
   }
   return clean;
+}
+
+function cloneOutboundPayloadPreservingDiskSymbol(
+  basePayload: Record<string, any>,
+  overrides?: Record<string, any>
+): Record<string, any> {
+  const next: Record<string, any> = {
+    ...(basePayload || {}),
+    ...(overrides || {}),
+  };
+  const symPath =
+    basePayload && typeof basePayload === 'object' ? (basePayload as any)[TRUSTED_OUTBOUND_DISK_PATH] : undefined;
+  if (typeof symPath === 'string' && symPath) {
+    Object.defineProperty(next, TRUSTED_OUTBOUND_DISK_PATH, {
+      value: symPath,
+      enumerable: false,
+      configurable: false,
+      writable: false,
+    });
+  }
+  return next;
 }
 
 export function applyUploadedMediaToMessagePayload(
@@ -10112,6 +10389,869 @@ export function applyUploadedMediaToMessagePayload(
   return { payload: next, mediaUrl };
 }
 
+// ==================== PER-(ACCOUNT, CHAT) OUTBOUND FIFO SCHEDULER & IDEMPOTENCY ====================
+export type OutboundDeliveryResult = Awaited<ReturnType<typeof deliverOutboundTelegramMessage>> & {
+  deliveryStatus?: 'delivered' | 'failed' | 'pending' | 'paused';
+  queuePauseReason?: string;
+  clientMessageId?: string;
+  duplicate?: boolean;
+};
+
+interface OutboundQueueItem {
+  id: string;
+  clientMessageId?: string;
+  effectiveAccountId: string;
+  accountKey: string;
+  chatId: string;
+  canonicalChatId: string;
+  isGroup: boolean;
+  isMedia: boolean;
+  asyncQueue: boolean;
+  payload: Record<string, any>;
+  enqueuedAt: number;
+  deliverFn?: typeof deliverOutboundTelegramMessage;
+  skipPeerFloodCheck?: boolean;
+  resolve: (result: OutboundDeliveryResult) => void;
+}
+
+interface OutboundChatQueueState {
+  chatId: string;
+  isGroup: boolean;
+  inFlight: boolean;
+  nextAllowedAt: number;
+  items: OutboundQueueItem[];
+}
+
+interface OutboundAccountSchedulerState {
+  accountKey: string;
+  queues: Map<string, OutboundChatQueueState>;
+  groupOrder: string[];
+  groupCursor: number;
+  mediaInFlight: boolean;
+  nextAnyDispatchAt: number;
+  nextGroupDispatchAt: number;
+  floodWaitUntil: number;
+  drainTimer: NodeJS.Timeout | null;
+}
+
+export interface OutboundClientIdempotencyRecord {
+  id: string;
+  clientMessageId: string;
+  accountId: string;
+  chatId: string;
+  status: 'pending' | 'retrying' | 'paused' | 'delivered' | 'failed';
+  telegramMessageId?: number;
+  queuePauseReason?: string;
+  floodWaitUntil?: number;
+  error?: string;
+  payload: Record<string, any>;
+  updatedAt: number;
+}
+
+const outboundAccountSchedulers = new Map<string, OutboundAccountSchedulerState>();
+const outboundClientMessageRecords = new Map<string, OutboundClientIdempotencyRecord>();
+const MAX_OUTBOUND_CLIENT_RECORDS = 5000;
+
+function randomIntBetween(min: number, max: number): number {
+  const lo = Math.max(0, Math.floor(Math.min(min, max)));
+  const hi = Math.max(lo, Math.floor(Math.max(min, max)));
+  if (hi <= lo) return lo;
+  return lo + Math.floor(Math.random() * (hi - lo + 1));
+}
+
+function canonicalizeSchedulerChatId(chatId: string): string {
+  const clean = String(chatId || '').trim();
+  if (!clean) return 'unknown';
+  return clean.startsWith('tg_') || clean.startsWith('chat_') ? clean : `tg_${clean}`;
+}
+
+function getOutboundAccountSchedulerKey(effectiveAccountId: string): string {
+  return (
+    resolveTelegramAccountRuntimeKey({ accountId: effectiveAccountId }) ||
+    String(effectiveAccountId || 'acc_1').trim() ||
+    'acc_1'
+  );
+}
+
+function recordOutboundClientMessageState(entry: OutboundClientIdempotencyRecord): void {
+  if (!entry.clientMessageId) return;
+  const key = `${entry.accountId}::${entry.clientMessageId}`;
+  outboundClientMessageRecords.set(key, entry);
+  while (outboundClientMessageRecords.size > MAX_OUTBOUND_CLIENT_RECORDS) {
+    const oldest = outboundClientMessageRecords.keys().next().value;
+    if (oldest === undefined) break;
+    outboundClientMessageRecords.delete(oldest);
+  }
+}
+
+export function clearOutboundSchedulerForTesting(): void {
+  for (const state of outboundAccountSchedulers.values()) {
+    if (state.drainTimer) clearTimeout(state.drainTimer);
+  }
+  outboundAccountSchedulers.clear();
+  outboundClientMessageRecords.clear();
+}
+
+export function getOutboundSchedulerStats() {
+  let queuedTotal = 0;
+  let groupQueues = 0;
+  let privateQueues = 0;
+  for (const acc of outboundAccountSchedulers.values()) {
+    for (const q of acc.queues.values()) {
+      queuedTotal += q.items.length;
+      if (q.isGroup) groupQueues += 1;
+      else privateQueues += 1;
+    }
+  }
+  return {
+    accounts: outboundAccountSchedulers.size,
+    queuedTotal,
+    groupQueues,
+    privateQueues,
+    clientRecords: outboundClientMessageRecords.size,
+  };
+}
+
+function getOrCreateOutboundAccountScheduler(accountKey: string): OutboundAccountSchedulerState {
+  let state = outboundAccountSchedulers.get(accountKey);
+  if (!state) {
+    state = {
+      accountKey,
+      queues: new Map(),
+      groupOrder: [],
+      groupCursor: 0,
+      mediaInFlight: false,
+      nextAnyDispatchAt: 0,
+      nextGroupDispatchAt: 0,
+      floodWaitUntil: 0,
+      drainTimer: null,
+    };
+    outboundAccountSchedulers.set(accountKey, state);
+  }
+  return state;
+}
+
+function emitOutboundReceiptUpdate(params: {
+  id: string;
+  clientMessageId?: string;
+  chatId: string;
+  accountId: string;
+  deliveryStatus: 'pending' | 'delivered' | 'paused' | 'failed';
+  telegramMessageId?: number;
+  dialogState?: OutboundDialogState;
+  queuePauseReason?: string;
+  floodWaitUntil?: number;
+  error?: string;
+  peerFlood?: boolean;
+}) {
+  const now = Date.now();
+  pushPendingLocalUpdate({
+    id: `receipt_${params.id}_${now}_${Math.random().toString(36).slice(2, 6)}`,
+    type: 'delivery_receipt',
+    messageId: params.id,
+    clientMessageId: params.clientMessageId,
+    telegramMessageId: params.telegramMessageId,
+    chatId: params.chatId,
+    accountId: params.accountId,
+    sender: 'me',
+    senderName: '我方',
+    text: params.error || params.queuePauseReason || '',
+    timestamp: new Date(now).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false }),
+    createdAt: now,
+    deliveryStatus: params.deliveryStatus,
+    queuePauseReason: params.queuePauseReason,
+    floodWaitUntil: params.floodWaitUntil,
+    dialogState: params.dialogState,
+    peerFloodRestricted: params.peerFlood || undefined,
+    error: params.error,
+  });
+}
+
+function emitAccountFloodStateUpdate(params: {
+  accountId: string;
+  floodWaitUntil: number;
+  retryAfterSeconds: number;
+  method?: string;
+}) {
+  const now = Date.now();
+  pushPendingLocalUpdate({
+    id: `flood_${params.accountId}_${now}_${Math.random().toString(36).slice(2, 6)}`,
+    type: 'flood_state',
+    chatId: '',
+    accountId: params.accountId,
+    sender: 'system',
+    senderName: 'Telegram 系统',
+    text: `触发限流，需等待 ${params.retryAfterSeconds}s`,
+    timestamp: new Date(now).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false }),
+    createdAt: now,
+    floodWaitUntil: params.floodWaitUntil,
+    retryAfterSeconds: params.retryAfterSeconds,
+    floodMethod: params.method,
+  });
+}
+
+function emitAccountPeerFloodUpdate(params: {
+  accountId: string;
+  reason: string;
+}) {
+  const now = Date.now();
+  pushPendingLocalUpdate({
+    id: `peer_flood_${params.accountId}_${now}_${Math.random().toString(36).slice(2, 6)}`,
+    type: 'peer_flood',
+    chatId: '',
+    accountId: params.accountId,
+    sender: 'system',
+    senderName: 'Telegram 系统',
+    text: params.reason,
+    timestamp: new Date(now).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false }),
+    createdAt: now,
+    peerFloodRestricted: true,
+    peerFloodReason: params.reason,
+  });
+}
+
+async function persistOutboundStatusUpdate(params: {
+  item: OutboundQueueItem;
+  deliveryStatus: 'pending' | 'delivered' | 'paused' | 'failed';
+  telegramMessageId?: number;
+  queuePauseReason?: string | null;
+  floodWaitUntil?: number | null;
+}) {
+  const { item, deliveryStatus, telegramMessageId, queuePauseReason, floodWaitUntil } = params;
+  recordOutboundClientMessageState({
+    id: item.id,
+    clientMessageId: item.clientMessageId || '',
+    accountId: item.effectiveAccountId,
+    chatId: item.canonicalChatId,
+    status: deliveryStatus,
+    telegramMessageId,
+    queuePauseReason: queuePauseReason || undefined,
+    floodWaitUntil: floodWaitUntil || undefined,
+    payload: item.payload,
+    updatedAt: Date.now(),
+  });
+  if (!item.chatId) return;
+  await upsertSyncedMessageToDb(
+    cloneOutboundPayloadPreservingDiskSymbol(item.payload, {
+      id: item.id,
+      clientMessageId: item.clientMessageId,
+      sender: item.payload?.sender || 'me',
+      accountId: item.effectiveAccountId,
+      deliveryStatus,
+      queuePauseReason: queuePauseReason ?? null,
+      floodWaitUntil: floodWaitUntil ?? null,
+      telegramMessageId: telegramMessageId ?? item.payload?.telegramMessageId,
+    }),
+    String(item.chatId),
+    item.effectiveAccountId,
+    { priority: 'HIGH', source: 'outbound_scheduler' }
+  ).catch(() => false);
+}
+
+async function pauseOutboundItem(
+  item: OutboundQueueItem,
+  reason: string,
+  floodWaitUntil?: number
+): Promise<OutboundDeliveryResult> {
+  await persistOutboundStatusUpdate({
+    item,
+    deliveryStatus: 'paused',
+    queuePauseReason: reason,
+    floodWaitUntil: floodWaitUntil ?? null,
+  });
+  if (item.asyncQueue) {
+    emitOutboundReceiptUpdate({
+      id: item.id,
+      clientMessageId: item.clientMessageId,
+      chatId: item.canonicalChatId,
+      accountId: item.effectiveAccountId,
+      deliveryStatus: 'paused',
+      queuePauseReason: reason,
+      floodWaitUntil,
+      error: reason,
+    });
+  }
+  const result: OutboundDeliveryResult = {
+    delivered: false,
+    channel: 'mtproto',
+    deliveryStatus: 'paused',
+    queuePauseReason: reason,
+    floodWait: Boolean(floodWaitUntil),
+    floodWaitUntil,
+    retryAfterSeconds: floodWaitUntil ? Math.max(1, Math.ceil((floodWaitUntil - Date.now()) / 1000)) : undefined,
+    clientMessageId: item.clientMessageId,
+    error: reason,
+  };
+  item.resolve(result);
+  return result;
+}
+
+async function pauseExcessiveQueuedItemsForAccount(
+  account: OutboundAccountSchedulerState,
+  reason: string,
+  floodWaitUntil?: number
+): Promise<void> {
+  const maxAgeMs = outboundRuntimeConfig.outboundMaxQueueAgeSec * 1000;
+  const now = Date.now();
+  const targetUntil = floodWaitUntil && floodWaitUntil > now ? floodWaitUntil : now;
+  const waitSec = Math.max(0, Math.ceil((targetUntil - now) / 1000));
+  const pauseAll = waitSec > outboundRuntimeConfig.floodWaitAutoWaitMaxSec;
+
+  for (const q of account.queues.values()) {
+    const keep: OutboundQueueItem[] = [];
+    for (const qItem of q.items) {
+      if (pauseAll || targetUntil - qItem.enqueuedAt > maxAgeMs) {
+        await pauseOutboundItem(qItem, reason, floodWaitUntil);
+      } else {
+        keep.push(qItem);
+      }
+    }
+    q.items = keep;
+  }
+}
+
+function scheduleOutboundDrain(accountKey: string, delayMs = 0) {
+  const account = outboundAccountSchedulers.get(accountKey);
+  if (!account) return;
+  if (account.drainTimer) {
+    clearTimeout(account.drainTimer);
+    account.drainTimer = null;
+  }
+  const hasQueued = Array.from(account.queues.values()).some((q) => !q.inFlight && q.items.length > 0);
+  if (!hasQueued) return;
+  account.drainTimer = setTimeout(() => {
+    account.drainTimer = null;
+    void drainOutboundAccountScheduler(accountKey);
+  }, Math.max(0, delayMs));
+}
+
+async function executeQueuedOutboundItem(account: OutboundAccountSchedulerState, q: OutboundChatQueueState, item: OutboundQueueItem) {
+  const now = Date.now();
+  const ageSec = (now - item.enqueuedAt) / 1000;
+  if (ageSec > outboundRuntimeConfig.outboundMaxQueueAgeSec) {
+    q.inFlight = false;
+    if (item.isMedia) account.mediaInFlight = false;
+    await pauseOutboundItem(
+      item,
+      `排队等待超过 ${outboundRuntimeConfig.outboundMaxQueueAgeSec} 秒，已自动暂停以避免过时消息误发`
+    );
+    scheduleOutboundDrain(account.accountKey, 0);
+    return;
+  }
+
+  try {
+    const activeCooldown = getTelegramFloodCooldown({ accountId: item.effectiveAccountId });
+    const effectiveFloodUntil = Math.max(account.floodWaitUntil || 0, activeCooldown?.floodWaitUntil || 0);
+    if (effectiveFloodUntil > now) {
+      const remainSec = Math.max(1, Math.ceil((effectiveFloodUntil - now) / 1000));
+      const projectedAgeSec = (effectiveFloodUntil - item.enqueuedAt) / 1000;
+      if (
+        remainSec > outboundRuntimeConfig.floodWaitAutoWaitMaxSec ||
+        projectedAgeSec > outboundRuntimeConfig.outboundMaxQueueAgeSec
+      ) {
+        q.inFlight = false;
+        if (item.isMedia) account.mediaInFlight = false;
+        const reason =
+          remainSec > outboundRuntimeConfig.floodWaitAutoWaitMaxSec
+            ? `Telegram 限流等待 ${remainSec}s（超过 ${outboundRuntimeConfig.floodWaitAutoWaitMaxSec}s 阈值），已暂停等待手动确认`
+            : `预计限流后排队总时长将超过 ${outboundRuntimeConfig.outboundMaxQueueAgeSec}s，已暂停等待手动确认`;
+        await pauseOutboundItem(item, reason, effectiveFloodUntil);
+        await pauseExcessiveQueuedItemsForAccount(account, reason, effectiveFloodUntil);
+        scheduleOutboundDrain(account.accountKey, 0);
+        return;
+      }
+      // Within auto-wait threshold
+      if (item.asyncQueue) {
+        q.items.unshift(item);
+        q.inFlight = false;
+        if (item.isMedia) account.mediaInFlight = false;
+        account.floodWaitUntil = effectiveFloodUntil;
+        emitAccountFloodStateUpdate({
+          accountId: item.effectiveAccountId,
+          floodWaitUntil: effectiveFloodUntil,
+          retryAfterSeconds: remainSec,
+        });
+        scheduleOutboundDrain(account.accountKey, effectiveFloodUntil - now);
+        return;
+      }
+    }
+
+    const deliverFn = item.deliverFn || deliverOutboundTelegramMessage;
+    const res = await deliverFn(item.payload, item.effectiveAccountId, item.id);
+    const doneAt = Date.now();
+
+    if (res.peerFlood) {
+      emitAccountPeerFloodUpdate({
+        accountId: item.effectiveAccountId,
+        reason: res.error || '触发 Telegram PEER_FLOOD 限制，已停止向陌生人/非联系人发送',
+      });
+      // Immediately fail any other queued non-contact private DMs for this account
+      const conn = resolveConnectedTelegramUser(item.effectiveAccountId);
+      for (const otherQ of account.queues.values()) {
+        if (otherQ.isGroup || otherQ.items.length === 0) continue;
+        const known = await isKnownContactOrGroupPeer(conn, otherQ.chatId);
+        if (!known) {
+          const cancelled = otherQ.items.splice(0);
+          for (const cItem of cancelled) {
+            await persistOutboundStatusUpdate({
+              item: cItem,
+              deliveryStatus: 'failed',
+            });
+            if (cItem.asyncQueue) {
+              emitOutboundReceiptUpdate({
+                id: cItem.id,
+                clientMessageId: cItem.clientMessageId,
+                chatId: cItem.canonicalChatId,
+                accountId: cItem.effectiveAccountId,
+                deliveryStatus: 'failed',
+                peerFlood: true,
+                error: res.error,
+              });
+            }
+            cItem.resolve({
+              delivered: false,
+              channel: 'mtproto',
+              deliveryStatus: 'failed',
+              peerFlood: true,
+              clientMessageId: cItem.clientMessageId,
+              error: res.error,
+            });
+          }
+        }
+      }
+      await persistOutboundStatusUpdate({
+        item,
+        deliveryStatus: 'failed',
+      });
+      if (item.asyncQueue) {
+        emitOutboundReceiptUpdate({
+          id: item.id,
+          clientMessageId: item.clientMessageId,
+          chatId: item.canonicalChatId,
+          accountId: item.effectiveAccountId,
+          deliveryStatus: 'failed',
+          peerFlood: true,
+          error: res.error,
+        });
+      }
+      item.resolve({
+        ...res,
+        deliveryStatus: 'failed',
+        clientMessageId: item.clientMessageId,
+      });
+      return;
+    }
+
+    if (res.floodWait) {
+      const waitSec = Math.max(1, Number(res.retryAfterSeconds || 1));
+      const floodUntil = res.floodWaitUntil || doneAt + waitSec * 1000;
+      account.floodWaitUntil = Math.max(account.floodWaitUntil, floodUntil);
+      const projectedAgeSec = (floodUntil - item.enqueuedAt) / 1000;
+      const shouldPause =
+        waitSec > outboundRuntimeConfig.floodWaitAutoWaitMaxSec ||
+        projectedAgeSec > outboundRuntimeConfig.outboundMaxQueueAgeSec;
+
+      emitAccountFloodStateUpdate({
+        accountId: item.effectiveAccountId,
+        floodWaitUntil: floodUntil,
+        retryAfterSeconds: waitSec,
+      });
+
+      if (shouldPause) {
+        const reason =
+          waitSec > outboundRuntimeConfig.floodWaitAutoWaitMaxSec
+            ? `Telegram 限流等待 ${waitSec}s（超过 ${outboundRuntimeConfig.floodWaitAutoWaitMaxSec}s 阈值），已暂停等待手动确认`
+            : `预计限流后排队总时长将超过 ${outboundRuntimeConfig.outboundMaxQueueAgeSec}s，已暂停等待手动确认`;
+        await pauseOutboundItem(item, reason, floodUntil);
+        await pauseExcessiveQueuedItemsForAccount(account, reason, floodUntil);
+        return;
+      }
+
+      if (item.asyncQueue) {
+        // Auto-wait: keep message in front of its FIFO queue & update flood_wait_until
+        q.items.unshift(item);
+        await persistOutboundStatusUpdate({
+          item,
+          deliveryStatus: 'pending',
+          floodWaitUntil: floodUntil,
+        });
+        emitOutboundReceiptUpdate({
+          id: item.id,
+          clientMessageId: item.clientMessageId,
+          chatId: item.canonicalChatId,
+          accountId: item.effectiveAccountId,
+          deliveryStatus: 'pending',
+          floodWaitUntil: floodUntil,
+        });
+        return;
+      }
+
+      // Synchronous non-async caller within threshold: return 429 floodWait immediately rather than blocking HTTP request
+      await persistOutboundStatusUpdate({
+        item,
+        deliveryStatus: 'failed',
+        floodWaitUntil: floodUntil,
+      });
+      item.resolve({
+        ...res,
+        deliveryStatus: 'failed',
+        clientMessageId: item.clientMessageId,
+      });
+      return;
+    }
+
+    if (res.delivered) {
+      if (q.isGroup) {
+        const sameGroupDelay = randomIntBetween(
+          outboundRuntimeConfig.sameGroupGapMinMs,
+          outboundRuntimeConfig.sameGroupGapMaxMs
+        );
+        q.nextAllowedAt = Math.max(q.nextAllowedAt, doneAt + sameGroupDelay);
+      }
+      await persistOutboundStatusUpdate({
+        item,
+        deliveryStatus: 'delivered',
+        telegramMessageId: res.telegramMessageId,
+        queuePauseReason: null,
+        floodWaitUntil: null,
+      });
+      if (item.asyncQueue) {
+        emitOutboundReceiptUpdate({
+          id: item.id,
+          clientMessageId: item.clientMessageId,
+          chatId: item.canonicalChatId,
+          accountId: item.effectiveAccountId,
+          deliveryStatus: 'delivered',
+          telegramMessageId: res.telegramMessageId,
+          dialogState: res.dialogState,
+        });
+      }
+      item.resolve({
+        ...res,
+        deliveryStatus: 'delivered',
+        clientMessageId: item.clientMessageId,
+      });
+      return;
+    }
+
+    await persistOutboundStatusUpdate({
+      item,
+      deliveryStatus: 'failed',
+      queuePauseReason: null,
+      floodWaitUntil: null,
+    });
+    if (item.asyncQueue) {
+      emitOutboundReceiptUpdate({
+        id: item.id,
+        clientMessageId: item.clientMessageId,
+        chatId: item.canonicalChatId,
+        accountId: item.effectiveAccountId,
+        deliveryStatus: 'failed',
+        error: res.error,
+      });
+    }
+    item.resolve({
+      ...res,
+      deliveryStatus: 'failed',
+      clientMessageId: item.clientMessageId,
+    });
+  } finally {
+    q.inFlight = false;
+    if (item.isMedia) {
+      account.mediaInFlight = false;
+    }
+    scheduleOutboundDrain(account.accountKey, 0);
+  }
+}
+
+async function drainOutboundAccountScheduler(accountKey: string) {
+  const account = outboundAccountSchedulers.get(accountKey);
+  if (!account) return;
+  const now = Date.now();
+
+  if (account.floodWaitUntil > now) {
+    scheduleOutboundDrain(accountKey, account.floodWaitUntil - now);
+    return;
+  }
+
+  let pickedQueue: OutboundChatQueueState | null = null;
+  let earliestWaitAt = Number.POSITIVE_INFINITY;
+
+  const accountGateAt = account.nextAnyDispatchAt;
+
+  // 1. Private chat priority preemption (zero per-chat artificial delay)
+  for (const q of account.queues.values()) {
+    if (q.isGroup || q.inFlight || q.items.length === 0) continue;
+    const head = q.items[0];
+    if (head.isMedia && account.mediaInFlight) continue;
+    if (now >= accountGateAt) {
+      pickedQueue = q;
+      break;
+    }
+    earliestWaitAt = Math.min(earliestWaitAt, accountGateAt);
+  }
+
+  // 2. Round-robin across group chat queues when no private queue is eligible
+  if (!pickedQueue && account.groupOrder.length > 0) {
+    const totalGroups = account.groupOrder.length;
+    for (let offset = 0; offset < totalGroups; offset++) {
+      const idx = (account.groupCursor + offset) % totalGroups;
+      const gKey = account.groupOrder[idx];
+      const q = account.queues.get(gKey);
+      if (!q || !q.isGroup || q.inFlight || q.items.length === 0) continue;
+      const head = q.items[0];
+      if (head.isMedia && account.mediaInFlight) continue;
+      const readyAt = Math.max(q.nextAllowedAt, account.nextGroupDispatchAt, accountGateAt);
+      if (now >= readyAt) {
+        pickedQueue = q;
+        account.groupCursor = (idx + 1) % totalGroups;
+        break;
+      }
+      earliestWaitAt = Math.min(earliestWaitAt, readyAt);
+    }
+  }
+
+  if (!pickedQueue) {
+    if (Number.isFinite(earliestWaitAt) && earliestWaitAt > now) {
+      scheduleOutboundDrain(accountKey, earliestWaitAt - now);
+    }
+    return;
+  }
+
+  const nextItem = pickedQueue.items.shift()!;
+  pickedQueue.inFlight = true;
+  if (nextItem.isMedia) {
+    account.mediaInFlight = true;
+  }
+
+  const dispatchNow = Date.now();
+  const minGap = randomIntBetween(
+    outboundRuntimeConfig.accountMinGapMinMs,
+    outboundRuntimeConfig.accountMinGapMaxMs
+  );
+  account.nextAnyDispatchAt = Math.max(account.nextAnyDispatchAt, dispatchNow + minGap);
+
+  if (pickedQueue.isGroup) {
+    const crossGroupGap = randomIntBetween(
+      outboundRuntimeConfig.crossGroupGapMinMs,
+      outboundRuntimeConfig.crossGroupGapMaxMs
+    );
+    account.nextGroupDispatchAt = Math.max(account.nextGroupDispatchAt, dispatchNow + crossGroupGap);
+    const sameGroupDelay = randomIntBetween(
+      outboundRuntimeConfig.sameGroupGapMinMs,
+      outboundRuntimeConfig.sameGroupGapMaxMs
+    );
+    pickedQueue.nextAllowedAt = Math.max(pickedQueue.nextAllowedAt, dispatchNow + sameGroupDelay);
+  }
+
+  void executeQueuedOutboundItem(account, pickedQueue, nextItem);
+  // Check immediately if another non-blocked queue (e.g. private chat / another group) can prepare its next timer
+  scheduleOutboundDrain(accountKey, 1);
+}
+
+export async function enqueueOutboundDelivery(params: {
+  id: string;
+  clientMessageId?: string;
+  effectiveAccountId: string;
+  payload: Record<string, any>;
+  asyncQueue?: boolean;
+  bypassIdempotency?: boolean;
+  deliverFn?: typeof deliverOutboundTelegramMessage;
+}): Promise<
+  | { queued: true; id: string; clientMessageId?: string; duplicate: boolean; deliveryStatus: 'pending' | 'paused' | 'delivered' | 'failed'; telegramMessageId?: number; queuePauseReason?: string; floodWaitUntil?: number }
+  | { queued: false; result: OutboundDeliveryResult }
+> {
+  const { id, clientMessageId, effectiveAccountId, payload, asyncQueue = false, bypassIdempotency = false, deliverFn } = params;
+  const cleanClientMsgId = String(clientMessageId || payload?.clientMessageId || '').trim() || undefined;
+  const chatId = String(payload?.chatId || '').trim();
+  const canonicalChatId = canonicalizeSchedulerChatId(chatId);
+  const accountKey = getOutboundAccountSchedulerKey(effectiveAccountId);
+
+  // 1. Idempotency check by (effectiveAccountId, clientMessageId)
+  if (cleanClientMsgId && !bypassIdempotency) {
+    const memKey = `${effectiveAccountId}::${cleanClientMsgId}`;
+    const existingMem = outboundClientMessageRecords.get(memKey);
+    if (existingMem && existingMem.status !== 'failed') {
+      if (asyncQueue) {
+        return {
+          queued: true,
+          id: existingMem.id,
+          clientMessageId: cleanClientMsgId,
+          duplicate: true,
+          deliveryStatus: existingMem.status === 'retrying' ? 'pending' : existingMem.status,
+          telegramMessageId: existingMem.telegramMessageId,
+          queuePauseReason: existingMem.queuePauseReason,
+          floodWaitUntil: existingMem.floodWaitUntil,
+        };
+      }
+      if (existingMem.status === 'delivered') {
+        return {
+          queued: false,
+          result: {
+            delivered: true,
+            channel: 'mtproto',
+            telegramMessageId: existingMem.telegramMessageId,
+            deliveryStatus: 'delivered',
+            clientMessageId: cleanClientMsgId,
+            duplicate: true,
+          },
+        };
+      }
+    }
+
+    try {
+      const accVariants = getScopedAccountIdVariants(effectiveAccountId);
+      const placeholders = accVariants.map(() => '?').join(', ');
+      const existingRow = (await db
+        .prepare(
+          `SELECT id, delivery_status, telegram_message_id, queue_pause_reason, flood_wait_until
+           FROM messages
+           WHERE account_id IN (${placeholders}) AND client_message_id = ?
+           LIMIT 1`
+        )
+        .get(...accVariants, cleanClientMsgId)) as any;
+      if (existingRow && existingRow.delivery_status && existingRow.delivery_status !== 'failed') {
+        const statusVal = (existingRow.delivery_status === 'retrying' ? 'pending' : existingRow.delivery_status) as
+          | 'pending'
+          | 'paused'
+          | 'delivered'
+          | 'failed';
+        if (asyncQueue) {
+          return {
+            queued: true,
+            id: existingRow.id,
+            clientMessageId: cleanClientMsgId,
+            duplicate: true,
+            deliveryStatus: statusVal,
+            telegramMessageId: existingRow.telegram_message_id ?? undefined,
+            queuePauseReason: existingRow.queue_pause_reason ?? undefined,
+            floodWaitUntil: existingRow.flood_wait_until ?? undefined,
+          };
+        }
+        if (statusVal === 'delivered') {
+          return {
+            queued: false,
+            result: {
+              delivered: true,
+              channel: 'mtproto',
+              telegramMessageId: existingRow.telegram_message_id ?? undefined,
+              deliveryStatus: 'delivered',
+              clientMessageId: cleanClientMsgId,
+              duplicate: true,
+            },
+          };
+        }
+      }
+    } catch {}
+  }
+
+  const isExplicitBot = effectiveAccountId === 'acc_telegram_bot';
+  const isTgChat = Boolean(chatId && (chatId.startsWith('tg_') || isExplicitBot));
+  if (payload?.sender !== 'me' || !isTgChat) {
+    const localRes = await (deliverFn || deliverOutboundTelegramMessage)(payload, effectiveAccountId, id);
+    if (asyncQueue) {
+      return {
+        queued: true,
+        id,
+        clientMessageId: cleanClientMsgId,
+        duplicate: false,
+        deliveryStatus: localRes.delivered ? 'delivered' : 'failed',
+      };
+    }
+    return {
+      queued: false,
+      result: {
+        ...localRes,
+        deliveryStatus: localRes.delivered ? 'delivered' : 'failed',
+        clientMessageId: cleanClientMsgId,
+      },
+    };
+  }
+
+  const conn = resolveConnectedTelegramUser(effectiveAccountId);
+  const isGroup = isTelegramGroupChatId(canonicalChatId, conn);
+  const isMedia = Boolean(payload?.isImage || payload?.isVideo || payload?.isAudio || payload?.isFile);
+  const storedPayload = cloneOutboundPayloadPreservingDiskSymbol(payload, {
+    id,
+    clientMessageId: cleanClientMsgId,
+    chatId: canonicalChatId,
+    accountId: effectiveAccountId,
+  });
+
+  if (asyncQueue && chatId) {
+    recordOutboundClientMessageState({
+      id,
+      clientMessageId: cleanClientMsgId || '',
+      accountId: effectiveAccountId,
+      chatId: canonicalChatId,
+      status: 'pending',
+      payload: storedPayload,
+      updatedAt: Date.now(),
+    });
+    await upsertSyncedMessageToDb(
+      cloneOutboundPayloadPreservingDiskSymbol(storedPayload, {
+        deliveryStatus: 'pending',
+        queuePauseReason: null,
+        floodWaitUntil: null,
+      }),
+      canonicalChatId,
+      effectiveAccountId,
+      { priority: 'HIGH', source: 'outbound_enqueue' }
+    ).catch(() => false);
+  }
+
+  const deliveryPromise = new Promise<OutboundDeliveryResult>((resolve) => {
+    const account = getOrCreateOutboundAccountScheduler(accountKey);
+    let q = account.queues.get(canonicalChatId);
+    if (!q) {
+      q = {
+        chatId: canonicalChatId,
+        isGroup,
+        inFlight: false,
+        nextAllowedAt: 0,
+        items: [],
+      };
+      account.queues.set(canonicalChatId, q);
+      if (isGroup && !account.groupOrder.includes(canonicalChatId)) {
+        account.groupOrder.push(canonicalChatId);
+      }
+    }
+    q.items.push({
+      id,
+      clientMessageId: cleanClientMsgId,
+      effectiveAccountId,
+      accountKey,
+      chatId,
+      canonicalChatId,
+      isGroup,
+      isMedia,
+      asyncQueue,
+      payload: storedPayload,
+      enqueuedAt: Date.now(),
+      deliverFn,
+      resolve,
+    });
+    scheduleOutboundDrain(accountKey, 0);
+  });
+
+  if (asyncQueue) {
+    void deliveryPromise;
+    return {
+      queued: true,
+      id,
+      clientMessageId: cleanClientMsgId,
+      duplicate: false,
+      deliveryStatus: 'pending',
+    };
+  }
+
+  const finalResult = await deliveryPromise;
+  return {
+    queued: false,
+    result: finalResult,
+  };
+}
+
 // 3. Relay Message to Telegram & Persist to Unified Conversation Store (supports streaming multipart/form-data & lightweight text JSON)
 app.post('/api/messages', requireTenantAuth, parseMultipartMessageUpload, async (req: Request, res: Response) => {
   try {
@@ -10120,6 +11260,11 @@ app.post('/api/messages', requireTenantAuth, parseMultipartMessageUpload, async 
       return res.status(scope.status).json({ success: false, code: scope.code, error: scope.error });
     }
     const msgId = req.body?.id || `msg_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
+    const clientMessageId =
+      typeof req.body?.clientMessageId === 'string' && req.body.clientMessageId.trim()
+        ? req.body.clientMessageId.trim()
+        : undefined;
+    const asyncQueue = req.body?.asyncQueue === true || req.body?.asyncQueue === 'true';
     const effectiveAccountId = scope.accountId;
     const uploadedMedia = (req as any).uploadedMedia;
     const { payload: outboundPayload, mediaUrl } = applyUploadedMediaToMessagePayload(
@@ -10128,19 +11273,52 @@ app.post('/api/messages', requireTenantAuth, parseMultipartMessageUpload, async 
       effectiveAccountId
     );
 
-    const deliveryResult = await deliverOutboundTelegramMessage(outboundPayload, effectiveAccountId, msgId);
-    const deliveryStatus = deliveryResult.delivered ? 'delivered' : 'failed';
+    const enqueued = await enqueueOutboundDelivery({
+      id: msgId,
+      clientMessageId,
+      effectiveAccountId,
+      payload: outboundPayload,
+      asyncQueue,
+    });
+
+    if (enqueued.queued) {
+      return res.status(202).json({
+        success: true,
+        queued: true,
+        duplicate: enqueued.duplicate,
+        id: enqueued.id,
+        clientMessageId: enqueued.clientMessageId,
+        telegramMessageId: enqueued.telegramMessageId,
+        syncedToStore: true,
+        localOnly: false,
+        delivered: enqueued.deliveryStatus === 'delivered',
+        deliveryStatus: enqueued.deliveryStatus,
+        queuePauseReason: enqueued.queuePauseReason,
+        floodWaitUntil: enqueued.floodWaitUntil,
+        channel: effectiveAccountId === 'acc_telegram_bot' ? 'bot' : 'mtproto',
+        ...(mediaUrl ? { mediaUrl } : {}),
+        ...(outboundPayload.imageUrl ? { imageUrl: outboundPayload.imageUrl } : {}),
+        ...(outboundPayload.videoUrl ? { videoUrl: outboundPayload.videoUrl } : {}),
+        ...(outboundPayload.audioUrl ? { audioUrl: outboundPayload.audioUrl } : {}),
+        ...(outboundPayload.fileUrl ? { fileUrl: outboundPayload.fileUrl } : {}),
+      });
+    }
+
+    const deliveryResult = enqueued.result;
+    const deliveryStatus = deliveryResult.deliveryStatus || (deliveryResult.delivered ? 'delivered' : 'failed');
 
     let syncedToStore = false;
     if (outboundPayload?.chatId) {
       syncedToStore = await upsertSyncedMessageToDb(
-        {
-          ...outboundPayload,
+        cloneOutboundPayloadPreservingDiskSymbol(outboundPayload, {
           id: msgId,
+          clientMessageId,
           accountId: effectiveAccountId,
           deliveryStatus,
+          queuePauseReason: deliveryResult.queuePauseReason ?? null,
+          floodWaitUntil: deliveryResult.floodWaitUntil ?? null,
           telegramMessageId: deliveryResult.telegramMessageId ?? outboundPayload?.telegramMessageId,
-        },
+        }),
         String(outboundPayload.chatId),
         effectiveAccountId,
         { priority: 'HIGH', source: 'outbound_send' }
@@ -10150,12 +11328,15 @@ app.post('/api/messages', requireTenantAuth, parseMultipartMessageUpload, async 
     res.status(deliveryResult.sessionExpired ? 401 : deliveryResult.floodWait ? 429 : 200).json({
       success: deliveryResult.delivered,
       id: msgId,
+      clientMessageId,
+      duplicate: Boolean(deliveryResult.duplicate),
       telegramMessageId: deliveryResult.telegramMessageId,
       ...(deliveryResult.dialogState ? { dialogState: deliveryResult.dialogState } : {}),
       syncedToStore,
       localOnly: false,
       delivered: deliveryResult.delivered,
       deliveryStatus,
+      ...(deliveryResult.queuePauseReason ? { queuePauseReason: deliveryResult.queuePauseReason } : {}),
       channel: deliveryResult.channel,
       ...(mediaUrl ? { mediaUrl } : {}),
       ...(outboundPayload.imageUrl ? { imageUrl: outboundPayload.imageUrl } : {}),
@@ -10163,6 +11344,7 @@ app.post('/api/messages', requireTenantAuth, parseMultipartMessageUpload, async 
       ...(outboundPayload.audioUrl ? { audioUrl: outboundPayload.audioUrl } : {}),
       ...(outboundPayload.fileUrl ? { fileUrl: outboundPayload.fileUrl } : {}),
       ...(deliveryResult.sessionExpired ? { code: 'TELEGRAM_SESSION_EXPIRED' } : {}),
+      ...(deliveryResult.peerFlood ? { code: 'TELEGRAM_PEER_FLOOD', peerFlood: true } : {}),
       ...(deliveryResult.floodWait
         ? {
             code: 'TELEGRAM_FLOOD_WAIT',
@@ -10192,6 +11374,7 @@ app.post('/api/messages/:id/retry', requireTenantAuth, parseMultipartMessageUplo
 
     const rawBody = req.body && typeof req.body === 'object' ? req.body : null;
     const clientMsg = rawBody && rawBody.chatId ? rawBody : null;
+    const asyncQueue = Boolean(rawBody?.asyncQueue === true || rawBody?.asyncQueue === 'true');
     if (clientMsg) {
       if (!isMaster && clientMsg.accountId && clientMsg.accountId !== effectiveAccountId) {
         return res.status(403).json({ error: '无权操作不属于当前账号的消息记录' });
@@ -10208,13 +11391,16 @@ app.post('/api/messages/:id/retry', requireTenantAuth, parseMultipartMessageUplo
         try {
           const existingRow = (await db
             .prepare(
-              'SELECT account_id, audio_url, image_url, video_url, file_url, file_name, file_size FROM messages WHERE id = ?'
+              'SELECT account_id, client_message_id, audio_url, image_url, video_url, file_url, file_name, file_size FROM messages WHERE id = ?'
             )
             .get(id)) as any;
           if (
             existingRow &&
             (isMaster || !existingRow.account_id || existingRow.account_id === effectiveAccountId)
           ) {
+            if (!mergedClientMsg.clientMessageId && existingRow.client_message_id) {
+              mergedClientMsg.clientMessageId = existingRow.client_message_id;
+            }
             if (existingRow.audio_url) mergedClientMsg.audioUrl = existingRow.audio_url;
             if (existingRow.image_url) mergedClientMsg.imageUrl = existingRow.image_url;
             if (existingRow.video_url) mergedClientMsg.videoUrl = existingRow.video_url;
@@ -10233,21 +11419,40 @@ app.post('/api/messages/:id/retry', requireTenantAuth, parseMultipartMessageUplo
         uploadedMedia,
         targetAcc
       );
-      const retryResult = await deliverOutboundTelegramMessage(
-        { ...outboundPayload, sender: outboundPayload.sender || 'me' },
-        targetAcc,
-        id
-      );
-      const nextStatus = retryResult.delivered ? 'delivered' : 'failed';
+      const enqueued = await enqueueOutboundDelivery({
+        id,
+        clientMessageId: outboundPayload.clientMessageId,
+        effectiveAccountId: targetAcc,
+        payload: { ...outboundPayload, sender: outboundPayload.sender || 'me' },
+        asyncQueue,
+        bypassIdempotency: true,
+      });
+      if (enqueued.queued) {
+        return res.status(202).json({
+          success: true,
+          queued: true,
+          id,
+          clientMessageId: enqueued.clientMessageId,
+          deliveryStatus: enqueued.deliveryStatus,
+          ...(mediaUrl ? { mediaUrl } : {}),
+          ...(outboundPayload.imageUrl ? { imageUrl: outboundPayload.imageUrl } : {}),
+          ...(outboundPayload.videoUrl ? { videoUrl: outboundPayload.videoUrl } : {}),
+          ...(outboundPayload.audioUrl ? { audioUrl: outboundPayload.audioUrl } : {}),
+          ...(outboundPayload.fileUrl ? { fileUrl: outboundPayload.fileUrl } : {}),
+        });
+      }
+      const retryResult = enqueued.result;
+      const nextStatus = retryResult.deliveryStatus || (retryResult.delivered ? 'delivered' : 'failed');
       await upsertSyncedMessageToDb(
-        {
-          ...outboundPayload,
+        cloneOutboundPayloadPreservingDiskSymbol(outboundPayload, {
           id,
           sender: outboundPayload.sender || 'me',
           accountId: targetAcc,
           deliveryStatus: nextStatus,
+          queuePauseReason: retryResult.queuePauseReason ?? null,
+          floodWaitUntil: retryResult.floodWaitUntil ?? null,
           telegramMessageId: retryResult.telegramMessageId ?? outboundPayload.telegramMessageId,
-        },
+        }),
         String(outboundPayload.chatId),
         targetAcc,
         { priority: 'HIGH', source: 'retry_send' }
@@ -10264,6 +11469,7 @@ app.post('/api/messages/:id/retry', requireTenantAuth, parseMultipartMessageUplo
         ...(outboundPayload.audioUrl ? { audioUrl: outboundPayload.audioUrl } : {}),
         ...(outboundPayload.fileUrl ? { fileUrl: outboundPayload.fileUrl } : {}),
         ...(retryResult.sessionExpired ? { code: 'TELEGRAM_SESSION_EXPIRED' } : {}),
+        ...(retryResult.peerFlood ? { code: 'TELEGRAM_PEER_FLOOD', peerFlood: true } : {}),
         ...(retryResult.floodWait
           ? {
               code: 'TELEGRAM_FLOOD_WAIT',
@@ -10287,12 +11493,13 @@ app.post('/api/messages/:id/retry', requireTenantAuth, parseMultipartMessageUplo
     }
 
     if (isMaster) {
-      await db.prepare('UPDATE messages SET delivery_status = ? WHERE id = ?').run('retrying', id);
+      await db.prepare('UPDATE messages SET delivery_status = ?, queue_pause_reason = NULL, flood_wait_until = NULL WHERE id = ?').run('retrying', id);
     } else {
-      await db.prepare('UPDATE messages SET delivery_status = ? WHERE id = ? AND account_id = ?').run('retrying', id, effectiveAccountId);
+      await db.prepare('UPDATE messages SET delivery_status = ?, queue_pause_reason = NULL, flood_wait_until = NULL WHERE id = ? AND account_id = ?').run('retrying', id, effectiveAccountId);
     }
 
     const dbBasePayload = {
+      clientMessageId: msg.client_message_id || undefined,
       chatId: msg.chat_id,
       accountId: msg.account_id,
       sender: msg.sender || 'me',
@@ -10320,13 +11527,31 @@ app.post('/api/messages/:id/retry', requireTenantAuth, parseMultipartMessageUplo
       msg.account_id || effectiveAccountId
     );
 
-    const dbRetryResult = await deliverOutboundTelegramMessage(
-      dbOutboundPayload,
-      msg.account_id || effectiveAccountId,
-      id
-    );
+    const dbEnqueued = await enqueueOutboundDelivery({
+      id,
+      clientMessageId: dbOutboundPayload.clientMessageId,
+      effectiveAccountId: msg.account_id || effectiveAccountId,
+      payload: dbOutboundPayload,
+      asyncQueue,
+      bypassIdempotency: true,
+    });
+    if (dbEnqueued.queued) {
+      return res.status(202).json({
+        success: true,
+        queued: true,
+        id,
+        clientMessageId: dbEnqueued.clientMessageId,
+        deliveryStatus: dbEnqueued.deliveryStatus,
+        ...(dbMediaUrl ? { mediaUrl: dbMediaUrl } : {}),
+        ...(dbOutboundPayload.imageUrl ? { imageUrl: dbOutboundPayload.imageUrl } : {}),
+        ...(dbOutboundPayload.videoUrl ? { videoUrl: dbOutboundPayload.videoUrl } : {}),
+        ...(dbOutboundPayload.audioUrl ? { audioUrl: dbOutboundPayload.audioUrl } : {}),
+        ...(dbOutboundPayload.fileUrl ? { fileUrl: dbOutboundPayload.fileUrl } : {}),
+      });
+    }
+    const dbRetryResult = dbEnqueued.result;
 
-    const nextStatus = dbRetryResult.delivered ? 'delivered' : 'failed';
+    const nextStatus = dbRetryResult.deliveryStatus || (dbRetryResult.delivered ? 'delivered' : 'failed');
     try {
       await enqueueMessageDbWrite({
         priority: 'HIGH',
@@ -10341,6 +11566,8 @@ app.post('/api/messages/:id/retry', requireTenantAuth, parseMultipartMessageUplo
               .prepare(
                 `UPDATE messages SET
                    delivery_status = ?,
+                   queue_pause_reason = ?,
+                   flood_wait_until = ?,
                    telegram_message_id = COALESCE(?, telegram_message_id),
                    audio_url = CASE WHEN ? != '' THEN ? ELSE audio_url END,
                    image_url = CASE WHEN ? != '' THEN ? ELSE image_url END,
@@ -10350,6 +11577,8 @@ app.post('/api/messages/:id/retry', requireTenantAuth, parseMultipartMessageUplo
               )
               .run(
                 nextStatus,
+                dbRetryResult.queuePauseReason ?? null,
+                dbRetryResult.floodWaitUntil ?? null,
                 dbRetryResult.telegramMessageId ?? null,
                 dbOutboundPayload.audioUrl || '',
                 dbOutboundPayload.audioUrl || '',
@@ -10366,6 +11595,8 @@ app.post('/api/messages/:id/retry', requireTenantAuth, parseMultipartMessageUplo
               .prepare(
                 `UPDATE messages SET
                    delivery_status = ?,
+                   queue_pause_reason = ?,
+                   flood_wait_until = ?,
                    telegram_message_id = COALESCE(?, telegram_message_id),
                    audio_url = CASE WHEN ? != '' THEN ? ELSE audio_url END,
                    image_url = CASE WHEN ? != '' THEN ? ELSE image_url END,
@@ -10375,6 +11606,8 @@ app.post('/api/messages/:id/retry', requireTenantAuth, parseMultipartMessageUplo
               )
               .run(
                 nextStatus,
+                dbRetryResult.queuePauseReason ?? null,
+                dbRetryResult.floodWaitUntil ?? null,
                 dbRetryResult.telegramMessageId ?? null,
                 dbOutboundPayload.audioUrl || '',
                 dbOutboundPayload.audioUrl || '',
@@ -10404,6 +11637,7 @@ app.post('/api/messages/:id/retry', requireTenantAuth, parseMultipartMessageUplo
       ...(dbOutboundPayload.audioUrl ? { audioUrl: dbOutboundPayload.audioUrl } : {}),
       ...(dbOutboundPayload.fileUrl ? { fileUrl: dbOutboundPayload.fileUrl } : {}),
       ...(dbRetryResult.sessionExpired ? { code: 'TELEGRAM_SESSION_EXPIRED' } : {}),
+      ...(dbRetryResult.peerFlood ? { code: 'TELEGRAM_PEER_FLOOD', peerFlood: true } : {}),
       ...(dbRetryResult.floodWait
         ? {
             code: 'TELEGRAM_FLOOD_WAIT',
@@ -10416,6 +11650,133 @@ app.post('/api/messages/:id/retry', requireTenantAuth, parseMultipartMessageUplo
     });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
+  }
+});
+
+// 3.1a Resume a paused outbound message (after FLOOD_WAIT > maxWait or queue age > maxAge)
+app.post('/api/messages/:id/resume', requireTenantAuth, async (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+    const scope = resolveScopedAccountFromRequest(req, { allowBot: true });
+    if (!scope.ok) {
+      return res.status(scope.status).json({ success: false, code: scope.code, error: scope.error });
+    }
+    const authContext = (req as any).auth;
+    const effectiveAccountId = scope.accountId;
+    const isMaster = Boolean(authContext?.session?.isMaster);
+    const accVariants = getScopedAccountIdVariants(effectiveAccountId);
+
+    const msg = (await db.prepare('SELECT * FROM messages WHERE id = ?').get(id)) as any;
+    if (!msg) {
+      return res.status(404).json({ success: false, error: 'Message not found' });
+    }
+    if (!isMaster && msg.account_id && !accVariants.includes(String(msg.account_id))) {
+      return res.status(403).json({ success: false, error: '无权操作不属于当前账号的消息记录' });
+    }
+
+    const targetAccountId = String(msg.account_id || effectiveAccountId);
+    const memRec = msg.client_message_id
+      ? outboundClientMessageRecords.get(`${targetAccountId}::${msg.client_message_id}`)
+      : undefined;
+
+    const resumePayload = cloneOutboundPayloadPreservingDiskSymbol(
+      memRec?.payload || {
+        id: msg.id,
+        clientMessageId: msg.client_message_id || undefined,
+        chatId: msg.chat_id,
+        accountId: targetAccountId,
+        sender: msg.sender || 'me',
+        text: msg.text,
+        translatedText: msg.translated_text,
+        isAudio: Boolean(msg.is_audio),
+        audioDuration: msg.audio_duration,
+        audioUrl: msg.audio_url,
+        sttText: msg.stt_text,
+        isImage: Boolean(msg.is_image),
+        imageUrl: msg.image_url,
+        imageCaption: msg.image_caption,
+        isVideo: Boolean(msg.is_video),
+        videoDuration: msg.video_duration,
+        videoUrl: msg.video_url,
+        isFile: Boolean(msg.is_file),
+        fileName: msg.file_name,
+        fileSize: msg.file_size,
+        fileUrl: msg.file_url,
+        replyTo: msg.reply_to_json ? safeJsonParse(msg.reply_to_json, undefined) : undefined,
+      }
+    );
+
+    const asyncQueue = req.body?.asyncQueue !== false;
+    const enqueued = await enqueueOutboundDelivery({
+      id: msg.id,
+      clientMessageId: msg.client_message_id || undefined,
+      effectiveAccountId: targetAccountId,
+      payload: resumePayload,
+      asyncQueue,
+      bypassIdempotency: true,
+    });
+
+    if (enqueued.queued) {
+      return res.status(202).json({
+        success: true,
+        queued: true,
+        id: msg.id,
+        clientMessageId: msg.client_message_id || undefined,
+        deliveryStatus: 'pending',
+      });
+    }
+    return res.json({
+      success: enqueued.result.delivered,
+      delivered: enqueued.result.delivered,
+      deliveryStatus: enqueued.result.deliveryStatus || (enqueued.result.delivered ? 'delivered' : 'failed'),
+      telegramMessageId: enqueued.result.telegramMessageId,
+      error: enqueued.result.error,
+    });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err?.message || '继续发送失败' });
+  }
+});
+
+// 3.1b Discard a paused/unsent outbound message from queue & DB
+app.post('/api/messages/:id/discard', requireTenantAuth, async (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+    const scope = resolveScopedAccountFromRequest(req, { allowBot: true });
+    if (!scope.ok) {
+      return res.status(scope.status).json({ success: false, code: scope.code, error: scope.error });
+    }
+    const authContext = (req as any).auth;
+    const effectiveAccountId = scope.accountId;
+    const isMaster = Boolean(authContext?.session?.isMaster);
+    const accVariants = getScopedAccountIdVariants(effectiveAccountId);
+
+    const msg = (await db.prepare('SELECT id, account_id, chat_id, client_message_id, delivery_status FROM messages WHERE id = ?').get(id)) as any;
+    if (!msg) {
+      return res.status(404).json({ success: false, error: 'Message not found' });
+    }
+    if (!isMaster && msg.account_id && !accVariants.includes(String(msg.account_id))) {
+      return res.status(403).json({ success: false, error: '无权操作不属于当前账号的消息记录' });
+    }
+    if (msg.delivery_status === 'delivered') {
+      return res.status(400).json({ success: false, error: '已成功送达的消息无法通过丢弃队列接口移除' });
+    }
+
+    const targetAccountId = String(msg.account_id || effectiveAccountId);
+    const accountKey = getOutboundAccountSchedulerKey(targetAccountId);
+    const scheduler = outboundAccountSchedulers.get(accountKey);
+    if (scheduler) {
+      for (const q of scheduler.queues.values()) {
+        q.items = q.items.filter((qItem) => qItem.id !== id);
+      }
+    }
+    if (msg.client_message_id) {
+      outboundClientMessageRecords.delete(`${targetAccountId}::${msg.client_message_id}`);
+    }
+
+    await db.prepare('DELETE FROM messages WHERE id = ?').run(id);
+    return res.json({ success: true, discarded: true, id, chatId: msg.chat_id });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err?.message || '丢弃消息失败' });
   }
 });
 
@@ -23988,6 +25349,13 @@ async function finishQrLogin(sessionObj: QrSessionContext, user: any) {
   connectedUserClients.set(cleanPhone, userConnectedObj);
   connectedUserClients.set(`acc_tg_${user.id}`, userConnectedObj);
   clearExpiredAccountRecord(String(user.id), cleanPhone);
+  if (process.env.NODE_ENV !== 'test') {
+    void fetchTelegramAvatarWithLimiting({
+      cacheAccountScope: `acc_tg_${user.id}`,
+      cleanId: String(user.id),
+      candidates: [userConnectedObj],
+    }).catch(() => {});
+  }
 
   const qrRuntime = getOrCreateTelegramAccountRuntimeState({
     userId: String(user.id),
@@ -24537,6 +25905,13 @@ app.post('/api/telegram/user/verify-code', requireTenantAuth, authAttemptLimiter
     connectedUserClients.set(cleanPhone, userConnectedObj);
     connectedUserClients.set(`acc_tg_${me.id}`, userConnectedObj);
     clearExpiredAccountRecord(String(me.id), cleanPhone);
+    if (process.env.NODE_ENV !== 'test') {
+      void fetchTelegramAvatarWithLimiting({
+        cacheAccountScope: `acc_tg_${me.id}`,
+        cleanId: String(me.id),
+        candidates: [userConnectedObj],
+      }).catch(() => {});
+    }
 
     const phoneRuntime = getOrCreateTelegramAccountRuntimeState({
       userId: String(me.id),
@@ -24669,6 +26044,9 @@ app.get('/api/telegram/user/status', requireTenantAuth, async (req: Request, res
         userId: uid,
         username: u.username,
         firstName: u.firstName,
+        ...(uid
+          ? { avatarUrl: signTelegramResourceUrl(`/api/telegram/user/avatar/${uid}`, `acc_tg_${uid}`) }
+          : {}),
         updatedAt: u.connectedAt,
         dialogsCount: u.dialogs.length,
         isInMemoryConnected: true,
@@ -24717,6 +26095,9 @@ app.get('/api/telegram/user/status', requireTenantAuth, async (req: Request, res
         userId: uid,
         username: r.username ? `@${r.username}` : '',
         firstName: r.first_name,
+        ...(uid
+          ? { avatarUrl: signTelegramResourceUrl(`/api/telegram/user/avatar/${uid}`, `acc_tg_${uid}`) }
+          : {}),
         updatedAt: r.updated_at,
         dialogsCount: 0,
         isInMemoryConnected: false,
@@ -25658,13 +27039,23 @@ export async function fetchTelegramAvatarWithLimiting(opts: {
   const { cacheAccountScope, cleanId, candidates, signal } = opts;
   const cacheKey = `${cacheAccountScope}:${cleanId}`;
   const now = Date.now();
+  const isSelfAvatar = candidates.some((c) => c?.userId && String(c.userId).trim() === cleanId);
+  const lookupKeys = isSelfAvatar
+    ? Array.from(new Set([cacheKey, `acc_tg_${cleanId}:${cleanId}`]))
+    : [cacheKey];
 
-  const cached = telegramAvatarCache.get(cacheKey, now);
-  if (cached) {
-    return { status: 200, buffer: cached.buffer, mime: cached.mime };
+  for (const lk of lookupKeys) {
+    const cached = telegramAvatarCache.get(lk, now);
+    if (cached) {
+      return { status: 200, buffer: cached.buffer, mime: cached.mime };
+    }
   }
 
-  const diskHit = readAvatarFromDiskCache(cacheKey);
+  let diskHit: { buffer: Buffer; mime: string; isStale: boolean } | null = null;
+  for (const lk of lookupKeys) {
+    diskHit = readAvatarFromDiskCache(lk);
+    if (diskHit) break;
+  }
   if (diskHit) {
     telegramAvatarCache.set(
       cacheKey,
@@ -25739,31 +27130,33 @@ export async function fetchTelegramAvatarWithLimiting(opts: {
   }
 
   let releaseSlot: (() => void) | null = null;
-  try {
-    releaseSlot = await acquireAvatarSlot(cacheAccountScope, signal);
-  } catch (slotErr: any) {
-    if (slotErr?.code === 'AVATAR_ABORTED') {
-      return { status: 503, retryAfterSeconds: 3, errorType: 'offline' };
+  if (!isSelfAvatar) {
+    try {
+      releaseSlot = await acquireAvatarSlot(cacheAccountScope, signal);
+    } catch (slotErr: any) {
+      if (slotErr?.code === 'AVATAR_ABORTED') {
+        return { status: 503, retryAfterSeconds: 3, errorType: 'offline' };
+      }
+      return { status: 503, retryAfterSeconds: 3, errorType: 'queue_full' };
     }
-    return { status: 503, retryAfterSeconds: 3, errorType: 'queue_full' };
   }
 
   // Re-check caches after acquiring queued slot in case single-flight resolved it meanwhile
   const cachedAfterWait = telegramAvatarCache.get(cacheKey, Date.now());
   if (cachedAfterWait) {
-    releaseSlot();
+    releaseSlot?.();
     return { status: 200, buffer: cachedAfterWait.buffer, mime: cachedAfterWait.mime };
   }
   const negAfterWait = getAvatarNegativeCacheEntry(cacheKey, Date.now());
   if (negAfterWait) {
-    releaseSlot();
+    releaseSlot?.();
     return negAfterWait.reason === 'no_photo'
       ? { status: 404, errorType: 'no_photo' }
       : { status: 503, retryAfterSeconds: 5, errorType: 'rpc_error' };
   }
   const existingFlightAfterWait = telegramAvatarInFlight.get(cacheKey);
   if (existingFlightAfterWait) {
-    releaseSlot();
+    releaseSlot?.();
     avatarLimiterStats.singleFlightHitsTotal += 1;
     return await existingFlightAfterWait;
   }
@@ -25976,13 +27369,16 @@ app.get('/api/telegram/user/avatar/:chatId', async (req: Request, res: Response)
     const cacheAccountScope = accountId || (candidates[0] ? `acc_tg_${candidates[0].userId}` : '');
     if (candidates.length === 0) {
       const fallbackScopes = accountId ? getScopedAccountIdVariants(accountId) : [];
+      if (/^\d+$/.test(cleanId) && !fallbackScopes.includes(`acc_tg_${cleanId}`)) {
+        fallbackScopes.push(`acc_tg_${cleanId}`);
+      }
       for (const sc of fallbackScopes) {
         const k = `${sc}:${cleanId}`;
         const mem = telegramAvatarCache.get(k, Date.now());
         const hit = mem ? { buffer: mem.buffer, mime: mem.mime } : readAvatarFromDiskCache(k);
         if (hit?.buffer) {
           res.setHeader('Content-Type', hit.mime || 'image/jpeg');
-          res.setHeader('Cache-Control', 'private, max-age=86400');
+          res.setHeader('Cache-Control', 'private, max-age=604800');
           return res.send(hit.buffer);
         }
       }
@@ -26010,7 +27406,7 @@ app.get('/api/telegram/user/avatar/:chatId', async (req: Request, res: Response)
 
       if (outcome.status === 200 && outcome.buffer) {
         res.setHeader('Content-Type', outcome.mime || 'image/jpeg');
-        res.setHeader('Cache-Control', 'private, max-age=86400');
+        res.setHeader('Cache-Control', 'private, max-age=604800');
         return res.send(outcome.buffer);
       }
       if (outcome.status === 429) {
@@ -26156,11 +27552,23 @@ export function extractTelegramMediaMeta(msg: any, tgMsgId: number, wantThumb: b
 
   let bestThumb: any = null;
   if (wantThumb && doc && Array.isArray(doc.thumbs) && doc.thumbs.length > 0) {
-    const validThumbs = doc.thumbs.filter((t: any) => t && t.className !== 'PhotoPathSize');
+    const validThumbs = doc.thumbs.filter(
+      (t: any) => t && t.className !== 'PhotoPathSize' && t.className !== 'PhotoSizeEmpty'
+    );
     bestThumb = validThumbs[validThumbs.length - 1] || null;
+  } else if (wantThumb && photo && Array.isArray(photo.sizes) && photo.sizes.length > 0) {
+    const validSizes = photo.sizes.filter(
+      (s: any) => s && s.className !== 'PhotoPathSize' && s.className !== 'PhotoSizeEmpty'
+    );
+    bestThumb =
+      validSizes.find((s: any) => String(s?.type || '').toLowerCase() === 'm') ||
+      validSizes.find((s: any) => String(s?.type || '').toLowerCase() === 'x') ||
+      validSizes[Math.min(1, Math.max(0, validSizes.length - 1))] ||
+      validSizes[validSizes.length - 1] ||
+      null;
   }
 
-  let mime = bestThumb ? 'image/webp' : String(doc?.mimeType || '').trim();
+  let mime = bestThumb ? (doc ? 'image/webp' : 'image/jpeg') : String(doc?.mimeType || '').trim();
   let fileName = String(filenameAttr?.fileName || '').trim();
 
   if (!mime) {
@@ -26451,6 +27859,168 @@ export async function streamTelegramMediaViaIterDownload(params: {
   }
 }
 
+export const TELEGRAM_MEDIA_DISK_CACHE_DIR = path.resolve(dbDir, 'telegram_media_cache');
+export const TELEGRAM_MEDIA_MAX_CONCURRENT_PER_ACCOUNT = 2;
+try {
+  fs.mkdirSync(TELEGRAM_MEDIA_DISK_CACHE_DIR, { recursive: true });
+} catch {}
+
+interface TelegramMediaInFlightResult {
+  kind: 'entry' | 'flood' | 'not_found';
+  entry?: { buffer: Buffer; mime: string; fileName: string; expiresAt: number };
+  floodWaitEntry?: TelegramFloodCooldownEntry;
+}
+
+const telegramMediaInFlight = new Map<string, Promise<TelegramMediaInFlightResult>>();
+const mediaAccountActiveDownloads = new Map<string, number>();
+
+function getMediaAccountSlotScope(accountScope: string): string {
+  return resolveTelegramAccountRuntimeKey({ accountId: accountScope }) || accountScope || 'global';
+}
+
+function acquireMediaDownloadSlot(accountScope: string): boolean {
+  const key = getMediaAccountSlotScope(accountScope);
+  const current = mediaAccountActiveDownloads.get(key) || 0;
+  if (current >= TELEGRAM_MEDIA_MAX_CONCURRENT_PER_ACCOUNT) {
+    return false;
+  }
+  mediaAccountActiveDownloads.set(key, current + 1);
+  return true;
+}
+
+function releaseMediaDownloadSlot(accountScope: string): void {
+  const key = getMediaAccountSlotScope(accountScope);
+  const current = mediaAccountActiveDownloads.get(key) || 0;
+  if (current <= 1) {
+    mediaAccountActiveDownloads.delete(key);
+  } else {
+    mediaAccountActiveDownloads.set(key, current - 1);
+  }
+}
+
+export function getTelegramMediaDiskCachePath(cacheKey: string): { binPath: string; metaPath: string } | null {
+  const digest = crypto.createHash('sha256').update(cacheKey, 'utf8').digest('hex');
+  const binPath = path.resolve(TELEGRAM_MEDIA_DISK_CACHE_DIR, `${digest}.bin`);
+  const metaPath = path.resolve(TELEGRAM_MEDIA_DISK_CACHE_DIR, `${digest}.meta.json`);
+  if (
+    !binPath.startsWith(TELEGRAM_MEDIA_DISK_CACHE_DIR + path.sep) ||
+    !metaPath.startsWith(TELEGRAM_MEDIA_DISK_CACHE_DIR + path.sep)
+  ) {
+    return null;
+  }
+  return { binPath, metaPath };
+}
+
+export function readTelegramMediaFromDiskCache(
+  cacheKey: string
+): { buffer: Buffer; mime: string; fileName: string } | null {
+  try {
+    const paths = getTelegramMediaDiskCachePath(cacheKey);
+    if (!paths || !fs.existsSync(paths.binPath) || !fs.existsSync(paths.metaPath)) return null;
+    const stat = fs.statSync(paths.binPath);
+    if (!stat.isFile() || stat.size <= 0) return null;
+    const meta = safeJsonParse<{ mime?: string; fileName?: string } | null>(
+      fs.readFileSync(paths.metaPath, 'utf8'),
+      null
+    );
+    if (!meta || !meta.mime) return null;
+    const buffer = fs.readFileSync(paths.binPath);
+    if (!buffer || buffer.length <= 0) return null;
+    const nowDate = new Date();
+    try {
+      fs.utimesSync(paths.binPath, nowDate, nowDate);
+      fs.utimesSync(paths.metaPath, nowDate, nowDate);
+    } catch {}
+    return {
+      buffer,
+      mime: String(meta.mime),
+      fileName: String(meta.fileName || 'telegram_media'),
+    };
+  } catch {
+    return null;
+  }
+}
+
+export function enforceTelegramMediaDiskCacheLimit(
+  maxBytes = outboundRuntimeConfig.mediaDiskCacheMaxBytes
+): { totalBytes: number; evictedCount: number } {
+  let totalBytes = 0;
+  let evictedCount = 0;
+  try {
+    if (!fs.existsSync(TELEGRAM_MEDIA_DISK_CACHE_DIR)) {
+      return { totalBytes: 0, evictedCount: 0 };
+    }
+    const entries: Array<{ digest: string; binPath: string; metaPath: string; size: number; mtimeMs: number }> = [];
+    for (const name of fs.readdirSync(TELEGRAM_MEDIA_DISK_CACHE_DIR)) {
+      if (!name.endsWith('.bin')) continue;
+      const digest = name.slice(0, -4);
+      const binPath = path.join(TELEGRAM_MEDIA_DISK_CACHE_DIR, name);
+      const metaPath = path.join(TELEGRAM_MEDIA_DISK_CACHE_DIR, `${digest}.meta.json`);
+      try {
+        const st = fs.statSync(binPath);
+        if (!st.isFile()) continue;
+        totalBytes += st.size;
+        entries.push({ digest, binPath, metaPath, size: st.size, mtimeMs: st.mtimeMs });
+      } catch {}
+    }
+    if (totalBytes <= maxBytes) {
+      return { totalBytes, evictedCount };
+    }
+    entries.sort((a, b) => a.mtimeMs - b.mtimeMs);
+    for (const item of entries) {
+      if (totalBytes <= maxBytes) break;
+      try {
+        if (fs.existsSync(item.binPath)) fs.unlinkSync(item.binPath);
+      } catch {}
+      try {
+        if (fs.existsSync(item.metaPath)) fs.unlinkSync(item.metaPath);
+      } catch {}
+      totalBytes = Math.max(0, totalBytes - item.size);
+      evictedCount += 1;
+    }
+  } catch {}
+  return { totalBytes, evictedCount };
+}
+
+export function writeTelegramMediaToDiskCache(
+  cacheKey: string,
+  entry: { buffer: Buffer; mime: string; fileName: string }
+): boolean {
+  try {
+    if (!entry?.buffer || entry.buffer.length <= 0 || entry.buffer.length > TELEGRAM_MEDIA_STREAM_THRESHOLD_BYTES) {
+      return false;
+    }
+    const paths = getTelegramMediaDiskCachePath(cacheKey);
+    if (!paths) return false;
+    fs.mkdirSync(TELEGRAM_MEDIA_DISK_CACHE_DIR, { recursive: true });
+    const tmpBin = `${paths.binPath}.${process.pid}.${Date.now()}.tmp`;
+    const tmpMeta = `${paths.metaPath}.${process.pid}.${Date.now()}.tmp`;
+    fs.writeFileSync(tmpBin, entry.buffer);
+    fs.writeFileSync(tmpMeta, JSON.stringify({ mime: entry.mime, fileName: entry.fileName }), 'utf8');
+    fs.renameSync(tmpBin, paths.binPath);
+    fs.renameSync(tmpMeta, paths.metaPath);
+    enforceTelegramMediaDiskCacheLimit(outboundRuntimeConfig.mediaDiskCacheMaxBytes);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export function clearTelegramMediaCachesForTesting(): void {
+  telegramMediaCache.clear();
+  telegramMediaInFlight.clear();
+  mediaAccountActiveDownloads.clear();
+  if (process.env.NODE_ENV === 'test') {
+    try {
+      for (const name of fs.readdirSync(TELEGRAM_MEDIA_DISK_CACHE_DIR)) {
+        if (name.endsWith('.bin') || name.endsWith('.meta.json') || name.endsWith('.tmp')) {
+          fs.unlinkSync(path.join(TELEGRAM_MEDIA_DISK_CACHE_DIR, name));
+        }
+      }
+    } catch {}
+  }
+}
+
 app.get('/api/telegram/user/media/:chatId/:msgId', async (req: Request, res: Response) => {
   try {
     if (!isAllowedClientOrigin(req)) {
@@ -26500,124 +28070,211 @@ app.get('/api/telegram/user/media/:chatId/:msgId', async (req: Request, res: Res
       return sendMediaBufferResponse(req, res, cached, forceDownload);
     }
 
-    let floodWaitEntry: TelegramFloodCooldownEntry | null = null;
-    for (const candidate of candidates) {
-      if (!candidate.client) continue;
-      const candCooldown = getTelegramFloodCooldown({
-        accountId: cacheAccountScope,
-        userId: candidate.userId,
-        phone: candidate.phone,
-      });
-      if (candCooldown) {
-        floodWaitEntry = {
-          accountKey: cacheAccountScope,
-          retryAfterSeconds: candCooldown.retryAfterSeconds,
-          floodWaitUntil: candCooldown.floodWaitUntil,
-          recordedAt: Date.now(),
-        };
-        continue;
+    const diskCached = readTelegramMediaFromDiskCache(cacheKey);
+    if (diskCached) {
+      telegramMediaCache.set(
+        cacheKey,
+        { ...diskCached, expiresAt: Date.now() + TELEGRAM_MEDIA_CACHE_TTL_MS },
+        Date.now()
+      );
+      return sendMediaBufferResponse(req, res, diskCached, forceDownload);
+    }
+
+    // Single-flight deduplication for concurrent requests of the exact same media key
+    const existingInFlight = telegramMediaInFlight.get(cacheKey);
+    if (existingInFlight) {
+      const sharedOutcome = await existingInFlight;
+      if (sharedOutcome.kind === 'entry' && sharedOutcome.entry) {
+        return sendMediaBufferResponse(req, res, sharedOutcome.entry, forceDownload);
       }
-      try {
-        const { inputPeer } = await resolveTelegramInputPeer(candidate.client, chatId, candidate.userId);
-        const msgs = await candidate.client.getMessages(inputPeer, { ids: [tgMsgId] });
-        const msg: any = msgs?.[0];
-        if (!msg || !msg.media) continue;
+      if (sharedOutcome.kind === 'flood' && sharedOutcome.floodWaitEntry) {
+        res.setHeader('Retry-After', String(sharedOutcome.floodWaitEntry.retryAfterSeconds));
+        return res.status(429).json({
+          ok: false,
+          code: 'TELEGRAM_FLOOD_WAIT',
+          retryAfterSeconds: sharedOutcome.floodWaitEntry.retryAfterSeconds,
+          floodWaitUntil: sharedOutcome.floodWaitEntry.floodWaitUntil,
+          error: formatTelegramError({ errorMessage: `FLOOD_WAIT_${sharedOutcome.floodWaitEntry.retryAfterSeconds}` }),
+        });
+      }
+      return res.status(404).send('Media not found');
+    }
 
-        const { doc, bestThumb, mime, fileName, knownSize } = extractTelegramMediaMeta(msg, tgMsgId, wantThumb);
+    if (!acquireMediaDownloadSlot(cacheAccountScope)) {
+      res.setHeader('Retry-After', '2');
+      return res.status(503).json({
+        ok: false,
+        code: 'MEDIA_DOWNLOAD_BUSY',
+        retryAfterSeconds: 2,
+        error: '媒体下载通道繁忙，请稍后重试',
+      });
+    }
 
-        // Large files (> threshold) or unknown-size documents stream via iterDownload with true HTTP Range (never buffer whole file in RAM)
-        const shouldStreamMedia =
-          !wantThumb &&
-          ((Boolean(doc) && (knownSize > TELEGRAM_MEDIA_STREAM_THRESHOLD_BYTES || knownSize === 0)) ||
-            knownSize > TELEGRAM_MEDIA_STREAM_THRESHOLD_BYTES);
+    let slotReleased = false;
+    const safeReleaseSlot = () => {
+      if (!slotReleased) {
+        slotReleased = true;
+        releaseMediaDownloadSlot(cacheAccountScope);
+      }
+    };
 
-        if (shouldStreamMedia) {
-          const streamStatus = await streamTelegramMediaViaIterDownload({
-            client: candidate.client,
-            fileTarget: doc || msg.media,
-            dcId: doc?.dcId ?? msg.media?.photo?.dcId,
-            msgData: [inputPeer, tgMsgId],
-            totalSize: knownSize,
-            mime,
-            fileName,
-            forceDownload,
-            req,
-            res,
-            thresholdBytes: TELEGRAM_MEDIA_STREAM_THRESHOLD_BYTES,
-            onSmallComplete: (fullBuf) => {
-              telegramMediaCache.set(
-                cacheKey,
-                {
+    try {
+      let floodWaitEntry: TelegramFloodCooldownEntry | null = null;
+      for (const candidate of candidates) {
+        if (!candidate.client) continue;
+        const candCooldown = getTelegramFloodCooldown({
+          accountId: cacheAccountScope,
+          userId: candidate.userId,
+          phone: candidate.phone,
+        });
+        if (candCooldown) {
+          floodWaitEntry = {
+            accountKey: cacheAccountScope,
+            retryAfterSeconds: candCooldown.retryAfterSeconds,
+            floodWaitUntil: candCooldown.floodWaitUntil,
+            recordedAt: Date.now(),
+          };
+          continue;
+        }
+        try {
+          const { inputPeer } = await resolveTelegramInputPeer(candidate.client, chatId, candidate.userId, 'P2');
+          const msgs = await scheduleTelegramRpc(cacheAccountScope, 'P2', 'media.getMessages', () =>
+            candidate.client.getMessages(inputPeer, { ids: [tgMsgId] })
+          );
+          const msg: any = msgs?.[0];
+          if (!msg || !msg.media) continue;
+
+          const { doc, bestThumb, mime, fileName, knownSize } = extractTelegramMediaMeta(msg, tgMsgId, wantThumb);
+
+          // Large files (> threshold) or unknown-size documents stream via iterDownload with true HTTP Range (never buffer whole file in RAM)
+          const shouldStreamMedia =
+            !wantThumb &&
+            ((Boolean(doc) && (knownSize > TELEGRAM_MEDIA_STREAM_THRESHOLD_BYTES || knownSize === 0)) ||
+              knownSize > TELEGRAM_MEDIA_STREAM_THRESHOLD_BYTES);
+
+          if (shouldStreamMedia) {
+            const streamStatus = await streamTelegramMediaViaIterDownload({
+              client: candidate.client,
+              fileTarget: doc || msg.media,
+              dcId: doc?.dcId ?? msg.media?.photo?.dcId,
+              msgData: [inputPeer, tgMsgId],
+              totalSize: knownSize,
+              mime,
+              fileName,
+              forceDownload,
+              req,
+              res,
+              thresholdBytes: TELEGRAM_MEDIA_STREAM_THRESHOLD_BYTES,
+              onSmallComplete: (fullBuf) => {
+                const entry = {
                   buffer: fullBuf,
                   mime,
                   fileName,
                   expiresAt: Date.now() + TELEGRAM_MEDIA_CACHE_TTL_MS,
-                },
-                Date.now()
+                };
+                telegramMediaCache.set(cacheKey, entry, Date.now());
+                writeTelegramMediaToDiskCache(cacheKey, entry);
+              },
+            });
+            if (streamStatus === 'sent' || streamStatus === 'unsatisfiable') {
+              return;
+            }
+            continue;
+          }
+
+          const docByteSize = doc?.size != null
+            ? Number(typeof doc.size?.toJSNumber === 'function' ? doc.size.toJSNumber() : doc.size)
+            : 0;
+          if (wantThumb && doc && !bestThumb && docByteSize > TELEGRAM_MEDIA_STREAM_THRESHOLD_BYTES) {
+            continue;
+          }
+
+          // Small files (<= threshold), photos, and native PhotoSize/doc thumbnails: single-flight download + P2 scheduling + disk cache
+          const downloadPromise = (async (): Promise<TelegramMediaInFlightResult> => {
+            try {
+              let downloaded: Buffer | undefined;
+              if (wantThumb && bestThumb) {
+                downloaded = (await scheduleTelegramRpc(cacheAccountScope, 'P2', 'downloadMedia.thumb', () =>
+                  candidate.client.downloadMedia(doc || msg.media, { thumb: bestThumb })
+                )) as Buffer;
+              }
+              if (!downloaded || !Buffer.isBuffer(downloaded) || downloaded.length === 0) {
+                downloaded = (await scheduleTelegramRpc(cacheAccountScope, 'P2', 'downloadMedia.full', () =>
+                  candidate.client.downloadMedia(msg.media, {})
+                )) as Buffer;
+              }
+              if (!downloaded || !Buffer.isBuffer(downloaded) || downloaded.length === 0) {
+                return { kind: 'not_found' };
+              }
+              const entry = {
+                buffer: downloaded,
+                mime,
+                fileName,
+                expiresAt: Date.now() + TELEGRAM_MEDIA_CACHE_TTL_MS,
+              };
+              telegramMediaCache.set(cacheKey, entry, Date.now());
+              writeTelegramMediaToDiskCache(cacheKey, entry);
+              return { kind: 'entry', entry };
+            } catch (dlErr: any) {
+              const recorded = recordTelegramFloodWait(
+                { accountId: cacheAccountScope, userId: candidate.userId, phone: candidate.phone },
+                dlErr,
+                'downloadMedia'
               );
-            },
+              if (recorded) {
+                return { kind: 'flood', floodWaitEntry: recorded };
+              }
+              throw dlErr;
+            }
+          })();
+
+          telegramMediaInFlight.set(cacheKey, downloadPromise);
+          const outcome = await downloadPromise.finally(() => {
+            if (telegramMediaInFlight.get(cacheKey) === downloadPromise) {
+              telegramMediaInFlight.delete(cacheKey);
+            }
           });
-          if (streamStatus === 'sent' || streamStatus === 'unsatisfiable') {
-            return;
+
+          if (outcome.kind === 'entry' && outcome.entry) {
+            return sendMediaBufferResponse(req, res, outcome.entry, forceDownload);
+          }
+          if (outcome.kind === 'flood' && outcome.floodWaitEntry) {
+            floodWaitEntry = outcome.floodWaitEntry;
+            continue;
           }
           continue;
+        } catch (mediaErr: any) {
+          const recorded = recordTelegramFloodWait(
+            { accountId: cacheAccountScope, userId: candidate.userId, phone: candidate.phone },
+            mediaErr,
+            'downloadMedia'
+          );
+          if (recorded) {
+            floodWaitEntry = recorded;
+          }
+          if (res.headersSent) {
+            if (!res.destroyed) res.destroy();
+            return;
+          }
+          // Try next candidate client if peer doesn't belong to this session
         }
-
-        const docByteSize = doc?.size != null
-          ? Number(typeof doc.size?.toJSNumber === 'function' ? doc.size.toJSNumber() : doc.size)
-          : 0;
-        if (wantThumb && doc && !bestThumb && docByteSize > TELEGRAM_MEDIA_STREAM_THRESHOLD_BYTES) {
-          continue;
-        }
-
-        // Small files (<= threshold), photos, and thumbnails: download into buffer & store in budgeted LRU cache
-        let downloaded: Buffer | undefined;
-        if (wantThumb && doc && bestThumb) {
-          downloaded = (await candidate.client.downloadMedia(doc, { thumb: bestThumb })) as Buffer;
-        }
-        if (!downloaded || !Buffer.isBuffer(downloaded) || downloaded.length === 0) {
-          downloaded = (await candidate.client.downloadMedia(msg.media, {})) as Buffer;
-        }
-        if (!downloaded || !Buffer.isBuffer(downloaded) || downloaded.length === 0) continue;
-
-        const entry = {
-          buffer: downloaded,
-          mime,
-          fileName,
-          expiresAt: Date.now() + TELEGRAM_MEDIA_CACHE_TTL_MS,
-        };
-        // BoundedByteLruCache automatically skips caching if downloaded.length > TELEGRAM_MEDIA_STREAM_THRESHOLD_BYTES
-        telegramMediaCache.set(cacheKey, entry, Date.now());
-
-        return sendMediaBufferResponse(req, res, entry, forceDownload);
-      } catch (mediaErr: any) {
-        const recorded = recordTelegramFloodWait(
-          { accountId: cacheAccountScope, userId: candidate.userId, phone: candidate.phone },
-          mediaErr,
-          'downloadMedia'
-        );
-        if (recorded) {
-          floodWaitEntry = recorded;
-        }
-        if (res.headersSent) {
-          if (!res.destroyed) res.destroy();
-          return;
-        }
-        // Try next candidate client if peer doesn't belong to this session
       }
-    }
 
-    if (!res.headersSent) {
-      if (floodWaitEntry) {
-        return res.status(429).json({
-          ok: false,
-          code: 'TELEGRAM_FLOOD_WAIT',
-          retryAfterSeconds: floodWaitEntry.retryAfterSeconds,
-          floodWaitUntil: floodWaitEntry.floodWaitUntil,
-          error: formatTelegramError({ errorMessage: `FLOOD_WAIT_${floodWaitEntry.retryAfterSeconds}` }),
-        });
+      if (!res.headersSent) {
+        if (floodWaitEntry) {
+          res.setHeader('Retry-After', String(floodWaitEntry.retryAfterSeconds));
+          return res.status(429).json({
+            ok: false,
+            code: 'TELEGRAM_FLOOD_WAIT',
+            retryAfterSeconds: floodWaitEntry.retryAfterSeconds,
+            floodWaitUntil: floodWaitEntry.floodWaitUntil,
+            error: formatTelegramError({ errorMessage: `FLOOD_WAIT_${floodWaitEntry.retryAfterSeconds}` }),
+          });
+        }
+        return res.status(404).send('Media not found');
       }
-      return res.status(404).send('Media not found');
+    } finally {
+      safeReleaseSlot();
     }
   } catch {
     if (!res.headersSent) {
@@ -33864,7 +35521,18 @@ app.post('/api/telegram/autopilot/toggle', requireTenantAuth, (req: Request, res
 // Real-time MTProto NewMessage event listener for personal Telegram account
 export interface LocalIncomingUpdate {
   id: string;
-  type?: 'message' | 'edit' | 'delete' | 'read_outbox' | 'read_inbox' | 'dialog_pinned' | 'dialogs_pinned_order' | 'dialog_unread_mark' | 'dialog_muted' | 'dialog_archived' | 'self_profile' | 'peer_profile' | 'chat_meta' | 'settings_updated' | 'folders_updated' | 'pin' | 'user_status' | 'peer_blocked' | 'reactions' | 'phone_call_ringing';
+  type?: 'message' | 'edit' | 'delete' | 'read_outbox' | 'read_inbox' | 'dialog_pinned' | 'dialogs_pinned_order' | 'dialog_unread_mark' | 'dialog_muted' | 'dialog_archived' | 'self_profile' | 'peer_profile' | 'chat_meta' | 'settings_updated' | 'folders_updated' | 'pin' | 'user_status' | 'peer_blocked' | 'reactions' | 'phone_call_ringing' | 'delivery_receipt' | 'flood_state' | 'peer_flood';
+  messageId?: string;
+  clientMessageId?: string;
+  deliveryStatus?: 'pending' | 'delivered' | 'paused' | 'failed' | 'retrying';
+  queuePauseReason?: string;
+  floodWaitUntil?: number;
+  retryAfterSeconds?: number;
+  floodMethod?: string;
+  dialogState?: OutboundDialogState;
+  peerFloodRestricted?: boolean;
+  peerFloodReason?: string;
+  error?: string;
   telegramMessageId?: number;
   deletedMessageIds?: number[];
   readOutboxMaxId?: number;
@@ -33926,6 +35594,125 @@ export interface LocalIncomingUpdate {
 }
 export const pendingLocalUpdates: LocalIncomingUpdate[] = [];
 
+interface SseUpdateSubscriber {
+  id: string;
+  scopedAccountFilter: string;
+  authorizedAccounts: string[];
+  isMaster: boolean;
+  res: Response;
+}
+
+const activeFocusChatByAccount = new Map<string, string>();
+const sseUpdateSubscribers = new Set<SseUpdateSubscriber>();
+const backgroundGroupBatchStates = new Map<
+  string,
+  { timer: NodeJS.Timeout | null; chatIds: Set<string>; rawAccountId: string }
+>();
+
+export function setActiveFocusChat(accountId: string, chatId?: string | null): void {
+  const key = getOutboundAccountSchedulerKey(accountId);
+  const cleanChat = String(chatId || '').trim();
+  if (!cleanChat) {
+    activeFocusChatByAccount.delete(key);
+    return;
+  }
+  activeFocusChatByAccount.set(key, canonicalizeSchedulerChatId(cleanChat));
+}
+
+export function getActiveFocusChat(accountId: string): string | null {
+  const key = getOutboundAccountSchedulerKey(accountId);
+  return activeFocusChatByAccount.get(key) || null;
+}
+
+export function clearActiveFocusAndSseForTesting(): void {
+  activeFocusChatByAccount.clear();
+  for (const state of backgroundGroupBatchStates.values()) {
+    if (state.timer) clearTimeout(state.timer);
+  }
+  backgroundGroupBatchStates.clear();
+  for (const sub of sseUpdateSubscribers) {
+    try {
+      sub.res.end();
+    } catch {}
+  }
+  sseUpdateSubscribers.clear();
+}
+
+function sendSseWakeupToSubscribers(accountId: string, payload: Record<string, any>): void {
+  const frame = `event: wakeup\ndata: ${JSON.stringify(payload)}\n\n`;
+  for (const sub of sseUpdateSubscribers) {
+    if (sub.res.destroyed || sub.res.writableEnded) {
+      sseUpdateSubscribers.delete(sub);
+      continue;
+    }
+    if (sub.scopedAccountFilter) {
+      if (!doesUpdateBelongToAccount(accountId, sub.scopedAccountFilter)) continue;
+    } else if (!sub.isMaster) {
+      continue;
+    } else {
+      const acc = String(accountId || '').trim();
+      if (!acc.startsWith('acc_tg_') && !sub.authorizedAccounts.includes(acc)) continue;
+    }
+    try {
+      sub.res.write(frame);
+    } catch {
+      sseUpdateSubscribers.delete(sub);
+    }
+  }
+}
+
+function notifySseUpdateAvailable(upd: LocalIncomingUpdate): void {
+  if (sseUpdateSubscribers.size === 0) return;
+  const isMessageKind = !upd.type || upd.type === 'message';
+  const conn = resolveConnectedTelegramUser(upd.accountId);
+  const isGroup = isTelegramGroupChatId(upd.chatId, conn);
+  const focusedChat = getActiveFocusChat(upd.accountId);
+  const isFocused = Boolean(focusedChat && upd.chatId && isSameCanonicalChatId(upd.chatId, focusedChat));
+  const isBackgroundGroupMsg = isMessageKind && isGroup && !isFocused;
+
+  if (!isBackgroundGroupMsg) {
+    sendSseWakeupToSubscribers(upd.accountId, {
+      kind: 'wakeup',
+      mode: 'immediate',
+      type: upd.type || 'message',
+      accountId: upd.accountId,
+      chatId: upd.chatId,
+      ts: Date.now(),
+    });
+    return;
+  }
+
+  const accKey = getOutboundAccountSchedulerKey(upd.accountId);
+  let batchState = backgroundGroupBatchStates.get(accKey);
+  if (!batchState) {
+    batchState = { timer: null, chatIds: new Set<string>(), rawAccountId: upd.accountId };
+    backgroundGroupBatchStates.set(accKey, batchState);
+  }
+  if (upd.chatId) batchState.chatIds.add(upd.chatId);
+  if (!batchState.timer) {
+    const waitMs = randomIntBetween(
+      outboundRuntimeConfig.bgGroupBatchMinMs,
+      outboundRuntimeConfig.bgGroupBatchMaxMs
+    );
+    batchState.timer = setTimeout(() => {
+      const st = backgroundGroupBatchStates.get(accKey);
+      if (!st) return;
+      st.timer = null;
+      const chatIds = Array.from(st.chatIds);
+      st.chatIds.clear();
+      backgroundGroupBatchStates.delete(accKey);
+      sendSseWakeupToSubscribers(st.rawAccountId, {
+        kind: 'wakeup',
+        mode: 'batch_group',
+        accountId: st.rawAccountId,
+        chatIds,
+        ts: Date.now(),
+      });
+    }, waitMs);
+    batchState.timer.unref?.();
+  }
+}
+
 export function pushPendingLocalUpdate(upd: LocalIncomingUpdate, maxPerAccount = 600, maxTotal = 2400) {
   pendingLocalUpdates.push(upd);
   let accountCount = 0;
@@ -33952,6 +35739,7 @@ export function pushPendingLocalUpdate(upd: LocalIncomingUpdate, maxPerAccount =
     const evictIdx = pendingLocalUpdates.findIndex((item) => item.accountId === busiestAcc);
     pendingLocalUpdates.splice(evictIdx >= 0 ? evictIdx : 0, 1);
   }
+  notifySseUpdateAvailable(upd);
 }
 
 function doesUpdateBelongToAccount(updateAccountId: string | undefined, targetAccountId: string): boolean {
@@ -34078,6 +35866,115 @@ app.post('/api/telegram/user/ack-updates', requireTenantAuth, (req: Request, res
   pendingLocalUpdates.length = 0;
   pendingLocalUpdates.push(...remaining);
   res.json({ ok: true, ackedCount: beforeLen - remaining.length });
+});
+
+// Sync currently focused chatId per account so SSE batches background groups and pushes private/focused updates immediately
+app.post('/api/telegram/user/focus-chat', requireTenantAuth, (req: Request, res: Response) => {
+  const scope = resolveScopedAccountFromRequest(req, { allowBot: false });
+  if (!scope.ok) {
+    return res.status(scope.status).json({ ok: false, code: scope.code, error: scope.error });
+  }
+  const chatId = typeof req.body?.chatId === 'string' ? req.body.chatId.trim() : '';
+  setActiveFocusChat(scope.accountId, chatId || null);
+  return res.json({
+    ok: true,
+    accountId: scope.accountId,
+    chatId: getActiveFocusChat(scope.accountId),
+  });
+});
+
+// Differentiated SSE wakeup stream: immediate for private/focused/receipts/flood; 1.5-2.5s coalesced batch for background groups
+app.get('/api/telegram/user/updates-stream', requireTenantAuth, (req: Request, res: Response) => {
+  const authContext = (req as any).auth;
+  const session = authContext?.session;
+  if (!session || session.isBot || authContext?.isBot) {
+    return res.status(403).json({
+      ok: false,
+      code: 'BOT_FORBIDDEN',
+      error: '权限不足：Bot Webhook 凭证无权订阅个人账号实时更新流',
+    });
+  }
+
+  const rawRequested =
+    (typeof req.query.accountId === 'string' && req.query.accountId.trim()) ||
+    (typeof req.headers['x-account-id'] === 'string' && req.headers['x-account-id'].trim()) ||
+    '';
+
+  let scopedAccountFilter = '';
+  const authorized: string[] = Array.isArray(session.authorizedAccounts) ? session.authorizedAccounts : [];
+  if (!session.isMaster) {
+    const lockedAccount = String(authContext.effectiveAccountId || session.accountId || '').trim();
+    if (rawRequested && !doesUpdateBelongToAccount(rawRequested, lockedAccount)) {
+      return res.status(403).json({
+        ok: false,
+        code: 'ACCOUNT_SCOPE_FORBIDDEN',
+        error: `权限不足：禁止跨账号订阅 (${rawRequested}) 的实时更新流`,
+      });
+    }
+    scopedAccountFilter = lockedAccount;
+  } else if (rawRequested) {
+    const isAllowed =
+      rawRequested === authContext.effectiveAccountId ||
+      rawRequested.startsWith('acc_tg_') ||
+      authorized.includes(rawRequested);
+    if (!isAllowed) {
+      return res.status(403).json({
+        ok: false,
+        code: 'ACCOUNT_SCOPE_FORBIDDEN',
+        error: `权限不足：无权订阅未授权账号 (${rawRequested}) 的实时更新流`,
+      });
+    }
+    scopedAccountFilter = rawRequested;
+  }
+
+  res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
+  res.setHeader('Cache-Control', 'no-cache, no-transform');
+  res.setHeader('Connection', 'keep-alive');
+  res.setHeader('X-Accel-Buffering', 'no');
+  res.flushHeaders?.();
+
+  const sub: SseUpdateSubscriber = {
+    id: `sse_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+    scopedAccountFilter,
+    authorizedAccounts: authorized,
+    isMaster: Boolean(session.isMaster),
+    res,
+  };
+  sseUpdateSubscribers.add(sub);
+
+  try {
+    res.write(`: connected\n\n`);
+    const hasPending = pendingLocalUpdates.some((upd) => {
+      if (scopedAccountFilter) return doesUpdateBelongToAccount(upd.accountId, scopedAccountFilter);
+      const acc = String(upd.accountId || '').trim();
+      return acc.startsWith('acc_tg_') || authorized.includes(acc);
+    });
+    if (hasPending) {
+      res.write(`event: wakeup\ndata: ${JSON.stringify({ kind: 'wakeup', mode: 'initial', ts: Date.now() })}\n\n`);
+    }
+  } catch {}
+
+  const heartbeat = setInterval(() => {
+    if (res.destroyed || res.writableEnded) {
+      clearInterval(heartbeat);
+      sseUpdateSubscribers.delete(sub);
+      return;
+    }
+    try {
+      res.write(`: ping\n\n`);
+    } catch {
+      clearInterval(heartbeat);
+      sseUpdateSubscribers.delete(sub);
+    }
+  }, 20_000);
+  heartbeat.unref?.();
+
+  const cleanup = () => {
+    clearInterval(heartbeat);
+    sseUpdateSubscribers.delete(sub);
+  };
+  req.on('close', cleanup);
+  res.on('close', cleanup);
 });
 
 // In-memory cache of recently sent outbound messages and processed MTProto message IDs to prevent echo duplicates
@@ -36289,6 +38186,13 @@ export async function restoreTelegramUserSessionsOnStartup(
               await destroyFn(oldClient);
             }
 
+            if (uidStr && process.env.NODE_ENV !== 'test') {
+              void fetchTelegramAvatarWithLimiting({
+                cacheAccountScope: `acc_tg_${uidStr}`,
+                cleanId: uidStr,
+                candidates: [userObj],
+              }).catch(() => {});
+            }
             if (userObj.dialogs.length === 0) {
               getOrFetchConnectedAccountDialogs(userObj, { limit: 150 }).catch(() => {});
             }

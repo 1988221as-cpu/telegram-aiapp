@@ -47,6 +47,9 @@ import {
   deleteTelegramDialogFilterApi,
   fetchTelegramBlockedContactsApi,
   unblockTelegramUserContactApi,
+  resolveAccountAvatarSrc,
+  invalidateCachedAccountAvatar,
+  cacheAccountAvatarFromUrl,
   TelegramOfficialSettingsResponse,
   TelegramOfficialDialogFilter,
   TelegramPrivacyRuleKey,
@@ -428,6 +431,8 @@ export const TelegramSettingsModal: React.FC<TelegramSettingsModalProps> = ({
         setSaveError(res.error || '头像上传 Telegram 云端失败');
         return;
       }
+      invalidateCachedAccountAvatar(currentAccount?.id);
+      void cacheAccountAvatarFromUrl(currentAccount?.id, res.avatarUrl, { force: true });
       onUpdateAccount?.({ avatarUrl: res.avatarUrl }, currentAccount?.id);
       setCloudSettings((prev) =>
         prev?.profile ? { ...prev, profile: { ...prev.profile, hasAvatar: true, avatarUrl: res.avatarUrl! } } : prev
@@ -1005,11 +1010,14 @@ export const TelegramSettingsModal: React.FC<TelegramSettingsModalProps> = ({
                       className="w-16 h-16 rounded-full flex items-center justify-center font-bold text-xl text-white shadow-md relative overflow-hidden"
                       style={{ backgroundColor: currentAccount?.avatarBg || '#2481cc' }}
                     >
-                      {currentAccount?.avatarUrl ? (
-                        <img src={currentAccount.avatarUrl} alt={name} className="w-full h-full object-cover" />
-                      ) : (
-                        <span>{currentAccount?.avatarInitial || name.slice(0, 2)}</span>
-                      )}
+                      {(() => {
+                        const settingsAvatarSrc = resolveAccountAvatarSrc(currentAccount?.id, currentAccount?.avatarUrl);
+                        return settingsAvatarSrc ? (
+                          <img src={settingsAvatarSrc} alt={name} className="w-full h-full object-cover" />
+                        ) : (
+                          <span>{currentAccount?.avatarInitial || name.slice(0, 2)}</span>
+                        );
+                      })()}
                       {isUploadingAvatar && (
                         <div className="absolute inset-0 bg-black/55 flex items-center justify-center">
                           <Loader2 className="w-5 h-5 text-white animate-spin" />

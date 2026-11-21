@@ -25,6 +25,7 @@ import {
   fetchWithTimeout,
   fetchTelegramCredsStatusApi,
   syncCloudTelegramCredsApi,
+  resolveAccountAvatarSrc,
 } from '../services/apiService';
 import { COMMON_COUNTRY_CODES, CountryPreset } from '../data/countryCodes';
 
@@ -218,6 +219,7 @@ export const MultiAccountModal: React.FC<MultiAccountModalProps> = ({
   };
   const [confirmingDeleteId, setConfirmingDeleteId] = useState<string | null>(null);
   const [disconnectingId, setDisconnectingId] = useState<string | null>(null);
+  const [failedModalAvatars, setFailedModalAvatars] = useState<Record<string, string>>({});
   const [disconnectError, setDisconnectError] = useState<{
     accountId: string;
     message: string;
@@ -1054,14 +1056,27 @@ export const MultiAccountModal: React.FC<MultiAccountModalProps> = ({
                         >
                           <div className="relative shrink-0">
                             <div
-                              className="w-7 h-7 rounded-full flex items-center justify-center text-xs font-bold text-white overflow-hidden"
+                              className="relative w-7 h-7 rounded-full flex items-center justify-center text-xs font-bold text-white overflow-hidden"
                               style={{ backgroundColor: acc.avatarBg || '#2481cc' }}
                             >
-                              {acc.avatarUrl ? (
-                                <img src={acc.avatarUrl} alt={displayName} className="w-full h-full object-cover" />
-                              ) : (
-                                acc.avatarInitial || 'TG'
-                              )}
+                              <span>{acc.avatarInitial || 'TG'}</span>
+                              {(() => {
+                                const modalAvatarSrc = resolveAccountAvatarSrc(acc.id, acc.avatarUrl);
+                                if (!modalAvatarSrc || failedModalAvatars[acc.id] === modalAvatarSrc) return null;
+                                return (
+                                  <img
+                                    src={modalAvatarSrc}
+                                    alt={displayName}
+                                    referrerPolicy="no-referrer"
+                                    onError={() =>
+                                      setFailedModalAvatars((prev) =>
+                                        prev[acc.id] === modalAvatarSrc ? prev : { ...prev, [acc.id]: modalAvatarSrc }
+                                      )
+                                    }
+                                    className="w-full h-full object-cover absolute inset-0"
+                                  />
+                                );
+                              })()}
                             </div>
                             <span
                               className={`absolute -bottom-0.5 -right-0.5 w-2.5 h-2.5 rounded-full border-2 border-white dark:border-[#0e1726] aurora:border-[#101c23] linen:border-[#efe6d6] ${

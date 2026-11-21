@@ -593,6 +593,8 @@ interface ChatAreaProps {
   onUpdateMessage?: (messageId: string, patch: Partial<Message>, scope?: { chatId?: string; accountId?: string }) => void;
   onRetranslateMessage?: (messageId: string, fallbackMessage?: Message) => void | Promise<any>;
   onRetryMessage?: (messageId: string) => Promise<{ ok: boolean; error?: string }>;
+  onResumePausedMessage?: (messageId: string) => void | Promise<void>;
+  onDiscardPausedMessage?: (messageId: string) => void | Promise<void>;
   onToggleReaction?: (messageId: string, emoji: string) => void | Promise<any>;
   onTogglePinMessage?: (messageId: string) => void | Promise<any>;
   onClearHistory?: (chatId: string, options?: { revoke?: boolean }) => void | Promise<{ ok: boolean; error?: string } | void>;
@@ -761,6 +763,8 @@ const ChatAreaActive: React.FC<ChatAreaProps & { chat: Chat }> = ({
   onUpdateMessage,
   onRetranslateMessage,
   onRetryMessage,
+  onResumePausedMessage,
+  onDiscardPausedMessage,
   onToggleReaction,
   onTogglePinMessage,
   onClearHistory,
@@ -883,6 +887,8 @@ const ChatAreaActive: React.FC<ChatAreaProps & { chat: Chat }> = ({
   const [recordDuration, setRecordDuration] = useState(0);
   const recordDurationRef = useRef<number>(0);
   const [retryingMsgIds, setRetryingMsgIds] = useState<Set<string>>(new Set());
+  const [mediaRetryNonces, setMediaRetryNonces] = useState<Record<string, number>>({});
+  const mediaRetryStateRef = useRef<Record<string, { attempts: number; pending: boolean; timer?: ReturnType<typeof setTimeout> }>>({});
   const [isVoiceStudioOpen, setIsVoiceStudioOpen] = useState(false);
   const [isVoiceprintModalOpen, setIsVoiceprintModalOpen] = useState(false);
   const [isSynthesizingVoice, setIsSynthesizingVoice] = useState(false);
@@ -1382,7 +1388,8 @@ const ChatAreaActive: React.FC<ChatAreaProps & { chat: Chat }> = ({
       const isLocalOnly =
         !resolveClientTelegramMessageId(targetMsg) ||
         targetMsg.deliveryStatus === 'failed' ||
-        targetMsg.deliveryStatus === 'pending';
+        targetMsg.deliveryStatus === 'pending' ||
+        targetMsg.deliveryStatus === 'paused';
       const revoke = isLocalOnly ? false : revokeSingleDelete;
       setMessageToDelete(null);
       const res = await onDeleteMessage?.(targetMsg.id, { revoke });
@@ -1736,6 +1743,12 @@ const ChatAreaActive: React.FC<ChatAreaProps & { chat: Chat }> = ({
     stopAudio();
     return () => {
       stopAudio();
+      const states = mediaRetryStateRef.current;
+      for (const k of Object.keys(states)) {
+        if (states[k]?.timer) clearTimeout(states[k].timer);
+      }
+      mediaRetryStateRef.current = {};
+      setMediaRetryNonces({});
     };
   }, [chat?.id, currentAccountId]);
 
@@ -1747,6 +1760,14 @@ const ChatAreaActive: React.FC<ChatAreaProps & { chat: Chat }> = ({
     },
     [refreshedUrlsMap]
   );
+
+  const appendThumbQueryIfTelegramMedia = useCallback((rawUrl?: string) => {
+    if (!rawUrl) return undefined;
+    if (rawUrl.includes('/api/telegram/user/media/') && !/[?&]thumb=/.test(rawUrl)) {
+      return `${rawUrl}${rawUrl.includes('?') ? '&' : '?'}thumb=1`;
+    }
+    return rawUrl;
+  }, []);
 
   const triggerSilentUrlRefresh = useCallback(
     async (rawUrl?: string, force = false): Promise<string | null> => {
@@ -1786,6 +1807,83 @@ const ChatAreaActive: React.FC<ChatAreaProps & { chat: Chat }> = ({
       return null;
     },
     [currentAccountId, onRefreshMediaUrls, refreshedUrlsMap]
+  );
+
+  const handleTelegramBubbleImageError = useCallback(
+    async (msgId: string, rawImageUrl?: string, loadedSrc?: string) => {
+      const probeUrl = loadedSrc || resolveDisplayUrl(rawImageUrl);
+      if (!probeUrl) return;
+      const isTgMedia = probeUrl.includes('/api/telegram/user/media/');
+      const prevState = mediaRetryStateRef.current[msgId] || { attempts: 0, pending: false };
+      if (prevState.pending) return;
+
+      if (isTgMedia && prevState.attempts < 3) {
+        prevState.pending = true;
+        mediaRetryStateRef.current[msgId] = prevState;
+        try {
+          const resp = await fetchWithTimeout(
+            probeUrl,
+            {
+              method: 'HEAD',
+              credentials: 'same-origin',
+            },
+            6000
+          );
+          if (resp.status === 503 || resp.status === 429) {
+            const retryAfterRaw = resp.headers.get('Retry-After');
+            const retryAfterSec = retryAfterRaw ? Number.parseInt(retryAfterRaw, 10) : NaN;
+            const baseMs = Number.isFinite(retryAfterSec) && retryAfterSec > 0 ? retryAfterSec * 1000 : 1500;
+            const delayMs = Math.min(10000, Math.round(baseMs * Math.pow(1.6, prevState.attempts)));
+            prevState.timer = setTimeout(() => {
+              const st = mediaRetryStateRef.current[msgId];
+              if (!st) return;
+              st.pending = false;
+              st.attempts += 1;
+              st.timer = undefined;
+              setMediaRetryNonces((prev) => ({
+                ...prev,
+                [msgId]: (prev[msgId] || 0) + 1,
+              }));
+            }, delayMs);
+            return;
+          }
+          if (resp.ok) {
+            prevState.timer = setTimeout(() => {
+              const st = mediaRetryStateRef.current[msgId];
+              if (!st) return;
+              st.pending = false;
+              st.attempts += 1;
+              st.timer = undefined;
+              setMediaRetryNonces((prev) => ({
+                ...prev,
+                [msgId]: (prev[msgId] || 0) + 1,
+              }));
+            }, 250);
+            return;
+          }
+        } catch {
+          const delayMs = Math.min(8000, Math.round(1200 * Math.pow(1.8, prevState.attempts)));
+          prevState.timer = setTimeout(() => {
+            const st = mediaRetryStateRef.current[msgId];
+            if (!st) return;
+            st.pending = false;
+            st.attempts += 1;
+            st.timer = undefined;
+            setMediaRetryNonces((prev) => ({
+              ...prev,
+              [msgId]: (prev[msgId] || 0) + 1,
+            }));
+          }, delayMs);
+          return;
+        }
+        prevState.pending = false;
+      }
+
+      if (rawImageUrl) {
+        void triggerSilentUrlRefresh(rawImageUrl, true);
+      }
+    },
+    [resolveDisplayUrl, triggerSilentUrlRefresh]
   );
 
   useEffect(() => {
@@ -4409,7 +4507,10 @@ const ChatAreaActive: React.FC<ChatAreaProps & { chat: Chat }> = ({
     onToggleReaction,
     onTogglePinMessage,
     onRetryMessage,
+    onResumePausedMessage,
+    onDiscardPausedMessage,
     onDeleteMessage,
+    handleTelegramBubbleImageError,
   });
   msgRenderActionsRef.current = {
     toggleSelectMessage,
@@ -4427,7 +4528,10 @@ const ChatAreaActive: React.FC<ChatAreaProps & { chat: Chat }> = ({
     onToggleReaction,
     onTogglePinMessage,
     onRetryMessage,
+    onResumePausedMessage,
+    onDiscardPausedMessage,
     onDeleteMessage,
+    handleTelegramBubbleImageError,
   };
   const hasRetranslateHandler = Boolean(onRetranslateMessage);
   const hasDeleteHandler = Boolean(onDeleteMessage);
@@ -4478,7 +4582,8 @@ const ChatAreaActive: React.FC<ChatAreaProps & { chat: Chat }> = ({
           msg.translatedText ||
           msg.translationError ||
           (msg.reactions && Object.keys(msg.reactions).length > 0) ||
-          msg.deliveryStatus === 'failed'
+          msg.deliveryStatus === 'failed' ||
+          msg.deliveryStatus === 'paused'
       );
       const hasOverlayImageTimestamp = Boolean(
         msg.isImage && msg.imageUrl && resolveDisplayUrl(msg.imageUrl) && !hasInlineMediaFooterContent
@@ -4672,6 +4777,7 @@ const ChatAreaActive: React.FC<ChatAreaProps & { chat: Chat }> = ({
                   !msg.isCall &&
                   msg.deliveryStatus !== 'failed' &&
                   msg.deliveryStatus !== 'pending' &&
+                  msg.deliveryStatus !== 'paused' &&
                   (!chat.id.startsWith('tg_') || typeof msg.telegramMessageId === 'number') && (
                   <button
                     type="button"
@@ -4840,6 +4946,12 @@ const ChatAreaActive: React.FC<ChatAreaProps & { chat: Chat }> = ({
             {msg.isImage && msg.imageUrl && (() => {
               const safeImageHref = resolveDisplayUrl(msg.imageUrl);
               if (!safeImageHref) return null;
+              const baseBubbleThumbHref = appendThumbQueryIfTelegramMedia(safeImageHref) || safeImageHref;
+              const mediaRetryNonce = mediaRetryNonces[msg.id] || 0;
+              const bubbleThumbSrc =
+                mediaRetryNonce > 0
+                  ? `${baseBubbleThumbHref}${baseBubbleThumbHref.includes('?') ? '&' : '?'}_r=${mediaRetryNonce}`
+                  : baseBubbleThumbHref;
               const hasVisibleImageCaption = Boolean(
                 msg.text?.trim() &&
                   !isSystemMediaPlaceholder(msg.text, msg) &&
@@ -4848,7 +4960,7 @@ const ChatAreaActive: React.FC<ChatAreaProps & { chat: Chat }> = ({
               return (
                 <div className={`${hasVisibleImageCaption ? 'mb-1.5' : ''} rounded-xl overflow-hidden w-full max-w-[280px] min-h-[112px] bg-black/5 dark:bg-white/5 shadow-xs relative group/img select-none`}>
                   <img
-                    src={safeImageHref}
+                    src={bubbleThumbSrc}
                     alt={msg.imageCaption || 'image'}
                     loading="lazy"
                     decoding="async"
@@ -4864,7 +4976,7 @@ const ChatAreaActive: React.FC<ChatAreaProps & { chat: Chat }> = ({
                       e.currentTarget.style.display = '';
                     }}
                     onError={() => {
-                      void msgRenderActionsRef.current.triggerSilentUrlRefresh(msg.imageUrl, true);
+                      void msgRenderActionsRef.current.handleTelegramBubbleImageError(msg.id, msg.imageUrl, bubbleThumbSrc);
                     }}
                   />
                   {/* Hover actions for image: Zoom, Copy Image and Download Image */}
@@ -5490,6 +5602,38 @@ const ChatAreaActive: React.FC<ChatAreaProps & { chat: Chat }> = ({
                     <span className="inline-flex items-center gap-0.5 text-white/80" title="正在投递到 Telegram">
                       <RotateCw className="w-3 h-3 animate-spin" />
                     </span>
+                  ) : msg.deliveryStatus === 'paused' ? (
+                    <span
+                      className="inline-flex items-center gap-1.5 flex-wrap"
+                      title={msg.queuePauseReason || '发送已暂停，等待手动确认'}
+                    >
+                      <span className="inline-flex items-center gap-0.5 text-amber-200 dark:text-amber-300 font-medium">
+                        <Pause className="w-3 h-3" />
+                        <span>已暂停</span>
+                      </span>
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          void msgRenderActionsRef.current.onResumePausedMessage?.(msg.id);
+                        }}
+                        className="px-1.5 py-0.5 rounded bg-white/20 hover:bg-white/30 text-white text-[10px] font-medium cursor-pointer transition-colors"
+                        title={msg.queuePauseReason || '继续发送此消息'}
+                      >
+                        继续发送
+                      </button>
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          void msgRenderActionsRef.current.onDiscardPausedMessage?.(msg.id);
+                        }}
+                        className="px-1.5 py-0.5 rounded bg-rose-500/40 hover:bg-rose-500/60 text-white text-[10px] font-medium cursor-pointer transition-colors"
+                        title="丢弃此未发送消息"
+                      >
+                        丢弃
+                      </button>
+                    </span>
                   ) : msg.deliveryStatus === 'failed' ? (
                     <button
                       type="button"
@@ -5574,6 +5718,7 @@ const ChatAreaActive: React.FC<ChatAreaProps & { chat: Chat }> = ({
     audioProgress,
     transcribingMap,
     retryingMsgIds,
+    mediaRetryNonces,
     showOriginalMsgIds,
     chatFontClasses,
     isChatTransEnabled,
@@ -5581,6 +5726,7 @@ const ChatAreaActive: React.FC<ChatAreaProps & { chat: Chat }> = ({
     hasRetranslateHandler,
     hasDeleteHandler,
     resolveDisplayUrl,
+    appendThumbQueryIfTelegramMedia,
     triggerManualTranslate,
   ]);
 
@@ -7200,6 +7346,7 @@ const ChatAreaActive: React.FC<ChatAreaProps & { chat: Chat }> = ({
             messageContextMenu.message.sender === 'me' &&
             messageContextMenu.message.deliveryStatus !== 'failed' &&
             messageContextMenu.message.deliveryStatus !== 'pending' &&
+            messageContextMenu.message.deliveryStatus !== 'paused' &&
             typeof messageContextMenu.message.telegramMessageId === 'number' && (
             <button
               type="button"
@@ -7219,6 +7366,7 @@ const ChatAreaActive: React.FC<ChatAreaProps & { chat: Chat }> = ({
             !messageContextMenu.message.isAudio &&
             messageContextMenu.message.deliveryStatus !== 'failed' &&
             messageContextMenu.message.deliveryStatus !== 'pending' &&
+            messageContextMenu.message.deliveryStatus !== 'paused' &&
             (!chat.id.startsWith('tg_') || typeof messageContextMenu.message.telegramMessageId === 'number') && (
             <button
               type="button"
@@ -7260,7 +7408,8 @@ const ChatAreaActive: React.FC<ChatAreaProps & { chat: Chat }> = ({
         const isLocalOnly =
           !resolveClientTelegramMessageId(messageToDelete) ||
           messageToDelete.deliveryStatus === 'failed' ||
-          messageToDelete.deliveryStatus === 'pending';
+          messageToDelete.deliveryStatus === 'pending' ||
+          messageToDelete.deliveryStatus === 'paused';
         const isTgUserChat = chat.id.startsWith('tg_') && currentAccountId !== 'acc_telegram_bot';
         const isSupergroupOrChannel = chat.id.startsWith('tg_-100') || Boolean(chat.isChannel);
         const showRevokeOption = !isLocalOnly && isTgUserChat && !isSupergroupOrChannel;

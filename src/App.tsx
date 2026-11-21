@@ -57,6 +57,11 @@ import {
   reconnectTelegramSessionsApi,
   pollIncomingTelegramUpdates,
   ackIncomingTelegramUpdates,
+  syncActiveFocusChatApi,
+  subscribeTelegramUpdatesStream,
+  compressImageBeforeUpload,
+  resumePausedMessageApi,
+  discardPausedMessageApi,
   fetchTelegramDialogFiltersApi,
   TelegramOfficialDialogFilter,
   getLocalMessages,
@@ -114,6 +119,9 @@ import {
   refreshSignedResourceUrlsApi,
   fetchTelegramAccountMetaApi,
   saveTelegramAccountMetaApi,
+  getCachedAccountAvatarDataUrl,
+  cacheAccountAvatarFromUrl,
+  invalidateCachedAccountAvatar,
   checkAppUpdateApi,
   getDesktopUpdaterBridge,
   APP_VERSION,
@@ -1751,10 +1759,18 @@ export default function App() {
       { lastError?: string | null; retryCount?: number; nextRetryAt?: number; lastConnectedAt?: number | null }
     >();
 
+    const statusAvatarById = new Map<string, string>();
+    const statusAvatarByRuntimeKey = new Map<string, string>();
+
     if (statusRes.ok) {
       statusRes.activeUsers.forEach((u) => {
         const uIdentity = resolveTelegramAccountIdentity({ id: u.id, userId: u.userId, phone: u.phone });
         const uTrackKey = uIdentity.runtimeKey || u.id;
+        if (u.avatarUrl) {
+          statusAvatarById.set(u.id, u.avatarUrl);
+          if (uIdentity.runtimeKey) statusAvatarByRuntimeKey.set(uIdentity.runtimeKey, u.avatarUrl);
+          if (uIdentity.phone) statusAvatarByRuntimeKey.set(`phone:${uIdentity.phone}`, u.avatarUrl);
+        }
         const phase = resolvePhase(u);
         const evalRes = evalWithGrace(uTrackKey, phase, u.lastError, u.offlineReason);
         statusById.set(u.id, evalRes.uiStatus);
@@ -1918,11 +1934,17 @@ export default function App() {
             (identity.canonicalAccountId ? activeById.get(identity.canonicalAccountId) : undefined) ||
             (identity.runtimeKey ? activeByRuntimeKey.get(identity.runtimeKey) : undefined) ||
             (identity.phone ? activeByRuntimeKey.get(`phone:${identity.phone}`) : undefined);
+          const fallbackMetaAvatarUrl =
+            activeMeta?.avatarUrl ||
+            statusAvatarById.get(a.id) ||
+            (identity.canonicalAccountId ? statusAvatarById.get(identity.canonicalAccountId) : undefined) ||
+            (identity.runtimeKey ? statusAvatarByRuntimeKey.get(identity.runtimeKey) : undefined) ||
+            (identity.phone ? statusAvatarByRuntimeKey.get(`phone:${identity.phone}`) : undefined);
           const nextAvatarUrl =
-            activeMeta?.avatarUrl &&
+            fallbackMetaAvatarUrl &&
             (shouldRefreshAvatarUrl(a.avatarUrl) ||
-              (a.avatarUrl && a.avatarUrl.split('?')[0] !== activeMeta.avatarUrl.split('?')[0]))
-              ? activeMeta.avatarUrl
+              (a.avatarUrl && a.avatarUrl.split('?')[0] !== fallbackMetaAvatarUrl.split('?')[0]))
+              ? fallbackMetaAvatarUrl
               : a.avatarUrl;
           const serverAccMeta =
             serverMetaMap?.[a.id] ||
@@ -2226,6 +2248,20 @@ export default function App() {
     }, 500);
 
     return () => window.clearTimeout(timer);
+  }, [accounts, isMemberAuthenticated, isHydrated]);
+
+  const [, setAccountAvatarCacheTick] = useState(0);
+  useEffect(() => {
+    if (!isMemberAuthenticated || !isHydrated) return;
+    for (const acc of accounts) {
+      if (!acc?.id || !acc.avatarUrl) continue;
+      if (getCachedAccountAvatarDataUrl(acc.id)) continue;
+      void cacheAccountAvatarFromUrl(acc.id, acc.avatarUrl).then((dataUrl) => {
+        if (dataUrl && isMountedRef.current) {
+          setAccountAvatarCacheTick((n) => n + 1);
+        }
+      });
+    }
   }, [accounts, isMemberAuthenticated, isHydrated]);
 
   const notifyTelegramFloodCooldown = (accId: string, errorMsg?: string, retryAfterSeconds?: number) => {
@@ -2787,6 +2823,42 @@ export default function App() {
     activeChatIdRef.current = activeChatId;
   }, [activeChatId]);
 
+  const prevFocusSyncAccountRef = useRef<string>('');
+  useEffect(() => {
+    if (!isMemberAuthenticated || !activeAccountId) return;
+    const prevAcc = prevFocusSyncAccountRef.current;
+    if (prevAcc && prevAcc !== activeAccountId) {
+      void syncActiveFocusChatApi(prevAcc, '');
+    }
+    prevFocusSyncAccountRef.current = activeAccountId;
+    void syncActiveFocusChatApi(activeAccountId, activeChatId || '');
+  }, [isMemberAuthenticated, activeAccountId, activeChatId]);
+
+  const [floodNowMs, setFloodNowMs] = useState<number>(() => Date.now());
+  const hasActiveFloodCountdown = useMemo(
+    () => accounts.some((a) => typeof a.floodWaitUntil === 'number' && a.floodWaitUntil > floodNowMs),
+    [accounts, floodNowMs]
+  );
+  useEffect(() => {
+    if (!hasActiveFloodCountdown) return;
+    const timer = setInterval(() => {
+      const now = Date.now();
+      setFloodNowMs(now);
+      setAccounts((prev) => {
+        let changed = false;
+        const next = prev.map((a) => {
+          if (a.floodWaitUntil && a.floodWaitUntil <= now) {
+            changed = true;
+            return { ...a, floodWaitUntil: undefined, floodWaitMethod: undefined };
+          }
+          return a;
+        });
+        return changed ? next : prev;
+      });
+    }, 1000);
+    return () => clearInterval(timer);
+  }, [hasActiveFloodCountdown]);
+
   const pendingAutoReadOnFocusRef = useRef<{ accountId: string; chatId: string; maxId?: number } | null>(null);
 
   useEffect(() => {
@@ -3172,13 +3244,20 @@ export default function App() {
     backfillRetryNonce,
   ]);
 
-  // Real-time polling for incoming Telegram MTProto / Bot updates into pure local storage
+  // Real-time SSE wakeup + polling fallback for incoming Telegram MTProto / Bot updates into pure local storage
   useEffect(() => {
     if (!isMemberAuthenticated) return;
     let isMounted = true;
     let isPolling = false;
-    const pollInterval = setInterval(async () => {
-      if (isPolling) return;
+    let pollPendingAgain = false;
+    let sseConnected = false;
+
+    const runUpdatePoll = async () => {
+      if (!isMounted) return;
+      if (isPolling) {
+        pollPendingAgain = true;
+        return;
+      }
       isPolling = true;
       try {
         const currentAccId = activeAccountIdRef.current;
@@ -3225,6 +3304,18 @@ export default function App() {
                 reactedTgId: number;
                 nextReactions: Record<string, number>;
                 nextMyReactions: string[];
+              }
+            | {
+                kind: 'receipt';
+                accountId: string;
+                targetChatId: string;
+                bucketKey: string;
+                messageId?: string;
+                clientMessageId?: string;
+                telegramMessageId?: number;
+                deliveryStatus: 'pending' | 'delivered' | 'paused' | 'failed' | 'retrying';
+                queuePauseReason?: string;
+                floodWaitUntil?: number;
               }
             | {
                 kind: 'message';
@@ -3326,6 +3417,93 @@ export default function App() {
             const isOfficialNotice = isOfficial || targetChatId === 'tg_777000' || targetChatId === 'tg_42777';
             const officialTitle = 'Telegram 官方服务通知';
             const updType = upd.type || 'message';
+
+            if (updType === 'flood_state') {
+              const waitUntil = typeof upd.floodWaitUntil === 'number' ? upd.floodWaitUntil : undefined;
+              if (waitUntil) {
+                setFloodNowMs(Date.now());
+                setAccounts((prev) =>
+                  prev.map((a) =>
+                    a.id === targetAccountId
+                      ? { ...a, floodWaitUntil: waitUntil, floodWaitMethod: upd.floodMethod }
+                      : a
+                  )
+                );
+              }
+              return;
+            }
+
+            if (updType === 'peer_flood') {
+              const reason = String(upd.peerFloodReason || upd.text || '触发 Telegram PEER_FLOOD 限制，已停止向陌生人发送');
+              setAccounts((prev) =>
+                prev.map((a) =>
+                  a.id === targetAccountId
+                    ? { ...a, peerFloodRestricted: true, peerFloodReason: reason }
+                    : a
+                )
+              );
+              showCloudError(reason);
+              return;
+            }
+
+            if (updType === 'delivery_receipt') {
+              const targetBucketKey = msgBucketKey(targetAccountId, targetChatId);
+              const rStatus = upd.deliveryStatus || 'delivered';
+              const receiptMsgId = typeof upd.messageId === 'string' ? upd.messageId : undefined;
+              const receiptClientMsgId = typeof upd.clientMessageId === 'string' ? upd.clientMessageId : undefined;
+              const receiptTgId = typeof upd.telegramMessageId === 'number' ? upd.telegramMessageId : undefined;
+              orderedMessageOps.push({
+                kind: 'receipt',
+                accountId: targetAccountId,
+                targetChatId,
+                bucketKey: targetBucketKey,
+                messageId: receiptMsgId,
+                clientMessageId: receiptClientMsgId,
+                telegramMessageId: receiptTgId,
+                deliveryStatus: rStatus,
+                queuePauseReason: upd.queuePauseReason,
+                floodWaitUntil: upd.floodWaitUntil,
+              });
+              if (rStatus === 'delivered' && receiptMsgId) {
+                pendingMediaFilesRef.current.delete(receiptMsgId);
+                void cleanupPersistedPendingMedia(targetAccountId, receiptMsgId);
+              }
+              if (rStatus === 'failed' && upd.peerFloodRestricted) {
+                const reason = String(upd.error || upd.text || '触发 Telegram PEER_FLOOD 限制，已停止向陌生人发送');
+                setAccounts((prev) =>
+                  prev.map((a) =>
+                    a.id === targetAccountId
+                      ? { ...a, peerFloodRestricted: true, peerFloodReason: reason }
+                      : a
+                  )
+                );
+                showCloudError(reason);
+              } else if (rStatus === 'failed' && upd.error) {
+                showCloudError(upd.error);
+              }
+              if (upd.dialogState) {
+                const ds = upd.dialogState;
+                pendingChatUpdaters.push((prev) =>
+                  prev.map((c) =>
+                    c.id === targetChatId && (!targetAccountId || c.accountId === targetAccountId)
+                      ? {
+                          ...c,
+                          isPinned: ds.isPinned,
+                          isArchived: ds.isArchived,
+                          isMuted: ds.isMuted,
+                          unreadCount: ds.unreadCount,
+                          ...(ds.readOutboxMaxId !== undefined ? { readOutboxMaxId: ds.readOutboxMaxId } : {}),
+                          ...(ds.readInboxMaxId !== undefined ? { readInboxMaxId: ds.readInboxMaxId } : {}),
+                          ...(ds.lastMessage ? { lastMessage: ds.lastMessage } : {}),
+                          ...(ds.lastTime ? { lastTime: ds.lastTime } : {}),
+                          ...(ds.lastDate > 0 ? { lastDate: ds.lastDate } : {}),
+                        }
+                      : c
+                  )
+                );
+              }
+              return;
+            }
 
             if (updType === 'edit') {
               const targetBucketKey = msgBucketKey(targetAccountId, targetChatId);
@@ -3632,6 +3810,14 @@ export default function App() {
                     : a
                 )
               );
+              if (nextAvatarUrl) {
+                invalidateCachedAccountAvatar(targetAccountId);
+                void cacheAccountAvatarFromUrl(targetAccountId, nextAvatarUrl, { force: true }).then((dataUrl) => {
+                  if (dataUrl && isMountedRef.current) {
+                    setAccountAvatarCacheTick((n) => n + 1);
+                  }
+                });
+              }
               return;
             }
 
@@ -3972,9 +4158,13 @@ export default function App() {
                 (incomingNormLang === 'zh-cn' && inboundTargetNorm === 'zh') ||
                 (incomingNormLang === 'zh' && inboundTargetNorm === 'zh-cn'));
 
+            const isViewingThisGroup =
+              targetChatId === activeChatIdRef.current && targetAccountId === activeAccountIdRef.current;
+
             if (
               currentTransSettings.autoTranslateInbound !== false &&
               isIncomingChatTransEnabled &&
+              (!incomingIsGroup || isViewingThisGroup) &&
               incomingMsg.sender === 'peer' &&
               !isMediaPlaceholder &&
               !incomingMsg.translatedText &&
@@ -4307,6 +4497,27 @@ export default function App() {
                     next[op.bucketKey] = updated;
                     anyChanged = true;
                   }
+                } else if (op.kind === 'receipt') {
+                  const list = getBucketMessages(next, op.accountId, op.targetChatId);
+                  if (list.length === 0) continue;
+                  let changed = false;
+                  const updated = list.map((m) => {
+                    const matchedById = Boolean(op.messageId && m.id === op.messageId);
+                    const matchedByClient = Boolean(op.clientMessageId && m.clientMessageId === op.clientMessageId);
+                    if (!matchedById && !matchedByClient) return m;
+                    changed = true;
+                    return {
+                      ...m,
+                      deliveryStatus: op.deliveryStatus,
+                      queuePauseReason: op.deliveryStatus === 'paused' ? op.queuePauseReason : undefined,
+                      floodWaitUntil: op.floodWaitUntil,
+                      ...(op.telegramMessageId ? { telegramMessageId: op.telegramMessageId } : {}),
+                    };
+                  });
+                  if (changed) {
+                    next[op.bucketKey] = updated;
+                    anyChanged = true;
+                  }
                 } else if (op.kind === 'message') {
                   const currentList = getBucketMessages(next, op.accountId, op.targetChatId);
                   const foundIdx = currentList.findIndex((m) =>
@@ -4360,12 +4571,34 @@ export default function App() {
         // background poll non-fatal
       } finally {
         isPolling = false;
+        if (pollPendingAgain && isMounted) {
+          pollPendingAgain = false;
+          void runUpdatePoll();
+        }
       }
-    }, 2500);
+    };
+
+    const unsubscribeSse = subscribeTelegramUpdatesStream(
+      () => {
+        void runUpdatePoll();
+      },
+      {
+        onStatusChange: (connected) => {
+          sseConnected = connected;
+        },
+      }
+    );
+    void runUpdatePoll();
+    const fallbackPollInterval = setInterval(() => {
+      if (!sseConnected) {
+        void runUpdatePoll();
+      }
+    }, 4000);
 
     return () => {
       isMounted = false;
-      clearInterval(pollInterval);
+      unsubscribeSse();
+      clearInterval(fallbackPollInterval);
     };
   }, [isMemberAuthenticated]);
 
@@ -4468,7 +4701,7 @@ export default function App() {
     }
   };
 
-  // Handle send message (local preview + streaming outbound delivery to server/Telegram)
+  // Handle send message (local preview + async FIFO outbound queue + streaming multipart/JSON)
   const handleSendMessage = (
     newMsg: Partial<Message> & { skipCloudRelay?: boolean; mediaFile?: File | Blob }
   ) => {
@@ -4482,9 +4715,12 @@ export default function App() {
       senderRole === 'me' &&
       (targetChatId.startsWith('tg_') || targetAccountId === 'acc_telegram_bot');
     const mediaFile = newMsg.mediaFile;
+    const clientMessageId =
+      newMsg.clientMessageId || `cmid_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
 
     const fullMessage: Message = {
       id: newMsg.id || `msg_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+      clientMessageId,
       telegramMessageId: newMsg.telegramMessageId,
       chatId: targetChatId,
       accountId: targetAccountId,
@@ -4563,10 +4799,21 @@ export default function App() {
       return;
     }
 
-    // 3. Relay outbound via streaming multipart (when mediaFile present) or compact JSON
-    saveMessageToDb(fullMessage, mediaFile ? { mediaFile } : undefined).then((result) => {
+    // 3. Compress image on client when applicable, then enqueue via async FIFO scheduler
+    (async () => {
+      let uploadMediaFile = mediaFile;
+      if (uploadMediaFile && fullMessage.isImage) {
+        uploadMediaFile = await compressImageBeforeUpload(uploadMediaFile);
+        pendingMediaFilesRef.current.set(fullMessage.id, uploadMediaFile);
+      }
+
+      const result = await saveMessageToDb(fullMessage, {
+        ...(uploadMediaFile ? { mediaFile: uploadMediaFile } : {}),
+        ...(isTelegramOutbound ? { asyncQueue: true } : {}),
+      });
+
       const finalStatus = result.deliveryStatus;
-      if (result.ok) {
+      if (finalStatus === 'delivered' && result.ok) {
         pendingMediaFilesRef.current.delete(fullMessage.id);
         void cleanupPersistedPendingMedia(targetAccountId, fullMessage.id);
         if (result.dialogState) {
@@ -4608,6 +4855,15 @@ export default function App() {
           notifiedExpiredRef.current.add(targetAccountId);
           showCloudError(result.error || 'Telegram 登录会话已失效，请重新扫码或验证码登录');
         }
+      } else if (result.peerFlood && targetAccountId) {
+        setAccounts((prev) =>
+          prev.map((a) =>
+            a.id === targetAccountId
+              ? { ...a, peerFloodRestricted: true, peerFloodReason: result.error || 'PEER_FLOOD 受限' }
+              : a
+          )
+        );
+        showCloudError(result.error || '触发 Telegram PEER_FLOOD 限制，已停止向陌生人发送');
       } else if (finalStatus === 'failed' && result.error) {
         showCloudError(result.error);
       }
@@ -4633,7 +4889,10 @@ export default function App() {
           m.id === fullMessage.id
             ? {
                 ...m,
-                deliveryStatus: finalStatus,
+                // Do not regress an already delivered receipt back to pending if SSE arrived first
+                deliveryStatus: m.deliveryStatus === 'delivered' ? 'delivered' : finalStatus,
+                ...(result.queuePauseReason ? { queuePauseReason: result.queuePauseReason } : {}),
+                ...(result.floodWaitUntil ? { floodWaitUntil: result.floodWaitUntil } : {}),
                 ...(result.telegramMessageId ? { telegramMessageId: result.telegramMessageId } : {}),
                 ...(result.imageUrl ? { imageUrl: result.imageUrl } : {}),
                 ...(result.videoUrl ? { videoUrl: result.videoUrl } : {}),
@@ -4645,7 +4904,7 @@ export default function App() {
         return { ...prev, [bucketKey]: updated };
       });
       scheduleRevokeBlobUrls(replacedBlobUrls);
-    });
+    })();
   };
 
   const handleRetryMessage = async (messageId: string): Promise<{ ok: boolean; error?: string }> => {
@@ -4661,7 +4920,7 @@ export default function App() {
     setMessagesMap((prev) => {
       const list = getBucketMessages(prev, targetAccountId, targetChatId);
       const updated = list.map((m) =>
-        m.id === messageId ? { ...m, deliveryStatus: 'retrying' as const } : m
+        m.id === messageId ? { ...m, deliveryStatus: 'retrying' as const, queuePauseReason: undefined } : m
       );
       return { ...prev, [bucketKey]: updated };
     });
@@ -4675,14 +4934,18 @@ export default function App() {
         pendingMediaFilesRef.current.set(messageId, storedRecord.blob);
       }
     }
+    const isTelegramOutbound = targetChatId.startsWith('tg_') || targetAccountId === 'acc_telegram_bot';
     const result = await retryMessageDelivery(
       messageId,
       targetAccountId,
       targetMsg,
-      pendingMediaFile ? { mediaFile: pendingMediaFile } : undefined
+      {
+        ...(pendingMediaFile ? { mediaFile: pendingMediaFile } : {}),
+        ...(isTelegramOutbound ? { asyncQueue: true } : {}),
+      }
     );
     const nextStatus = result.deliveryStatus;
-    if (result.ok) {
+    if (nextStatus === 'delivered' && result.ok) {
       pendingMediaFilesRef.current.delete(messageId);
       void cleanupPersistedPendingMedia(targetAccountId, messageId);
       if (result.dialogState) {
@@ -4718,6 +4981,15 @@ export default function App() {
         notifiedExpiredRef.current.add(targetAccountId);
         showCloudError(result.error || 'Telegram 登录会话已失效，请重新扫码或验证码登录');
       }
+    } else if (result.peerFlood && targetAccountId) {
+      setAccounts((prev) =>
+        prev.map((a) =>
+          a.id === targetAccountId
+            ? { ...a, peerFloodRestricted: true, peerFloodReason: result.error || 'PEER_FLOOD 受限' }
+            : a
+        )
+      );
+      showCloudError(result.error || '触发 Telegram PEER_FLOOD 限制，已停止向陌生人发送');
     } else if (nextStatus === 'failed' && result.error) {
       showCloudError(result.error);
     }
@@ -4735,7 +5007,7 @@ export default function App() {
     if (result.fileUrl && targetMsg.fileUrl?.startsWith('blob:') && result.fileUrl !== targetMsg.fileUrl) {
       replacedBlobUrls.push(targetMsg.fileUrl);
     }
-    if (result.ok && replacedBlobUrls.length > 0) {
+    if (nextStatus === 'delivered' && result.ok && replacedBlobUrls.length > 0) {
       revokeRestoredBlobUrlsForMessage(targetAccountId, messageId);
     }
 
@@ -4745,7 +5017,7 @@ export default function App() {
         m.id === messageId
           ? {
               ...m,
-              deliveryStatus: nextStatus,
+              deliveryStatus: m.deliveryStatus === 'delivered' ? 'delivered' : nextStatus,
               ...(result.telegramMessageId ? { telegramMessageId: result.telegramMessageId } : {}),
               ...(result.imageUrl ? { imageUrl: result.imageUrl } : {}),
               ...(result.videoUrl ? { videoUrl: result.videoUrl } : {}),
@@ -4759,6 +5031,58 @@ export default function App() {
     scheduleRevokeBlobUrls(replacedBlobUrls);
 
     return { ok: result.ok, error: result.error };
+  };
+
+  const handleResumePausedMessage = async (messageId: string): Promise<void> => {
+    const targetChatId = activeChatIdRef.current || activeChatId;
+    const targetAccountId = activeAccountIdRef.current || activeAccountId;
+    if (!targetChatId) return;
+    const bucketKey = msgBucketKey(targetAccountId, targetChatId);
+
+    setMessagesMap((prev) => {
+      const list = getBucketMessages(prev, targetAccountId, targetChatId);
+      return {
+        ...prev,
+        [bucketKey]: list.map((m) =>
+          m.id === messageId ? { ...m, deliveryStatus: 'pending' as const, queuePauseReason: undefined } : m
+        ),
+      };
+    });
+
+    const res = await resumePausedMessageApi(messageId, targetAccountId);
+    if (!res.ok) {
+      showCloudError(res.error || '继续发送失败');
+      setMessagesMap((prev) => {
+        const list = getBucketMessages(prev, targetAccountId, targetChatId);
+        return {
+          ...prev,
+          [bucketKey]: list.map((m) =>
+            m.id === messageId ? { ...m, deliveryStatus: 'paused' as const } : m
+          ),
+        };
+      });
+    }
+  };
+
+  const handleDiscardPausedMessage = async (messageId: string): Promise<void> => {
+    const targetChatId = activeChatIdRef.current || activeChatId;
+    const targetAccountId = activeAccountIdRef.current || activeAccountId;
+    if (!targetChatId) return;
+    const bucketKey = msgBucketKey(targetAccountId, targetChatId);
+
+    const res = await discardPausedMessageApi(messageId, targetAccountId);
+    if (!res.ok) {
+      showCloudError(res.error || '丢弃消息失败');
+      return;
+    }
+    pendingMediaFilesRef.current.delete(messageId);
+    void cleanupPersistedPendingMedia(targetAccountId, messageId);
+    revokeRestoredBlobUrlsForMessage(targetAccountId, messageId);
+    setMessagesMap((prev) => {
+      const list = getBucketMessages(prev, targetAccountId, targetChatId);
+      const remaining = list.filter((m) => m.id !== messageId);
+      return { ...prev, [bucketKey]: remaining };
+    });
   };
 
   // Update contact remark / nickname (Cloud-first via contacts.AddContact)
@@ -4878,6 +5202,13 @@ export default function App() {
       }
       return [...prev, newAcc];
     });
+    if (newAccountData.avatarUrl) {
+      void cacheAccountAvatarFromUrl(id, newAccountData.avatarUrl, { force: true }).then((dataUrl) => {
+        if (dataUrl && isMountedRef.current) {
+          setAccountAvatarCacheTick((n) => n + 1);
+        }
+      });
+    }
     handleSelectAccount(id);
   };
 
@@ -4925,6 +5256,7 @@ export default function App() {
     scheduleRevokeBlobUrls(removedAccountBlobUrls);
 
     clearAccountLocalCache(id, unsharedRemovedChatIds);
+    invalidateCachedAccountAvatar(id);
     secureRemoveItem(getScopedTranslationSettingsKey(id));
     void clearAccountPendingMediaBlobs(id);
 
@@ -6489,6 +6821,50 @@ export default function App() {
             </div>
           )}
 
+        {isMemberAuthenticated &&
+          currentAccount &&
+          currentAccount.peerFloodRestricted && (
+            <div className="shrink-0 px-4 py-2 border-b flex items-center justify-between gap-3 text-xs bg-rose-50 dark:bg-rose-950/60 aurora:bg-rose-950/60 linen:bg-[#f2ded9] border-rose-200 dark:border-rose-800/60 aurora:border-rose-700/60 linen:border-[#d4a59a] text-rose-700 dark:text-rose-200 aurora:text-rose-200 linen:text-[#7a2e22]">
+              <div className="flex items-center gap-2 min-w-0">
+                <span className="w-2 h-2 rounded-full shrink-0 bg-rose-500" />
+                <span className="truncate font-medium">
+                  {currentAccount.peerFloodReason ||
+                    `账号「${currentAccount.name}」已触发 Telegram PEER_FLOOD 限制：已停止向陌生人/非联系人发送，请等待官方解除限制`}
+                </span>
+              </div>
+              <button
+                type="button"
+                onClick={() =>
+                  setAccounts((prev) =>
+                    prev.map((a) =>
+                      a.id === currentAccount.id
+                        ? { ...a, peerFloodRestricted: false, peerFloodReason: undefined }
+                        : a
+                    )
+                  )
+                }
+                className="px-2 py-0.5 rounded bg-white/80 dark:bg-white/10 border border-current/20 text-[11px] font-medium cursor-pointer shrink-0"
+              >
+                收起提示
+              </button>
+            </div>
+          )}
+
+        {isMemberAuthenticated &&
+          currentAccount &&
+          typeof currentAccount.floodWaitUntil === 'number' &&
+          currentAccount.floodWaitUntil > floodNowMs && (
+            <div className="shrink-0 px-4 py-1.5 border-b flex items-center justify-between gap-3 text-xs bg-amber-50 dark:bg-amber-950/50 aurora:bg-amber-950/55 linen:bg-[#f2e8d4] border-amber-200 dark:border-amber-800/60 aurora:border-amber-700/55 linen:border-[#cbbba2] text-amber-800 dark:text-amber-200 aurora:text-amber-200 linen:text-[#5c4328]">
+              <div className="flex items-center gap-2 min-w-0">
+                <span className="w-2 h-2 rounded-full shrink-0 bg-amber-500 animate-pulse" />
+                <span className="truncate font-medium">
+                  Telegram 发送限流等待中：账号「{currentAccount.name}」将在{' '}
+                  {Math.max(1, Math.ceil((currentAccount.floodWaitUntil - floodNowMs) / 1000))} 秒后自动恢复队列发送
+                </span>
+              </div>
+            </div>
+          )}
+
         <div className="flex-1 flex min-w-0 min-h-0 overflow-hidden">
         {/* 2. Official Telegram Middle Chats List Pane (resizable) */}
         <ChatList
@@ -6564,6 +6940,8 @@ export default function App() {
           onUpdateMessage={handleUpdateMessage}
           onRetranslateMessage={handleRetranslateMessage}
           onRetryMessage={handleRetryMessage}
+          onResumePausedMessage={handleResumePausedMessage}
+          onDiscardPausedMessage={handleDiscardPausedMessage}
           onToggleReaction={handleToggleReaction}
           onTogglePinMessage={handleTogglePinMessage}
           onClearHistory={handleClearHistory}

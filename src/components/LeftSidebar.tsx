@@ -16,6 +16,7 @@ import {
   Check
 } from 'lucide-react';
 import { Account, AccountGroup } from '../types';
+import { resolveAccountAvatarSrc } from '../services/apiService';
 
 const TOOLS_COLLAPSED_STORAGE_KEY = 'hs_left_sidebar_tools_collapsed';
 const ACCOUNT_RAIL_HEIGHT_STORAGE_KEY = 'hs_left_sidebar_account_height';
@@ -501,10 +502,11 @@ export const LeftSidebar: React.FC<LeftSidebarProps> = React.memo(({
             const canEditAccount = Boolean(onUpdateAccountMeta || onUpdateAccountRemark);
             const renderAccountItem = (acc: Account) => {
               const isSelected = acc.id === activeAccountId;
-              const retryKey = `${acc.id}|${acc.status}`;
+              const resolvedAvatarSrc = resolveAccountAvatarSrc(acc.id, acc.avatarUrl);
+              const retryKey = acc.id;
               const retryCount = avatarRetryNonce[retryKey] || 0;
-              const avatarRenderKey = `${acc.avatarUrl || ''}|${acc.status}|${retryCount}`;
-              const canRenderAvatarImg = Boolean(acc.avatarUrl) && failedAvatarKeys[acc.id] !== avatarRenderKey;
+              const avatarRenderKey = `${resolvedAvatarSrc || ''}|${retryCount}`;
+              const canRenderAvatarImg = Boolean(resolvedAvatarSrc) && failedAvatarKeys[acc.id] !== avatarRenderKey;
               const remarkText = acc.remark?.trim() || '';
               const groupObj = acc.groupId ? accountGroups.find((g) => g.id === acc.groupId) : undefined;
               const canDragAcc = Boolean(onReorderAccounts);
@@ -589,7 +591,7 @@ export const LeftSidebar: React.FC<LeftSidebarProps> = React.memo(({
                       {canRenderAvatarImg && (
                         <img
                           draggable={false}
-                          src={acc.avatarUrl}
+                          src={resolvedAvatarSrc}
                           alt={remarkText || acc.name}
                           referrerPolicy="no-referrer"
                           className="w-full h-full object-cover absolute inset-0"

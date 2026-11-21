@@ -20,6 +20,7 @@ import {
   APP_VERSION,
   disconnectTelegramAccount,
   checkAppUpdateApi,
+  resolveAccountAvatarSrc,
   type AppUpdateCheckResult,
 } from '../services/apiService';
 
@@ -87,6 +88,8 @@ export const TelegramMenuDrawer: React.FC<TelegramMenuDrawerProps> = ({
   const [confirmingMemberLogout, setConfirmingMemberLogout] = useState(false);
   const [disconnectingId, setDisconnectingId] = useState<string | null>(null);
   const [isCheckingUpdate, setIsCheckingUpdate] = useState(false);
+  const [failedHeaderAvatarSrc, setFailedHeaderAvatarSrc] = useState<string | null>(null);
+  const [failedDropdownAvatars, setFailedDropdownAvatars] = useState<Record<string, string>>({});
   const [disconnectError, setDisconnectError] = useState<{
     accountId: string;
     message: string;
@@ -133,18 +136,23 @@ export const TelegramMenuDrawer: React.FC<TelegramMenuDrawerProps> = ({
           <div className="flex items-start justify-between mb-3">
             <div className="relative">
               <div
-                className="w-14 h-14 rounded-full flex items-center justify-center text-lg font-bold shadow-md border-2 border-white/25 overflow-hidden"
+                className="relative w-14 h-14 rounded-full flex items-center justify-center text-lg font-bold shadow-md border-2 border-white/25 overflow-hidden"
                 style={{ backgroundColor: safeAccount.avatarBg || '#2ba0ff' }}
               >
-                {safeAccount.avatarUrl ? (
-                  <img
-                    src={safeAccount.avatarUrl}
-                    alt={safeAccount.name}
-                    className="w-full h-full object-cover"
-                  />
-                ) : (
-                  <span>{safeAccount.avatarInitial || 'TG'}</span>
-                )}
+                <span>{safeAccount.avatarInitial || 'TG'}</span>
+                {(() => {
+                  const headerAvatarSrc = resolveAccountAvatarSrc(safeAccount.id, safeAccount.avatarUrl);
+                  if (!headerAvatarSrc || failedHeaderAvatarSrc === headerAvatarSrc) return null;
+                  return (
+                    <img
+                      src={headerAvatarSrc}
+                      alt={safeAccount.name}
+                      referrerPolicy="no-referrer"
+                      onError={() => setFailedHeaderAvatarSrc(headerAvatarSrc)}
+                      className="w-full h-full object-cover absolute inset-0"
+                    />
+                  );
+                })()}
               </div>
               {safeAccount.id && (
                 <span
@@ -229,10 +237,27 @@ export const TelegramMenuDrawer: React.FC<TelegramMenuDrawerProps> = ({
                     >
                       <div className="relative shrink-0">
                         <div
-                          className="w-8 h-8 rounded-full flex items-center justify-center text-xs font-bold text-white"
+                          className="relative w-8 h-8 rounded-full flex items-center justify-center text-xs font-bold text-white overflow-hidden"
                           style={{ backgroundColor: acc.avatarBg || '#2ba0ff' }}
                         >
-                          {acc.avatarInitial || 'TG'}
+                          <span>{acc.avatarInitial || 'TG'}</span>
+                          {(() => {
+                            const accAvatarSrc = resolveAccountAvatarSrc(acc.id, acc.avatarUrl);
+                            if (!accAvatarSrc || failedDropdownAvatars[acc.id] === accAvatarSrc) return null;
+                            return (
+                              <img
+                                src={accAvatarSrc}
+                                alt={acc.name}
+                                referrerPolicy="no-referrer"
+                                onError={() =>
+                                  setFailedDropdownAvatars((prev) =>
+                                    prev[acc.id] === accAvatarSrc ? prev : { ...prev, [acc.id]: accAvatarSrc }
+                                  )
+                                }
+                                className="w-full h-full object-cover absolute inset-0"
+                              />
+                            );
+                          })()}
                         </div>
                         <span
                           className={`absolute -bottom-0.5 -right-0.5 w-2.5 h-2.5 rounded-full border-2 border-[#f8fafc] dark:border-[#0e1726] aurora:border-[#101c23] linen:border-[#efe6d6] ${

@@ -192,8 +192,11 @@ export async function initSessionHandshake(): Promise<{
 
 export const TELEGRAM_MAX_MEDIA = 512 * 1024 * 1024;
 
-export function getAuthHeaders(accountId?: string, options?: { omitContentType?: boolean }): Record<string, string> {
-  const effectiveAcc = accountId || currentActiveAccountId;
+export function getAuthHeaders(
+  accountId?: string,
+  options?: { omitContentType?: boolean; omitAccountId?: boolean }
+): Record<string, string> {
+  const effectiveAcc = accountId || (options?.omitAccountId ? '' : currentActiveAccountId);
   const headers: Record<string, string> = {};
   if (!options?.omitContentType) {
     headers['Content-Type'] = 'application/json';
@@ -1814,7 +1817,7 @@ export async function pollIncomingTelegramUpdates(accountId?: string): Promise<a
   try {
     const query = accountId ? `?accountId=${encodeURIComponent(accountId)}` : '';
     const res = await fetchWithTimeout(`/api/telegram/user/poll-updates${query}`, {
-      headers: getAuthHeaders(accountId),
+      headers: getAuthHeaders(accountId, { omitAccountId: !accountId }),
     }, 10000);
     if (res.ok) {
       const data = await res.json();
@@ -1833,7 +1836,7 @@ export async function ackIncomingTelegramUpdates(ids: string[], accountId?: stri
       '/api/telegram/user/ack-updates',
       {
         method: 'POST',
-        headers: getAuthHeaders(accountId),
+        headers: getAuthHeaders(accountId, { omitAccountId: !accountId }),
         body: JSON.stringify({ ids, accountId }),
       },
       10000
@@ -1842,6 +1845,114 @@ export async function ackIncomingTelegramUpdates(ids: string[], accountId?: stri
   } catch {
     return false;
   }
+}
+
+export async function syncActiveFocusChatApi(accountId?: string, chatId?: string | null): Promise<void> {
+  const acc = String(accountId || currentActiveAccountId || '').trim();
+  if (!acc || acc === 'acc_telegram_bot') return;
+  try {
+    await fetchWithTimeout(
+      '/api/telegram/user/focus-chat',
+      {
+        method: 'POST',
+        headers: getAuthHeaders(acc),
+        body: JSON.stringify({ accountId: acc, chatId: chatId || '' }),
+      },
+      6000
+    );
+  } catch {}
+}
+
+export interface TelegramUpdatesWakeupEvent {
+  kind?: string;
+  mode?: 'immediate' | 'batch_group' | 'initial';
+  type?: string;
+  accountId?: string;
+  chatId?: string;
+  chatIds?: string[];
+  ts?: number;
+}
+
+export function subscribeTelegramUpdatesStream(
+  onWakeup: (evt: TelegramUpdatesWakeupEvent) => void,
+  options?: { accountId?: string; onStatusChange?: (connected: boolean) => void }
+): () => void {
+  let closed = false;
+  let controller: AbortController | null = null;
+  let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  let retryDelayMs = 1000;
+
+  const connect = async () => {
+    if (closed) return;
+    controller = new AbortController();
+    const acc = String(options?.accountId || '').trim();
+    const query = acc ? `?accountId=${encodeURIComponent(acc)}` : '';
+    try {
+      const res = await fetch(`/api/telegram/user/updates-stream${query}`, {
+        method: 'GET',
+        headers: getAuthHeaders(acc || undefined, { omitContentType: true, omitAccountId: !acc }),
+        signal: controller.signal,
+      });
+      if (!res.ok || !res.body) {
+        throw new Error(`SSE HTTP ${res.status}`);
+      }
+      options?.onStatusChange?.(true);
+      retryDelayMs = 1000;
+
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+      while (!closed) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        let boundary = buffer.indexOf('\n\n');
+        while (boundary !== -1) {
+          const block = buffer.slice(0, boundary);
+          buffer = buffer.slice(boundary + 2);
+          const dataLines: string[] = [];
+          for (const line of block.split(/\r?\n/)) {
+            if (line.startsWith('data:')) {
+              dataLines.push(line.slice(5).trim());
+            }
+          }
+          if (dataLines.length > 0) {
+            const rawData = dataLines.join('\n');
+            try {
+              const parsed = JSON.parse(rawData);
+              onWakeup(parsed);
+            } catch {}
+          }
+          boundary = buffer.indexOf('\n\n');
+        }
+      }
+    } catch {
+      // Reconnect handled cleanly below
+    } finally {
+      options?.onStatusChange?.(false);
+      if (!closed) {
+        const waitMs = retryDelayMs;
+        retryDelayMs = Math.min(10000, Math.round(retryDelayMs * 1.6));
+        reconnectTimer = setTimeout(() => {
+          reconnectTimer = null;
+          void connect();
+        }, waitMs);
+      }
+    }
+  };
+
+  void connect();
+
+  return () => {
+    closed = true;
+    if (reconnectTimer) {
+      clearTimeout(reconnectTimer);
+      reconnectTimer = null;
+    }
+    try {
+      controller?.abort();
+    } catch {}
+  };
 }
 
 export async function sendAutonomousChat(
@@ -2250,7 +2361,7 @@ function stripTransientMediaUrl(url?: string): string | undefined {
 }
 
 function buildCompactOutboundJsonPayload(
-  message: Partial<Message>,
+  message: Partial<Message> & { asyncQueue?: boolean },
   effectiveAccountId?: string
 ): Record<string, any> {
   const clean: Record<string, any> = {
@@ -2262,6 +2373,8 @@ function buildCompactOutboundJsonPayload(
     timestamp: message.timestamp,
     createdAt: message.createdAt,
   };
+  if (message.clientMessageId) clean.clientMessageId = message.clientMessageId;
+  if (message.asyncQueue !== undefined) clean.asyncQueue = Boolean(message.asyncQueue);
   if (message.senderName) clean.senderName = message.senderName;
   if (message.senderId) clean.senderId = message.senderId;
   if (message.senderAvatarUrl) clean.senderAvatarUrl = message.senderAvatarUrl;
@@ -2299,6 +2412,60 @@ function buildCompactOutboundJsonPayload(
     if (safeFile) clean.fileUrl = safeFile;
   }
   return clean;
+}
+
+export async function compressImageBeforeUpload(
+  file: File | Blob,
+  maxDimension = 1600,
+  quality = 0.84
+): Promise<File | Blob> {
+  try {
+    const mime = String(file.type || '').toLowerCase();
+    if (!mime.startsWith('image/') || mime === 'image/gif' || mime === 'image/svg+xml') {
+      return file;
+    }
+    if (file.size > 0 && file.size <= 350 * 1024) {
+      return file;
+    }
+    if (typeof document === 'undefined' || typeof createImageBitmap !== 'function') {
+      return file;
+    }
+    const bitmap = await createImageBitmap(file);
+    try {
+      const { width, height } = bitmap;
+      if (!width || !height) return file;
+      const scale = Math.min(1, maxDimension / Math.max(width, height));
+      const targetW = Math.max(1, Math.round(width * scale));
+      const targetH = Math.max(1, Math.round(height * scale));
+      if (scale === 1 && file.size <= 1.2 * 1024 * 1024) {
+        return file;
+      }
+      const canvas = document.createElement('canvas');
+      canvas.width = targetW;
+      canvas.height = targetH;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) return file;
+      ctx.drawImage(bitmap, 0, 0, targetW, targetH);
+      const outMime = mime === 'image/png' ? 'image/jpeg' : mime === 'image/webp' ? 'image/webp' : 'image/jpeg';
+      const compressedBlob = await new Promise<Blob | null>((resolve) => {
+        canvas.toBlob((b) => resolve(b), outMime, quality);
+      });
+      if (!compressedBlob || compressedBlob.size === 0 || compressedBlob.size >= file.size) {
+        return file;
+      }
+      const origName = (file as File).name || 'photo.jpg';
+      const ext = outMime === 'image/webp' ? '.webp' : '.jpg';
+      const nextName = origName.replace(/\.[a-z0-9]+$/i, ext);
+      if (typeof File === 'function') {
+        return new File([compressedBlob], nextName, { type: outMime, lastModified: Date.now() });
+      }
+      return compressedBlob;
+    } finally {
+      bitmap.close?.();
+    }
+  } catch {
+    return file;
+  }
 }
 
 function resolveUploadBlobForMessage(
@@ -2359,9 +2526,16 @@ export interface OutboundDialogState {
 
 export interface OutboundDeliveryResponse {
   ok: boolean;
-  deliveryStatus: 'delivered' | 'failed';
+  queued?: boolean;
+  duplicate?: boolean;
+  deliveryStatus: 'delivered' | 'failed' | 'pending' | 'paused';
+  clientMessageId?: string;
   telegramMessageId?: number;
   dialogState?: OutboundDialogState;
+  queuePauseReason?: string;
+  floodWaitUntil?: number;
+  retryAfterSeconds?: number;
+  peerFlood?: boolean;
   mediaUrl?: string;
   imageUrl?: string;
   videoUrl?: string;
@@ -2373,7 +2547,7 @@ export interface OutboundDeliveryResponse {
 
 export async function saveMessageToDb(
   message: Partial<Message>,
-  options?: { mediaFile?: File | Blob }
+  options?: { mediaFile?: File | Blob; asyncQueue?: boolean }
 ): Promise<OutboundDeliveryResponse> {
   try {
     const effectiveAcc = message.accountId || currentActiveAccountId;
@@ -2388,7 +2562,10 @@ export async function saveMessageToDb(
       };
     }
 
-    const compactPayload = buildCompactOutboundJsonPayload(message, effectiveAcc);
+    const compactPayload = buildCompactOutboundJsonPayload(
+      { ...message, ...(options?.asyncQueue !== undefined ? { asyncQueue: options.asyncQueue } : {}) },
+      effectiveAcc
+    );
     let fetchInit: RequestInit;
     let timeoutMs = 25000;
 
@@ -2419,10 +2596,28 @@ export async function saveMessageToDb(
       audioUrl: typeof data?.audioUrl === 'string' ? data.audioUrl : undefined,
       fileUrl: typeof data?.fileUrl === 'string' ? data.fileUrl : undefined,
     };
+    if (res.status === 202 || data?.queued === true || data?.deliveryStatus === 'pending' || data?.deliveryStatus === 'paused') {
+      const st = data?.deliveryStatus === 'paused' ? 'paused' : data?.deliveryStatus === 'delivered' ? 'delivered' : 'pending';
+      return {
+        ok: true,
+        queued: Boolean(data?.queued),
+        duplicate: Boolean(data?.duplicate),
+        deliveryStatus: st,
+        clientMessageId: data?.clientMessageId || message.clientMessageId,
+        telegramMessageId: typeof data?.telegramMessageId === 'number' ? data.telegramMessageId : undefined,
+        queuePauseReason: data?.queuePauseReason,
+        floodWaitUntil: typeof data?.floodWaitUntil === 'number' ? data.floodWaitUntil : undefined,
+        ...returnedMedia,
+      };
+    }
     if (!res.ok || data?.delivered === false || data?.deliveryStatus === 'failed') {
       return {
         ok: false,
         deliveryStatus: 'failed',
+        clientMessageId: data?.clientMessageId || message.clientMessageId,
+        floodWaitUntil: typeof data?.floodWaitUntil === 'number' ? data.floodWaitUntil : undefined,
+        retryAfterSeconds: typeof data?.retryAfterSeconds === 'number' ? data.retryAfterSeconds : undefined,
+        peerFlood: Boolean(data?.peerFlood || data?.code === 'TELEGRAM_PEER_FLOOD'),
         ...returnedMedia,
         code: data?.code,
         error: data?.error || `投递失败 (${res.status})`,
@@ -2430,7 +2625,9 @@ export async function saveMessageToDb(
     }
     return {
       ok: true,
+      duplicate: Boolean(data?.duplicate),
       deliveryStatus: 'delivered',
+      clientMessageId: data?.clientMessageId || message.clientMessageId,
       telegramMessageId: typeof data?.telegramMessageId === 'number' ? data.telegramMessageId : undefined,
       ...(data?.dialogState && typeof data.dialogState === 'object' ? { dialogState: data.dialogState } : {}),
       ...returnedMedia,
@@ -2449,7 +2646,7 @@ export async function retryMessageDelivery(
   messageId: string,
   accountId?: string,
   messagePayload?: Partial<Message>,
-  options?: { mediaFile?: File | Blob }
+  options?: { mediaFile?: File | Blob; asyncQueue?: boolean }
 ): Promise<OutboundDeliveryResponse> {
   try {
     const effectiveAcc = messagePayload?.accountId || accountId || currentActiveAccountId;
@@ -2466,10 +2663,14 @@ export async function retryMessageDelivery(
 
     let fetchInit: RequestInit;
     let timeoutMs = 25000;
+    const extraAsync = options?.asyncQueue !== undefined ? { asyncQueue: options.asyncQueue } : {};
 
     if (uploadBlob && messagePayload) {
       const formData = new FormData();
-      formData.append('payload', JSON.stringify(buildCompactOutboundJsonPayload(messagePayload, effectiveAcc)));
+      formData.append(
+        'payload',
+        JSON.stringify(buildCompactOutboundJsonPayload({ ...messagePayload, ...extraAsync }, effectiveAcc))
+      );
       formData.append('file', uploadBlob, fileName);
       fetchInit = {
         method: 'POST',
@@ -2482,7 +2683,9 @@ export async function retryMessageDelivery(
         method: 'POST',
         headers: getAuthHeaders(effectiveAcc),
         body: JSON.stringify(
-          messagePayload ? buildCompactOutboundJsonPayload(messagePayload, effectiveAcc) : {}
+          messagePayload
+            ? buildCompactOutboundJsonPayload({ ...messagePayload, ...extraAsync }, effectiveAcc)
+            : extraAsync
         ),
       };
     }
@@ -2500,10 +2703,22 @@ export async function retryMessageDelivery(
       audioUrl: typeof data?.audioUrl === 'string' ? data.audioUrl : undefined,
       fileUrl: typeof data?.fileUrl === 'string' ? data.fileUrl : undefined,
     };
+    if (res.status === 202 || data?.queued === true || data?.deliveryStatus === 'pending' || data?.deliveryStatus === 'paused') {
+      return {
+        ok: true,
+        queued: Boolean(data?.queued),
+        deliveryStatus: data?.deliveryStatus === 'paused' ? 'paused' : 'pending',
+        clientMessageId: data?.clientMessageId,
+        ...returnedMedia,
+      };
+    }
     if (!res.ok || data?.success === false || data?.delivered === false || data?.deliveryStatus === 'failed') {
       return {
         ok: false,
         deliveryStatus: 'failed',
+        floodWaitUntil: typeof data?.floodWaitUntil === 'number' ? data.floodWaitUntil : undefined,
+        retryAfterSeconds: typeof data?.retryAfterSeconds === 'number' ? data.retryAfterSeconds : undefined,
+        peerFlood: Boolean(data?.peerFlood || data?.code === 'TELEGRAM_PEER_FLOOD'),
         ...returnedMedia,
         code: data?.code,
         error: data?.error || `重发失败 (${res.status})`,
@@ -2521,8 +2736,61 @@ export async function retryMessageDelivery(
     return {
       ok: false,
       deliveryStatus: 'failed',
-      error: err?.message || '网络连接异常',
+      error: err?.message || '重发网络异常',
     };
+  }
+}
+
+export async function resumePausedMessageApi(
+  messageId: string,
+  accountId?: string
+): Promise<OutboundDeliveryResponse> {
+  const effectiveAcc = accountId || currentActiveAccountId;
+  try {
+    const res = await fetchWithTimeout(
+      `/api/messages/${encodeURIComponent(messageId)}/resume`,
+      {
+        method: 'POST',
+        headers: getAuthHeaders(effectiveAcc),
+        body: JSON.stringify({ accountId: effectiveAcc, asyncQueue: true }),
+      },
+      15000
+    );
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      return { ok: false, deliveryStatus: 'paused', error: data?.error || `继续发送失败 (${res.status})` };
+    }
+    return {
+      ok: true,
+      queued: Boolean(data?.queued),
+      deliveryStatus: data?.deliveryStatus === 'delivered' ? 'delivered' : 'pending',
+      clientMessageId: data?.clientMessageId,
+      telegramMessageId: typeof data?.telegramMessageId === 'number' ? data.telegramMessageId : undefined,
+    };
+  } catch (err: any) {
+    return { ok: false, deliveryStatus: 'paused', error: err?.message || '网络异常' };
+  }
+}
+
+export async function discardPausedMessageApi(
+  messageId: string,
+  accountId?: string
+): Promise<{ ok: boolean; error?: string }> {
+  const effectiveAcc = accountId || currentActiveAccountId;
+  try {
+    const res = await fetchWithTimeout(
+      `/api/messages/${encodeURIComponent(messageId)}/discard`,
+      {
+        method: 'POST',
+        headers: getAuthHeaders(effectiveAcc),
+        body: JSON.stringify({ accountId: effectiveAcc }),
+      },
+      10000
+    );
+    const data = await res.json().catch(() => ({}));
+    return { ok: res.ok && data?.success !== false, error: data?.error };
+  } catch (err: any) {
+    return { ok: false, error: err?.message || '丢弃消息失败' };
   }
 }
 
@@ -2873,6 +3141,7 @@ export async function fetchTelegramUserStatusApi(): Promise<{
     phone: string;
     username?: string;
     firstName?: string;
+    avatarUrl?: string;
     isInMemoryConnected?: boolean;
     isConnected?: boolean;
     isConnecting?: boolean;
@@ -6154,6 +6423,184 @@ export function clearLegacyLocalTelegramCredentials(): void {
     localStorage.removeItem('tg_custom_api_id');
     localStorage.removeItem('tg_custom_api_hash');
   } catch {}
+}
+
+// ==================== PERSISTENT ACCOUNT AVATAR LOCAL CACHE ====================
+
+const ACCOUNT_AVATAR_CACHE_STORAGE_KEY = 'tg_pro_account_avatar_cache_v1';
+const ACCOUNT_AVATAR_CACHE_MAX_ENTRIES = 40;
+const accountAvatarMemoryCache = new Map<string, string>();
+const accountAvatarCacheInFlight = new Map<string, Promise<string | null>>();
+const accountAvatarNoPhotoCooldown = new Map<string, number>();
+let accountAvatarCacheLoaded = false;
+
+function ensureAccountAvatarCacheLoaded(): void {
+  if (accountAvatarCacheLoaded || typeof window === 'undefined') return;
+  accountAvatarCacheLoaded = true;
+  try {
+    const raw = localStorage.getItem(ACCOUNT_AVATAR_CACHE_STORAGE_KEY);
+    if (!raw) return;
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return;
+    for (const [k, v] of Object.entries(parsed)) {
+      if (k && typeof v === 'string' && v.startsWith('data:image/')) {
+        accountAvatarMemoryCache.set(k, v);
+      }
+    }
+  } catch {}
+}
+
+function persistAccountAvatarCache(): void {
+  if (typeof window === 'undefined') return;
+  try {
+    while (accountAvatarMemoryCache.size > ACCOUNT_AVATAR_CACHE_MAX_ENTRIES) {
+      const oldestKey = accountAvatarMemoryCache.keys().next().value;
+      if (oldestKey === undefined) break;
+      accountAvatarMemoryCache.delete(oldestKey);
+    }
+    const obj: Record<string, string> = {};
+    for (const [k, v] of accountAvatarMemoryCache.entries()) {
+      obj[k] = v;
+    }
+    localStorage.setItem(ACCOUNT_AVATAR_CACHE_STORAGE_KEY, JSON.stringify(obj));
+  } catch {}
+}
+
+export function getCachedAccountAvatarDataUrl(accountId?: string): string | undefined {
+  const cleanId = String(accountId || '').trim();
+  if (!cleanId) return undefined;
+  ensureAccountAvatarCacheLoaded();
+  return accountAvatarMemoryCache.get(cleanId);
+}
+
+export function resolveAccountAvatarSrc(accountId?: string, remoteUrl?: string): string | undefined {
+  return getCachedAccountAvatarDataUrl(accountId) || remoteUrl;
+}
+
+export function setCachedAccountAvatarDataUrl(accountId?: string, dataUrl?: string): void {
+  const cleanId = String(accountId || '').trim();
+  if (!cleanId || !dataUrl || !dataUrl.startsWith('data:image/')) return;
+  ensureAccountAvatarCacheLoaded();
+  accountAvatarMemoryCache.delete(cleanId);
+  accountAvatarMemoryCache.set(cleanId, dataUrl);
+  accountAvatarNoPhotoCooldown.delete(cleanId);
+  persistAccountAvatarCache();
+}
+
+export function invalidateCachedAccountAvatar(accountId?: string): void {
+  const cleanId = String(accountId || '').trim();
+  if (!cleanId) return;
+  ensureAccountAvatarCacheLoaded();
+  accountAvatarMemoryCache.delete(cleanId);
+  accountAvatarNoPhotoCooldown.delete(cleanId);
+  persistAccountAvatarCache();
+}
+
+async function convertBlobToCompactDataUrl(blob: Blob): Promise<string | null> {
+  if (!blob || blob.size === 0 || !blob.type.startsWith('image/')) return null;
+  if (blob.size <= 64 * 1024 || typeof document === 'undefined') {
+    return await new Promise<string | null>((resolve) => {
+      try {
+        const reader = new FileReader();
+        reader.onload = () => {
+          const res = typeof reader.result === 'string' ? reader.result : '';
+          resolve(res.startsWith('data:image/') ? res : null);
+        };
+        reader.onerror = () => resolve(null);
+        reader.readAsDataURL(blob);
+      } catch {
+        resolve(null);
+      }
+    });
+  }
+  const objectUrl = URL.createObjectURL(blob);
+  try {
+    const img = await new Promise<HTMLImageElement | null>((resolve) => {
+      const el = new Image();
+      el.onload = () => resolve(el);
+      el.onerror = () => resolve(null);
+      el.src = objectUrl;
+    });
+    if (!img) return null;
+    const maxDim = 128;
+    const w = img.naturalWidth || maxDim;
+    const h = img.naturalHeight || maxDim;
+    const scale = Math.min(1, maxDim / Math.max(w, h));
+    const targetW = Math.max(1, Math.round(w * scale));
+    const targetH = Math.max(1, Math.round(h * scale));
+    const canvas = document.createElement('canvas');
+    canvas.width = targetW;
+    canvas.height = targetH;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return null;
+    ctx.drawImage(img, 0, 0, targetW, targetH);
+    const out = canvas.toDataURL('image/jpeg', 0.86);
+    return out.startsWith('data:image/') ? out : null;
+  } catch {
+    return null;
+  } finally {
+    URL.revokeObjectURL(objectUrl);
+  }
+}
+
+export async function cacheAccountAvatarFromUrl(
+  accountId?: string,
+  avatarUrl?: string,
+  options?: { force?: boolean }
+): Promise<string | null> {
+  const cleanId = String(accountId || '').trim();
+  const cleanUrl = String(avatarUrl || '').trim();
+  if (!cleanId || !cleanUrl || typeof window === 'undefined') return null;
+
+  ensureAccountAvatarCacheLoaded();
+  if (cleanUrl.startsWith('data:image/')) {
+    setCachedAccountAvatarDataUrl(cleanId, cleanUrl);
+    return cleanUrl;
+  }
+
+  if (!options?.force) {
+    const existing = accountAvatarMemoryCache.get(cleanId);
+    if (existing) return existing;
+    const noPhotoUntil = accountAvatarNoPhotoCooldown.get(cleanId) || 0;
+    if (noPhotoUntil > Date.now()) return null;
+  } else {
+    accountAvatarNoPhotoCooldown.delete(cleanId);
+  }
+
+  const flightKey = `${cleanId}::${options?.force ? 'force' : cleanUrl}`;
+  const existingFlight = accountAvatarCacheInFlight.get(flightKey);
+  if (existingFlight) return await existingFlight;
+
+  const task = (async (): Promise<string | null> => {
+    try {
+      const res = await fetchWithTimeout(
+        cleanUrl,
+        {
+          method: 'GET',
+          credentials: 'same-origin',
+        },
+        10000
+      );
+      if (res.status === 404) {
+        accountAvatarNoPhotoCooldown.set(cleanId, Date.now() + 5 * 60 * 1000);
+        return null;
+      }
+      if (!res.ok) return null;
+      const blob = await res.blob();
+      const dataUrl = await convertBlobToCompactDataUrl(blob);
+      if (dataUrl) {
+        setCachedAccountAvatarDataUrl(cleanId, dataUrl);
+      }
+      return dataUrl;
+    } catch {
+      return null;
+    } finally {
+      accountAvatarCacheInFlight.delete(flightKey);
+    }
+  })();
+
+  accountAvatarCacheInFlight.set(flightKey, task);
+  return await task;
 }
 
 

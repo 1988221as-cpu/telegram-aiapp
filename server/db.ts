@@ -663,6 +663,23 @@ export async function initDatabase() {
   try {
     await db.exec(`ALTER TABLE messages ADD COLUMN system_event_type TEXT DEFAULT ''`);
   } catch {}
+  try {
+    await db.exec(`ALTER TABLE messages ADD COLUMN client_message_id TEXT`);
+  } catch {}
+  try {
+    await db.exec(`ALTER TABLE messages ADD COLUMN queue_pause_reason TEXT`);
+  } catch {}
+  try {
+    await db.exec(`ALTER TABLE messages ADD COLUMN flood_wait_until INTEGER`);
+  } catch {}
+  try {
+    await db.exec(`CREATE INDEX IF NOT EXISTS idx_messages_account_client_msg ON messages (account_id, client_message_id)`);
+  } catch {}
+  try {
+    await db.exec(
+      `UPDATE messages SET delivery_status = 'failed' WHERE sender = 'me' AND delivery_status IN ('pending', 'retrying')`
+    );
+  } catch {}
 
   try {
     await db.exec(`ALTER TABLE knowledge_base ADD COLUMN account_id TEXT DEFAULT 'global'`);
