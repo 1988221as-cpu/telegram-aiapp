@@ -77,17 +77,40 @@ export const UnifiedRightDock: React.FC<UnifiedRightDockProps> = ({
   isMasterVoiceActive,
 }) => {
   const pointerDownOnBackdropRef = useRef(false);
+  const dialogRef = useRef<HTMLElement>(null);
+  const previousFocusRef = useRef<HTMLElement | null>(null);
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
+  const isOpen = Boolean(activePanel);
 
   useEffect(() => {
-    if (!activePanel) return;
+    if (!isOpen) return;
+    previousFocusRef.current =
+      document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const rafId = window.requestAnimationFrame(() => {
+      const panelEl = dialogRef.current;
+      if (panelEl && !panelEl.contains(document.activeElement)) {
+        panelEl.focus({ preventScroll: true });
+      }
+    });
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
-        onClose();
+        e.preventDefault();
+        e.stopPropagation();
+        onCloseRef.current();
       }
     };
     window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [activePanel, onClose]);
+    return () => {
+      window.cancelAnimationFrame(rafId);
+      window.removeEventListener('keydown', handleKeyDown);
+      const prevEl = previousFocusRef.current;
+      previousFocusRef.current = null;
+      if (prevEl && prevEl.isConnected) {
+        prevEl.focus({ preventScroll: true });
+      }
+    };
+  }, [isOpen]);
 
   if (!activePanel) return null;
 
@@ -116,13 +139,15 @@ export const UnifiedRightDock: React.FC<UnifiedRightDockProps> = ({
     >
       {/* Standalone Modal Page Overlay (Detached from Chat Workspace) */}
       <section
+        ref={dialogRef}
+        tabIndex={-1}
         role="dialog"
         aria-modal="true"
         aria-label={activeMeta.title}
         onClick={(e) => e.stopPropagation()}
         className={`w-full ${
           activePanel === 'persona' ? 'max-w-5xl' : 'max-w-3xl'
-        } h-[88vh] max-h-[860px] rounded-2xl flex flex-col overflow-hidden bg-white/95 dark:bg-[#09111b]/95 aurora:bg-[#0c151b]/95 linen:bg-[#f8f2e7]/96 backdrop-blur-xl border border-[#e2e8f0] dark:border-[#1e3148] aurora:border-[#1c343e] linen:border-[#d5c6ae] shadow-2xl linen:shadow-sm text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118] select-none transition-colors animate-in zoom-in-95 fade-in duration-150`}
+        } h-[88vh] max-h-[860px] rounded-2xl flex flex-col overflow-hidden bg-white dark:bg-[#09111b] aurora:bg-[#0c151b] linen:bg-[#f8f2e7] border border-[#e2e8f0] dark:border-[#1e3148] aurora:border-[#1c343e] linen:border-[#d5c6ae] shadow-2xl linen:shadow-sm text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118] select-none outline-none transition-colors animate-in zoom-in-95 fade-in duration-150`}
       >
         {/* Top Precision Hairline Accent */}
         <div className="h-[2px] w-full bg-gradient-to-r from-transparent via-[#2481cc]/60 dark:via-[#2ba0ff]/75 aurora:via-[#2dd4bf]/80 linen:via-[#a86a43]/75 to-transparent shrink-0" />

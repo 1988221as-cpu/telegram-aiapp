@@ -142,7 +142,7 @@ interface ContextMenuState {
   y: number;
 }
 
-export const ChatList: React.FC<ChatListProps> = ({
+export const ChatList: React.FC<ChatListProps> = React.memo(({
   chats,
   activeChatId,
   onSelectChat,
@@ -223,6 +223,7 @@ export const ChatList: React.FC<ChatListProps> = ({
   const chatAvatarRetryTimersRef = useRef<Record<string, number>>({});
   const [nowTick, setNowTick] = useState<number>(() => Date.now());
   const attemptedAvatarRefreshRef = useRef<Set<string>>(new Set());
+  const backdropPointerDownTargetRef = useRef<EventTarget | null>(null);
 
   useEffect(() => {
     return () => {
@@ -334,9 +335,6 @@ export const ChatList: React.FC<ChatListProps> = ({
       document.body.style.userSelect = '';
       window.removeEventListener('mousemove', handleMouseMove);
       window.removeEventListener('mouseup', handleMouseUp);
-      try {
-        localStorage.setItem('tg_pro_chatlist_width', String(startWidthRef.current));
-      } catch {}
     };
 
     window.addEventListener('mousemove', handleMouseMove);
@@ -344,34 +342,50 @@ export const ChatList: React.FC<ChatListProps> = ({
   };
 
   useEffect(() => {
+    if (isResizing) return;
     try {
       localStorage.setItem('tg_pro_chatlist_width', String(width));
     } catch {}
-  }, [width]);
+  }, [width, isResizing]);
 
-  // Close context menu on outside click, ESC, scroll or resize
+  // Close context menu on outside click, scroll or resize
   useEffect(() => {
+    if (!contextMenu) return;
     const handleCloseMenu = () => setContextMenu(null);
+    window.addEventListener('click', handleCloseMenu);
+    window.addEventListener('resize', handleCloseMenu);
+    window.addEventListener('scroll', handleCloseMenu, true);
+    return () => {
+      window.removeEventListener('click', handleCloseMenu);
+      window.removeEventListener('resize', handleCloseMenu);
+      window.removeEventListener('scroll', handleCloseMenu, true);
+    };
+  }, [contextMenu]);
+
+  // Close context menu / preview modal / delete modal on ESC
+  useEffect(() => {
+    if (!contextMenu && !previewChat && !chatToDelete) return;
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
-        setContextMenu(null);
-        setPreviewChat(null);
-        setChatToDelete(null);
+        e.preventDefault();
+        e.stopPropagation();
+        if (chatToDelete) {
+          setChatToDelete(null);
+          setRevokeDeleteChat(false);
+          return;
+        }
+        if (previewChat) {
+          setPreviewChat(null);
+          return;
+        }
+        if (contextMenu) {
+          setContextMenu(null);
+        }
       }
     };
-    if (contextMenu) {
-      window.addEventListener('click', handleCloseMenu);
-      window.addEventListener('keydown', handleKeyDown);
-      window.addEventListener('resize', handleCloseMenu);
-      window.addEventListener('scroll', handleCloseMenu, true);
-      return () => {
-        window.removeEventListener('click', handleCloseMenu);
-        window.removeEventListener('keydown', handleKeyDown);
-        window.removeEventListener('resize', handleCloseMenu);
-        window.removeEventListener('scroll', handleCloseMenu, true);
-      };
-    }
-  }, [contextMenu]);
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [contextMenu, previewChat, chatToDelete]);
 
   // Context Menu Trigger
   const handleOpenContextMenu = (chat: Chat, e: React.MouseEvent, anchorToButton = false) => {
@@ -522,7 +536,7 @@ export const ChatList: React.FC<ChatListProps> = ({
   return (
     <div
       style={{ width: `clamp(168px, 36vw, ${width}px)` }}
-      className="bg-white/95 dark:bg-[#09111d]/95 aurora:bg-[#0f171c]/95 linen:hs-linen-list-bg backdrop-blur-md border-r border-[#e2e8f0] dark:border-[#162436] aurora:border-[#182b34] linen:border-[#cbbba2] flex flex-col h-full shrink-0 select-none transition-colors relative"
+      className="bg-white dark:bg-[#09111d] aurora:bg-[#0f171c] linen:hs-linen-list-bg border-r border-[#e2e8f0] dark:border-[#162436] aurora:border-[#182b34] linen:border-[#cbbba2] flex flex-col h-full shrink-0 select-none transition-colors relative"
     >
       {/* 1. Top Header: Search Bar + Compact New Chat Button */}
       <div className="h-[56px] px-2.5 flex items-center gap-2 border-b border-[#e2e8f0] dark:border-[#162436] aurora:border-[#182b34] linen:border-[#d5c6b0] shrink-0">
@@ -853,7 +867,7 @@ export const ChatList: React.FC<ChatListProps> = ({
                 }}
                 onClick={() => onSelectChat(chat.id)}
                 onContextMenu={(e) => handleOpenContextMenu(chat, e)}
-                className={`mx-1.5 flex items-center px-2.5 py-2.5 rounded-xl cursor-pointer transition-all relative group border ${
+                className={`mx-1.5 flex items-center px-2.5 py-2.5 rounded-xl cursor-pointer transition-colors relative group border ${
                   isDraggingThis ? 'opacity-45 ' : ''
                 }${
                   isDropBefore ? 'border-t-2 border-t-[#2481cc] dark:border-t-[#2ba0ff] aurora:border-t-[#2dd4bf] linen:border-t-[#a86a43] ' : ''
@@ -880,8 +894,9 @@ export const ChatList: React.FC<ChatListProps> = ({
                         <span className="text-white text-xs font-semibold select-none">{chat.avatarInitial}</span>
                         {(() => {
                           const effectiveAvatarUrl = resolveAvatarUrl(chat.avatarUrl);
-                          const retryCount = chatAvatarRetryNonce[chat.id] || 0;
-                          const failKey = `${chat.id}|${effectiveAvatarUrl || ''}|${retryCount}`;
+                          const retryBucketKey = `${chat.accountId || 'default'}::${chat.id}::${currentAccountStatus || ''}`;
+                          const retryCount = chatAvatarRetryNonce[retryBucketKey] || 0;
+                          const failKey = `${retryBucketKey}|${effectiveAvatarUrl || ''}|${retryCount}`;
                           if (!effectiveAvatarUrl || failedChatAvatars[failKey]) return null;
                           return (
                             <img
@@ -894,6 +909,10 @@ export const ChatList: React.FC<ChatListProps> = ({
                               className="w-full h-full object-cover absolute inset-0"
                               onLoad={(e) => {
                                 e.currentTarget.style.display = '';
+                                if (chatAvatarRetryTimersRef.current[retryBucketKey]) {
+                                  window.clearTimeout(chatAvatarRetryTimersRef.current[retryBucketKey]);
+                                  delete chatAvatarRetryTimersRef.current[retryBucketKey];
+                                }
                                 setFailedChatAvatars((prev) => {
                                   if (!(failKey in prev)) return prev;
                                   const next = { ...prev };
@@ -904,11 +923,11 @@ export const ChatList: React.FC<ChatListProps> = ({
                               onError={() => {
                                 setFailedChatAvatars((prev) => ({ ...prev, [failKey]: true }));
                                 void triggerAvatarRefresh(chat.avatarUrl, true).then((nextUrl) => {
-                                  if (!nextUrl && retryCount < 2 && !chatAvatarRetryTimersRef.current[chat.id]) {
+                                  if (!nextUrl && retryCount < 2 && !chatAvatarRetryTimersRef.current[retryBucketKey]) {
                                     const delayMs = retryCount === 0 ? 2500 : 6500;
-                                    chatAvatarRetryTimersRef.current[chat.id] = window.setTimeout(() => {
-                                      delete chatAvatarRetryTimersRef.current[chat.id];
-                                      setChatAvatarRetryNonce((p) => ({ ...p, [chat.id]: (p[chat.id] || 0) + 1 }));
+                                    chatAvatarRetryTimersRef.current[retryBucketKey] = window.setTimeout(() => {
+                                      delete chatAvatarRetryTimersRef.current[retryBucketKey];
+                                      setChatAvatarRetryNonce((p) => ({ ...p, [retryBucketKey]: (p[retryBucketKey] || 0) + 1 }));
                                     }, delayMs);
                                   }
                                 });
@@ -1210,8 +1229,26 @@ export const ChatList: React.FC<ChatListProps> = ({
 
       {/* 6. Quick Preview Modal */}
       {previewChat && typeof document !== 'undefined' && createPortal(
-        <div className="fixed inset-0 z-[9996] flex items-center justify-center p-4 bg-black/55 dark:bg-black/75 aurora:bg-black/80 backdrop-blur-xs select-none">
-          <div className="bg-white dark:bg-[#0b131f] aurora:bg-[#0c151b] linen:bg-[#f8f2e7] border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] linen:border-[#d5c6ae] rounded-2xl w-full max-w-sm overflow-hidden shadow-2xl linen:shadow-sm p-5 animate-in fade-in zoom-in-95 duration-150">
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-label={`预览 ${previewChat.title}`}
+          onMouseDown={(e) => {
+            backdropPointerDownTargetRef.current = e.target;
+          }}
+          onClick={(e) => {
+            const startedOnBackdrop = backdropPointerDownTargetRef.current === e.currentTarget;
+            backdropPointerDownTargetRef.current = null;
+            if (startedOnBackdrop && e.target === e.currentTarget) {
+              setPreviewChat(null);
+            }
+          }}
+          className="fixed inset-0 z-[9996] flex items-center justify-center p-4 bg-black/55 dark:bg-black/75 aurora:bg-black/80 backdrop-blur-xs select-none"
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            className="bg-white dark:bg-[#0b131f] aurora:bg-[#0c151b] linen:bg-[#f8f2e7] border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] linen:border-[#d5c6ae] rounded-2xl w-full max-w-sm overflow-hidden shadow-2xl linen:shadow-sm p-5 animate-in fade-in zoom-in-95 duration-150"
+          >
             <div className="flex items-start justify-between mb-4">
               <div className="flex items-center gap-3">
                 <div
@@ -1283,8 +1320,27 @@ export const ChatList: React.FC<ChatListProps> = ({
 
       {/* 7. Delete Chat Confirmation Modal */}
       {chatToDelete && typeof document !== 'undefined' && createPortal(
-        <div className="fixed inset-0 z-[9996] flex items-center justify-center p-4 bg-black/55 dark:bg-black/75 aurora:bg-black/80 backdrop-blur-xs select-none">
-          <div className="bg-white dark:bg-[#0b131f] aurora:bg-[#0c151b] linen:bg-[#f8f2e7] border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] linen:border-[#d5c6ae] rounded-2xl w-full max-w-sm overflow-hidden shadow-2xl linen:shadow-sm p-5 animate-in fade-in zoom-in-95 duration-150">
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-label="删除对话确认"
+          onMouseDown={(e) => {
+            backdropPointerDownTargetRef.current = e.target;
+          }}
+          onClick={(e) => {
+            const startedOnBackdrop = backdropPointerDownTargetRef.current === e.currentTarget;
+            backdropPointerDownTargetRef.current = null;
+            if (startedOnBackdrop && e.target === e.currentTarget) {
+              setChatToDelete(null);
+              setRevokeDeleteChat(false);
+            }
+          }}
+          className="fixed inset-0 z-[9996] flex items-center justify-center p-4 bg-black/55 dark:bg-black/75 aurora:bg-black/80 backdrop-blur-xs select-none"
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            className="bg-white dark:bg-[#0b131f] aurora:bg-[#0c151b] linen:bg-[#f8f2e7] border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] linen:border-[#d5c6ae] rounded-2xl w-full max-w-sm overflow-hidden shadow-2xl linen:shadow-sm p-5 animate-in fade-in zoom-in-95 duration-150"
+          >
             <h4 className="font-bold text-base text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118] mb-2">
               {chatToDelete.isGroup || chatToDelete.isChannel
                 ? `退出并删除该${chatToDelete.isChannel ? '频道' : '群组'}？`
@@ -1338,4 +1394,4 @@ export const ChatList: React.FC<ChatListProps> = ({
       )}
     </div>
   );
-};
+});

@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { LeftSidebar } from './components/LeftSidebar';
 import { ChatList } from './components/ChatList';
 import { ChatArea, detectClientLangCode } from './components/ChatArea';
@@ -1675,7 +1675,7 @@ export default function App() {
     if (accountMetaRes?.ok) {
       accountMetaHydratedRef.current = true;
       if (Array.isArray(accountMetaRes.groups) && accountMetaRes.groups.length > 0) {
-        setAccountGroups((prev) => (prev.length > 0 ? prev : accountMetaRes.groups!));
+        setAccountGroups(accountMetaRes.groups);
       }
     }
 
@@ -2856,6 +2856,10 @@ export default function App() {
         ? translationSettings.autoTranslateGroups === true
         : translationSettings.autoTranslatePrivate !== false;
   const backfillScopeKey = `${activeAccountId}::${activeChatId || ''}::${backfillTargetLang}::${backfillSourceLang}::${backfillHistoryEngine}::${translationSettings.autoTranslateInbound !== false}::${isActiveChatTranslationEnabled}::${translationSettings.googleApiKey || ''}`;
+  const activeBackfillMessages =
+    activeAccountId && activeChatId
+      ? getBucketMessages(messagesMap, activeAccountId, activeChatId)
+      : undefined;
 
   useEffect(() => {
     return () => {
@@ -2901,8 +2905,8 @@ export default function App() {
     const targetChatId = activeChatId;
     const targetAccountId = activeAccountId;
     const targetBucketKey = msgBucketKey(targetAccountId, targetChatId);
-    const currentMsgs = getBucketMessages(messagesMap, targetAccountId, targetChatId);
-    if (currentMsgs.length === 0) return;
+    const currentMsgs = activeBackfillMessages;
+    if (!currentMsgs || currentMsgs.length === 0) return;
 
     const nowTs = Date.now();
     const targetNorm = normalizeLanguageCode(backfillTargetLang);
@@ -3159,7 +3163,7 @@ export default function App() {
     isMemberAuthenticated,
     activeChatId,
     activeAccountId,
-    messagesMap,
+    activeBackfillMessages,
     backfillScopeKey,
     backfillTargetLang,
     backfillSourceLang,
@@ -4113,81 +4117,92 @@ export default function App() {
               arr.push(item);
               groupsByLang.set(gKey, arr);
             }
+            const translationChunks: Array<typeof pendingLiveTranslations> = [];
             for (const items of groupsByLang.values()) {
               for (let i = 0; i < items.length; i += 10) {
-                const chunk = items.slice(i, i + 10);
+                translationChunks.push(items.slice(i, i + 10));
+              }
+            }
+            let nextChunkIdx = 0;
+            const MAX_LIVE_TRANS_CONCURRENCY = 2;
+            const runTranslationWorker = async () => {
+              while (isMounted && nextChunkIdx < translationChunks.length) {
+                const chunk = translationChunks[nextChunkIdx++];
                 const first = chunk[0];
-                translateBatchTexts(
-                  chunk.map((c) => ({ id: c.msg.id, text: c.msg.text })),
-                  first.sourceLang,
-                  first.targetLang,
-                  effectiveInboundEngine,
-                  currentTransSettings.googleApiKey,
-                  first.isGroup ? { purpose: 'group', isGroup: true } : { purpose: 'inbound' }
-                )
-                  .then((translations) => {
-                    const patchByBucket = new Map<string, Map<string, Partial<Message>>>();
-                    chunk.forEach((c, idx) => {
-                      const itemRes = translations[idx];
-                      const trans = itemRes?.translatedText;
-                      if (trans && trans.trim() && trans.trim().toLowerCase() !== c.trimmedText.toLowerCase()) {
-                        updateMessageTranslationInDb(c.msg.id, trans, {
-                          chatId: c.chatId,
-                          telegramMessageId: c.msg.telegramMessageId,
-                          accountId: c.accountId,
-                        }).catch(() => {});
-                        const mMap = patchByBucket.get(c.bucketKey) || new Map<string, Partial<Message>>();
-                        mMap.set(c.msg.id, {
-                          translatedText: trans,
-                          translationError: undefined,
-                          translationErrorChannel: undefined,
-                        });
-                        patchByBucket.set(c.bucketKey, mMap);
-                      } else if (itemRes?.error) {
-                        const mMap = patchByBucket.get(c.bucketKey) || new Map<string, Partial<Message>>();
-                        mMap.set(c.msg.id, {
-                          translationError: itemRes.error,
-                          translationErrorChannel: engineToLiveErrorChannel(effectiveInboundEngine),
-                        });
-                        patchByBucket.set(c.bucketKey, mMap);
-                      }
-                    });
-                    if (patchByBucket.size > 0) {
-                      setMessagesMap((prevMap) => {
-                        let changed = false;
-                        const nextMap = { ...prevMap };
-                        for (const [bKey, idPatches] of patchByBucket.entries()) {
-                          const list = nextMap[bKey];
-                          if (!Array.isArray(list)) continue;
-                          nextMap[bKey] = list.map((m) => (idPatches.has(m.id) ? { ...m, ...idPatches.get(m.id)! } : m));
-                          changed = true;
-                        }
-                        return changed ? nextMap : prevMap;
-                      });
-                    }
-                  })
-                  .catch(() => {
-                    const errPatchByBucket = new Map<string, Map<string, Partial<Message>>>();
-                    for (const c of chunk) {
-                      const mMap = errPatchByBucket.get(c.bucketKey) || new Map<string, Partial<Message>>();
+                try {
+                  const translations = await translateBatchTexts(
+                    chunk.map((c) => ({ id: c.msg.id, text: c.msg.text })),
+                    first.sourceLang,
+                    first.targetLang,
+                    effectiveInboundEngine,
+                    currentTransSettings.googleApiKey,
+                    first.isGroup ? { purpose: 'group', isGroup: true } : { purpose: 'inbound' }
+                  );
+                  if (!isMounted) return;
+                  const patchByBucket = new Map<string, Map<string, Partial<Message>>>();
+                  chunk.forEach((c, idx) => {
+                    const itemRes = translations[idx];
+                    const trans = itemRes?.translatedText;
+                    if (trans && trans.trim() && trans.trim().toLowerCase() !== c.trimmedText.toLowerCase()) {
+                      updateMessageTranslationInDb(c.msg.id, trans, {
+                        chatId: c.chatId,
+                        telegramMessageId: c.msg.telegramMessageId,
+                        accountId: c.accountId,
+                      }).catch(() => {});
+                      const mMap = patchByBucket.get(c.bucketKey) || new Map<string, Partial<Message>>();
                       mMap.set(c.msg.id, {
-                        translationError: '翻译失败，请检查翻译通道',
+                        translatedText: trans,
+                        translationError: undefined,
+                        translationErrorChannel: undefined,
+                      });
+                      patchByBucket.set(c.bucketKey, mMap);
+                    } else if (itemRes?.error) {
+                      const mMap = patchByBucket.get(c.bucketKey) || new Map<string, Partial<Message>>();
+                      mMap.set(c.msg.id, {
+                        translationError: itemRes.error,
                         translationErrorChannel: engineToLiveErrorChannel(effectiveInboundEngine),
                       });
-                      errPatchByBucket.set(c.bucketKey, mMap);
+                      patchByBucket.set(c.bucketKey, mMap);
                     }
+                  });
+                  if (patchByBucket.size > 0) {
                     setMessagesMap((prevMap) => {
+                      let changed = false;
                       const nextMap = { ...prevMap };
-                      for (const [bKey, idPatches] of errPatchByBucket.entries()) {
+                      for (const [bKey, idPatches] of patchByBucket.entries()) {
                         const list = nextMap[bKey];
                         if (!Array.isArray(list)) continue;
                         nextMap[bKey] = list.map((m) => (idPatches.has(m.id) ? { ...m, ...idPatches.get(m.id)! } : m));
+                        changed = true;
                       }
-                      return nextMap;
+                      return changed ? nextMap : prevMap;
                     });
+                  }
+                } catch {
+                  if (!isMounted) return;
+                  const errPatchByBucket = new Map<string, Map<string, Partial<Message>>>();
+                  for (const c of chunk) {
+                    const mMap = errPatchByBucket.get(c.bucketKey) || new Map<string, Partial<Message>>();
+                    mMap.set(c.msg.id, {
+                      translationError: '翻译失败，请检查翻译通道',
+                      translationErrorChannel: engineToLiveErrorChannel(effectiveInboundEngine),
+                    });
+                    errPatchByBucket.set(c.bucketKey, mMap);
+                  }
+                  setMessagesMap((prevMap) => {
+                    const nextMap = { ...prevMap };
+                    for (const [bKey, idPatches] of errPatchByBucket.entries()) {
+                      const list = nextMap[bKey];
+                      if (!Array.isArray(list)) continue;
+                      nextMap[bKey] = list.map((m) => (idPatches.has(m.id) ? { ...m, ...idPatches.get(m.id)! } : m));
+                    }
+                    return nextMap;
                   });
+                }
               }
-            }
+            };
+            const workerCount = Math.min(MAX_LIVE_TRANS_CONCURRENCY, translationChunks.length);
+            void Promise.all(Array.from({ length: workerCount }, () => runTranslationWorker()));
           }
 
           // Apply all message updates in ONE single pure React state transition merged against latest prev
@@ -4764,6 +4779,9 @@ export default function App() {
         const errMsg = cloudRes.error || '同步云端联系人备注失败';
         showCloudError(errMsg);
         return { ok: false, error: errMsg };
+      }
+      if (cloudRes.cloudSynced === false) {
+        showCloudError('当前账号未连接 Telegram，备注已保存至本地，暂未同步到云端');
       }
     }
     if (targetAccountId) {
@@ -6342,16 +6360,31 @@ export default function App() {
 
   const currentAccount = accounts.find((a) => a.id === activeAccountId) || accounts[0];
 
+  const accountsWithUnread = useMemo(() => {
+    const unreadByAccount = new Map<string, number>();
+    for (const chat of chats) {
+      if (chat.isArchived || !chat.accountId) continue;
+      unreadByAccount.set(
+        chat.accountId,
+        (unreadByAccount.get(chat.accountId) || 0) + (chat.unreadCount || 0)
+      );
+    }
+    return accounts.map((a) => ({
+      ...a,
+      unreadTotal: unreadByAccount.get(a.id) || 0,
+    }));
+  }, [accounts, chats]);
+
+  const contactChatIdSet = useMemo(
+    () => new Set(contacts.filter((ct) => ct.isContact !== false).map((ct) => ct.id)),
+    [contacts]
+  );
+
   return (
     <div className="flex h-screen w-screen overflow-hidden bg-[#f4f7fb] text-[#0f172a] dark:bg-[#05080f] dark:text-[#eef4fb] aurora:bg-[#081116] aurora:text-[#ecf6f8] linen:bg-[#ddd2bc] linen:text-[#2b2118] font-sans antialiased transition-colors">
       {/* 1. Leftmost Features & Multi-Account Activity Rail (56px) */}
       <LeftSidebar
-        accounts={accounts.map((a) => ({
-          ...a,
-          unreadTotal: chats
-            .filter((c) => c.accountId === a.id && !c.isArchived)
-            .reduce((sum, c) => sum + (c.unreadCount || 0), 0),
-        }))}
+        accounts={accountsWithUnread}
         accountGroups={accountGroups}
         activeAccountId={activeAccountId}
         onSelectAccount={(accountId) => {
@@ -6361,6 +6394,9 @@ export default function App() {
         onUpdateAccountRemark={(accountId, remark) => {
           const normalized = remark.trim();
           handleUpdateCurrentAccount({ remark: normalized || undefined }, accountId);
+          if (isMemberAuthenticated) {
+            void saveTelegramAccountMetaApi({ accountId, remark: normalized }).catch(() => {});
+          }
         }}
         onUpdateAccountMeta={handleUpdateAccountMeta}
         onCreateAccountGroup={handleCreateAccountGroup}
@@ -6480,7 +6516,7 @@ export default function App() {
           }}
           onRefreshMediaUrls={handleRefreshMediaUrls}
           customFolders={activeAccountId ? (foldersByAccount[activeAccountId] || []) : []}
-          contactChatIds={new Set(contacts.filter((ct) => ct.isContact !== false).map((ct) => ct.id))}
+          contactChatIds={contactChatIdSet}
           customChatOrder={activeAccountId ? (chatOrderByAccount[activeAccountId] || []) : []}
           onReorderChats={handleReorderChats}
           onResetChatOrder={handleResetChatOrder}
@@ -6539,17 +6575,26 @@ export default function App() {
           onSelectChat={(targetChatId) => void handleSelectChat(targetChatId)}
           onRemoveContact={handleRemoveContact}
           onChatInfoUpdated={(chatId, patch) => {
+            const existingChat = chatsRef.current.find(
+              (c) => c.id === chatId && (!activeAccountId || c.accountId === activeAccountId)
+            );
+            const preserveCustomTitle = Boolean(existingChat?.hasCustomRemark);
             setChats((prev) =>
-              prev.map((c) =>
-                c.id === chatId && (!activeAccountId || c.accountId === activeAccountId)
-                  ? { ...c, ...patch }
-                  : c
-              )
+              prev.map((c) => {
+                if (c.id === chatId && (!activeAccountId || c.accountId === activeAccountId)) {
+                  if (c.hasCustomRemark) {
+                    const { title: _ignoredTitle, ...restPatch } = patch;
+                    return { ...c, ...restPatch };
+                  }
+                  return { ...c, ...patch };
+                }
+                return c;
+              })
             );
             if (typeof patch.isBlocked === 'boolean') {
               handleContactBlockChanged(chatId, patch.isBlocked);
             }
-            if (typeof patch.title === 'string' && patch.title.trim()) {
+            if (!preserveCustomTitle && typeof patch.title === 'string' && patch.title.trim()) {
               const nextTitle = patch.title.trim();
               setContacts((prev) => {
                 let changed = false;

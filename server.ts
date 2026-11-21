@@ -2837,6 +2837,16 @@ export function syncAccountReconnectLifecycleMarkers(
   }
 }
 
+export function markTelegramAccountTrafficAlive(accountScope: string, now = Date.now()): void {
+  const runtimeKey = resolveTelegramAccountRuntimeKey({ accountId: accountScope }) || String(accountScope || '').trim();
+  if (!runtimeKey) return;
+  const runtime = telegramAccountRuntimeStates.get(runtimeKey);
+  if (!runtime) return;
+  runtime.lastConnectedAt = now;
+  runtime.reconnectProbeFailures = 0;
+  runtime.suspectedStuckWarningAt = null;
+}
+
 export function attachTelegramConnectionStateTracker(
   client: TelegramClient | null | undefined,
   meta: { userId?: string; phone?: string; accountId?: string }
@@ -3282,6 +3292,7 @@ function drainRpcSchedulerBucket(accountKey: string, bucket: AccountRpcScheduler
       .then(
         (res) => {
           rpcSchedulerTelemetry.completedTotal += 1;
+          markTelegramAccountTrafficAlive(accountKey);
           activeTask.resolve(res);
         },
         (err) => {
@@ -25368,6 +25379,32 @@ function writeAvatarToDiskCache(cacheKey: string, buffer: Buffer): void {
   } catch {}
 }
 
+function deleteAvatarDiskCache(cacheKey: string): void {
+  try {
+    const filePath = resolveAvatarDiskPath(cacheKey);
+    if (filePath && fs.existsSync(filePath)) {
+      fs.unlinkSync(filePath);
+    }
+  } catch {}
+}
+
+function invalidateTelegramAvatarCacheEntries(userId: string, peerId: string, extraKeys: string[] = []): void {
+  const cleanPeer = String(peerId || '').replace(/^tg_/, '').trim();
+  const keys = new Set<string>(extraKeys.filter(Boolean));
+  if (cleanPeer) {
+    keys.add(cleanPeer);
+    if (userId) {
+      keys.add(`acc_tg_${userId}:${cleanPeer}`);
+      keys.add(`${userId}:${cleanPeer}`);
+    }
+    keys.add(`shared:${cleanPeer}`);
+  }
+  for (const k of keys) {
+    telegramAvatarCache.delete(k);
+    deleteAvatarDiskCache(k);
+  }
+}
+
 interface AvatarNegativeEntry {
   reason: 'no_photo' | 'rpc_error';
   expiresAt: number;
@@ -25660,6 +25697,10 @@ export async function fetchTelegramAvatarWithLimiting(opts: {
               { buffer: fresh, mime: 'image/jpeg', expiresAt: ts + TELEGRAM_AVATAR_CACHE_TTL_MS },
               ts
             );
+          } else {
+            telegramAvatarCache.delete(cacheKey);
+            deleteAvatarDiskCache(cacheKey);
+            setAvatarNegativeCache(cacheKey, 'no_photo', Date.now());
           }
         } catch {} finally {
           telegramAvatarBgRefreshInFlight.delete(cacheKey);
@@ -26686,52 +26727,63 @@ app.get('/api/telegram/user/accounts/meta', requireTenantAuth, async (req: Reque
 app.put('/api/telegram/user/accounts/meta', requireTenantAuth, async (req: Request, res: Response) => {
   try {
     const now = Date.now();
+    const authContext = (req as any).auth;
+    const isMaster = Boolean(authContext?.session?.isMaster);
     const { accountId: rawAccountId, remark, groupId, groups } = req.body || {};
+    if (Array.isArray(groups) && !isMaster) {
+      return res.status(403).json({ ok: false, error: '仅主控管理员可修改账号分组配置' });
+    }
+    let targetId = '';
     if (typeof rawAccountId === 'string' && rawAccountId.trim()) {
       const scope = resolveScopedAccountFromRequest(req, { allowBot: true });
       if (!scope.ok) {
         return res.status(scope.status).json({ ok: false, code: scope.code, error: scope.error });
       }
-      const targetId = scope.accountId || rawAccountId.trim();
-      const nextRemark = remark === undefined ? undefined : (typeof remark === 'string' ? remark.trim() || null : null);
-      const nextGroupId = groupId === undefined ? undefined : (typeof groupId === 'string' ? groupId.trim() || null : null);
-      await db
-        .prepare(`
-          INSERT INTO telegram_account_meta (account_id, remark, group_id, updated_at)
-          VALUES (?, ?, ?, ?)
-          ON CONFLICT(account_id) DO UPDATE SET
-            remark = COALESCE(?, telegram_account_meta.remark),
-            group_id = COALESCE(?, telegram_account_meta.group_id),
-            updated_at = excluded.updated_at
-        `)
-        .run(
-          targetId,
-          nextRemark !== undefined ? nextRemark : null,
-          nextGroupId !== undefined ? nextGroupId : null,
-          now,
-          nextRemark !== undefined ? nextRemark : null,
-          nextGroupId !== undefined ? nextGroupId : null
-        );
-      if (remark === '' || remark === null) {
-        await db.prepare(`UPDATE telegram_account_meta SET remark = NULL, updated_at = ? WHERE account_id = ?`).run(now, targetId);
-      }
-      if (groupId === '' || groupId === null) {
-        await db.prepare(`UPDATE telegram_account_meta SET group_id = NULL, updated_at = ? WHERE account_id = ?`).run(now, targetId);
-      }
+      targetId = scope.accountId || rawAccountId.trim();
     }
-    if (Array.isArray(groups)) {
-      await db.prepare(`DELETE FROM telegram_account_groups`).run();
-      for (let i = 0; i < groups.length; i++) {
-        const g = groups[i];
-        if (!g?.id || !g?.name) continue;
+    const runTx = db.transaction(async () => {
+      if (targetId) {
+        const nextRemark = remark === undefined ? undefined : (typeof remark === 'string' ? remark.trim() || null : null);
+        const nextGroupId = groupId === undefined ? undefined : (typeof groupId === 'string' ? groupId.trim() || null : null);
         await db
           .prepare(`
-            INSERT INTO telegram_account_groups (id, name, color, collapsed, sort_order, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?)
+            INSERT INTO telegram_account_meta (account_id, remark, group_id, updated_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(account_id) DO UPDATE SET
+              remark = COALESCE(?, telegram_account_meta.remark),
+              group_id = COALESCE(?, telegram_account_meta.group_id),
+              updated_at = excluded.updated_at
           `)
-          .run(String(g.id), String(g.name).trim().slice(0, 24), g.color ? String(g.color) : null, g.collapsed ? 1 : 0, i, now);
+          .run(
+            targetId,
+            nextRemark !== undefined ? nextRemark : null,
+            nextGroupId !== undefined ? nextGroupId : null,
+            now,
+            nextRemark !== undefined ? nextRemark : null,
+            nextGroupId !== undefined ? nextGroupId : null
+          );
+        if (remark === '' || remark === null) {
+          await db.prepare(`UPDATE telegram_account_meta SET remark = NULL, updated_at = ? WHERE account_id = ?`).run(now, targetId);
+        }
+        if (groupId === '' || groupId === null) {
+          await db.prepare(`UPDATE telegram_account_meta SET group_id = NULL, updated_at = ? WHERE account_id = ?`).run(now, targetId);
+        }
       }
-    }
+      if (Array.isArray(groups)) {
+        await db.prepare(`DELETE FROM telegram_account_groups`).run();
+        for (let i = 0; i < groups.length; i++) {
+          const g = groups[i];
+          if (!g?.id || !g?.name) continue;
+          await db
+            .prepare(`
+              INSERT INTO telegram_account_groups (id, name, color, collapsed, sort_order, updated_at)
+              VALUES (?, ?, ?, ?, ?, ?)
+            `)
+            .run(String(g.id), String(g.name).trim().slice(0, 24), g.color ? String(g.color) : null, g.collapsed ? 1 : 0, i, now);
+        }
+      }
+    });
+    await runTx();
     return res.json({ ok: true });
   } catch (err: any) {
     return res.status(500).json({ ok: false, error: err?.message || '保存账号备注与分组失败' });
@@ -27037,15 +27089,12 @@ app.post('/api/telegram/user/upload-avatar', requireTenantAuth, async (req: Requ
       })
     );
 
-    telegramAvatarCache.delete(connected.userId);
-    telegramAvatarCache.delete(`acc_tg_${connected.userId}:${connected.userId}`);
-    telegramAvatarCache.delete(`${connected.userId}:${connected.userId}`);
-    telegramAvatarCache.delete(`shared:${connected.userId}`);
+    const extraAvatarKeys: string[] = [];
     if (connected.username) {
       const cleanUname = connected.username.replace(/^@/, '');
-      telegramAvatarCache.delete(cleanUname);
-      telegramAvatarCache.delete(`acc_tg_${connected.userId}:${cleanUname}`);
+      extraAvatarKeys.push(cleanUname, `acc_tg_${connected.userId}:${cleanUname}`);
     }
+    invalidateTelegramAvatarCacheEntries(connected.userId, connected.userId, extraAvatarKeys);
 
     return res.json({
       ok: true,
@@ -34189,6 +34238,7 @@ export function attachTelegramClientMessageListener(client: TelegramClient, phon
         }
         const message = event.message;
         if (!message) return;
+        markTelegramAccountTrafficAlive(listenerAccountId);
 
         const senderId = message.senderId ? String(message.senderId) : null;
         const rawChatId = String(message.chatId || senderId || 'unknown');
@@ -34782,10 +34832,7 @@ export function attachTelegramClientMessageListener(client: TelegramClient, phon
         if (update instanceof Api.UpdateUser) {
           const targetUid = update.userId !== undefined ? String(update.userId) : '';
           if (!targetUid) return;
-          telegramAvatarCache.delete(targetUid);
-          telegramAvatarCache.delete(`acc_tg_${userId}:${targetUid}`);
-          telegramAvatarCache.delete(`${userId}:${targetUid}`);
-          telegramAvatarCache.delete(`shared:${targetUid}`);
+          invalidateTelegramAvatarCacheEntries(userId, targetUid);
           clearAvatarNegativeCacheForPeer(userId, targetUid);
           invalidateTelegramSenderCache(accountId, targetUid);
           if (targetUid !== String(userId)) {
@@ -34893,9 +34940,7 @@ export function attachTelegramClientMessageListener(client: TelegramClient, phon
             const oldestKey = peerMetaSyncAt.keys().next().value;
             if (oldestKey) peerMetaSyncAt.delete(oldestKey);
           }
-          telegramAvatarCache.delete(rawNumId);
-          telegramAvatarCache.delete(`acc_tg_${userId}:${rawNumId}`);
-          telegramAvatarCache.delete(`${userId}:${rawNumId}`);
+          invalidateTelegramAvatarCacheEntries(userId, rawNumId);
           clearAvatarNegativeCacheForPeer(userId, rawNumId);
           invalidateTelegramSenderCache(accountId, rawNumId);
           try {
@@ -36864,6 +36909,10 @@ export async function runTelegramConnectionWatchdogCycle(options?: {
             'watchdog.onlineProbe',
             now
           );
+          continue;
+        }
+        const aliveCode = String(aliveErr?.code || '').toUpperCase();
+        if (aliveCode === 'TELEGRAM_RPC_QUEUE_FULL' || aliveCode === 'RPC_ABORTED') {
           continue;
         }
         aliveOk = false;

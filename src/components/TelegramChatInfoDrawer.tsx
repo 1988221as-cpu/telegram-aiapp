@@ -242,7 +242,7 @@ export const TelegramChatInfoDrawer: React.FC<TelegramChatInfoDrawerProps> = ({
     }
     setFullInfo(info);
     onChatInfoUpdated?.(chat.id, {
-      ...(!chat.isGroup && !chat.isChannel && info.title ? { title: info.title } : {}),
+      ...(!chat.isGroup && !chat.isChannel && !chat.hasCustomRemark && info.title ? { title: info.title } : {}),
       ...(typeof info.memberCount === 'number' ? { memberCount: info.memberCount } : {}),
       ...(typeof info.onlineCount === 'number' ? { onlineCount: info.onlineCount } : {}),
       ...(typeof info.isOnline === 'boolean' ? { isOnline: info.isOnline } : {}),

@@ -51,7 +51,7 @@ interface LeftSidebarProps {
   setActiveTab: (tab: 'chats' | 'memory' | 'llm' | 'translation' | 'voice' | 'persona') => void;
 }
 
-export const LeftSidebar: React.FC<LeftSidebarProps> = ({
+export const LeftSidebar: React.FC<LeftSidebarProps> = React.memo(({
   accounts,
   accountGroups = [],
   activeAccountId,
@@ -501,7 +501,8 @@ export const LeftSidebar: React.FC<LeftSidebarProps> = ({
             const canEditAccount = Boolean(onUpdateAccountMeta || onUpdateAccountRemark);
             const renderAccountItem = (acc: Account) => {
               const isSelected = acc.id === activeAccountId;
-              const retryCount = avatarRetryNonce[acc.id] || 0;
+              const retryKey = `${acc.id}|${acc.status}`;
+              const retryCount = avatarRetryNonce[retryKey] || 0;
               const avatarRenderKey = `${acc.avatarUrl || ''}|${acc.status}|${retryCount}`;
               const canRenderAvatarImg = Boolean(acc.avatarUrl) && failedAvatarKeys[acc.id] !== avatarRenderKey;
               const remarkText = acc.remark?.trim() || '';
@@ -593,6 +594,10 @@ export const LeftSidebar: React.FC<LeftSidebarProps> = ({
                           referrerPolicy="no-referrer"
                           className="w-full h-full object-cover absolute inset-0"
                           onLoad={() => {
+                            if (avatarRetryTimersRef.current[retryKey]) {
+                              window.clearTimeout(avatarRetryTimersRef.current[retryKey]);
+                              delete avatarRetryTimersRef.current[retryKey];
+                            }
                             setFailedAvatarKeys((prev) => {
                               if (!(acc.id in prev)) return prev;
                               const next = { ...prev };
@@ -604,11 +609,11 @@ export const LeftSidebar: React.FC<LeftSidebarProps> = ({
                             setFailedAvatarKeys((prev) =>
                               prev[acc.id] === avatarRenderKey ? prev : { ...prev, [acc.id]: avatarRenderKey }
                             );
-                            if (retryCount < 2 && !avatarRetryTimersRef.current[acc.id]) {
+                            if (retryCount < 2 && !avatarRetryTimersRef.current[retryKey]) {
                               const delayMs = retryCount === 0 ? 2500 : 6500;
-                              avatarRetryTimersRef.current[acc.id] = window.setTimeout(() => {
-                                delete avatarRetryTimersRef.current[acc.id];
-                                setAvatarRetryNonce((p) => ({ ...p, [acc.id]: (p[acc.id] || 0) + 1 }));
+                              avatarRetryTimersRef.current[retryKey] = window.setTimeout(() => {
+                                delete avatarRetryTimersRef.current[retryKey];
+                                setAvatarRetryNonce((p) => ({ ...p, [retryKey]: (p[retryKey] || 0) + 1 }));
                               }, delayMs);
                             }
                           }}
@@ -1107,5 +1112,5 @@ export const LeftSidebar: React.FC<LeftSidebarProps> = ({
       )}
     </aside>
   );
-};
+});
 
