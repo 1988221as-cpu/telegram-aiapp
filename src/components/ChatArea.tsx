@@ -937,6 +937,10 @@ const ChatAreaActive: React.FC<ChatAreaProps & { chat: Chat }> = ({
   const [replyingTo, setReplyingTo] = useState<Message | null>(null);
   const [editingMessage, setEditingMessage] = useState<Message | null>(null);
   const [translateOnEdit, setTranslateOnEdit] = useState(false);
+  // [用户锁定规则 - 禁止AI改回悬停弹出]
+  // hoveredMessageId 仅用于控制消息上方浮动快捷操作栏（👍❤️🔥🎉 / 回复 / 转发 / 翻译 / 置顶 / 复制 / 删除）的显隐。
+  // 必须严格保持：鼠标悬停（onMouseEnter / onMouseLeave / group-hover）绝对不触发显示；
+  // 仅允许在同一条消息上【连续右键按两次】时才触发弹出。
   const [hoveredMessageId, setHoveredMessageId] = useState<string | null>(null);
   const lastRightClickRef = useRef<{ msgId: string; ts: number } | null>(null);
   const [activeReactionMsgId, setActiveReactionMsgId] = useState<string | null>(null);
@@ -1321,13 +1325,17 @@ const ChatAreaActive: React.FC<ChatAreaProps & { chat: Chat }> = ({
     });
   }, [chat, currentAccountId]);
 
+  // [用户锁定规则 - 右按两次才弹出浮动快捷操作栏]
+  // 第1次右键：打开常规纵向右键菜单，并关闭浮动快捷操作栏；
+  // 550ms 内在同一条消息上第2次右键：关闭纵向右键菜单，弹出消息上方浮动快捷操作栏（hoveredMessageId）。
+  // 禁止改为单次悬停（onMouseEnter）或单次左键/鼠标经过触发。
   const handleMessageContextMenu = (e: React.MouseEvent, msg: Message) => {
     e.preventDefault();
     e.stopPropagation();
 
     const now = Date.now();
     const prev = lastRightClickRef.current;
-    if (prev && prev.msgId === msg.id && now - prev.ts <= 450) {
+    if (prev && prev.msgId === msg.id && now - prev.ts <= 550) {
       lastRightClickRef.current = null;
       setMessageContextMenu(null);
       setHoveredMessageId(msg.id);
@@ -2585,6 +2593,11 @@ const ChatAreaActive: React.FC<ChatAreaProps & { chat: Chat }> = ({
           setMessageContextMenu(null);
           return;
         }
+        if (hoveredMessageId) {
+          e.preventDefault();
+          setHoveredMessageId(null);
+          return;
+        }
         if (translatedPreview) {
           e.preventDefault();
           setTranslatedPreview('');
@@ -2616,6 +2629,7 @@ const ChatAreaActive: React.FC<ChatAreaProps & { chat: Chat }> = ({
     aiSuggestion,
     translatedPreview,
     messageContextMenu,
+    hoveredMessageId,
     messageToDelete,
     showBatchDeleteModal,
     isBatchDeleting,
@@ -2863,6 +2877,9 @@ const ChatAreaActive: React.FC<ChatAreaProps & { chat: Chat }> = ({
     setIsTranslatingSuggestion(false);
     setIsMultiSelectMode(false);
     setSelectedMessageIds(new Set());
+    setHoveredMessageId(null);
+    setMessageContextMenu(null);
+    lastRightClickRef.current = null;
     setIsSearchingInChat(false);
     setChatSearchQuery('');
     setCloudSearchResults(null);
@@ -4663,15 +4680,10 @@ const ChatAreaActive: React.FC<ChatAreaProps & { chat: Chat }> = ({
             </div>
           )}
 
+          {/* [用户锁定规则 - 禁止添加 onMouseEnter/onMouseLeave] 看消息（鼠标移入）绝不自动弹出快捷操作栏，仅支持同一条消息右按两次弹出 */}
           <div
             data-msg-id={msg.id}
             onClick={isMultiSelectMode ? () => msgRenderActionsRef.current.toggleSelectMessage(msg.id) : undefined}
-            onMouseEnter={() => {
-              if (!isMultiSelectMode) setHoveredMessageId(msg.id);
-            }}
-            onMouseLeave={() => {
-              setHoveredMessageId((prev) => (prev === msg.id ? null : prev));
-            }}
             className={`w-full min-w-0 flex ${isMultiSelectMode ? 'items-center gap-2.5 cursor-pointer rounded-xl px-1.5 py-0.5 transition-colors ' + (isSelectedMulti ? 'bg-[#2481cc]/10 dark:bg-[#2ba0ff]/15 aurora:bg-[#14b8a6]/15 linen:bg-[#a86a43]/15' : 'hover:bg-black/5 dark:hover:bg-white/5 aurora:hover:bg-white/5') : 'flex-col'} ${
               isMe ? (isMultiSelectMode ? 'justify-end' : 'items-end') : (isMultiSelectMode ? 'justify-start' : 'items-start')
             } group relative ${hoveredMessageId === msg.id ? 'z-30' : ''} ${isSameSenderAsPrev ? 'mt-0.5' : 'mt-1'} ${isSameSenderAsNext ? 'mb-0.5' : 'mb-1'}`}
@@ -4696,7 +4708,7 @@ const ChatAreaActive: React.FC<ChatAreaProps & { chat: Chat }> = ({
               </button>
             )}
 
-            {/* Telegram Floating Quick Action Menu on Hover */}
+            {/* Telegram Floating Quick Action Menu — [LOCKED: Double Right-Click Only, DO NOT switch back to hover] */}
             {!isMultiSelectMode && hoveredMessageId === msg.id && (
               <div
                 className={`absolute ${idx === 0 ? 'top-1' : '-top-4'} z-40 max-w-full overflow-x-auto no-scrollbar flex items-center gap-0.5 bg-white dark:bg-[#0e1726] aurora:bg-[#101c23] linen:bg-[#faf5ec] border border-[#e2e8f0] dark:border-[#1e3148] aurora:border-[#203742] linen:border-[#cbbba2] rounded-full px-1.5 py-0.5 shadow-lg animate-in fade-in zoom-in-95 duration-100 ${
@@ -4819,6 +4831,7 @@ const ChatAreaActive: React.FC<ChatAreaProps & { chat: Chat }> = ({
                   type="button"
                   onClick={(e) => {
                     e.stopPropagation();
+                    setHoveredMessageId(null);
                     setRevokeSingleDelete(true);
                     setMessageToDelete(msg);
                   }}

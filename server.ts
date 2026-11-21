@@ -32064,43 +32064,259 @@ export const telegramStickerThumbCache = new BoundedByteLruCache<{
   maxItemBytes: TELEGRAM_STICKER_CACHE_ITEM_MAX_BYTES,
 });
 
-const STICKER_KEYWORD_TO_EMOJI: Array<{ keywords: string[]; emoji: string }> = [
-  { keywords: ['笑', '开心', '高兴', '哈哈', 'happy', 'smile', 'laugh', 'lol', 'funny'], emoji: '😂' },
-  { keywords: ['爱', '爱心', '喜欢', '亲', '么么', 'love', 'heart', 'kiss'], emoji: '❤️' },
-  { keywords: ['猫', '猫咪', '小猫', '喵', 'cat', 'kitty', 'meow'], emoji: '🐱' },
-  { keywords: ['狗', '狗狗', '小狗', '汪', 'dog', 'puppy'], emoji: '🐶' },
-  { keywords: ['哭', '难过', '伤心', '泪', 'cry', 'sad', 'sob'], emoji: '😭' },
-  { keywords: ['赞', '好', '棒', '牛', 'ok', 'like', 'good', 'thumbs'], emoji: '👍' },
-  { keywords: ['火', '热', '爆', 'fire', 'hot', 'lit'], emoji: '🔥' },
-  { keywords: ['酷', '帅', 'cool', 'sunglasses'], emoji: '😎' },
-  { keywords: ['生气', '怒', '气', 'angry', 'mad', 'rage'], emoji: '😡' },
-  { keywords: ['晚安', '睡', '困', 'sleep', 'night', 'zzz'], emoji: '😴' },
-  { keywords: ['早安', '早上好', '你好', '嗨', 'hello', 'hi', 'morning', 'wave'], emoji: '👋' },
-  { keywords: ['谢谢', '感谢', '拜托', 'thanks', 'thank', 'pray', 'please'], emoji: '🙏' },
-  { keywords: ['庆祝', '派对', '恭喜', '生日', 'party', 'congrats', 'birthday'], emoji: '🎉' },
-  { keywords: ['咖啡', '茶', 'coffee', 'tea'], emoji: '☕' },
-  { keywords: ['钱', '发财', '暴富', 'money', 'rich', 'cash', 'coin'], emoji: '💰' },
-  { keywords: ['花', '玫瑰', 'flower', 'rose'], emoji: '🌹' },
-  { keywords: ['礼物', '惊喜', 'gift', 'present'], emoji: '🎁' },
-  { keywords: ['加油', '鼓励', '力量', 'muscle', 'cheer', 'fight'], emoji: '💪' },
-  { keywords: ['害羞', '脸红', 'shy', 'blush'], emoji: '😊' },
-  { keywords: ['震惊', '吃惊', '吓', 'wow', 'shock', 'omg'], emoji: '😱' },
+// Cache sticker Document metadata returned by global SearchStickers / GetStickers
+// so thumbnails and sending work seamlessly even when the pack is not installed locally.
+const TELEGRAM_STICKER_DOC_META_MAX = 800;
+const TELEGRAM_STICKER_DOC_META_TTL_MS = 30 * 60 * 1000;
+const telegramStickerDocMetaCache = new Map<string, { doc: any; expiresAt: number }>();
+
+function cacheTelegramStickerDoc(userId: string, doc: any) {
+  if (!userId || !doc?.id) return;
+  const key = `${userId}:${String(doc.id)}`;
+  const now = Date.now();
+  if (telegramStickerDocMetaCache.has(key)) {
+    telegramStickerDocMetaCache.delete(key);
+  }
+  telegramStickerDocMetaCache.set(key, {
+    doc,
+    expiresAt: now + TELEGRAM_STICKER_DOC_META_TTL_MS,
+  });
+  while (telegramStickerDocMetaCache.size > TELEGRAM_STICKER_DOC_META_MAX) {
+    const oldestKey = telegramStickerDocMetaCache.keys().next().value;
+    if (!oldestKey) break;
+    telegramStickerDocMetaCache.delete(oldestKey);
+  }
+}
+
+function getCachedTelegramStickerDoc(userId: string, docId: string): any | null {
+  if (!userId || !docId) return null;
+  const key = `${userId}:${String(docId)}`;
+  const entry = telegramStickerDocMetaCache.get(key);
+  if (!entry) return null;
+  if (entry.expiresAt <= Date.now()) {
+    telegramStickerDocMetaCache.delete(key);
+    return null;
+  }
+  // refresh LRU order
+  telegramStickerDocMetaCache.delete(key);
+  telegramStickerDocMetaCache.set(key, entry);
+  return entry.doc;
+}
+
+const STICKER_KEYWORD_TO_EMOJI: Array<{ keywords: string[]; emojis: string[] }> = [
+  { keywords: ['欢迎', '抱抱', '拥抱', 'welcome', 'hug'], emojis: ['🤗', '👋', '🎉'] },
+  { keywords: ['早安', '早上好', '你好', '嗨', '打招呼', 'hello', 'hi', 'morning', 'wave'], emojis: ['👋', '☀️'] },
+  { keywords: ['再见', '拜拜', 'bye', 'goodbye'], emojis: ['👋'] },
+  { keywords: ['谢谢', '感谢', '多谢', '拜托', 'thanks', 'thank', 'pray', 'please'], emojis: ['🙏', '🥰'] },
+  { keywords: ['收到', '明白', '敬礼', 'roger', 'salute'], emojis: ['🫡', '👌'] },
+  { keywords: ['庆祝', '派对', '恭喜', '生日', 'party', 'congrats', 'birthday'], emojis: ['🎉', '🎂'] },
+  { keywords: ['笑', '开心', '高兴', '哈哈', 'happy', 'smile', 'laugh', 'lol', 'funny'], emojis: ['😂', '😄'] },
+  { keywords: ['爱', '爱心', '喜欢', '比心', '亲', '么么', 'love', 'heart', 'kiss'], emojis: ['❤️', '😘'] },
+  { keywords: ['猫', '猫咪', '小猫', '喵', 'cat', 'kitty', 'meow'], emojis: ['🐱'] },
+  { keywords: ['狗', '狗狗', '小狗', '汪', 'dog', 'puppy'], emojis: ['🐶'] },
+  { keywords: ['哭', '难过', '伤心', '泪', '委屈', 'cry', 'sad', 'sob'], emojis: ['😭', '🥺'] },
+  { keywords: ['赞', '好', '棒', '牛', '厉害', 'ok', 'like', 'good', 'thumbs'], emojis: ['👍'] },
+  { keywords: ['火', '热', '爆', '牛逼', 'fire', 'hot', 'lit'], emojis: ['🔥'] },
+  { keywords: ['酷', '帅', '墨镜', 'cool', 'sunglasses'], emojis: ['😎'] },
+  { keywords: ['生气', '怒', '气', 'angry', 'mad', 'rage'], emojis: ['😡'] },
+  { keywords: ['晚安', '睡', '困', '摸鱼', 'sleep', 'night', 'zzz'], emojis: ['😴'] },
+  { keywords: ['咖啡', '茶', '下午茶', 'coffee', 'tea'], emojis: ['☕'] },
+  { keywords: ['钱', '发财', '暴富', '红包', '美元', 'money', 'rich', 'cash', 'coin'], emojis: ['💰', '🤑'] },
+  { keywords: ['花', '玫瑰', 'flower', 'rose'], emojis: ['🌹'] },
+  { keywords: ['礼物', '惊喜', 'gift', 'present'], emojis: ['🎁'] },
+  { keywords: ['加油', '鼓励', '力量', '肌肉', 'muscle', 'cheer', 'fight'], emojis: ['💪'] },
+  { keywords: ['害羞', '脸红', 'shy', 'blush'], emojis: ['😊'] },
+  { keywords: ['震惊', '吃惊', '吓', 'wow', 'shock', 'omg'], emojis: ['😱'] },
+  { keywords: ['干杯', '喝酒', '香槟', 'cheers', 'champagne'], emojis: ['🥂'] },
+  { keywords: ['思考', '想', '问号', 'thinking', 'hmm'], emojis: ['🤔'] },
+  { keywords: ['无语', '尴尬', 'awkward', 'sweat'], emojis: ['😅'] },
+  { keywords: ['工作', '上班', '加班', '电脑', 'work', 'laptop'], emojis: ['💻'] },
+  { keywords: ['起飞', '火箭', '暴涨', 'rocket', 'moon'], emojis: ['🚀'] },
 ];
 
-function resolveStickerSearchEmoticon(rawQuery: string): string | null {
+const STICKER_ZH_TO_EN_ALIASES: Array<{ zh: string[]; en: string }> = [
+  { zh: ['欢迎'], en: 'welcome' },
+  { zh: ['你好', '嗨', '打招呼'], en: 'hello' },
+  { zh: ['早安', '早上好'], en: 'good morning' },
+  { zh: ['晚安'], en: 'good night' },
+  { zh: ['再见', '拜拜'], en: 'bye' },
+  { zh: ['谢谢', '感谢', '多谢'], en: 'thanks' },
+  { zh: ['拜托', '求求'], en: 'please' },
+  { zh: ['恭喜', '祝贺'], en: 'congrats' },
+  { zh: ['庆祝', '派对'], en: 'party' },
+  { zh: ['生日', '生日快乐'], en: 'birthday' },
+  { zh: ['开心', '高兴', '快乐'], en: 'happy' },
+  { zh: ['笑', '哈哈', '大笑', '笑死'], en: 'laugh' },
+  { zh: ['爱', '爱心', '喜欢', '比心'], en: 'love' },
+  { zh: ['亲', '亲亲', '么么', '飞吻'], en: 'kiss' },
+  { zh: ['抱', '抱抱', '拥抱'], en: 'hug' },
+  { zh: ['猫', '猫咪', '小猫', '喵'], en: 'cat' },
+  { zh: ['狗', '狗狗', '小狗', '汪'], en: 'dog' },
+  { zh: ['哭', '大哭', '难过', '伤心'], en: 'sad' },
+  { zh: ['委屈', '可怜'], en: 'cute' },
+  { zh: ['赞', '点赞', '好棒', '牛'], en: 'good' },
+  { zh: ['收到', '明白'], en: 'ok' },
+  { zh: ['酷', '帅'], en: 'cool' },
+  { zh: ['生气', '愤怒', '发火'], en: 'angry' },
+  { zh: ['睡', '睡觉', '困'], en: 'sleep' },
+  { zh: ['加油', '努力'], en: 'cheer' },
+  { zh: ['钱', '发财', '暴富', '美元'], en: 'money' },
+  { zh: ['干杯', '喝酒'], en: 'cheers' },
+  { zh: ['咖啡', '下午茶'], en: 'coffee' },
+  { zh: ['礼物', '惊喜'], en: 'gift' },
+  { zh: ['花', '玫瑰'], en: 'flower' },
+  { zh: ['思考', '想一下'], en: 'thinking' },
+  { zh: ['震惊', '吃惊'], en: 'wow' },
+  { zh: ['工作', '上班', '加班'], en: 'work' },
+  { zh: ['圣诞', '圣诞节'], en: 'christmas' },
+  { zh: ['新年', '春节'], en: 'new year' },
+  { zh: ['熊', '熊猫'], en: 'panda' },
+  { zh: ['兔', '兔子'], en: 'rabbit' },
+  { zh: ['鸭', '鸭子'], en: 'duck' },
+  { zh: ['青蛙', '佩佩'], en: 'pepe' },
+  { zh: ['表情包', '沙雕', '搞笑'], en: 'meme' },
+];
+
+function resolveStickerEnglishAlias(rawQuery: string): string | null {
+  const lower = rawQuery.trim().toLowerCase();
+  if (!lower) return null;
+  for (const entry of STICKER_ZH_TO_EN_ALIASES) {
+    if (entry.zh.some((kw) => lower === kw || lower.includes(kw))) {
+      return entry.en;
+    }
+  }
+  return null;
+}
+
+function resolveStickerSearchEmoticons(rawQuery: string): string[] {
   const q = rawQuery.trim();
-  if (!q) return null;
-  if (/\p{Extended_Pictographic}/u.test(q)) {
-    const match = q.match(/\p{Extended_Pictographic}/u);
-    return match ? match[0] : null;
+  if (!q) return [];
+  const results: string[] = [];
+  const addUnique = (em: string) => {
+    const clean = String(em || '').trim();
+    if (clean && !results.includes(clean)) results.push(clean);
+  };
+  const emojiMatches = q.match(/\p{Extended_Pictographic}/gu);
+  if (emojiMatches) {
+    for (const em of emojiMatches) addUnique(em);
   }
   const lower = q.toLowerCase();
   for (const entry of STICKER_KEYWORD_TO_EMOJI) {
     if (entry.keywords.some((kw) => lower === kw || lower.includes(kw))) {
-      return entry.emoji;
+      for (const em of entry.emojis) addUnique(em);
     }
   }
-  return null;
+  return results;
+}
+
+// Cache official Telegram emoji keywords dictionaries (messages.GetEmojiKeywords) per language
+const EMOJI_KEYWORDS_CACHE_TTL_MS = 6 * 60 * 60 * 1000;
+const telegramEmojiKeywordsCache = new Map<
+  string,
+  {
+    fetchedAt: number;
+    exact: Map<string, string[]>;
+    entries: Array<{ keyword: string; emoticons: string[] }>;
+  }
+>();
+const telegramEmojiKeywordsInFlight = new Map<string, Promise<void>>();
+
+async function loadTelegramEmojiKeywordsForLang(client: TelegramClient, langCode: string): Promise<void> {
+  const normalizedLang = langCode.trim().toLowerCase();
+  if (!normalizedLang) return;
+  const cached = telegramEmojiKeywordsCache.get(normalizedLang);
+  if (cached && Date.now() - cached.fetchedAt < EMOJI_KEYWORDS_CACHE_TTL_MS) {
+    return;
+  }
+  const existingFlight = telegramEmojiKeywordsInFlight.get(normalizedLang);
+  if (existingFlight) {
+    await existingFlight;
+    return;
+  }
+  const job = (async () => {
+    try {
+      const diff: any = await client.invoke(
+        new Api.messages.GetEmojiKeywords({
+          langCode: normalizedLang,
+        })
+      );
+      const rawKeywords: any[] = Array.isArray(diff?.keywords) ? diff.keywords : [];
+      const exact = new Map<string, string[]>();
+      const entries: Array<{ keyword: string; emoticons: string[] }> = [];
+      for (const item of rawKeywords) {
+        const kw = String(item?.keyword || '').trim().toLowerCase();
+        const emoticons: string[] = Array.isArray(item?.emoticons)
+          ? item.emoticons.map((e: any) => String(e || '').trim()).filter(Boolean)
+          : [];
+        if (!kw || emoticons.length === 0) continue;
+        const prev = exact.get(kw);
+        if (prev) {
+          for (const em of emoticons) {
+            if (!prev.includes(em)) prev.push(em);
+          }
+        } else {
+          exact.set(kw, [...emoticons]);
+          entries.push({ keyword: kw, emoticons: exact.get(kw)! });
+        }
+      }
+      telegramEmojiKeywordsCache.set(normalizedLang, {
+        fetchedAt: Date.now(),
+        exact,
+        entries,
+      });
+    } catch {
+      // Cache empty result briefly so unsupported lang codes don't re-hit every keystroke
+      if (!telegramEmojiKeywordsCache.has(normalizedLang)) {
+        telegramEmojiKeywordsCache.set(normalizedLang, {
+          fetchedAt: Date.now(),
+          exact: new Map(),
+          entries: [],
+        });
+      }
+    } finally {
+      telegramEmojiKeywordsInFlight.delete(normalizedLang);
+    }
+  })();
+  telegramEmojiKeywordsInFlight.set(normalizedLang, job);
+  await job;
+}
+
+async function resolveCloudEmojiKeywords(client: TelegramClient, rawQuery: string): Promise<string[]> {
+  const lower = rawQuery.trim().toLowerCase();
+  if (!lower) return [];
+  const hasCjk = /[\u4e00-\u9fff]/.test(lower);
+  const langs = hasCjk ? ['zh-hans', 'zh', 'en'] : ['en', 'zh-hans'];
+  await Promise.all(langs.map((lang) => loadTelegramEmojiKeywordsForLang(client, lang)));
+
+  const matched: string[] = [];
+  const addEmoticon = (em: string) => {
+    if (em && !matched.includes(em) && matched.length < 4) {
+      matched.push(em);
+    }
+  };
+
+  for (const lang of langs) {
+    const dict = telegramEmojiKeywordsCache.get(lang);
+    if (!dict) continue;
+    const exactList = dict.exact.get(lower);
+    if (exactList) {
+      for (const em of exactList) addEmoticon(em);
+    }
+  }
+  if (matched.length === 0 && lower.length >= 2) {
+    for (const lang of langs) {
+      const dict = telegramEmojiKeywordsCache.get(lang);
+      if (!dict) continue;
+      for (const entry of dict.entries) {
+        if (entry.keyword.includes(lower) || (entry.keyword.length >= 2 && lower.includes(entry.keyword))) {
+          for (const em of entry.emoticons) addEmoticon(em);
+          if (matched.length >= 3) break;
+        }
+      }
+      if (matched.length >= 3) break;
+    }
+  }
+  return matched;
 }
 
 function mapTelegramStickerDocToItem(
@@ -32109,15 +32325,24 @@ function mapTelegramStickerDocToItem(
   fallbackSet: { id: string; accessHash: string; shortName: string },
   docEmojiMap?: Map<string, string>
 ) {
+  if (!doc || !doc.id || !doc.accessHash) return null;
+  cacheTelegramStickerDoc(userId, doc);
+
   const attrs: any[] = Array.isArray(doc.attributes) ? doc.attributes : [];
   const stickerAttr = attrs.find((a) => a.className === 'DocumentAttributeSticker');
   const attrSet = stickerAttr?.stickerset;
-  const setId = String(attrSet?.id ?? fallbackSet.id ?? '');
-  const setAccessHash = String(attrSet?.accessHash ?? fallbackSet.accessHash ?? '');
-  if (!setId || !setAccessHash) return null;
+  const setId = String(attrSet?.id ?? (fallbackSet.id || '0')) || '0';
+  const setAccessHash = String(attrSet?.accessHash ?? (fallbackSet.accessHash || '0')) || '0';
+  const shortName = String(attrSet?.shortName ?? fallbackSet.shortName ?? '');
 
   const mimeType = String(doc.mimeType || 'image/webp');
   const docId = String(doc.id);
+  const queryParams = new URLSearchParams({
+    accountId: `acc_tg_${userId}`,
+    setAccessHash,
+  });
+  if (shortName) queryParams.set('shortName', shortName);
+
   return {
     docId,
     accessHash: String(doc.accessHash),
@@ -32126,13 +32351,13 @@ function mapTelegramStickerDocToItem(
       : '',
     setId,
     setAccessHash,
-    shortName: String(fallbackSet.shortName || ''),
+    shortName,
     emoji: String(stickerAttr?.alt || docEmojiMap?.get(docId) || '✨'),
     mimeType,
     isAnimated: mimeType.includes('tgsticker'),
     isVideo: mimeType.includes('webm'),
     thumbUrl: signTelegramResourceUrl(
-      `/api/telegram/user/sticker/${encodeURIComponent(setId)}/${encodeURIComponent(docId)}?accountId=${encodeURIComponent(`acc_tg_${userId}`)}&setAccessHash=${encodeURIComponent(setAccessHash)}`
+      `/api/telegram/user/sticker/${encodeURIComponent(setId)}/${encodeURIComponent(docId)}?${queryParams.toString()}`
     ),
   };
 }
@@ -32281,7 +32506,11 @@ app.get('/api/telegram/user/stickers', requireTenantAuth, async (req: Request, r
   }
 });
 
-// 20.3.1v2 Cloud Search Official Telegram Sticker Sets & Stickers by Keyword or Emoji
+// 20.3.1v2 Global Cloud Search Official Telegram Stickers & Sticker Sets
+// Combines:
+//   1) messages.SearchStickers (Telegram official global sticker search across all public packs)
+//   2) messages.SearchStickerSets (official public sticker sets by title/shortName)
+//   3) messages.GetEmojiKeywords + built-in multilingual map -> messages.GetStickers (emoji sticker search)
 app.get('/api/telegram/user/stickers/search', requireTenantAuth, async (req: Request, res: Response) => {
   let scopedAccountId = '';
   try {
@@ -32308,80 +32537,176 @@ app.get('/api/telegram/user/stickers/search', requireTenantAuth, async (req: Req
     const client = connected.client;
     const packs: any[] = [];
     const seenSetIds = new Set<string>();
+    const existingDocIds = new Set<string>();
 
-    // 1. Search public Telegram sticker sets by keyword
-    try {
-      const searchRes: any = await client.invoke(
-        new Api.messages.SearchStickerSets({
-          q,
-          hash: returnBigInt(0),
-        })
-      );
-      const foundSets: any[] = Array.isArray(searchRes?.sets) ? searchRes.sets : [];
-      const candidateSets: any[] = [];
-      for (const covered of foundSets) {
-        const rawSet = covered?.set || covered;
-        const sid = String(rawSet?.id || '');
-        if (sid && !seenSetIds.has(sid)) {
-          seenSetIds.add(sid);
-          candidateSets.push(rawSet);
-        }
-      }
-      if (candidateSets.length > 0) {
-        const fetched = await fetchStickerPacksInBatches(
-          client,
-          connected.userId,
-          candidateSets.slice(0, 10),
-          24,
-          4
-        );
-        packs.push(...fetched);
-      }
-    } catch {
-      // continue to emoticon sticker lookup
-    }
+    const isDirectEmoji = /^\s*[\p{Extended_Pictographic}\uFE0F\u200D]+\s*$/u.test(q);
+    const englishAlias = resolveStickerEnglishAlias(q);
+    const searchLangs = /[\u4e00-\u9fff]/.test(q)
+      ? ['zh-hans', 'zh-hant', 'zh', 'en']
+      : ['en', 'zh-hans', 'zh'];
 
-    // 2. Also query Telegram cloud stickers by Emoji (direct Emoji input or ZH/EN keyword mapped to Emoji)
-    const emoticon = resolveStickerSearchEmoticon(q);
-    if (emoticon) {
+    const searchGlobalStickers = async (queryTerm: string, langs: string[], emoticon = '', limit = 48) => {
       try {
-        const emojiRes: any = await client.invoke(
-          new Api.messages.GetStickers({
+        const found: any = await client.invoke(
+          new Api.messages.SearchStickers({
+            emojis: false,
+            q: queryTerm,
             emoticon,
+            langCode: langs,
+            offset: 0,
+            limit,
             hash: returnBigInt(0),
           })
         );
-        const rawDocs: any[] = Array.isArray(emojiRes?.stickers) ? emojiRes.stickers : [];
-        const existingDocIds = new Set<string>();
-        for (const p of packs) {
-          for (const st of p.stickers || []) {
-            existingDocIds.add(String(st.docId));
-          }
-        }
-        const emojiStickers = rawDocs
-          .filter((doc) => doc && doc.id && doc.accessHash && !existingDocIds.has(String(doc.id)))
-          .slice(0, 36)
-          .map((doc) =>
-            mapTelegramStickerDocToItem(doc, connected.userId, {
-              id: '',
-              accessHash: '',
-              shortName: '',
-            })
-          )
-          .filter(Boolean);
+        return Array.isArray(found?.stickers) ? found.stickers : [];
+      } catch {
+        return [];
+      }
+    };
 
-        if (emojiStickers.length > 0) {
-          packs.unshift({
-            id: `cloud_emoji_${emoticon}`,
-            accessHash: '0',
-            shortName: `cloud_emoji_${emoticon}`,
-            title: `${emoticon} 热门云端贴纸`,
-            count: emojiStickers.length,
-            stickers: emojiStickers,
+    const searchStickerSets = async (queryTerm: string) => {
+      try {
+        const searchRes: any = await client.invoke(
+          new Api.messages.SearchStickerSets({
+            excludeFeatured: false,
+            q: queryTerm,
+            hash: returnBigInt(0),
+          })
+        );
+        return Array.isArray(searchRes?.sets) ? searchRes.sets : [];
+      } catch {
+        return [];
+      }
+    };
+
+    // Run primary global sticker search, public pack search, and official cloud emoji keyword lookup in parallel
+    const [primaryGlobalDocs, primaryFoundSets, cloudEmoticons] = await Promise.all([
+      searchGlobalStickers(isDirectEmoji ? '' : q, searchLangs, isDirectEmoji ? q.trim() : '', 48),
+      searchStickerSets(q),
+      resolveCloudEmojiKeywords(client, q),
+    ]);
+
+    const candidateEmoticons: string[] = [];
+    for (const em of [...resolveStickerSearchEmoticons(q), ...cloudEmoticons]) {
+      if (em && !candidateEmoticons.includes(em)) candidateEmoticons.push(em);
+    }
+
+    // Supplement with English alias global search (for Chinese queries when global packs are tagged in EN)
+    // and GetStickers by matched official emoticons
+    const [aliasGlobalDocs, aliasFoundSets, ...emojiStickersLists] = await Promise.all([
+      englishAlias && englishAlias.toLowerCase() !== q.toLowerCase() && primaryGlobalDocs.length < 24
+        ? searchGlobalStickers(englishAlias, ['en', 'zh-hans', 'zh'], '', 36)
+        : Promise.resolve([]),
+      englishAlias && englishAlias.toLowerCase() !== q.toLowerCase() && primaryFoundSets.length < 4
+        ? searchStickerSets(englishAlias)
+        : Promise.resolve([]),
+      ...candidateEmoticons.slice(0, 2).map(async (emoticon) => {
+        try {
+          const emojiRes: any = await client.invoke(
+            new Api.messages.GetStickers({
+              emoticon,
+              hash: returnBigInt(0),
+            })
+          );
+          return {
+            emoticon,
+            docs: Array.isArray(emojiRes?.stickers) ? emojiRes.stickers : [],
+          };
+        } catch {
+          return { emoticon, docs: [] as any[] };
+        }
+      }),
+    ]);
+
+    // 1. Collect global stickers returned by messages.SearchStickers
+    const globalStickerItems: any[] = [];
+    for (const doc of [...primaryGlobalDocs, ...aliasGlobalDocs]) {
+      if (!doc || !doc.id || !doc.accessHash) continue;
+      const docIdStr = String(doc.id);
+      if (existingDocIds.has(docIdStr)) continue;
+      const item = mapTelegramStickerDocToItem(doc, connected.userId, {
+        id: '0',
+        accessHash: '0',
+        shortName: '',
+      });
+      if (item) {
+        existingDocIds.add(docIdStr);
+        globalStickerItems.push(item);
+        if (globalStickerItems.length >= 60) break;
+      }
+    }
+    if (globalStickerItems.length > 0) {
+      packs.push({
+        id: `cloud_global_${q}`,
+        accessHash: '0',
+        shortName: 'cloud_global',
+        title: `全网搜索「${q}」`,
+        count: globalStickerItems.length,
+        stickers: globalStickerItems,
+      });
+    }
+
+    // 2. Collect public Telegram sticker sets matched by SearchStickerSets
+    const candidateSets: any[] = [];
+    for (const covered of [...primaryFoundSets, ...aliasFoundSets]) {
+      const rawSet = covered?.set || covered;
+      const sid = String(rawSet?.id || '');
+      if (sid && !seenSetIds.has(sid)) {
+        seenSetIds.add(sid);
+        candidateSets.push(rawSet);
+      }
+    }
+    if (candidateSets.length > 0) {
+      const fetched = await fetchStickerPacksInBatches(
+        client,
+        connected.userId,
+        candidateSets.slice(0, 8),
+        24,
+        4
+      );
+      for (const pack of fetched) {
+        const dedupedStickers = (pack.stickers || []).filter((st: any) => {
+          const did = String(st?.docId || '');
+          if (!did || existingDocIds.has(did)) return false;
+          existingDocIds.add(did);
+          return true;
+        });
+        if (dedupedStickers.length > 0) {
+          packs.push({
+            ...pack,
+            stickers: dedupedStickers,
           });
         }
-      } catch {
-        // ignore emoticon lookup error
+      }
+    }
+
+    // 3. Collect emoticon cloud stickers from messages.GetStickers
+    for (const { emoticon, docs } of emojiStickersLists) {
+      const emojiStickers = docs
+        .filter((doc: any) => doc && doc.id && doc.accessHash && !existingDocIds.has(String(doc.id)))
+        .slice(0, 28)
+        .map((doc: any) =>
+          mapTelegramStickerDocToItem(doc, connected.userId, {
+            id: '0',
+            accessHash: '0',
+            shortName: '',
+          })
+        )
+        .filter(Boolean);
+
+      for (const st of emojiStickers) {
+        existingDocIds.add(String(st.docId));
+      }
+
+      if (emojiStickers.length > 0) {
+        packs.push({
+          id: `cloud_emoji_${emoticon}`,
+          accessHash: '0',
+          shortName: `cloud_emoji_${emoticon}`,
+          title: `${emoticon} 云端关联贴纸`,
+          count: emojiStickers.length,
+          stickers: emojiStickers,
+        });
       }
     }
 
@@ -32405,6 +32730,7 @@ app.get('/api/telegram/user/sticker/:setId/:docId', async (req: Request, res: Re
 
     const { setId, docId } = req.params;
     const setAccessHash = String(req.query.setAccessHash || '');
+    const shortName = String(req.query.shortName || '').trim();
     const accountId = typeof req.query.accountId === 'string' ? req.query.accountId.trim() : '';
 
     const primaryConnected = accountId ? resolveConnectedTelegramUser(accountId) : undefined;
@@ -32438,20 +32764,34 @@ app.get('/api/telegram/user/sticker/:setId/:docId', async (req: Request, res: Re
     }
 
     for (const candidate of candidates) {
-      if (!candidate.client || !setAccessHash) continue;
+      if (!candidate.client) continue;
       try {
-        const setRes: any = await candidate.client.invoke(
-          new Api.messages.GetStickerSet({
-            stickerset: new Api.InputStickerSetID({
-              id: returnBigInt(setId),
-              accessHash: returnBigInt(setAccessHash),
-            }),
-            hash: 0,
-          })
-        );
-        const doc: any = (Array.isArray(setRes?.documents) ? setRes.documents : []).find(
-          (d: any) => String(d?.id) === String(docId)
-        );
+        let doc: any = getCachedTelegramStickerDoc(candidate.userId, docId);
+        if (!doc && setId && setId !== '0' && setAccessHash && setAccessHash !== '0') {
+          const setRes: any = await candidate.client.invoke(
+            new Api.messages.GetStickerSet({
+              stickerset: new Api.InputStickerSetID({
+                id: returnBigInt(setId),
+                accessHash: returnBigInt(setAccessHash),
+              }),
+              hash: 0,
+            })
+          );
+          doc = (Array.isArray(setRes?.documents) ? setRes.documents : []).find(
+            (d: any) => String(d?.id) === String(docId)
+          );
+        }
+        if (!doc && shortName) {
+          const setRes: any = await candidate.client.invoke(
+            new Api.messages.GetStickerSet({
+              stickerset: new Api.InputStickerSetShortName({ shortName }),
+              hash: 0,
+            })
+          );
+          doc = (Array.isArray(setRes?.documents) ? setRes.documents : []).find(
+            (d: any) => String(d?.id) === String(docId)
+          );
+        }
         if (!doc) continue;
 
         const mimeType = String(doc.mimeType || '').toLowerCase();
@@ -32512,6 +32852,7 @@ app.post('/api/telegram/user/send-sticker', requireTenantAuth, async (req: Reque
       fileReferenceBase64,
       setId,
       setAccessHash,
+      shortName,
       replyToMsgId,
       emoji,
       packTitle,
@@ -32571,13 +32912,20 @@ app.post('/api/telegram/user/send-sticker', requireTenantAuth, async (req: Reque
       updates = await invokeSendSticker(Buffer.from(String(fileReferenceBase64 || ''), 'base64'));
     } catch (sendErr: any) {
       const msg = String(sendErr?.errorMessage || sendErr?.message || '');
-      if (msg.includes('FILE_REFERENCE_EXPIRED') && setId && setAccessHash) {
+      const cleanShortName = typeof shortName === 'string' ? shortName.trim() : '';
+      if (
+        msg.includes('FILE_REFERENCE_EXPIRED') &&
+        ((setId && setId !== '0' && setAccessHash && setAccessHash !== '0') || cleanShortName)
+      ) {
         const refreshedSet: any = await client.invoke(
           new Api.messages.GetStickerSet({
-            stickerset: new Api.InputStickerSetID({
-              id: returnBigInt(String(setId)),
-              accessHash: returnBigInt(String(setAccessHash)),
-            }),
+            stickerset:
+              setId && setId !== '0' && setAccessHash && setAccessHash !== '0'
+                ? new Api.InputStickerSetID({
+                    id: returnBigInt(String(setId)),
+                    accessHash: returnBigInt(String(setAccessHash)),
+                  })
+                : new Api.InputStickerSetShortName({ shortName: cleanShortName }),
             hash: 0,
           })
         );
@@ -35591,6 +35939,9 @@ export interface LocalIncomingUpdate {
   profileName?: string;
   profileUsername?: string;
   profileAvatarUrl?: string;
+  isGroup?: boolean;
+  isChannel?: boolean;
+  chatTitle?: string;
 }
 export const pendingLocalUpdates: LocalIncomingUpdate[] = [];
 
@@ -36208,6 +36559,21 @@ export function attachTelegramClientMessageListener(client: TelegramClient, phon
           ? { senderId: senderId || '', senderName: 'Telegram 官方服务通知', senderAvatarUrl: undefined }
           : await resolveTelegramMessageSenderInfo(message, isOut, accountId);
 
+        const msgChatObj: any = (message as any).chat;
+        const isChannelMsg = Boolean(
+          (message as any).isChannel &&
+            !msgChatObj?.megagroup &&
+            !(message as any).isGroup
+        );
+        const isGroupMsg = Boolean(
+          ((message as any).isGroup || msgChatObj?.megagroup || /^tg_-/.test(canonicalChatId)) &&
+            !isChannelMsg
+        );
+        const resolvedChatTitle =
+          typeof msgChatObj?.title === 'string' && msgChatObj.title.trim()
+            ? msgChatObj.title.trim()
+            : undefined;
+
         const realtimeUpdate: LocalIncomingUpdate = {
           id: messageId,
           telegramMessageId: Number(message.id),
@@ -36219,6 +36585,9 @@ export function attachTelegramClientMessageListener(client: TelegramClient, phon
           senderName: senderInfo.senderName,
           ...(senderInfo.senderId ? { senderId: senderInfo.senderId } : {}),
           ...(senderInfo.senderAvatarUrl ? { senderAvatarUrl: senderInfo.senderAvatarUrl } : {}),
+          ...(isGroupMsg ? { isGroup: true } : {}),
+          ...(isChannelMsg ? { isChannel: true } : {}),
+          ...(resolvedChatTitle ? { chatTitle: resolvedChatTitle } : {}),
           text,
           timestamp,
           createdAt,
@@ -37512,6 +37881,7 @@ export function attachTelegramClientMessageListener(client: TelegramClient, phon
             senderName: senderInfo.senderName,
             ...(senderInfo.senderId ? { senderId: senderInfo.senderId } : {}),
             ...(senderInfo.senderAvatarUrl ? { senderAvatarUrl: senderInfo.senderAvatarUrl } : {}),
+            ...(groupServiceInfo && /^tg_-/.test(canonicalChatId) ? { isGroup: true } : {}),
             text: callInfo ? callInfo.text : groupServiceInfo!.text,
             timestamp,
             createdAt,

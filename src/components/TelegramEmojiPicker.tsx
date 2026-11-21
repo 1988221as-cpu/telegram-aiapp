@@ -86,7 +86,8 @@ const EMOJI_DATABASE: EmojiItem[] = [
   { char: '👆', name: '指上', keywords: ['楼上', '看上面', 'point up'], category: 'gestures' },
   { char: '👇', name: '指下', keywords: ['楼下', '看下方', 'point down'], category: 'gestures' },
   { char: '💪', name: '肌肉力量', keywords: ['强', '加油', '力量', 'muscle', 'strong', 'flex'], category: 'gestures' },
-  { char: '👋', name: '挥手问候', keywords: ['嗨', '你好', '再见', 'wave', 'hello', 'bye'], category: 'gestures' },
+  { char: '👋', name: '挥手问候', keywords: ['嗨', '你好', '欢迎', '再见', 'wave', 'hello', 'welcome', 'bye'], category: 'gestures' },
+  { char: '🤗', name: '拥抱欢迎', keywords: ['欢迎', '抱抱', '拥抱', '热情', 'welcome', 'hug'], category: 'gestures' },
   { char: '🫡', name: '敬礼遵命', keywords: ['收到', '明白', '遵命', 'salute', 'yes sir'], category: 'gestures' },
 
   // Hearts & Emotion
@@ -149,6 +150,7 @@ export const TelegramEmojiPicker: React.FC<TelegramEmojiPickerProps> = ({
   const [remoteSearchPacks, setRemoteSearchPacks] = useState<TelegramStickerPack[]>([]);
   const [isSearchingRemote, setIsSearchingRemote] = useState(false);
   const [remoteSearchError, setRemoteSearchError] = useState<string | null>(null);
+  const [failedThumbKeys, setFailedThumbKeys] = useState<Set<string>>(new Set());
   const remoteSearchSeqRef = useRef(0);
   const pickerRef = useRef<HTMLDivElement>(null);
   const [popupPos, setPopupPos] = useState<{ top: number; left: number; width: number; maxHeight: number } | null>(null);
@@ -228,6 +230,7 @@ export const TelegramEmojiPicker: React.FC<TelegramEmojiPickerProps> = ({
     setStickerPacks([]);
     setRemoteSearchPacks([]);
     setSelectedPackId('all');
+    setFailedThumbKeys(new Set());
     setStickersError(null);
     setRemoteSearchError(null);
     setIsSearchingRemote(false);
@@ -438,7 +441,11 @@ export const TelegramEmojiPicker: React.FC<TelegramEmojiPickerProps> = ({
           />
           {searchQuery && (
             <button
-              onClick={() => setSearchQuery('')}
+              type="button"
+              onClick={() => {
+                setSearchQuery('');
+                setSelectedPackId('all');
+              }}
               className="absolute right-2.5 text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a] hover:text-[#0f172a] dark:hover:text-[#eef4fb] aurora:hover:text-[#ecf6f8] linen:hover:text-[#2b2118] cursor-pointer"
             >
               <X className="w-3 h-3" />
@@ -597,7 +604,7 @@ export const TelegramEmojiPicker: React.FC<TelegramEmojiPickerProps> = ({
               {remoteSearchError && searchQuery.trim()
                 ? remoteSearchError
                 : searchQuery.trim()
-                  ? `云端暂未找到与「${searchQuery}」匹配的贴纸，可尝试英文关键词或 Emoji`
+                  ? `Telegram 全网暂未找到与「${searchQuery}」匹配的贴纸，可尝试换个词或直接输入 Emoji`
                   : '当前 Telegram 账号暂无可用官方贴纸包'}
             </p>
             <button
@@ -605,6 +612,7 @@ export const TelegramEmojiPicker: React.FC<TelegramEmojiPickerProps> = ({
               onClick={() => {
                 if (searchQuery) {
                   setSearchQuery('');
+                  setSelectedPackId('all');
                 } else {
                   void loadOfficialStickers();
                 }
@@ -615,10 +623,20 @@ export const TelegramEmojiPicker: React.FC<TelegramEmojiPickerProps> = ({
             </button>
           </div>
         ) : (
-          <div className="grid grid-cols-4 gap-2">
-            {filteredStickers.map(({ sticker, packTitle }) => (
+          <>
+            {isSearchingRemote && searchQuery.trim() && (
+              <div className="mb-2 px-2.5 py-1 rounded-lg bg-[#e8f3ff]/80 dark:bg-[#2ba0ff]/10 aurora:bg-[#112d36]/80 linen:bg-[#efe4d3] text-[11px] text-[#0284c7] dark:text-[#7cc4ff] aurora:text-[#5eead4] linen:text-[#8c522d] flex items-center gap-1.5">
+                <Loader2 className="w-3 h-3 animate-spin shrink-0" />
+                <span>正在同步 Telegram 官方全网贴纸结果...</span>
+              </div>
+            )}
+            <div className="grid grid-cols-4 gap-2">
+            {filteredStickers.map(({ sticker, packTitle }) => {
+              const thumbKey = `${sticker.setId}_${sticker.docId}`;
+              const isThumbFailed = failedThumbKeys.has(thumbKey);
+              return (
               <button
-                key={`${sticker.setId}_${sticker.docId}`}
+                key={thumbKey}
                 type="button"
                 title={`${sticker.emoji} · ${packTitle}`}
                 onClick={() => {
@@ -628,19 +646,33 @@ export const TelegramEmojiPicker: React.FC<TelegramEmojiPickerProps> = ({
                 className="flex flex-col items-center justify-center p-1.5 rounded-xl hover:bg-[#f1f5f9] dark:hover:bg-[#132234] aurora:hover:bg-[#13252e] linen:hover:bg-[#efe4d3] transition-all hover:scale-105 cursor-pointer group border border-transparent hover:border-[#2481cc]/25 dark:hover:border-[#2ba0ff]/30 aurora:hover:border-[#2dd4bf]/30 linen:hover:border-[#cbbba2]"
               >
                 <div className="w-16 h-16 rounded-lg overflow-hidden relative flex items-center justify-center bg-[#f8fafc] dark:bg-[#0e1726]/85 aurora:bg-[#101c23]/90 linen:bg-[#efe6d6]">
-                  <img
-                    src={sticker.thumbUrl}
-                    alt={sticker.emoji}
-                    loading="lazy"
-                    className="w-full h-full object-contain group-hover:scale-110 transition-transform duration-200"
-                  />
+                  {!isThumbFailed && sticker.thumbUrl ? (
+                    <img
+                      src={sticker.thumbUrl}
+                      alt={sticker.emoji}
+                      loading="lazy"
+                      onError={() => {
+                        setFailedThumbKeys((prev) => {
+                          if (prev.has(thumbKey)) return prev;
+                          const next = new Set(prev);
+                          next.add(thumbKey);
+                          return next;
+                        });
+                      }}
+                      className="w-full h-full object-contain group-hover:scale-110 transition-transform duration-200"
+                    />
+                  ) : (
+                    <span className="text-3xl leading-none select-none">{sticker.emoji || '✨'}</span>
+                  )}
                   <span className="absolute bottom-0.5 right-0.5 text-xs bg-black/55 text-white rounded-full px-1 leading-tight">
                     {sticker.emoji}
                   </span>
                 </div>
               </button>
-            ))}
-          </div>
+              );
+            })}
+            </div>
+          </>
         )}
       </div>
 

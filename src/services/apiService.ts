@@ -6380,6 +6380,7 @@ export async function sendTelegramStickerApi(params: {
         fileReferenceBase64: params.sticker.fileReferenceBase64,
         setId: params.sticker.setId,
         setAccessHash: params.sticker.setAccessHash,
+        shortName: params.sticker.shortName,
         replyToMsgId: params.replyToMsgId,
         emoji: params.sticker.emoji,
         packTitle: params.packTitle,
@@ -6567,7 +6568,7 @@ export async function cacheAccountAvatarFromUrl(
     accountAvatarNoPhotoCooldown.delete(cleanId);
   }
 
-  const flightKey = `${cleanId}::${options?.force ? 'force' : cleanUrl}`;
+  const flightKey = `${cleanId}::${cleanUrl}`;
   const existingFlight = accountAvatarCacheInFlight.get(flightKey);
   if (existingFlight) return await existingFlight;
 

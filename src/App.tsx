@@ -2196,7 +2196,11 @@ export default function App() {
 
     const timer = window.setTimeout(() => {
       if (!isMountedRef.current || !isMemberAuthenticatedRef.current) return;
-      enqueueBrowserAvatarPreload(onlineAccs.map((a) => a.avatarUrl));
+      enqueueBrowserAvatarPreload(
+        onlineAccs
+          .filter((a) => !getCachedAccountAvatarDataUrl(a.id))
+          .map((a) => a.avatarUrl)
+      );
       const activeChatsUrls = chatsRef.current
         .filter((c) => c.accountId === activeAccountIdRef.current && c.avatarUrl)
         .slice(0, 20)
@@ -3360,6 +3364,9 @@ export default function App() {
               isOfficialNotice: boolean;
               officialTitle: string;
               fallbackSenderName?: string;
+              chatTitle?: string;
+              isGroup?: boolean;
+              isChannel?: boolean;
             }
           >();
           const pendingLiveTranslations: Array<{
@@ -4219,6 +4226,13 @@ export default function App() {
               !isViewingFocusedChat && incomingMsg.sender !== 'me' && incomingMsg.sender !== 'system';
             const patchKey = `${targetAccountId}::${targetChatId}`;
             const prevPatch = pendingMessageChatPatches.get(patchKey);
+            const patchIsChannel = Boolean(prevPatch?.isChannel || upd.isChannel);
+            const patchIsGroup = Boolean(
+              (prevPatch?.isGroup || upd.isGroup || /^tg_-/.test(targetChatId)) && !patchIsChannel
+            );
+            const patchChatTitle =
+              (typeof upd.chatTitle === 'string' && upd.chatTitle.trim() ? upd.chatTitle.trim() : undefined) ||
+              prevPatch?.chatTitle;
             pendingMessageChatPatches.set(patchKey, {
               accountId: targetAccountId,
               chatId: targetChatId,
@@ -4230,6 +4244,9 @@ export default function App() {
               isOfficialNotice: Boolean(prevPatch?.isOfficialNotice || isOfficialNotice),
               officialTitle,
               fallbackSenderName: prevPatch?.fallbackSenderName || upd.senderName,
+              chatTitle: patchChatTitle,
+              isGroup: patchIsGroup,
+              isChannel: patchIsChannel,
             });
           });
 
@@ -4257,21 +4274,25 @@ export default function App() {
                 const newChats: Chat[] = [];
                 for (const [pKey, patch] of pendingMessageChatPatches.entries()) {
                   if (seenKeys.has(pKey)) continue;
+                  const resolvedTitle = patch.isOfficialNotice
+                    ? patch.officialTitle
+                    : patch.chatTitle ||
+                      (!patch.isGroup && !patch.isChannel ? patch.fallbackSenderName : undefined) ||
+                      `Telegram (${patch.chatId.replace('tg_', '')})`;
                   newChats.push({
                     id: patch.chatId,
                     accountId: patch.accountId,
-                    title: patch.isOfficialNotice
-                      ? patch.officialTitle
-                      : patch.fallbackSenderName || `Telegram (${patch.chatId.replace('tg_', '')})`,
+                    title: resolvedTitle,
                     unreadCount: patch.clearUnread ? 0 : patch.unreadDelta,
                     lastMessage: patch.lastMessage,
                     lastTime: patch.lastTime,
                     lastDate: patch.lastDate,
                     avatarInitial: patch.isOfficialNotice
                       ? 'TG'
-                      : (patch.fallbackSenderName || 'TG').slice(0, 2).toUpperCase(),
+                      : (resolvedTitle || 'TG').slice(0, 2).toUpperCase(),
                     avatarBg: '#2481cc',
-                    isGroup: false,
+                    isGroup: Boolean(patch.isGroup && !patch.isChannel),
+                    isChannel: Boolean(patch.isChannel),
                     isVerified: patch.isOfficialNotice,
                     sourceLang: 'Auto',
                     targetLang: 'Auto',

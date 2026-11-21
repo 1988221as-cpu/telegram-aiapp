@@ -149,6 +149,7 @@ export const TelegramSettingsModal: React.FC<TelegramSettingsModalProps> = ({
   const [isSavedNotice, setIsSavedNotice] = useState(false);
   const [saveNoticeText, setSaveNoticeText] = useState('已同步至 Telegram 云端');
   const [saveError, setSaveError] = useState('');
+  const [failedAvatarSrc, setFailedAvatarSrc] = useState('');
   const avatarInputRef = useRef<HTMLInputElement | null>(null);
 
   // Change phone state
@@ -313,6 +314,7 @@ export const TelegramSettingsModal: React.FC<TelegramSettingsModalProps> = ({
     setPhone(currentAccount?.phone || '');
     setIsSavedNotice(false);
     setSaveError('');
+    setFailedAvatarSrc('');
     setActionFeedback(null);
     setTwoFactorMode('idle');
     setCur2faPwd('');
@@ -432,6 +434,7 @@ export const TelegramSettingsModal: React.FC<TelegramSettingsModalProps> = ({
         return;
       }
       invalidateCachedAccountAvatar(currentAccount?.id);
+      setFailedAvatarSrc('');
       void cacheAccountAvatarFromUrl(currentAccount?.id, res.avatarUrl, { force: true });
       onUpdateAccount?.({ avatarUrl: res.avatarUrl }, currentAccount?.id);
       setCloudSettings((prev) =>
@@ -1010,12 +1013,23 @@ export const TelegramSettingsModal: React.FC<TelegramSettingsModalProps> = ({
                       className="w-16 h-16 rounded-full flex items-center justify-center font-bold text-xl text-white shadow-md relative overflow-hidden"
                       style={{ backgroundColor: currentAccount?.avatarBg || '#2481cc' }}
                     >
+                      <span>{currentAccount?.avatarInitial || name.slice(0, 2)}</span>
                       {(() => {
                         const settingsAvatarSrc = resolveAccountAvatarSrc(currentAccount?.id, currentAccount?.avatarUrl);
-                        return settingsAvatarSrc ? (
-                          <img src={settingsAvatarSrc} alt={name} className="w-full h-full object-cover" />
-                        ) : (
-                          <span>{currentAccount?.avatarInitial || name.slice(0, 2)}</span>
+                        if (!settingsAvatarSrc || failedAvatarSrc === settingsAvatarSrc) return null;
+                        return (
+                          <img
+                            src={settingsAvatarSrc}
+                            alt={name}
+                            referrerPolicy="no-referrer"
+                            onError={() => setFailedAvatarSrc(settingsAvatarSrc)}
+                            onLoad={() => {
+                              if (failedAvatarSrc === settingsAvatarSrc) {
+                                setFailedAvatarSrc('');
+                              }
+                            }}
+                            className="w-full h-full object-cover absolute inset-0"
+                          />
                         );
                       })()}
                       {isUploadingAvatar && (
