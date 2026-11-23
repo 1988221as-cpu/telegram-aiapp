@@ -47,6 +47,8 @@ import { NewMessage, Raw } from 'telegram/events/index.js';
 import { computeCheck, computeDigest } from 'telegram/Password.js';
 import { CustomFile } from 'telegram/client/uploads.js';
 import { returnBigInt, generateRandomLong } from 'telegram/Helpers.js';
+import { ConnectionTCPObfuscated } from 'telegram/network/connection/index.js';
+import { PromisedNetSockets } from 'telegram/extensions/index.js';
 import {
   db,
   dbPath,
@@ -23327,7 +23329,16 @@ export interface SystemProxyConfig {
   password?: string;
 }
 
+export interface AutoSystemProxyConfig {
+  protocol: 'socks5' | 'socks4' | 'http' | 'https';
+  host: string;
+  port: number;
+  username?: string;
+  password?: string;
+}
+
 let cachedSystemProxyConfig: SystemProxyConfig | null = null;
+let cachedElectronAutoSystemProxy: string | null = null;
 
 export function parseSocksProxyEnvString(raw?: string | null): SystemProxyConfig | null {
   const val = String(raw || '').trim();
@@ -23443,6 +23454,336 @@ export function getConfiguredTelegramProxy():
   };
 }
 
+export function parseAnyProxyEnvString(raw?: string | null): AutoSystemProxyConfig | null {
+  const val = String(raw || '').trim();
+  if (!val) return null;
+  try {
+    const normalized = /^[a-z0-9+.-]+:\/\//i.test(val) ? val : `http://${val}`;
+    const parsed = new URL(normalized);
+    let proto = parsed.protocol.replace(':', '').toLowerCase();
+    if (proto === 'socks' || proto === 'socks5h') proto = 'socks5';
+    if (proto === 'socks4a') proto = 'socks4';
+    if (proto !== 'socks5' && proto !== 'socks4' && proto !== 'http' && proto !== 'https') {
+      return null;
+    }
+    const host = parsed.hostname.replace(/^\[|\]$/g, '');
+    const port = Number(parsed.port || (proto === 'https' ? 443 : proto === 'http' ? 8080 : 1080));
+    if (!host || !Number.isInteger(port) || port < 1 || port > 65535) return null;
+    return {
+      protocol: proto as AutoSystemProxyConfig['protocol'],
+      host,
+      port,
+      ...(parsed.username ? { username: decodeURIComponent(parsed.username) } : {}),
+      ...(parsed.password ? { password: decodeURIComponent(parsed.password) } : {}),
+    };
+  } catch {
+    return null;
+  }
+}
+
+export function getAutoDetectedSystemProxy(): AutoSystemProxyConfig | null {
+  if (process.env.NODE_ENV === 'test' || process.env.AIS_TEST_IMPORT === 'true') {
+    return null;
+  }
+  const candidates = [
+    cachedElectronAutoSystemProxy,
+    process.env.HS_AUTO_SYSTEM_PROXY,
+    process.env.ALL_PROXY,
+    process.env.all_proxy,
+    process.env.HTTPS_PROXY,
+    process.env.https_proxy,
+    process.env.HTTP_PROXY,
+    process.env.http_proxy,
+  ];
+  for (const raw of candidates) {
+    const parsed = parseAnyProxyEnvString(raw);
+    if (parsed) return parsed;
+  }
+  return null;
+}
+
+async function isTcpEndpointReachable(host: string, port: number, timeoutMs = 800): Promise<boolean> {
+  return await new Promise<boolean>((resolve) => {
+    let done = false;
+    const sock = new net.Socket();
+    const finish = (ok: boolean) => {
+      if (done) return;
+      done = true;
+      try {
+        sock.destroy();
+      } catch {}
+      resolve(ok);
+    };
+    const timer = setTimeout(() => finish(false), timeoutMs);
+    sock.once('connect', () => {
+      clearTimeout(timer);
+      finish(true);
+    });
+    sock.once('error', () => {
+      clearTimeout(timer);
+      finish(false);
+    });
+    try {
+      sock.connect(port, host);
+    } catch {
+      clearTimeout(timer);
+      finish(false);
+    }
+  });
+}
+
+async function openHttpConnectTunnelSocket(
+  proxy: AutoSystemProxyConfig,
+  targetHost: string,
+  targetPort: number,
+  timeoutMs = 8000
+): Promise<net.Socket> {
+  return await new Promise<net.Socket>((resolve, reject) => {
+    let settled = false;
+    const tlsServername = net.isIP(proxy.host) ? undefined : proxy.host;
+    const baseSock =
+      proxy.protocol === 'https'
+        ? (tls.connect({
+            host: proxy.host,
+            port: proxy.port,
+            ...(tlsServername ? { servername: tlsServername } : {}),
+          }) as unknown as net.Socket)
+        : net.connect({ host: proxy.host, port: proxy.port });
+
+    let headerBuf = Buffer.alloc(0);
+    const cleanupHandshakeListeners = () => {
+      baseSock.removeListener('data', onData);
+      baseSock.removeListener('close', onPrematureClose);
+      baseSock.removeListener('end', onPrematureEnd);
+    };
+    const fail = (err: Error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      cleanupHandshakeListeners();
+      try {
+        baseSock.destroy();
+      } catch {}
+      reject(err);
+    };
+    const timer = setTimeout(
+      () => fail(new Error(`HTTP proxy CONNECT timeout (${proxy.host}:${proxy.port})`)),
+      timeoutMs
+    );
+    const onPrematureClose = () => fail(new Error(`HTTP proxy CONNECT closed (${proxy.host}:${proxy.port})`));
+    const onPrematureEnd = () => fail(new Error(`HTTP proxy CONNECT ended (${proxy.host}:${proxy.port})`));
+
+    baseSock.once('error', (err) => fail(err));
+    baseSock.once('close', onPrematureClose);
+    baseSock.once('end', onPrematureEnd);
+    const connectEvent = proxy.protocol === 'https' ? 'secureConnect' : 'connect';
+    baseSock.once(connectEvent, () => {
+      const formattedHost = targetHost.includes(':') ? `[${targetHost}]` : targetHost;
+      const authority = `${formattedHost}:${targetPort}`;
+      const lines = [
+        `CONNECT ${authority} HTTP/1.1`,
+        `Host: ${authority}`,
+        'Proxy-Connection: Keep-Alive',
+      ];
+      if (proxy.username || proxy.password) {
+        const token = Buffer.from(`${proxy.username || ''}:${proxy.password || ''}`, 'utf8').toString('base64');
+        lines.push(`Proxy-Authorization: Basic ${token}`);
+      }
+      lines.push('', '');
+      baseSock.write(lines.join('\r\n'));
+    });
+
+    const onData = (chunk: Buffer) => {
+      headerBuf = Buffer.concat([headerBuf, Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)]);
+      const idx = headerBuf.indexOf('\r\n\r\n');
+      if (idx === -1) {
+        if (headerBuf.length > 16384) {
+          fail(new Error('HTTP proxy CONNECT response header too large'));
+        }
+        return;
+      }
+      cleanupHandshakeListeners();
+      const headerText = headerBuf.subarray(0, idx).toString('latin1');
+      const statusMatch = headerText.match(/^HTTP\/\d\.\d\s+(\d{3})/i);
+      const statusCode = statusMatch ? Number(statusMatch[1]) : 0;
+      if (statusCode < 200 || statusCode >= 300) {
+        fail(new Error(`HTTP proxy CONNECT rejected (HTTP ${statusCode})`));
+        return;
+      }
+      const leftover = headerBuf.subarray(idx + 4);
+      if (leftover.length > 0) {
+        baseSock.pause();
+        baseSock.unshift(leftover);
+      }
+      settled = true;
+      clearTimeout(timer);
+      resolve(baseSock);
+    };
+    baseSock.on('data', onData);
+  });
+}
+
+function createHttpConnectNetworkSocketClass(httpProxy: AutoSystemProxyConfig) {
+  return class HttpConnectPromisedNetSockets extends (PromisedNetSockets as any) {
+    _connectCancelled = false;
+    async connect(port: number, ip: string) {
+      this._connectCancelled = false;
+      this.stream = Buffer.alloc(0);
+      const tunSock = await openHttpConnectTunnelSocket(httpProxy, ip, port, 8000);
+      if (this._connectCancelled) {
+        try {
+          tunSock.destroy();
+        } catch {}
+        throw new Error('NetSocket was closed');
+      }
+      this.client = tunSock;
+      this.canRead = new Promise((resolve) => {
+        this.resolveRead = resolve;
+      });
+      this.closed = false;
+      return await new Promise((resolve, reject) => {
+        this.receive();
+        this.client.resume?.();
+        resolve(this);
+        this.client.on('error', reject);
+        this.client.on('close', () => {
+          if (this.resolveRead) {
+            this.resolveRead(false);
+          }
+          this.closed = true;
+        });
+      });
+    }
+    async close() {
+      this._connectCancelled = true;
+      return await super.close();
+    }
+  };
+}
+
+export type ResolvedEffectiveTelegramTransport =
+  | {
+      mode: 'socks';
+      proxy: NonNullable<ReturnType<typeof getConfiguredTelegramProxy>>;
+      source: 'manual' | 'auto_system';
+    }
+  | {
+      mode: 'http';
+      httpProxy: AutoSystemProxyConfig;
+      source: 'auto_system';
+    }
+  | {
+      mode: 'direct';
+      source: 'direct';
+    };
+
+export async function resolveEffectiveTelegramTransport(
+  manualProxyOverride?: ReturnType<typeof getConfiguredTelegramProxy>
+): Promise<ResolvedEffectiveTelegramTransport> {
+  const manual = manualProxyOverride !== undefined ? manualProxyOverride : getConfiguredTelegramProxy();
+  if (manual) {
+    return { mode: 'socks', proxy: manual, source: 'manual' };
+  }
+  const auto = getAutoDetectedSystemProxy();
+  if (!auto) {
+    return { mode: 'direct', source: 'direct' };
+  }
+  const alive = await isTcpEndpointReachable(auto.host, auto.port, 800);
+  if (!alive) {
+    return { mode: 'direct', source: 'direct' };
+  }
+  if (auto.protocol === 'socks4' || auto.protocol === 'socks5') {
+    return {
+      mode: 'socks',
+      source: 'auto_system',
+      proxy: {
+        ip: auto.host,
+        port: auto.port,
+        socksType: auto.protocol === 'socks4' ? 4 : 5,
+        timeout: 15,
+        ...(auto.username ? { username: auto.username } : {}),
+        ...(auto.password ? { password: auto.password } : {}),
+      },
+    };
+  }
+  return { mode: 'http', httpProxy: auto, source: 'auto_system' };
+}
+
+const TELEGRAM_OFFICIAL_INITIAL_DCS = [
+  { dcId: 4, ip: '149.154.167.91', port: 443 },
+  { dcId: 2, ip: '149.154.167.51', port: 443 },
+  { dcId: 1, ip: '149.154.175.53', port: 443 },
+] as const;
+
+class ConnectionTCPObfuscated443 extends ConnectionTCPObfuscated {
+  constructor(params: any) {
+    super({
+      ...params,
+      port: params?.port === 80 ? 443 : params?.port || 443,
+    });
+  }
+}
+
+async function connectNewTelegramClientWithDcFallback(opts: {
+  apiId: number;
+  apiHash: string;
+  label: string;
+  registerGuard: (client: TelegramClient) => void;
+}): Promise<TelegramClient> {
+  const effectiveTransport = await resolveEffectiveTelegramTransport();
+
+  const attemptTransportModes: ResolvedEffectiveTelegramTransport[] =
+    effectiveTransport.source === 'auto_system'
+      ? [effectiveTransport, { mode: 'direct', source: 'direct' }]
+      : [effectiveTransport];
+
+  let lastErr: any = null;
+  for (const transport of attemptTransportModes) {
+    const dcsToTry =
+      effectiveTransport.source === 'auto_system'
+        ? transport.source === 'direct'
+          ? [TELEGRAM_OFFICIAL_INITIAL_DCS[0]]
+          : TELEGRAM_OFFICIAL_INITIAL_DCS.slice(0, 2)
+        : TELEGRAM_OFFICIAL_INITIAL_DCS;
+
+    for (const dc of dcsToTry) {
+      const stringSession = new StringSession('');
+      stringSession.setDC(dc.dcId, dc.ip, dc.port);
+      const client = new TelegramClient(stringSession, opts.apiId, opts.apiHash, {
+        ...TELEGRAM_CLIENT_RETRY_OPTIONS,
+        connectionRetries: 1,
+        retryDelay: 500,
+        useWSS: false,
+        connection: ConnectionTCPObfuscated443,
+        autoReconnect: true,
+        ...TELEGRAM_DESKTOP_CLIENT_PARAMS,
+        ...(transport.mode === 'socks'
+          ? { proxy: transport.proxy }
+          : transport.mode === 'http'
+            ? { networkSocket: createHttpConnectNetworkSocketClass(transport.httpProxy) as any }
+            : {}),
+      });
+      opts.registerGuard(client);
+      try {
+        await withTelegramTimeout(
+          client.connect(),
+          4000,
+          '连接 Telegram 服务器超时，请检查网络或代理设置后重试'
+        );
+        return client;
+      } catch (err: any) {
+        lastErr = err;
+        await destroyTelegramClientSafely(client);
+        console.warn(
+          `[Telegram Auth Connect] ${opts.label} DC${dc.dcId}(${dc.ip}:${dc.port}) via ${transport.mode}/${transport.source} failed: ${err?.message || err}`
+        );
+      }
+    }
+  }
+
+  throw lastErr || new Error('连接 Telegram 服务器超时，请检查网络或代理设置后重试');
+}
+
 function getCloudCredsCacheKey(bearerToken?: string): string {
   if (!bearerToken || !bearerToken.trim()) return '__default__';
   return crypto.createHash('sha256').update(bearerToken.trim()).digest('hex').slice(0, 24);
@@ -23492,12 +23833,39 @@ export async function fetchWithSystemProxySupport(
   const cleanHost = rawHost.startsWith('[') && rawHost.endsWith(']') ? rawHost.slice(1, -1) : rawHost;
   const proxy = getConfiguredTelegramProxy();
 
-  // Never route local loopback traffic through external SOCKS proxy
-  if (!proxy || isAllowedLocalhostEndpoint(cleanHost)) {
+  // Never route local loopback traffic through external proxy
+  if (isAllowedLocalhostEndpoint(cleanHost)) {
     return await fetch(urlStr, {
       ...options,
       signal: options.signal || AbortSignal.timeout(timeoutMs),
     });
+  }
+
+  let autoHttpProxy: AutoSystemProxyConfig | null = null;
+  let effectiveSocksProxy = proxy;
+  let usingAutoProxy = false;
+
+  if (!effectiveSocksProxy) {
+    const auto = getAutoDetectedSystemProxy();
+    if (auto && (await isTcpEndpointReachable(auto.host, auto.port, 700))) {
+      usingAutoProxy = true;
+      if (auto.protocol === 'socks4' || auto.protocol === 'socks5') {
+        effectiveSocksProxy = {
+          ip: auto.host,
+          port: auto.port,
+          socksType: auto.protocol === 'socks4' ? 4 : 5,
+          ...(auto.username ? { username: auto.username } : {}),
+          ...(auto.password ? { password: auto.password } : {}),
+        };
+      } else {
+        autoHttpProxy = auto;
+      }
+    } else {
+      return await fetch(urlStr, {
+        ...options,
+        signal: options.signal || AbortSignal.timeout(timeoutMs),
+      });
+    }
   }
 
   const targetPort = parsedUrl.port
@@ -23507,21 +23875,42 @@ export async function fetchWithSystemProxySupport(
       : 80;
   const isHttps = parsedUrl.protocol === 'https:';
 
-  const { socket: rawSocket } = await socksConnectImpl({
-    proxy: {
-      host: proxy.ip,
-      port: proxy.port,
-      type: proxy.socksType,
-      ...(proxy.username ? { userId: proxy.username } : {}),
-      ...(proxy.password ? { password: proxy.password } : {}),
-    },
-    command: 'connect',
-    destination: {
-      host: pinnedOverride?.address || cleanHost,
-      port: targetPort,
-    },
-    timeout: timeoutMs,
-  });
+  let rawSocket: net.Socket;
+  try {
+    if (effectiveSocksProxy) {
+      const conn = await socksConnectImpl({
+        proxy: {
+          host: effectiveSocksProxy.ip,
+          port: effectiveSocksProxy.port,
+          type: effectiveSocksProxy.socksType,
+          ...(effectiveSocksProxy.username ? { userId: effectiveSocksProxy.username } : {}),
+          ...(effectiveSocksProxy.password ? { password: effectiveSocksProxy.password } : {}),
+        },
+        command: 'connect',
+        destination: {
+          host: pinnedOverride?.address || cleanHost,
+          port: targetPort,
+        },
+        timeout: timeoutMs,
+      });
+      rawSocket = conn.socket;
+    } else {
+      rawSocket = await openHttpConnectTunnelSocket(
+        autoHttpProxy!,
+        pinnedOverride?.address || cleanHost,
+        targetPort,
+        timeoutMs
+      );
+    }
+  } catch (tunnelErr) {
+    if (usingAutoProxy) {
+      return await fetch(urlStr, {
+        ...options,
+        signal: options.signal || AbortSignal.timeout(timeoutMs),
+      });
+    }
+    throw tunnelErr;
+  }
 
   const reqHeaders: Record<string, string> = {};
   if (options.headers) {
@@ -23551,9 +23940,21 @@ export async function fetchWithSystemProxySupport(
   return await new Promise<globalThis.Response>((resolve, reject) => {
     let settled = false;
     let activeSocket: net.Socket | tls.TLSSocket = rawSocket;
+    let reqTimer: NodeJS.Timeout | null = null;
+    const signal = options.signal;
+    const onAbort = () => {
+      const abortErr: any = new Error('The operation was aborted due to timeout');
+      abortErr.name = 'TimeoutError';
+      finishErr(abortErr);
+    };
     const finishErr = (err: any) => {
       if (settled) return;
       settled = true;
+      if (reqTimer) {
+        clearTimeout(reqTimer);
+        reqTimer = null;
+      }
+      if (signal) signal.removeEventListener('abort', onAbort);
       try {
         activeSocket.destroy();
       } catch {}
@@ -23563,12 +23964,6 @@ export async function fetchWithSystemProxySupport(
       reject(err);
     };
 
-    const signal = options.signal;
-    const onAbort = () => {
-      const abortErr: any = new Error('The operation was aborted due to timeout');
-      abortErr.name = 'TimeoutError';
-      finishErr(abortErr);
-    };
     if (signal) {
       if (signal.aborted) {
         onAbort();
@@ -23577,7 +23972,7 @@ export async function fetchWithSystemProxySupport(
       signal.addEventListener('abort', onAbort, { once: true });
     }
 
-    const reqTimer = setTimeout(() => {
+    reqTimer = setTimeout(() => {
       const tErr: any = new Error(`Request timeout (${timeoutMs}ms)`);
       tErr.name = 'TimeoutError';
       finishErr(tErr);
@@ -23608,7 +24003,10 @@ export async function fetchWithSystemProxySupport(
         const chunks: Buffer[] = [];
         res.on('data', (chunk: Buffer) => chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)));
         res.on('end', () => {
-          clearTimeout(reqTimer);
+          if (reqTimer) {
+            clearTimeout(reqTimer);
+            reqTimer = null;
+          }
           if (signal) signal.removeEventListener('abort', onAbort);
           if (settled) return;
           settled = true;
@@ -23622,7 +24020,7 @@ export async function fetchWithSystemProxySupport(
           }
           const fullBuf = Buffer.concat(chunks);
           const status = res.statusCode || 502;
-          const responseBody = status === 204 || status === 304 ? null : fullBuf;
+          const responseBody = status === 204 || status === 205 || status === 304 ? null : fullBuf;
           resolve(
             new Response(responseBody, {
               status,
@@ -23632,16 +24030,12 @@ export async function fetchWithSystemProxySupport(
           );
         });
         res.on('error', (err) => {
-          clearTimeout(reqTimer);
-          if (signal) signal.removeEventListener('abort', onAbort);
           finishErr(err);
         });
       }
     );
 
     req.on('error', (err) => {
-      clearTimeout(reqTimer);
-      if (signal) signal.removeEventListener('abort', onAbort);
       finishErr(err);
     });
 
@@ -24996,28 +25390,16 @@ app.post('/api/telegram/user/send-code', requireTenantAuth, async (req: Request,
     // Disconnect existing client for this phone if any
     await cleanupPendingUserClient(cleanPhone);
 
-    const stringSession = new StringSession('');
-    const telegramProxy = getConfiguredTelegramProxy();
-    const client = new TelegramClient(stringSession, useApiId, useApiHash, {
-      ...TELEGRAM_CLIENT_RETRY_OPTIONS,
-      connectionRetries: 5,
-      useWSS: false,
-      autoReconnect: true,
-      ...TELEGRAM_DESKTOP_CLIENT_PARAMS,
-      ...(telegramProxy ? { proxy: telegramProxy } : {}),
+    console.log(`[Telegram User Auth] Connecting to MTProto DC (443/obfuscated) for ${cleanPhone}...`);
+    const client = await connectNewTelegramClientWithDcFallback({
+      apiId: useApiId,
+      apiHash: useApiHash,
+      label: cleanPhone,
+      registerGuard: (c) => configureTelegramClientErrorGuard(c, cleanPhone),
     });
 
-    configureTelegramClientErrorGuard(client, cleanPhone);
-
-    console.log(`[Telegram User Auth] Connecting to MTProto DC for ${cleanPhone}...`);
     let sendResult: any;
     try {
-      await withTelegramTimeout(
-        client.connect(),
-        15000,
-        '连接 Telegram 服务器超时，请检查网络或代理设置后重试'
-      );
-
       console.log(`[Telegram User Auth] Requesting official login code for ${cleanPhone}...`);
       try {
         sendResult = await withTelegramTimeout(
@@ -25523,25 +25905,14 @@ app.post('/api/telegram/user/qr-token', requireTenantAuth, async (req: Request, 
     // Clean up stale QR sessions safely: NEVER destroy a client already transferred to connectedUserClients!
     pruneExpiredQrSessions(Date.now());
 
-    const stringSession = new StringSession('');
-    const telegramProxy = getConfiguredTelegramProxy();
-    const client = new TelegramClient(stringSession, useApiId, useApiHash, {
-      ...TELEGRAM_CLIENT_RETRY_OPTIONS,
-      connectionRetries: 5,
-      useWSS: false,
-      autoReconnect: true,
-      ...TELEGRAM_DESKTOP_CLIENT_PARAMS,
-      ...(telegramProxy ? { proxy: telegramProxy } : {}),
+    const client = await connectNewTelegramClientWithDcFallback({
+      apiId: useApiId,
+      apiHash: useApiHash,
+      label: sessionId,
+      registerGuard: (c) => configureTelegramClientErrorGuard(c, sessionId),
     });
-    configureTelegramClientErrorGuard(client, sessionId);
     let exportRes: any;
     try {
-      await withTelegramTimeout(
-        client.connect(),
-        15000,
-        '连接 Telegram 服务器超时，请检查网络或代理设置后重试'
-      );
-
       // Export initial login token directly from MTProto
       exportRes = await withTelegramTimeout(
         client.invoke(
@@ -28601,13 +28972,19 @@ app.post('/api/telegram/user/disconnect', requireTenantAuth, async (req: Request
           const decrypted = decryptSensitiveData(storedRow.session_string);
           const creds = await resolveTelegramApiCredentials({ bearerToken: extractBearerToken(req) });
           if (decrypted && creds.ok && creds.apiId && creds.apiHash) {
-            const telegramProxy = getConfiguredTelegramProxy();
+            const effectiveTransport = await resolveEffectiveTelegramTransport();
             const tempClient = new TelegramClient(new StringSession(decrypted), creds.apiId, creds.apiHash, {
               connectionRetries: 2,
               reconnectRetries: 0,
+              useWSS: false,
+              connection: ConnectionTCPObfuscated443,
               autoReconnect: false,
               ...TELEGRAM_DESKTOP_CLIENT_PARAMS,
-              ...(telegramProxy ? { proxy: telegramProxy } : {}),
+              ...(effectiveTransport.mode === 'socks'
+                ? { proxy: effectiveTransport.proxy }
+                : effectiveTransport.mode === 'http'
+                  ? { networkSocket: createHttpConnectNetworkSocketClass(effectiveTransport.httpProxy) as any }
+                  : {}),
             });
             configureTelegramClientErrorGuard(tempClient, `logout_${storedRow.phone || uid}`);
             try {
@@ -38484,14 +38861,22 @@ export async function restoreTelegramUserSessionsOnStartup(
               } catch {}
             }
 
+            const effectiveTransport = options?.deps?.getProxyConfig
+              ? await resolveEffectiveTelegramTransport(telegramProxy)
+              : await resolveEffectiveTelegramTransport();
             candidateClient = options?.deps?.createClient
               ? options.deps.createClient(decryptedSession, useApiId, useApiHash, telegramProxy)
               : new TelegramClient(new StringSession(decryptedSession), useApiId, useApiHash, {
                   ...TELEGRAM_CLIENT_RETRY_OPTIONS,
                   useWSS: false,
+                  connection: ConnectionTCPObfuscated443,
                   autoReconnect: true,
                   ...TELEGRAM_DESKTOP_CLIENT_PARAMS,
-                  ...(telegramProxy ? { proxy: telegramProxy } : {}),
+                  ...(effectiveTransport.mode === 'socks'
+                    ? { proxy: effectiveTransport.proxy }
+                    : effectiveTransport.mode === 'http'
+                      ? { networkSocket: createHttpConnectNetworkSocketClass(effectiveTransport.httpProxy) as any }
+                      : {}),
                 });
             (candidateClient as any)._tgProGenerationId = myGeneration;
 
@@ -39069,6 +39454,12 @@ app.post('/api/internal/system-resume', async (req: Request, res: Response) => {
   }
   lastHttpSystemResumeAt = nowTs;
   try {
+    if (typeof req.body?.autoSystemProxy === 'string') {
+      const nextAutoProxy = req.body.autoSystemProxy.trim();
+      cachedElectronAutoSystemProxy = nextAutoProxy || null;
+      if (nextAutoProxy) process.env.HS_AUTO_SYSTEM_PROXY = nextAutoProxy;
+      else delete process.env.HS_AUTO_SYSTEM_PROXY;
+    }
     const source = typeof req.body?.source === 'string' && req.body.source.trim()
       ? req.body.source.trim()
       : 'power_resume';

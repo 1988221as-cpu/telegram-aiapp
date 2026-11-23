@@ -504,6 +504,41 @@ function renderErrorHtml(title, errorMsg, stack = '') {
 `);
 }
 
+function normalizeResolvedProxyString(proxyResult) {
+  const raw = String(proxyResult || '').trim();
+  if (!raw || /^DIRECT$/i.test(raw)) return '';
+  const entries = raw.split(';').map((s) => s.trim()).filter(Boolean);
+  for (const entry of entries) {
+    if (/^DIRECT$/i.test(entry)) continue;
+    const m = entry.match(/^(SOCKS5|SOCKS4|SOCKS|PROXY|HTTP|HTTPS)\s+([^\s;]+)$/i);
+    if (!m) continue;
+    const kind = m[1].toUpperCase();
+    const hostPort = m[2].trim();
+    if (!hostPort) continue;
+    if (kind === 'SOCKS5' || kind === 'SOCKS') return `socks5://${hostPort}`;
+    if (kind === 'SOCKS4') return `socks4://${hostPort}`;
+    if (kind === 'PROXY' || kind === 'HTTP') return `http://${hostPort}`;
+    if (kind === 'HTTPS') return `https://${hostPort}`;
+  }
+  return '';
+}
+
+async function resolveSystemProxyForBackend() {
+  try {
+    const { session } = require('electron');
+    if (!session?.defaultSession || typeof session.defaultSession.resolveProxy !== 'function') {
+      return '';
+    }
+    const resolved = await Promise.race([
+      session.defaultSession.resolveProxy('https://api.telegram.org'),
+      new Promise((resolve) => setTimeout(() => resolve(''), 800)),
+    ]);
+    return normalizeResolvedProxyString(resolved);
+  } catch {
+    return '';
+  }
+}
+
 // 7. Load backend in main process
 async function startBackendServer(port) {
   const appPath = __dirname;
@@ -514,6 +549,13 @@ async function startBackendServer(port) {
   }
 
   const userDataDir = path.join(app.getPath('userData'), 'data');
+  const autoSystemProxy = await resolveSystemProxyForBackend();
+  if (autoSystemProxy) {
+    process.env.HS_AUTO_SYSTEM_PROXY = autoSystemProxy;
+    writeLog('info', `Detected OS system proxy for Telegram/Cloud fallback: ${autoSystemProxy}`);
+  } else {
+    delete process.env.HS_AUTO_SYSTEM_PROXY;
+  }
 
   // CRITICAL: NEVER set ELECTRON_RUN_AS_NODE in main process!
   delete process.env.ELECTRON_RUN_AS_NODE;
@@ -1545,14 +1587,20 @@ app.whenReady().then(() => {
   registerUpdaterIpcHandlers();
   if (powerMonitor && typeof powerMonitor.on === 'function') {
     let lastResumeNotifyAt = 0;
-    powerMonitor.on('resume', () => {
+    powerMonitor.on('resume', async () => {
       if (isQuitting) return;
       const now = Date.now();
       if (now - lastResumeNotifyAt < 3000) return;
       lastResumeNotifyAt = now;
+      const autoSystemProxy = await resolveSystemProxyForBackend();
+      if (autoSystemProxy) process.env.HS_AUTO_SYSTEM_PROXY = autoSystemProxy;
+      else delete process.env.HS_AUTO_SYSTEM_PROXY;
       const portToNotify = Number.isInteger(currentPort) && currentPort > 0 ? currentPort : FIXED_APP_PORT;
       try {
-        const payload = JSON.stringify({ source: 'electron_power_resume' });
+        const payload = JSON.stringify({
+          source: 'electron_power_resume',
+          autoSystemProxy: autoSystemProxy || '',
+        });
         const req = http.request(
           {
             hostname: '127.0.0.1',
