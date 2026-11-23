@@ -509,6 +509,30 @@ export const AiAssistantModal: React.FC<AiAssistantModalProps> = ({
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages, isSending, isOpen, isMinimized]);
 
+  // Auto-resize composer textarea height with content and panel width
+  const syncTextareaHeight = useCallback(() => {
+    const el = textareaRef.current;
+    if (!el) return;
+    if (!inputText) {
+      el.style.height = 'auto';
+      el.style.overflowY = 'hidden';
+      return;
+    }
+    el.style.height = 'auto';
+    const vh = typeof window !== 'undefined' ? window.innerHeight : 800;
+    const maxHeight = Math.min(280, Math.max(140, Math.round(vh * 0.38)));
+    const nextHeight = Math.min(el.scrollHeight, maxHeight);
+    el.style.height = `${nextHeight}px`;
+    el.style.overflowY = el.scrollHeight > maxHeight ? 'auto' : 'hidden';
+  }, [inputText]);
+
+  useEffect(() => {
+    if (!isOpen || isMinimized) return;
+    syncTextareaHeight();
+    const rafId = requestAnimationFrame(syncTextareaHeight);
+    return () => cancelAnimationFrame(rafId);
+  }, [syncTextareaHeight, isOpen, isMinimized, layoutMode, dockedWidth, rect.width]);
+
   // Handle adding image files / blobs (max 6)
   const addImageBlobs = useCallback(async (blobs: Blob[], source: 'paste' | 'other' = 'other') => {
     const imageBlobs = blobs.filter((b) => b.type.startsWith('image/'));
@@ -1541,7 +1565,7 @@ export const AiAssistantModal: React.FC<AiAssistantModalProps> = ({
                 }
               }}
               placeholder="输入业务、话术、产品或排障问题，支持 Ctrl+V 粘贴截图..."
-              className="w-full resize-none bg-transparent text-[13px] leading-relaxed outline-none placeholder:text-[#94a3b8] dark:placeholder:text-[#5c748c] aurora:placeholder:text-[#5d7b87] linen:placeholder:text-[#9c8974] select-text"
+              className="block w-full resize-none bg-transparent text-[13px] leading-relaxed outline-none placeholder:text-[#94a3b8] dark:placeholder:text-[#5c748c] aurora:placeholder:text-[#5d7b87] linen:placeholder:text-[#9c8974] select-text"
             />
 
             <div className="mt-2 flex items-center justify-between gap-2">
