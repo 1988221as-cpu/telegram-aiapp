@@ -1,7 +1,7 @@
 {
   "name": "lingxi-context",
   "private": true,
-  "version": "1.2.7",
+  "version": "1.2.8",
   "description": "HumanSense",
   "author": "HumanSense团队",
   "type": "module",
