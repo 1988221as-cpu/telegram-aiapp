@@ -34,6 +34,7 @@ import {
   getCachedResolvedAvatarUrl,
   isAvatarAlreadyLoaded,
   markAvatarLoaded,
+  clearLoadedAvatarCache,
   isAvatarKnownNoPhoto,
   markAvatarKnownNoPhoto,
   TelegramOfficialDialogFilter,
@@ -948,6 +949,7 @@ export const ChatList: React.FC<ChatListProps> = React.memo(({
                                 });
                               }}
                               onError={() => {
+                                clearLoadedAvatarCache(effectiveAvatarUrl);
                                 setFailedChatAvatars((prev) => ({ ...prev, [failKey]: true }));
                                 void fetch(effectiveAvatarUrl, { method: 'HEAD', credentials: 'include' })
                                   .then((r) => {
@@ -1324,6 +1326,7 @@ export const ChatList: React.FC<ChatListProps> = React.memo(({
                         onError={(e) => {
                           const imgEl = e.currentTarget;
                           imgEl.style.display = 'none';
+                          clearLoadedAvatarCache(previewUrl);
                           void fetch(previewUrl, { method: 'HEAD', credentials: 'include' })
                             .then((r) => {
                               if (r.status === 404) markAvatarKnownNoPhoto(previewUrl);

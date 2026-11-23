@@ -259,12 +259,30 @@ export function getStableAvatarKey(rawUrl?: string): string {
 export function getCachedResolvedAvatarUrl(rawUrl?: string): string | undefined {
   const key = getStableAvatarKey(rawUrl);
   if (!key) return rawUrl;
-  return loadedAvatarUrlByStableKey.get(key) || rawUrl;
+  const cached = loadedAvatarUrlByStableKey.get(key);
+  if (!cached) return rawUrl;
+  if (isSignedResourceUrlExpiringSoon(cached, 0)) {
+    loadedAvatarUrlByStableKey.delete(key);
+    return rawUrl;
+  }
+  const rawExp = parseSignedResourceExpiry(rawUrl) ?? 0;
+  const cachedExp = parseSignedResourceExpiry(cached) ?? 0;
+  if (rawExp > cachedExp) {
+    return rawUrl;
+  }
+  return cached;
 }
 
 export function isAvatarAlreadyLoaded(rawUrl?: string): boolean {
   const key = getStableAvatarKey(rawUrl);
-  return Boolean(key && loadedAvatarUrlByStableKey.has(key));
+  if (!key) return false;
+  const cached = loadedAvatarUrlByStableKey.get(key);
+  if (!cached) return false;
+  if (isSignedResourceUrlExpiringSoon(cached, 0)) {
+    loadedAvatarUrlByStableKey.delete(key);
+    return false;
+  }
+  return true;
 }
 
 export function markAvatarLoaded(rawUrl?: string): void {
@@ -272,6 +290,12 @@ export function markAvatarLoaded(rawUrl?: string): void {
   if (!key || !rawUrl) return;
   knownNoPhotoAvatarUntilByStableKey.delete(key);
   loadedAvatarUrlByStableKey.set(key, rawUrl);
+}
+
+export function clearLoadedAvatarCache(rawUrl?: string): void {
+  const key = getStableAvatarKey(rawUrl);
+  if (!key) return;
+  loadedAvatarUrlByStableKey.delete(key);
 }
 
 export function isAvatarKnownNoPhoto(rawUrl?: string): boolean {

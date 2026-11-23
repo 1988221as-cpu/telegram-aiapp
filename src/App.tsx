@@ -125,6 +125,7 @@ import {
   fetchTelegramAccountMetaApi,
   saveTelegramAccountMetaApi,
   getCachedAccountAvatarDataUrl,
+  resolveAccountAvatarSrc,
   cacheAccountAvatarFromUrl,
   invalidateCachedAccountAvatar,
   checkAppUpdateApi,
@@ -7118,7 +7119,9 @@ export default function App() {
           onClose={() => setIsAiAssistantOpen(false)}
           engineLicenseKey={customLLMConfig.engineLicenseKey}
           activeChatTitle={currentChat?.title}
-          operatorAvatarUrl={currentAccount?.avatarUrl}
+          operatorAvatarUrl={
+            currentAccount ? resolveAccountAvatarSrc(currentAccount.id, currentAccount.avatarUrl) : undefined
+          }
           operatorInitial={currentAccount?.avatarInitial || '我'}
         />
 

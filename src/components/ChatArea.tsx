@@ -82,6 +82,7 @@ import {
   getCachedResolvedAvatarUrl,
   isAvatarAlreadyLoaded,
   markAvatarLoaded,
+  clearLoadedAvatarCache,
   isAvatarKnownNoPhoto,
   markAvatarKnownNoPhoto,
   saveLocalMessage,
@@ -1014,6 +1015,7 @@ const ChatAreaActive: React.FC<ChatAreaProps & { chat: Chat }> = ({
   const [revokeSingleDelete, setRevokeSingleDelete] = useState(true);
   const [olderCursorOffsetId, setOlderCursorOffsetId] = useState<number | null>(null);
   const [loadedHeaderAvatarSrc, setLoadedHeaderAvatarSrc] = useState<string>('');
+  const [failedHeaderAvatarSrc, setFailedHeaderAvatarSrc] = useState<string>('');
   const sharedPhotoGalleryCacheRef = useRef<Record<string, Message[]>>({});
   const activeChatScopeKeyRef = useRef<string>('');
   activeChatScopeKeyRef.current = `${currentAccountId || 'default'}::${chat?.id || ''}`;
@@ -5769,7 +5771,13 @@ const ChatAreaActive: React.FC<ChatAreaProps & { chat: Chat }> = ({
               const cachedHeader = rawHeaderUrl ? getCachedResolvedAvatarUrl(rawHeaderUrl) : undefined;
               const resolvedHeaderUrl =
                 sanitizeSafeResourceUrl(cachedHeader || rawHeaderUrl) || rawHeaderUrl;
-              if (!resolvedHeaderUrl || isAvatarKnownNoPhoto(resolvedHeaderUrl)) return null;
+              if (
+                !resolvedHeaderUrl ||
+                isAvatarKnownNoPhoto(resolvedHeaderUrl) ||
+                failedHeaderAvatarSrc === resolvedHeaderUrl
+              ) {
+                return null;
+              }
               const isHeaderLoaded =
                 isAvatarAlreadyLoaded(resolvedHeaderUrl) || loadedHeaderAvatarSrc === resolvedHeaderUrl;
               return (
@@ -5785,8 +5793,11 @@ const ChatAreaActive: React.FC<ChatAreaProps & { chat: Chat }> = ({
                     if (e.currentTarget.naturalWidth <= 0) return;
                     markAvatarLoaded(resolvedHeaderUrl);
                     setLoadedHeaderAvatarSrc(resolvedHeaderUrl);
+                    setFailedHeaderAvatarSrc((prev) => (prev === resolvedHeaderUrl ? '' : prev));
                   }}
                   onError={() => {
+                    clearLoadedAvatarCache(resolvedHeaderUrl);
+                    setFailedHeaderAvatarSrc(resolvedHeaderUrl);
                     void fetch(resolvedHeaderUrl, { method: 'HEAD', credentials: 'include' })
                       .then((r) => {
                         if (r.status === 404) markAvatarKnownNoPhoto(resolvedHeaderUrl);
