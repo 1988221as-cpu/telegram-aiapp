@@ -17,6 +17,9 @@ import {
   TranslationSettings,
   SystemProxyConfig,
   VoiceCloneProvider,
+  WorkflowPlaybookItem,
+  AiQaResponse,
+  AiQaTurnMessage,
 } from '../types';
 import { normalizeLanguageCode } from '../data/mockData';
 import { clearAccountPendingMediaBlobs, purgeAllPendingMediaBlobs } from './pendingMediaStorage';
@@ -231,6 +234,63 @@ export function isSignedResourceUrl(rawUrl?: string): boolean {
   } catch {
     return SIGNED_RESOURCE_PATH_PREFIXES.some((prefix) => trimmed.startsWith(prefix));
   }
+}
+
+const loadedAvatarUrlByStableKey = new Map<string, string>();
+const knownNoPhotoAvatarUntilByStableKey = new Map<string, number>();
+const AVATAR_NO_PHOTO_CLIENT_TTL_MS = 10 * 60 * 1000;
+
+export function getStableAvatarKey(rawUrl?: string): string {
+  if (!rawUrl || typeof rawUrl !== 'string') return '';
+  const trimmed = rawUrl.trim();
+  if (!trimmed) return '';
+  if (trimmed.startsWith('data:') || trimmed.startsWith('blob:')) return trimmed;
+  try {
+    const parsed = new URL(trimmed, 'http://localhost');
+    parsed.searchParams.delete('exp');
+    parsed.searchParams.delete('sig');
+    const q = parsed.searchParams.toString();
+    return q ? `${parsed.pathname}?${q}` : parsed.pathname;
+  } catch {
+    return trimmed.split('?')[0];
+  }
+}
+
+export function getCachedResolvedAvatarUrl(rawUrl?: string): string | undefined {
+  const key = getStableAvatarKey(rawUrl);
+  if (!key) return rawUrl;
+  return loadedAvatarUrlByStableKey.get(key) || rawUrl;
+}
+
+export function isAvatarAlreadyLoaded(rawUrl?: string): boolean {
+  const key = getStableAvatarKey(rawUrl);
+  return Boolean(key && loadedAvatarUrlByStableKey.has(key));
+}
+
+export function markAvatarLoaded(rawUrl?: string): void {
+  const key = getStableAvatarKey(rawUrl);
+  if (!key || !rawUrl) return;
+  knownNoPhotoAvatarUntilByStableKey.delete(key);
+  loadedAvatarUrlByStableKey.set(key, rawUrl);
+}
+
+export function isAvatarKnownNoPhoto(rawUrl?: string): boolean {
+  const key = getStableAvatarKey(rawUrl);
+  if (!key) return false;
+  const until = knownNoPhotoAvatarUntilByStableKey.get(key);
+  if (!until) return false;
+  if (Date.now() > until) {
+    knownNoPhotoAvatarUntilByStableKey.delete(key);
+    return false;
+  }
+  return true;
+}
+
+export function markAvatarKnownNoPhoto(rawUrl?: string, ttlMs = AVATAR_NO_PHOTO_CLIENT_TTL_MS): void {
+  const key = getStableAvatarKey(rawUrl);
+  if (!key) return;
+  loadedAvatarUrlByStableKey.delete(key);
+  knownNoPhotoAvatarUntilByStableKey.set(key, Date.now() + ttlMs);
 }
 
 export function parseSignedResourceExpiry(rawUrl?: string): number | null {
@@ -2204,6 +2264,144 @@ export async function submitTrainingFeedbackApi(payload: {
     if (res.ok) return await res.json();
   } catch {}
   return { ok: false };
+}
+
+export async function fetchAiQaWorkflowPlaybookApi(engineLicenseKey?: string): Promise<{
+  ok: boolean;
+  items: WorkflowPlaybookItem[];
+  statusCode?: number;
+  code?: string;
+  error?: string;
+}> {
+  try {
+    const headers = getAuthHeaders(undefined, { omitAccountId: true });
+    if (engineLicenseKey?.trim()) {
+      headers['X-Engine-License'] = engineLicenseKey.trim();
+    }
+    const res = await fetchWithTimeout(
+      '/api/ai/qa/workflow-playbook',
+      { method: 'GET', headers },
+      15000
+    );
+    const data = await res.json().catch(() => null);
+    if (res.status === 401) {
+      notifyIfMemberAuthExpired(res, {
+        code: data?.code || 'AUTH_SESSION_REQUIRED',
+        message: data?.message || data?.error,
+      });
+    }
+    if (!res.ok) {
+      return {
+        ok: false,
+        items: [],
+        statusCode: res.status,
+        code: data?.code || data?.error,
+        error: data?.error || data?.message || `获取 1-7 天流程失败 (HTTP ${res.status})`,
+      };
+    }
+    const rawItems = Array.isArray(data?.items)
+      ? data.items
+      : Array.isArray(data)
+      ? data
+      : [];
+    const normalized: WorkflowPlaybookItem[] = rawItems
+      .filter((item: any) => item && typeof item === 'object')
+      .map((item: any, idx: number) => ({
+        day: Number(item.day) || idx + 1,
+        label: String(item.label || `第${Number(item.day) || idx + 1}天`),
+        title: String(item.title || item.label || `第${Number(item.day) || idx + 1}天流程`),
+        keywords: Array.isArray(item.keywords) ? item.keywords.map(String) : undefined,
+        content: String(item.content || ''),
+      }))
+      .sort((a: WorkflowPlaybookItem, b: WorkflowPlaybookItem) => a.day - b.day);
+    return { ok: true, items: normalized, statusCode: res.status };
+  } catch (err: any) {
+    return {
+      ok: false,
+      items: [],
+      error: err?.message || '获取 1-7 天流程网络连接异常',
+    };
+  }
+}
+
+export async function askAiQaAssistantApi(
+  payload: {
+    question?: string;
+    images?: string[];
+    context?: string;
+    messages?: AiQaTurnMessage[];
+    top_k?: number;
+    language?: string;
+    temperature?: number;
+  },
+  options?: { engineLicenseKey?: string; signal?: AbortSignal }
+): Promise<{
+  ok: boolean;
+  statusCode: number;
+  data: AiQaResponse | null;
+  error?: string;
+  code?: string;
+}> {
+  try {
+    const headers = getAuthHeaders(undefined, { omitAccountId: true });
+    if (options?.engineLicenseKey?.trim()) {
+      headers['X-Engine-License'] = options.engineLicenseKey.trim();
+    }
+    const res = await fetchWithTimeout(
+      '/api/ai/qa',
+      {
+        method: 'POST',
+        headers,
+        signal: options?.signal,
+        body: JSON.stringify({
+          ...(typeof payload.question === 'string' && payload.question.trim()
+            ? { question: payload.question }
+            : {}),
+          ...(Array.isArray(payload.images) && payload.images.length > 0
+            ? { images: payload.images.slice(0, 6) }
+            : {}),
+          ...(typeof payload.context === 'string' && payload.context.trim()
+            ? { context: payload.context }
+            : {}),
+          ...(Array.isArray(payload.messages) && payload.messages.length > 0
+            ? { messages: payload.messages }
+            : {}),
+          top_k: payload.top_k ?? 6,
+          language: payload.language ?? '',
+          temperature: payload.temperature ?? 0.4,
+          stream: false,
+        }),
+      },
+      90000
+    );
+    const data = (await res.json().catch(() => null)) as AiQaResponse | null;
+    if (res.status === 401) {
+      notifyIfMemberAuthExpired(res, {
+        code: data?.code || 'AUTH_SESSION_REQUIRED',
+        message: data?.message || data?.error,
+      });
+    }
+    if (!res.ok || !data?.ok) {
+      return {
+        ok: false,
+        statusCode: res.status,
+        data,
+        code: data?.code || data?.error,
+        error: data?.error || data?.message || `AI 问答请求失败 (HTTP ${res.status})`,
+      };
+    }
+    return { ok: true, statusCode: res.status, data };
+  } catch (err: any) {
+    if (err?.name === 'AbortError') {
+      throw err;
+    }
+    return {
+      ok: false,
+      statusCode: 0,
+      data: null,
+      error: err?.message || 'AI 问答请求连接异常',
+    };
+  }
 }
 
 // ==================== DATABASE & MEMORY SERVICES ====================

@@ -199,7 +199,8 @@ app.use((req: Request, res: Response, next: NextFunction) => {
     req.path.startsWith('/api/audio/tts-clone') ||
     req.path.startsWith('/api/knowledge/upload') ||
     req.path.startsWith('/api/database/restore') ||
-    req.path.startsWith('/api/telegram/user/upload-avatar')
+    req.path.startsWith('/api/telegram/user/upload-avatar') ||
+    req.path === '/api/ai/qa'
   ) {
     largeBodyParser(req, res, (err) => {
       if (err) return next(err);
@@ -14742,6 +14743,94 @@ app.post('/api/training/feedback', aiGenerationLimiter, requireTenantAuth, async
   }
 });
 
+// Operator AI QA Assistant & 1-7 Day Workflow Playbook Proxy (isolated from customer reply routes)
+app.get('/api/ai/qa/workflow-playbook', requireTenantAuth, async (req: Request, res: Response) => {
+  try {
+    const userJwt = extractBearerToken(req);
+    const serverCfg = await getServerCustomLlmConfig().catch(() => null);
+    const effectiveEngineKey = resolveSecretUpdate(
+      req.headers['x-engine-license'],
+      serverCfg?.engineLicenseKey,
+      true
+    );
+    const targetUrl = `${getRailwayBrainBaseUrl()}/api/ai/qa/workflow-playbook`;
+    const upstreamRes = await fetchWithSystemProxySupport(
+      targetUrl,
+      {
+        method: 'GET',
+        headers: buildRailwayAuthHeaders(undefined, userJwt, effectiveEngineKey),
+      },
+      15000
+    );
+    const rawText = await upstreamRes.text();
+    res.status(upstreamRes.status);
+    try {
+      return res.json(JSON.parse(rawText));
+    } catch {
+      return res.send(rawText);
+    }
+  } catch (error: any) {
+    return res.status(502).json({
+      ok: false,
+      error: error?.message || '获取 1-7 天流程指引失败',
+    });
+  }
+});
+
+app.post('/api/ai/qa', aiGenerationLimiter, requireTenantAuth, async (req: Request, res: Response) => {
+  try {
+    const userJwt = extractBearerToken(req);
+    const serverCfg = await getServerCustomLlmConfig().catch(() => null);
+    const effectiveEngineKey = resolveSecretUpdate(
+      req.headers['x-engine-license'] ?? req.body?.engineLicenseKey,
+      serverCfg?.engineLicenseKey,
+      true
+    );
+    const {
+      question,
+      images,
+      context,
+      messages,
+      top_k,
+      language,
+      temperature,
+      stream,
+    } = req.body || {};
+
+    const targetUrl = `${getRailwayBrainBaseUrl()}/api/ai/qa`;
+    const upstreamRes = await fetchWithSystemProxySupport(
+      targetUrl,
+      {
+        method: 'POST',
+        headers: buildRailwayAuthHeaders(undefined, userJwt, effectiveEngineKey),
+        body: JSON.stringify({
+          ...(typeof question === 'string' ? { question } : {}),
+          ...(Array.isArray(images) && images.length > 0 ? { images: images.slice(0, 6) } : {}),
+          ...(typeof context === 'string' && context.trim() ? { context } : {}),
+          ...(Array.isArray(messages) && messages.length > 0 ? { messages } : {}),
+          top_k: typeof top_k === 'number' ? Math.min(12, Math.max(1, Math.round(top_k))) : 6,
+          language: typeof language === 'string' ? language : '',
+          temperature: typeof temperature === 'number' ? temperature : 0.4,
+          stream: Boolean(stream),
+        }),
+      },
+      90000
+    );
+    const rawText = await upstreamRes.text();
+    res.status(upstreamRes.status);
+    try {
+      return res.json(JSON.parse(rawText));
+    } catch {
+      return res.send(rawText);
+    }
+  } catch (error: any) {
+    return res.status(502).json({
+      ok: false,
+      error: error?.message || '智能问答网关连接异常',
+    });
+  }
+});
+
 // ==================== FULL CHAT DIALOGUE CORPUS & STYLE LEARNING ====================
 
 // 1. Get all dialogue transcripts (Protected with requireTenantAuth + strictly scoped by account_id)
@@ -27275,7 +27364,7 @@ export async function prewarmAccountAvatarsOnce(
   const uid = String(connected?.userId || '').trim();
   if (!uid || !connected?.client) return { warmed: 0, skippedCached: 0 };
   const cacheAccountScope = `acc_tg_${uid}`;
-  const maxDialogs = Math.max(1, Math.min(80, opts?.maxDialogs ?? 45));
+  const maxDialogs = Math.max(1, Math.min(150, opts?.maxDialogs ?? 150));
   const stepDelayMs = opts?.delayMs ?? 80;
 
   const peerIds: string[] = [uid];

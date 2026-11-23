@@ -7,6 +7,7 @@ import {
   Plus,
   AudioWaveform,
   Sparkles,
+  Bot,
   ChevronUp,
   ChevronDown,
   Pencil,
@@ -47,6 +48,8 @@ interface LeftSidebarProps {
   onOpenDatabase?: () => void;
   onOpenMasterVoiceprint?: () => void;
   onOpenKnowledgeEvolution?: () => void;
+  onOpenAiAssistant?: () => void;
+  isAiAssistantOpen?: boolean;
   isMasterVoiceActive?: boolean;
   activeTab: 'chats' | 'memory' | 'llm' | 'translation' | 'voice' | 'persona';
   setActiveTab: (tab: 'chats' | 'memory' | 'llm' | 'translation' | 'voice' | 'persona') => void;
@@ -73,6 +76,8 @@ export const LeftSidebar: React.FC<LeftSidebarProps> = React.memo(({
   onOpenCustomerMemory,
   onOpenMasterVoiceprint,
   onOpenKnowledgeEvolution,
+  onOpenAiAssistant,
+  isAiAssistantOpen,
   isMasterVoiceActive,
   activeTab,
   setActiveTab,
@@ -341,7 +346,7 @@ export const LeftSidebar: React.FC<LeftSidebarProps> = React.memo(({
           <button
             onClick={() => setActiveTab('chats')}
             title="聊天"
-            className={railItemClass(activeTab === 'chats')}
+            className={railItemClass(activeTab === 'chats' && !isAiAssistantOpen)}
           >
             <div className="relative">
               <MessageSquare className="w-5 h-5" />
@@ -352,6 +357,17 @@ export const LeftSidebar: React.FC<LeftSidebarProps> = React.memo(({
               )}
             </div>
             <span className="text-xs leading-none mt-1.5 whitespace-nowrap tracking-wide">聊天</span>
+          </button>
+
+          {/* 1.5 独立 AI助手入口 (位于聊天正下方、展开/收起上方，不随功能区折叠) */}
+          <button
+            type="button"
+            onClick={() => onOpenAiAssistant?.()}
+            title="AI助手（业务、话术、产品、截图排障问答与 1-7 天流程）"
+            className={railItemClass(Boolean(isAiAssistantOpen))}
+          >
+            <Bot className="w-5 h-5 group-hover:scale-105 transition-transform" />
+            <span className="text-xs leading-none mt-1.5 whitespace-nowrap tracking-wide">AI助手</span>
           </button>
 
           {/* Collapse/Expand Toggle for Feature Tools (图2) */}

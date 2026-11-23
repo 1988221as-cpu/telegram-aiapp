@@ -457,3 +457,61 @@ export interface EvolutionLogItem {
 
 export type AppThemeMode = 'light' | 'dark' | 'aurora' | 'linen';
 
+export interface WorkflowPlaybookItem {
+  day: number;
+  label: string;
+  title: string;
+  keywords?: string[];
+  content: string;
+}
+
+export interface AiQaMatchedKnowledge {
+  id: string | number;
+  title: string;
+  category?: string;
+  contentPreview?: string;
+  finalScore?: number;
+  appliedLikely?: boolean;
+  appliedSignals?: string[];
+}
+
+export interface AiQaTurnMessage {
+  role: 'user' | 'assistant';
+  content:
+    | string
+    | Array<
+        | { type: 'text'; text: string }
+        | { type: 'image_url'; image_url: { url: string } }
+      >;
+}
+
+export interface AiQaResponse {
+  ok: boolean;
+  answer: string;
+  question?: string;
+  imageCount?: number;
+  model?: string;
+  knowledgeUsed?: boolean;
+  matchedCount?: number;
+  expandedChineseQuery?: string;
+  matchedKnowledge?: AiQaMatchedKnowledge[];
+  code?: string;
+  error?: string;
+  message?: string;
+}
+
+export interface AiQaLocalChatItem {
+  id: string;
+  role: 'user' | 'assistant';
+  text: string;
+  images?: string[];
+  createdAt: number;
+  model?: string;
+  knowledgeUsed?: boolean;
+  matchedCount?: number;
+  matchedKnowledge?: AiQaMatchedKnowledge[];
+  errorCode?: string;
+  isError?: boolean;
+}
+
+

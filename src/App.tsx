@@ -20,6 +20,7 @@ import {
   loadStoredClientPrefs,
 } from './components/TelegramSettingsModal';
 import { MemberAuthModal } from './components/MemberAuthModal';
+import { AiAssistantModal } from './components/AiAssistantModal';
 import { getMasterVoiceprint, hydrateMasterVoiceprint } from './services/voiceprintStorage';
 import {
   INITIAL_ACCOUNTS,
@@ -117,6 +118,10 @@ import {
   isSignedResourceUrl,
   isSignedResourceUrlExpiringSoon,
   refreshSignedResourceUrlsApi,
+  isAvatarAlreadyLoaded,
+  isAvatarKnownNoPhoto,
+  markAvatarLoaded,
+  markAvatarKnownNoPhoto,
   fetchTelegramAccountMetaApi,
   saveTelegramAccountMetaApi,
   getCachedAccountAvatarDataUrl,
@@ -754,6 +759,7 @@ export default function App() {
   const [reloginAccount, setReloginAccount] = useState<Account | null>(null);
   const [isDatabaseOpen, setIsDatabaseOpen] = useState(false);
   const [isSystemSettingsOpen, setIsSystemSettingsOpen] = useState(false);
+  const [isAiAssistantOpen, setIsAiAssistantOpen] = useState(false);
   const [isMasterVoiceActive, setIsMasterVoiceActive] = useState(() => {
     const mv = getMasterVoiceprint();
     return !!mv?.enabledAsDefault;
@@ -2163,10 +2169,17 @@ export default function App() {
     if (typeof window === 'undefined' || typeof Image === 'undefined') return;
     const targets: string[] = [];
     for (const raw of urls) {
-      if (!raw || preloadedBrowserAvatarUrlsRef.current.has(raw)) continue;
+      if (
+        !raw ||
+        preloadedBrowserAvatarUrlsRef.current.has(raw) ||
+        isAvatarAlreadyLoaded(raw) ||
+        isAvatarKnownNoPhoto(raw)
+      ) {
+        continue;
+      }
       preloadedBrowserAvatarUrlsRef.current.add(raw);
       targets.push(raw);
-      if (targets.length >= 30) break;
+      if (targets.length >= 150) break;
     }
     if (targets.length === 0) return;
     if (preloadedBrowserAvatarUrlsRef.current.size > 1500) {
@@ -2178,12 +2191,26 @@ export default function App() {
       const url = targets[idx++];
       const img = new Image();
       img.referrerPolicy = 'no-referrer';
-      const next = () => window.setTimeout(worker, 40);
-      img.onload = next;
-      img.onerror = next;
+      const next = () => window.setTimeout(worker, 60);
+      img.onload = () => {
+        if (img.naturalWidth > 0) {
+          markAvatarLoaded(url);
+        }
+        next();
+      };
+      img.onerror = () => {
+        void fetch(url, { method: 'HEAD', credentials: 'include' })
+          .then((r) => {
+            if (r.status === 404) {
+              markAvatarKnownNoPhoto(url);
+            }
+          })
+          .catch(() => {})
+          .finally(next);
+      };
       img.src = url;
     };
-    const concurrency = Math.min(3, targets.length);
+    const concurrency = Math.min(2, targets.length);
     for (let i = 0; i < concurrency; i++) {
       window.setTimeout(worker, i * 35);
     }
@@ -2203,7 +2230,7 @@ export default function App() {
       );
       const activeChatsUrls = chatsRef.current
         .filter((c) => c.accountId === activeAccountIdRef.current && c.avatarUrl)
-        .slice(0, 20)
+        .slice(0, 150)
         .map((c) => c.avatarUrl);
       enqueueBrowserAvatarPreload(activeChatsUrls);
 
@@ -2241,7 +2268,7 @@ export default function App() {
             if (res.ok && Array.isArray(res.dialogs) && res.dialogs.length > 0) {
               lastDialogsSyncAtRef.current[accId] = Date.now();
               mergeCloudDialogsForAccount(accId, res.dialogs, { isCached: Boolean(res.cached) });
-              enqueueBrowserAvatarPreload(res.dialogs.slice(0, 25).map((d: any) => d?.avatarUrl));
+              enqueueBrowserAvatarPreload(res.dialogs.slice(0, 150).map((d: any) => d?.avatarUrl));
             }
             await new Promise((r) => setTimeout(r, 250));
           }
@@ -6769,12 +6796,15 @@ export default function App() {
         onOpenCustomerMemory={() => toggleRightPanel('memory')}
         onOpenMasterVoiceprint={() => toggleRightPanel('voice')}
         onOpenKnowledgeEvolution={() => toggleRightPanel('persona')}
+        onOpenAiAssistant={() => setIsAiAssistantOpen((prev) => !prev)}
+        isAiAssistantOpen={isAiAssistantOpen}
         isMasterVoiceActive={isMasterVoiceActive}
         activeTab={activeRightPanel || 'chats'}
         setActiveTab={(tab) => {
           if (tab === 'chats') {
             setActiveRightPanel(null);
             setIsMultiAccountOpen(false);
+            setIsAiAssistantOpen(false);
           }
         }}
       />
@@ -7080,6 +7110,16 @@ export default function App() {
           customConfig={customLLMConfig}
           chatTitle={currentChat?.title || '当前联系人'}
           messages={currentMessages}
+        />
+
+        {/* 3.45 Docked / Resizable AI助手 Panel (Auto-shrinks ChatArea to center when docked) */}
+        <AiAssistantModal
+          isOpen={isAiAssistantOpen}
+          onClose={() => setIsAiAssistantOpen(false)}
+          engineLicenseKey={customLLMConfig.engineLicenseKey}
+          activeChatTitle={currentChat?.title}
+          operatorAvatarUrl={currentAccount?.avatarUrl}
+          operatorInitial={currentAccount?.avatarInitial || '我'}
         />
 
         {/* 3.5 Unified Feature Modal Page Overlay (Standalone 5-Tab Modal) */}

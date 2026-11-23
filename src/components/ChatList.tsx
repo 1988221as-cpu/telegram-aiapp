@@ -30,6 +30,12 @@ import {
   isSignedResourceUrlExpiringSoon,
   refreshSignedResourceUrlsApi,
   ensureFreshSignedResourceUrl,
+  getStableAvatarKey,
+  getCachedResolvedAvatarUrl,
+  isAvatarAlreadyLoaded,
+  markAvatarLoaded,
+  isAvatarKnownNoPhoto,
+  markAvatarKnownNoPhoto,
   TelegramOfficialDialogFilter,
 } from '../services/apiService';
 
@@ -219,6 +225,7 @@ export const ChatList: React.FC<ChatListProps> = React.memo(({
   const [dropChatTarget, setDropChatTarget] = useState<{ chatId: string; position: 'before' | 'after' } | null>(null);
   const [refreshedAvatars, setRefreshedAvatars] = useState<Record<string, string>>({});
   const [failedChatAvatars, setFailedChatAvatars] = useState<Record<string, true>>({});
+  const [loadedChatAvatars, setLoadedChatAvatars] = useState<Record<string, true>>({});
   const [chatAvatarRetryNonce, setChatAvatarRetryNonce] = useState<Record<string, number>>({});
   const chatAvatarRetryTimersRef = useRef<Record<string, number>>({});
   const [nowTick, setNowTick] = useState<number>(() => Date.now());
@@ -240,7 +247,8 @@ export const ChatList: React.FC<ChatListProps> = React.memo(({
   const resolveAvatarUrl = useCallback(
     (rawUrl?: string) => {
       if (!rawUrl) return rawUrl;
-      return refreshedAvatars[rawUrl] || rawUrl;
+      const baseResolved = refreshedAvatars[rawUrl] || rawUrl;
+      return getCachedResolvedAvatarUrl(baseResolved) || baseResolved;
     },
     [refreshedAvatars]
   );
@@ -894,20 +902,39 @@ export const ChatList: React.FC<ChatListProps> = React.memo(({
                         <span className="text-white text-xs font-semibold select-none">{chat.avatarInitial}</span>
                         {(() => {
                           const effectiveAvatarUrl = resolveAvatarUrl(chat.avatarUrl);
+                          const stableKey = getStableAvatarKey(effectiveAvatarUrl);
                           const retryBucketKey = `${chat.accountId || 'default'}::${chat.id}::${currentAccountStatus || ''}`;
                           const retryCount = chatAvatarRetryNonce[retryBucketKey] || 0;
-                          const failKey = `${retryBucketKey}|${effectiveAvatarUrl || ''}|${retryCount}`;
-                          if (!effectiveAvatarUrl || failedChatAvatars[failKey]) return null;
+                          const failKey = `${chat.accountId || 'default'}::${stableKey}|${retryCount}`;
+                          const isLoaded = Boolean(
+                            effectiveAvatarUrl &&
+                              (loadedChatAvatars[stableKey] || isAvatarAlreadyLoaded(effectiveAvatarUrl))
+                          );
+                          if (
+                            !effectiveAvatarUrl ||
+                            isAvatarKnownNoPhoto(effectiveAvatarUrl) ||
+                            failedChatAvatars[failKey]
+                          ) {
+                            return null;
+                          }
                           return (
                             <img
+                              key={effectiveAvatarUrl}
                               draggable={false}
                               loading={chatIdx < 18 ? 'eager' : 'lazy'}
                               decoding="async"
                               src={effectiveAvatarUrl}
-                              alt={chat.title}
+                              alt=""
                               referrerPolicy="no-referrer"
-                              className="w-full h-full object-cover absolute inset-0"
+                              className={`w-full h-full object-cover absolute inset-0 transition-opacity duration-150 ${
+                                isLoaded ? 'opacity-100' : 'opacity-0'
+                              }`}
                               onLoad={(e) => {
+                                if (e.currentTarget.naturalWidth <= 0) return;
+                                markAvatarLoaded(effectiveAvatarUrl);
+                                setLoadedChatAvatars((prev) =>
+                                  prev[stableKey] ? prev : { ...prev, [stableKey]: true }
+                                );
                                 e.currentTarget.style.display = '';
                                 if (chatAvatarRetryTimersRef.current[retryBucketKey]) {
                                   window.clearTimeout(chatAvatarRetryTimersRef.current[retryBucketKey]);
@@ -922,15 +949,30 @@ export const ChatList: React.FC<ChatListProps> = React.memo(({
                               }}
                               onError={() => {
                                 setFailedChatAvatars((prev) => ({ ...prev, [failKey]: true }));
-                                void triggerAvatarRefresh(chat.avatarUrl, true).then((nextUrl) => {
-                                  if (!nextUrl && retryCount < 2 && !chatAvatarRetryTimersRef.current[retryBucketKey]) {
-                                    const delayMs = retryCount === 0 ? 2500 : 6500;
-                                    chatAvatarRetryTimersRef.current[retryBucketKey] = window.setTimeout(() => {
-                                      delete chatAvatarRetryTimersRef.current[retryBucketKey];
-                                      setChatAvatarRetryNonce((p) => ({ ...p, [retryBucketKey]: (p[retryBucketKey] || 0) + 1 }));
-                                    }, delayMs);
-                                  }
-                                });
+                                void fetch(effectiveAvatarUrl, { method: 'HEAD', credentials: 'include' })
+                                  .then((r) => {
+                                    if (r.status === 404) {
+                                      markAvatarKnownNoPhoto(effectiveAvatarUrl);
+                                      return true;
+                                    }
+                                    return false;
+                                  })
+                                  .catch(() => false)
+                                  .then((confirmedNoPhoto) => {
+                                    if (confirmedNoPhoto) return;
+                                    void triggerAvatarRefresh(chat.avatarUrl, true).then((nextUrl) => {
+                                      if (!nextUrl && retryCount < 2 && !chatAvatarRetryTimersRef.current[retryBucketKey]) {
+                                        const delayMs = retryCount === 0 ? 2500 : 6500;
+                                        chatAvatarRetryTimersRef.current[retryBucketKey] = window.setTimeout(() => {
+                                          delete chatAvatarRetryTimersRef.current[retryBucketKey];
+                                          setChatAvatarRetryNonce((p) => ({
+                                            ...p,
+                                            [retryBucketKey]: (p[retryBucketKey] || 0) + 1,
+                                          }));
+                                        }, delayMs);
+                                      }
+                                    });
+                                  });
                               }}
                             />
                           );
@@ -1256,24 +1298,41 @@ export const ChatList: React.FC<ChatListProps> = React.memo(({
                   style={{ backgroundColor: previewChat.avatarBg }}
                 >
                   <span>{previewChat.avatarInitial}</span>
-                  {previewChat.avatarUrl && (
-                    <img
-                      src={resolveAvatarUrl(previewChat.avatarUrl)}
-                      alt={previewChat.title}
-                      className="w-full h-full object-cover absolute inset-0"
-                      onLoad={(e) => {
-                        e.currentTarget.style.display = '';
-                      }}
-                      onError={(e) => {
-                        const imgEl = e.currentTarget;
-                        void triggerAvatarRefresh(previewChat.avatarUrl, true).then((nextUrl) => {
-                          if (!nextUrl) {
-                            imgEl.style.display = 'none';
-                          }
-                        });
-                      }}
-                    />
-                  )}
+                  {(() => {
+                    const previewUrl = resolveAvatarUrl(previewChat.avatarUrl);
+                    const previewKey = getStableAvatarKey(previewUrl);
+                    if (!previewUrl || isAvatarKnownNoPhoto(previewUrl)) return null;
+                    const isPreviewLoaded = Boolean(
+                      loadedChatAvatars[previewKey] || isAvatarAlreadyLoaded(previewUrl)
+                    );
+                    return (
+                      <img
+                        key={previewUrl}
+                        src={previewUrl}
+                        alt=""
+                        className={`w-full h-full object-cover absolute inset-0 ${
+                          isPreviewLoaded ? 'opacity-100' : 'opacity-0'
+                        }`}
+                        onLoad={(e) => {
+                          if (e.currentTarget.naturalWidth <= 0) return;
+                          markAvatarLoaded(previewUrl);
+                          setLoadedChatAvatars((prev) =>
+                            prev[previewKey] ? prev : { ...prev, [previewKey]: true }
+                          );
+                          e.currentTarget.style.display = '';
+                        }}
+                        onError={(e) => {
+                          const imgEl = e.currentTarget;
+                          imgEl.style.display = 'none';
+                          void fetch(previewUrl, { method: 'HEAD', credentials: 'include' })
+                            .then((r) => {
+                              if (r.status === 404) markAvatarKnownNoPhoto(previewUrl);
+                            })
+                            .catch(() => {});
+                        }}
+                      />
+                    );
+                  })()}
                 </div>
                 <div>
                   <h4 className="font-bold text-sm text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118]">{previewChat.title}</h4>

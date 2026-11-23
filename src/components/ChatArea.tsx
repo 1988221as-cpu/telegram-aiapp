@@ -79,6 +79,11 @@ import {
   isSignedResourceUrlExpiringSoon,
   refreshSignedResourceUrlsApi,
   ensureFreshSignedResourceUrl,
+  getCachedResolvedAvatarUrl,
+  isAvatarAlreadyLoaded,
+  markAvatarLoaded,
+  isAvatarKnownNoPhoto,
+  markAvatarKnownNoPhoto,
   saveLocalMessage,
   updateMessageSttInDb,
   previewTelegramInviteApi,
@@ -1008,6 +1013,7 @@ const ChatAreaActive: React.FC<ChatAreaProps & { chat: Chat }> = ({
   const [messageToDelete, setMessageToDelete] = useState<Message | null>(null);
   const [revokeSingleDelete, setRevokeSingleDelete] = useState(true);
   const [olderCursorOffsetId, setOlderCursorOffsetId] = useState<number | null>(null);
+  const [loadedHeaderAvatarSrc, setLoadedHeaderAvatarSrc] = useState<string>('');
   const sharedPhotoGalleryCacheRef = useRef<Record<string, Message[]>>({});
   const activeChatScopeKeyRef = useRef<string>('');
   activeChatScopeKeyRef.current = `${currentAccountId || 'default'}::${chat?.id || ''}`;
@@ -5758,25 +5764,43 @@ const ChatAreaActive: React.FC<ChatAreaProps & { chat: Chat }> = ({
             style={{ backgroundColor: chat.avatarBg }}
           >
             <span className="text-white text-xs font-semibold select-none">{chat.avatarInitial}</span>
-            {chat.avatarUrl && (
-              <img
-                src={resolveDisplayUrl(chat.avatarUrl)}
-                alt={chat.title}
-                referrerPolicy="no-referrer"
-                className="w-full h-full object-cover absolute inset-0"
-                onLoad={(e) => {
-                  e.currentTarget.style.display = '';
-                }}
-                onError={(e) => {
-                  const imgEl = e.currentTarget;
-                  void triggerSilentUrlRefresh(chat.avatarUrl, true).then((nextUrl) => {
-                    if (!nextUrl) {
-                      imgEl.style.display = 'none';
-                    }
-                  });
-                }}
-              />
-            )}
+            {(() => {
+              const rawHeaderUrl = resolveDisplayUrl(chat.avatarUrl);
+              const cachedHeader = rawHeaderUrl ? getCachedResolvedAvatarUrl(rawHeaderUrl) : undefined;
+              const resolvedHeaderUrl =
+                sanitizeSafeResourceUrl(cachedHeader || rawHeaderUrl) || rawHeaderUrl;
+              if (!resolvedHeaderUrl || isAvatarKnownNoPhoto(resolvedHeaderUrl)) return null;
+              const isHeaderLoaded =
+                isAvatarAlreadyLoaded(resolvedHeaderUrl) || loadedHeaderAvatarSrc === resolvedHeaderUrl;
+              return (
+                <img
+                  key={resolvedHeaderUrl}
+                  src={resolvedHeaderUrl}
+                  alt=""
+                  referrerPolicy="no-referrer"
+                  className={`w-full h-full object-cover absolute inset-0 ${
+                    isHeaderLoaded ? 'opacity-100' : 'opacity-0'
+                  }`}
+                  onLoad={(e) => {
+                    if (e.currentTarget.naturalWidth <= 0) return;
+                    markAvatarLoaded(resolvedHeaderUrl);
+                    setLoadedHeaderAvatarSrc(resolvedHeaderUrl);
+                  }}
+                  onError={() => {
+                    void fetch(resolvedHeaderUrl, { method: 'HEAD', credentials: 'include' })
+                      .then((r) => {
+                        if (r.status === 404) markAvatarKnownNoPhoto(resolvedHeaderUrl);
+                      })
+                      .catch(() => {})
+                      .finally(() => {
+                        if (!isAvatarKnownNoPhoto(resolvedHeaderUrl)) {
+                          void triggerSilentUrlRefresh(chat.avatarUrl, true);
+                        }
+                      });
+                  }}
+                />
+              );
+            })()}
             {chat.isVerified && (
               <div className="absolute inset-0 bg-[#2481cc] dark:bg-[#2ba0ff] aurora:bg-[#14b8a6] linen:bg-[#a86a43] flex items-center justify-center text-white">
                 <Check className="w-4 h-4 stroke-[2.5]" />
