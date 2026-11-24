@@ -14746,7 +14746,185 @@ app.post('/api/training/feedback', aiGenerationLimiter, requireTenantAuth, async
 });
 
 // Operator AI QA Assistant & 1-7 Day Workflow Playbook Proxy (isolated from customer reply routes)
+async function fetchAiQaUpstreamWithResilience(
+  targetUrl: string,
+  init: RequestInit,
+  options: {
+    attemptTimeoutMs: number;
+    totalDeadlineMs: number;
+    maxRetries?: number;
+    clientSignal?: AbortSignal;
+  }
+): Promise<globalThis.Response> {
+  const startedAt = Date.now();
+  const maxRetries = Math.max(0, Math.min(2, options.maxRetries ?? 1));
+  const manualProxy = getConfiguredTelegramProxy();
+  const autoProxy = !manualProxy ? getAutoDetectedSystemProxy() : null;
+
+  const invokeDirectShortLived = async (timeoutMs: number): Promise<globalThis.Response> => {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    const onClientAbort = () => controller.abort();
+    if (options.clientSignal) {
+      if (options.clientSignal.aborted) {
+        clearTimeout(timer);
+        const err = new Error('请求已取消');
+        err.name = 'AbortError';
+        throw err;
+      }
+      options.clientSignal.addEventListener('abort', onClientAbort, { once: true });
+    }
+    try {
+      // safeSsrfFetch -> performPinnedHttpFetch enforces agent: false + Connection: close (avoids Undici keep-alive socket poisoning)
+      return await safeSsrfFetch(targetUrl, {
+        ...init,
+        signal: controller.signal,
+      });
+    } finally {
+      clearTimeout(timer);
+      if (options.clientSignal) {
+        options.clientSignal.removeEventListener('abort', onClientAbort);
+      }
+    }
+  };
+
+  const invokeViaProxy = async (timeoutMs: number): Promise<globalThis.Response> => {
+    const controller = new AbortController();
+    const onClientAbort = () => controller.abort();
+    if (options.clientSignal) {
+      if (options.clientSignal.aborted) {
+        const err = new Error('请求已取消');
+        err.name = 'AbortError';
+        throw err;
+      }
+      options.clientSignal.addEventListener('abort', onClientAbort, { once: true });
+    }
+    try {
+      return await fetchWithSystemProxySupport(
+        targetUrl,
+        { ...init, signal: controller.signal },
+        timeoutMs
+      );
+    } finally {
+      if (options.clientSignal) {
+        options.clientSignal.removeEventListener('abort', onClientAbort);
+      }
+    }
+  };
+
+  let lastErr: any = null;
+  let forceDirect = !manualProxy && !autoProxy;
+
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    if (options.clientSignal?.aborted) {
+      const err = new Error('请求已取消');
+      err.name = 'AbortError';
+      throw err;
+    }
+    const remainingMs = options.totalDeadlineMs - (Date.now() - startedAt);
+    if (remainingMs <= 1500) break;
+    const perAttemptMs = Math.max(3000, Math.min(options.attemptTimeoutMs, remainingMs));
+
+    try {
+      let res: globalThis.Response;
+      if (manualProxy) {
+        res = await invokeViaProxy(perAttemptMs);
+      } else if (!forceDirect && autoProxy) {
+        let proxyRes: globalThis.Response | null = null;
+        let shouldFallbackDirect = false;
+        try {
+          proxyRes = await invokeViaProxy(Math.min(perAttemptMs, 28000));
+          const cType = String(proxyRes.headers.get('content-type') || '').toLowerCase();
+          const isProxyGatewayFail =
+            proxyRes.status === 502 ||
+            proxyRes.status === 504 ||
+            (proxyRes.status === 503 && !cType.includes('application/json'));
+          if (isProxyGatewayFail) {
+            try {
+              await proxyRes.body?.cancel();
+            } catch {}
+            proxyRes = null;
+            shouldFallbackDirect = true;
+          }
+        } catch (proxyErr: any) {
+          if (options.clientSignal?.aborted) throw proxyErr;
+          lastErr = proxyErr;
+          shouldFallbackDirect = true;
+        }
+
+        if (shouldFallbackDirect) {
+          forceDirect = true;
+          const afterProxyRemaining = options.totalDeadlineMs - (Date.now() - startedAt);
+          if (afterProxyRemaining <= 2000) {
+            throw lastErr || new Error('智能问答代理连接超时');
+          }
+          res = await invokeDirectShortLived(Math.min(perAttemptMs, afterProxyRemaining));
+        } else {
+          res = proxyRes!;
+        }
+      } else {
+        res = await invokeDirectShortLived(perAttemptMs);
+      }
+
+      const cType = String(res.headers.get('content-type') || '').toLowerCase();
+      // Preserve legitimate upstream JSON 503 (e.g. service_unavailable when QA key is unconfigured) without wasting a retry
+      const isUpstreamJsonConfigError = res.status === 503 && cType.includes('application/json');
+      const isRetryableStatus =
+        !isUpstreamJsonConfigError &&
+        (res.status === 502 || res.status === 503 || res.status === 504 || res.status === 429);
+      if (!isRetryableStatus || attempt === maxRetries) {
+        return res;
+      }
+      lastErr = new Error(`云端智能问答网关暂不可用 (HTTP ${res.status})`);
+      try {
+        await res.body?.cancel();
+      } catch {}
+    } catch (err: any) {
+      lastErr = err;
+      const msg = String(err?.message || err || '');
+      const isNonRetryable = msg.includes('SSRF 安全拦截') || Boolean(options.clientSignal?.aborted);
+      if (isNonRetryable || attempt === maxRetries) {
+        throw err;
+      }
+    }
+
+    const backoffMs = Math.min(600, 300 * (attempt + 1));
+    if (options.totalDeadlineMs - (Date.now() - startedAt) <= backoffMs + 2000) {
+      break;
+    }
+    await new Promise((r) => setTimeout(r, backoffMs));
+  }
+
+  throw lastErr || new Error('智能问答网关连接异常');
+}
+
+function sendAiQaUpstreamResponse(
+  res: Response,
+  upstreamStatus: number,
+  rawText: string,
+  fallbackLabel: string
+) {
+  try {
+    const parsed = JSON.parse(rawText);
+    return res.status(upstreamStatus).json(parsed);
+  } catch {
+    if (upstreamStatus >= 500) {
+      return res.status(upstreamStatus).json({
+        ok: false,
+        code: 'UPSTREAM_GATEWAY_ERROR',
+        error: `${fallbackLabel} (HTTP ${upstreamStatus})，请稍后重试`,
+      });
+    }
+    return res.status(upstreamStatus).send(rawText);
+  }
+}
+
 app.get('/api/ai/qa/workflow-playbook', requireTenantAuth, async (req: Request, res: Response) => {
+  const clientAbortController = new AbortController();
+  const onResClose = () => {
+    if (!res.writableFinished) clientAbortController.abort();
+  };
+  res.on('close', onResClose);
   try {
     const userJwt = extractBearerToken(req);
     const serverCfg = await getServerCustomLlmConfig().catch(() => null);
@@ -14756,30 +14934,39 @@ app.get('/api/ai/qa/workflow-playbook', requireTenantAuth, async (req: Request, 
       true
     );
     const targetUrl = `${getRailwayBrainBaseUrl()}/api/ai/qa/workflow-playbook`;
-    const upstreamRes = await fetchWithSystemProxySupport(
+    const upstreamRes = await fetchAiQaUpstreamWithResilience(
       targetUrl,
       {
         method: 'GET',
         headers: buildRailwayAuthHeaders(undefined, userJwt, effectiveEngineKey),
       },
-      15000
+      {
+        attemptTimeoutMs: 12000,
+        totalDeadlineMs: 22000,
+        maxRetries: 1,
+        clientSignal: clientAbortController.signal,
+      }
     );
     const rawText = await upstreamRes.text();
-    res.status(upstreamRes.status);
-    try {
-      return res.json(JSON.parse(rawText));
-    } catch {
-      return res.send(rawText);
-    }
+    if (clientAbortController.signal.aborted || res.destroyed || res.writableEnded) return;
+    return sendAiQaUpstreamResponse(res, upstreamRes.status, rawText, '获取 1-7 天流程指引失败');
   } catch (error: any) {
+    if (clientAbortController.signal.aborted || res.destroyed || res.writableEnded) return;
     return res.status(502).json({
       ok: false,
       error: error?.message || '获取 1-7 天流程指引失败',
     });
+  } finally {
+    res.off('close', onResClose);
   }
 });
 
 app.post('/api/ai/qa', aiGenerationLimiter, requireTenantAuth, async (req: Request, res: Response) => {
+  const clientAbortController = new AbortController();
+  const onResClose = () => {
+    if (!res.writableFinished) clientAbortController.abort();
+  };
+  res.on('close', onResClose);
   try {
     const userJwt = extractBearerToken(req);
     const serverCfg = await getServerCustomLlmConfig().catch(() => null);
@@ -14800,7 +14987,7 @@ app.post('/api/ai/qa', aiGenerationLimiter, requireTenantAuth, async (req: Reque
     } = req.body || {};
 
     const targetUrl = `${getRailwayBrainBaseUrl()}/api/ai/qa`;
-    const upstreamRes = await fetchWithSystemProxySupport(
+    const upstreamRes = await fetchAiQaUpstreamWithResilience(
       targetUrl,
       {
         method: 'POST',
@@ -14816,20 +15003,24 @@ app.post('/api/ai/qa', aiGenerationLimiter, requireTenantAuth, async (req: Reque
           stream: Boolean(stream),
         }),
       },
-      90000
+      {
+        attemptTimeoutMs: 55000,
+        totalDeadlineMs: 85000,
+        maxRetries: 1,
+        clientSignal: clientAbortController.signal,
+      }
     );
     const rawText = await upstreamRes.text();
-    res.status(upstreamRes.status);
-    try {
-      return res.json(JSON.parse(rawText));
-    } catch {
-      return res.send(rawText);
-    }
+    if (clientAbortController.signal.aborted || res.destroyed || res.writableEnded) return;
+    return sendAiQaUpstreamResponse(res, upstreamRes.status, rawText, '云端智能问答网关响应异常');
   } catch (error: any) {
+    if (clientAbortController.signal.aborted || res.destroyed || res.writableEnded) return;
     return res.status(502).json({
       ok: false,
       error: error?.message || '智能问答网关连接异常',
     });
+  } finally {
+    res.off('close', onResClose);
   }
 });
 
@@ -35130,6 +35321,100 @@ export function getTelegramSenderCacheStats() {
 
 registerPerformanceQueueStatsProvider('senderInfoCache', getTelegramSenderCacheStats);
 
+function buildTelegramSenderInfoResult(
+  m: any,
+  resolvedId: string,
+  entity: any,
+  accountId: string
+): { result: TelegramSenderInfoResult; hasName: boolean } {
+  const postAuthor = typeof m?.postAuthor === 'string' ? m.postAuthor.trim() : '';
+  const entityName = entity
+    ? [entity.firstName, entity.lastName].filter(Boolean).join(' ').trim() ||
+      entity.title ||
+      entity.username ||
+      ''
+    : '';
+  const senderName = String(postAuthor || entityName || '').trim();
+  const senderAvatarUrl =
+    resolvedId && accountId && accountId !== 'acc_telegram_bot'
+      ? signTelegramResourceUrl(`/api/telegram/user/avatar/${encodeURIComponent(resolvedId)}`, accountId)
+      : undefined;
+  return {
+    result: {
+      senderId: resolvedId,
+      senderName,
+      ...(senderAvatarUrl ? { senderAvatarUrl } : {}),
+    },
+    hasName: Boolean(senderName),
+  };
+}
+
+export function peekTelegramMessageSenderInfoSync(
+  m: any,
+  isOut: boolean,
+  accountId: string,
+  connObj?: any,
+  canonicalChatId?: string,
+  rawChatId?: string
+): { hit: boolean; info: TelegramSenderInfoResult } {
+  if (isOut) return { hit: true, info: { senderId: '', senderName: '' } };
+  const peerId = extractTelegramSenderPeerId(m);
+  const accKey = normalizeMsgDbAccountKey(accountId || 'global');
+  const globalKey = peerId ? `${accKey}:${peerId}` : '';
+
+  const matchedDlg: any =
+    connObj && Array.isArray(connObj.dialogs)
+      ? connObj.dialogs.find(
+          (d: any) => d && (String(d.id) === canonicalChatId || String(d.rawId || '') === rawChatId)
+        )
+      : undefined;
+  const dlgTitle =
+    matchedDlg &&
+    !matchedDlg.isGroup &&
+    !matchedDlg.isChannel &&
+    typeof matchedDlg.title === 'string' &&
+    !/^Telegram\s*\(/i.test(matchedDlg.title.trim())
+      ? matchedDlg.title.trim()
+      : '';
+
+  if (globalKey) {
+    const globalHit = getCachedSenderEntry(globalKey);
+    if (globalHit) {
+      senderCacheStats.hitsTotal += 1;
+      if (!globalHit.senderName && dlgTitle) {
+        return { hit: true, info: { ...globalHit, senderName: dlgTitle } };
+      }
+      return { hit: true, info: globalHit };
+    }
+  }
+
+  if (m?.sender) {
+    const resolvedId = peerId || (m.sender?.id ? String(m.sender.id) : '');
+    const { result, hasName } = buildTelegramSenderInfoResult(m, resolvedId, m.sender, accountId);
+    if (resolvedId && hasName && globalKey) {
+      setCachedSenderEntry(globalKey, result, false);
+    }
+    return { hit: true, info: result };
+  }
+
+  const cleanRaw = String(rawChatId || '').replace(/^tg_/, '').trim();
+  const fallbackId = peerId || (cleanRaw && !cleanRaw.startsWith('-') ? cleanRaw : '');
+  const postAuthor = typeof m?.postAuthor === 'string' ? m.postAuthor.trim() : '';
+  const fallbackName = String(postAuthor || dlgTitle || '').trim();
+  const fallbackAvatarUrl =
+    fallbackId && accountId && accountId !== 'acc_telegram_bot'
+      ? signTelegramResourceUrl(`/api/telegram/user/avatar/${encodeURIComponent(fallbackId)}`, accountId)
+      : undefined;
+  return {
+    hit: false,
+    info: {
+      senderId: fallbackId,
+      senderName: fallbackName,
+      ...(fallbackAvatarUrl ? { senderAvatarUrl: fallbackAvatarUrl } : {}),
+    },
+  };
+}
+
 export async function resolveTelegramMessageSenderInfo(
   m: any,
   isOut: boolean,
@@ -35154,33 +35439,10 @@ export async function resolveTelegramMessageSenderInfo(
     }
   }
 
-  const buildResult = (resolvedId: string, entity: any): { result: TelegramSenderInfoResult; hasName: boolean } => {
-    const postAuthor = typeof m?.postAuthor === 'string' ? m.postAuthor.trim() : '';
-    const entityName = entity
-      ? [entity.firstName, entity.lastName].filter(Boolean).join(' ').trim() ||
-        entity.title ||
-        entity.username ||
-        ''
-      : '';
-    const senderName = String(postAuthor || entityName || '').trim();
-    const senderAvatarUrl =
-      resolvedId && accountId && accountId !== 'acc_telegram_bot'
-        ? signTelegramResourceUrl(`/api/telegram/user/avatar/${encodeURIComponent(resolvedId)}`, accountId)
-        : undefined;
-    return {
-      result: {
-        senderId: resolvedId,
-        senderName,
-        ...(senderAvatarUrl ? { senderAvatarUrl } : {}),
-      },
-      hasName: Boolean(senderName),
-    };
-  };
-
   // Fast inline path when GramJS already hydrated m.sender (zero RPC needed)
   if (m?.sender) {
     const resolvedId = peerId || (m.sender?.id ? String(m.sender.id) : '');
-    const { result, hasName } = buildResult(resolvedId, m.sender);
+    const { result, hasName } = buildTelegramSenderInfoResult(m, resolvedId, m.sender, accountId);
     if (resolvedId && hasName) {
       senderCache?.set(resolvedId, result);
       if (globalKey) setCachedSenderEntry(globalKey, result, false);
@@ -35212,7 +35474,7 @@ export async function resolveTelegramMessageSenderInfo(
       }
     }
     const resolvedId = peerId || (senderEntity?.id ? String(senderEntity.id) : '');
-    const { result, hasName } = buildResult(resolvedId, senderEntity);
+    const { result, hasName } = buildTelegramSenderInfoResult(m, resolvedId, senderEntity, accountId);
     if (resolvedId) {
       const isFallback = rpcErrored || !hasName;
       if (isFallback) senderCacheStats.errorFallbacksTotal += 1;
@@ -36944,6 +37206,7 @@ export function attachTelegramClientMessageListener(client: TelegramClient, phon
     }
     (client as any)._hasTgProListener = true;
     const listenerAccountId = `acc_tg_${userId}`;
+    const senderEnrichEmittedAt = new Map<string, number>();
 
     client.addEventHandler(async (event: any) => {
       try {
@@ -37021,10 +37284,6 @@ export function attachTelegramClientMessageListener(client: TelegramClient, phon
           };
         }
 
-        const senderInfo = isOfficialService
-          ? { senderId: senderId || '', senderName: 'Telegram 官方服务通知', senderAvatarUrl: undefined }
-          : await resolveTelegramMessageSenderInfo(message, isOut, accountId);
-
         const msgChatObj: any = (message as any).chat;
         const isChannelMsg = Boolean(
           (message as any).isChannel &&
@@ -37039,6 +37298,32 @@ export function attachTelegramClientMessageListener(client: TelegramClient, phon
           typeof msgChatObj?.title === 'string' && msgChatObj.title.trim()
             ? msgChatObj.title.trim()
             : undefined;
+        const msgConnObj = connectedUserClients.get(accountId) || connectedUserClients.get(userId);
+
+        let senderInfo: TelegramSenderInfoResult;
+        let needsBackgroundSenderEnrich = false;
+        if (isOfficialService) {
+          senderInfo = { senderId: senderId || '', senderName: 'Telegram 官方服务通知', senderAvatarUrl: undefined };
+        } else {
+          const syncSender = peekTelegramMessageSenderInfoSync(
+            message,
+            isOut,
+            accountId,
+            msgConnObj,
+            canonicalChatId,
+            rawChatId
+          );
+          if (syncSender.hit) {
+            senderInfo = syncSender.info;
+          } else if (!isGroupMsg && !isChannelMsg) {
+            // Private chats (e.g. UpdateShortMessage where GramJS leaves m.sender empty) push immediately
+            // with zero P2 RPC blocking; sender metadata enriches asynchronously in the background.
+            senderInfo = syncSender.info;
+            needsBackgroundSenderEnrich = !isOut && typeof (message as any)?.getSender === 'function';
+          } else {
+            senderInfo = await resolveTelegramMessageSenderInfo(message, isOut, accountId);
+          }
+        }
 
         const realtimeUpdate: LocalIncomingUpdate = {
           id: messageId,
@@ -37077,7 +37362,6 @@ export function attachTelegramClientMessageListener(client: TelegramClient, phon
           isPinned: Boolean((message as any).pinned),
         };
         pushPendingLocalUpdate(realtimeUpdate);
-        const msgConnObj = connectedUserClients.get(accountId) || connectedUserClients.get(userId);
         if (msgConnObj && Array.isArray(msgConnObj.dialogs)) {
           const matchedCachedDlg: any = msgConnObj.dialogs.find(
             (d: any) => d && (String(d.id) === canonicalChatId || String(d.rawId || '') === rawChatId)
@@ -37107,6 +37391,68 @@ export function attachTelegramClientMessageListener(client: TelegramClient, phon
           priority: 'HIGH',
           source: 'realtime_new_message',
         });
+
+        if (needsBackgroundSenderEnrich) {
+          void resolveTelegramMessageSenderInfo(message, isOut, accountId)
+            .then((resolved) => {
+              if (!isTelegramClientGenerationCurrent(client, { userId, phone, accountId: listenerAccountId })) {
+                return;
+              }
+              const resolvedName = String(resolved?.senderName || '').trim();
+              if (!resolvedName) return;
+              const latestConn = connectedUserClients.get(accountId) || connectedUserClients.get(userId);
+              if (latestConn && Array.isArray(latestConn.dialogs)) {
+                const dlg: any = latestConn.dialogs.find(
+                  (d: any) => d && (String(d.id) === canonicalChatId || String(d.rawId || '') === rawChatId)
+                );
+                if (dlg && (!dlg.title || /^Telegram\s*\(/i.test(String(dlg.title)))) {
+                  patchConnectedDialogCache(latestConn, canonicalChatId, { title: resolvedName });
+                }
+              }
+              if (!senderInfo.senderName || senderInfo.senderName !== resolvedName) {
+                void enqueueMessageDbWrite({
+                  priority: 'LOW',
+                  kind: 'edit',
+                  accountId,
+                  chatId: canonicalChatId,
+                  tgMsgIds: Number(message.id) > 0 ? [Number(message.id)] : [],
+                  msgId: messageId,
+                  exec: async () => {
+                    await db
+                      .prepare(
+                        `UPDATE messages SET sender_name = ? WHERE id = ? AND (sender_name IS NULL OR sender_name = '')`
+                      )
+                      .run(resolvedName, messageId);
+                  },
+                }).catch(() => {});
+                const enrichKey = `${canonicalChatId}::${resolvedName}`;
+                const nowEnrichMs = Date.now();
+                const lastEmittedAt = senderEnrichEmittedAt.get(enrichKey) || 0;
+                if (nowEnrichMs - lastEmittedAt >= 3000) {
+                  senderEnrichEmittedAt.set(enrichKey, nowEnrichMs);
+                  if (senderEnrichEmittedAt.size > 300) {
+                    const oldest = senderEnrichEmittedAt.keys().next().value;
+                    if (oldest) senderEnrichEmittedAt.delete(oldest);
+                  }
+                  pushPendingLocalUpdate({
+                    id: `sender_enrich_${userId}_${rawChatId}_${message.id}_${nowEnrichMs}`,
+                    type: 'peer_profile',
+                    chatId: canonicalChatId,
+                    rawChatId,
+                    accountId,
+                    sender: 'peer',
+                    senderName: resolvedName,
+                    profileName: resolvedName,
+                    ...(resolved.senderAvatarUrl ? { profileAvatarUrl: resolved.senderAvatarUrl } : {}),
+                    text: '',
+                    timestamp: '',
+                    createdAt: nowEnrichMs,
+                  });
+                }
+              }
+            })
+            .catch(() => {});
+        }
 
         // Check if Autopilot is enabled for this chat strictly scoped by accountId (NEVER run Autopilot on official notifications or group join/leave notices)
         const isAutopilotOn =

@@ -808,11 +808,19 @@ export const AiAssistantModal: React.FC<AiAssistantModalProps> = ({
     };
 
     // Build multi-turn messages history from prior turns (before this question)
-    const historyTurns: AiQaTurnMessage[] = messages
-      .filter((m) => !m.isError)
-      .slice(-10)
-      .map((m) => {
-        if (m.role === 'user' && m.images && m.images.length > 0) {
+    // Only retain images from the single most recent historical image turn (and skip oversized blobs) to prevent multi-MB payload bloat on follow-up questions
+    const recentHistorySlice = messages.filter((m) => !m.isError).slice(-8);
+    let lastHistoryImageIdx = -1;
+    for (let idx = recentHistorySlice.length - 1; idx >= 0; idx--) {
+      const m = recentHistorySlice[idx];
+      if (m.role === 'user' && m.images && m.images.length > 0) {
+        lastHistoryImageIdx = idx;
+        break;
+      }
+    }
+    const historyTurns: AiQaTurnMessage[] = recentHistorySlice.map((m, idx) => {
+      if (m.role === 'user' && m.images && m.images.length > 0) {
+        if (idx === lastHistoryImageIdx) {
           const parts: Array<
             | { type: 'text'; text: string }
             | { type: 'image_url'; image_url: { url: string } }
@@ -820,16 +828,27 @@ export const AiAssistantModal: React.FC<AiAssistantModalProps> = ({
           if (m.text) {
             parts.push({ type: 'text', text: m.text });
           }
+          let attachedCount = 0;
           for (const imgUrl of m.images.slice(0, 2)) {
-            parts.push({ type: 'image_url', image_url: { url: imgUrl } });
+            if (typeof imgUrl === 'string' && imgUrl.length <= 900_000) {
+              parts.push({ type: 'image_url', image_url: { url: imgUrl } });
+              attachedCount++;
+            }
           }
-          return { role: 'user', content: parts };
+          if (attachedCount > 0) {
+            return { role: 'user', content: parts };
+          }
         }
         return {
-          role: m.role,
-          content: m.text || '（图片提问）',
+          role: 'user',
+          content: m.text ? `${m.text}\n（历史附图已省略）` : '（历史图片提问）',
         };
-      });
+      }
+      return {
+        role: m.role,
+        content: m.text || '（图片提问）',
+      };
+    });
 
     const mergedContext = [
       activeChatTitle ? `当前右侧主窗口选中会话：${activeChatTitle}` : '',

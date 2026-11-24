@@ -1263,3 +1263,86 @@ test('prewarmAccountAvatarsOnce populates disk cache after login and skips alrea
   }
 });
 
+test('Private chat NewMessage with slow getSender() pushes update immediately without blocking on P2 RPC and enriches in background', async () => {
+  serverMod.clearTelegramSenderCacheForTesting();
+  const userId = 'res_priv_fast';
+  const accId = `acc_tg_${userId}`;
+  const phone = '+8613999001234';
+  const client = makeFakeClient({ initiallyConnected: true });
+  const connObj: ConnectedTelegramUser = {
+    client,
+    phone,
+    userId,
+    username: '@priv_fast',
+    firstName: 'PrivFast',
+    avatarInitial: 'PF',
+    avatarBg: '#2481cc',
+    apiId: 12345,
+    apiHash: '0123456789abcdef0123456789abcdef',
+    connectedAt: Date.now(),
+    proxyFingerprint: 'direct',
+    dialogs: [],
+  };
+  serverMod.connectedUserClients.set(accId, connObj);
+  serverMod.connectedUserClients.set(userId, connObj);
+
+  const prevPendingLen = serverMod.pendingLocalUpdates.length;
+  let resolveSenderRpc!: (val: any) => void;
+  const senderRpcGate = new Promise<any>((resolve) => {
+    resolveSenderRpc = resolve;
+  });
+
+  try {
+    serverMod.attachTelegramClientMessageListener(client, phone, userId);
+    const newMsgHandler = client.handlers[0]?.fn;
+    assert.ok(typeof newMsgHandler === 'function');
+
+    const tStart = Date.now();
+    await newMsgHandler({
+      message: {
+        id: 8801,
+        chatId: '551122',
+        senderId: '551122',
+        out: false,
+        date: Math.floor(tStart / 1000),
+        message: 'hello instant dm',
+        text: 'hello instant dm',
+        isGroup: false,
+        isChannel: false,
+        sender: undefined,
+        getSender: () => senderRpcGate,
+      },
+    });
+    const elapsedMs = Date.now() - tStart;
+    assert.ok(elapsedMs < 150, `Private NewMessage must not block on getSender() (took ${elapsedMs}ms)`);
+
+    const pushedMsg = serverMod.pendingLocalUpdates
+      .slice(prevPendingLen)
+      .find((u) => u.chatId === 'tg_551122' && u.telegramMessageId === 8801);
+    assert.ok(pushedMsg, 'Private message should be pushed to pendingLocalUpdates immediately');
+    assert.equal(pushedMsg.text, 'hello instant dm');
+    assert.equal(pushedMsg.senderId, '551122');
+
+    // Now resolve slow getSender() RPC and verify background peer_profile enrichment
+    resolveSenderRpc({ id: '551122', firstName: 'Instant', lastName: 'Client' });
+    await new Promise((r) => setTimeout(r, 60));
+
+    const enrichedProfile = serverMod.pendingLocalUpdates
+      .slice(prevPendingLen)
+      .find((u) => u.type === 'peer_profile' && u.chatId === 'tg_551122');
+    assert.ok(enrichedProfile, 'Background P2 enrichment should push peer_profile once resolved');
+    assert.equal(enrichedProfile.profileName, 'Instant Client');
+  } finally {
+    for (let i = serverMod.pendingLocalUpdates.length - 1; i >= prevPendingLen; i--) {
+      if (serverMod.pendingLocalUpdates[i]?.accountId === accId) {
+        serverMod.pendingLocalUpdates.splice(i, 1);
+      }
+    }
+    serverMod.connectedUserClients.delete(accId);
+    serverMod.connectedUserClients.delete(userId);
+    serverMod.clearTelegramSenderCacheForTesting();
+    await serverMod.flushMessageDbWriteQueue({ timeoutMs: 2000 });
+    await db.prepare('DELETE FROM messages WHERE account_id = ?').run(accId).catch(() => {});
+  }
+});
+

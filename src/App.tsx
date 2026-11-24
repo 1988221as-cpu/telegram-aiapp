@@ -3283,6 +3283,29 @@ export default function App() {
     let isPolling = false;
     let pollPendingAgain = false;
     let sseConnected = false;
+    let hasSseDisconnected = false;
+    const inFlightUpdateIds = new Set<string>();
+    const pendingServerAckIds = new Set<string>();
+    const recentlyAckedUpdateIds = new Map<string, number>();
+    let persistAckChain: Promise<void> = Promise.resolve();
+
+    const flushPendingServerAcks = async () => {
+      if (!isMounted || pendingServerAckIds.size === 0) return;
+      const ackBatch = Array.from(pendingServerAckIds);
+      const ackOk = await ackIncomingTelegramUpdates(ackBatch);
+      if (ackOk) {
+        const ackTs = Date.now();
+        for (const id of ackBatch) {
+          pendingServerAckIds.delete(id);
+          recentlyAckedUpdateIds.set(id, ackTs);
+        }
+        while (recentlyAckedUpdateIds.size > 2000) {
+          const oldest = recentlyAckedUpdateIds.keys().next().value;
+          if (oldest === undefined) break;
+          recentlyAckedUpdateIds.delete(oldest);
+        }
+      }
+    };
 
     const runUpdatePoll = async () => {
       if (!isMounted) return;
@@ -3299,8 +3322,22 @@ export default function App() {
         const currentLLMConfig = customLLMConfigRef.current;
 
         // Poll updates globally across ALL active Telegram accounts so background accounts receive real-time messages & unread badges
-        const updates = await pollIncomingTelegramUpdates();
-        if (isMounted && updates && updates.length > 0) {
+        const rawUpdates = await pollIncomingTelegramUpdates();
+        const nowPruneMs = Date.now();
+        for (const [idKey, ackTs] of recentlyAckedUpdateIds.entries()) {
+          if (nowPruneMs - ackTs > 15_000) {
+            recentlyAckedUpdateIds.delete(idKey);
+          }
+        }
+        const updates = (rawUpdates || []).filter((upd: any) => {
+          const updId = upd?.id ? String(upd.id) : '';
+          if (!updId) return true;
+          return !inFlightUpdateIds.has(updId) && !pendingServerAckIds.has(updId) && !recentlyAckedUpdateIds.has(updId);
+        });
+        if (isMounted && updates.length === 0 && pendingServerAckIds.size > 0) {
+          persistAckChain = persistAckChain.then(() => flushPendingServerAcks()).catch(() => {});
+        }
+        if (isMounted && updates.length > 0) {
           const processedIds: string[] = [];
 
           type PollMessageOp =
@@ -4601,19 +4638,47 @@ export default function App() {
           }
 
           if (processedIds.length > 0) {
-            let committed = true;
-            if (commitWaitPromise) {
-              committed = await Promise.race([
-                commitWaitPromise,
-                new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 5000)),
-              ]);
+            const idsToPersist = [...processedIds];
+            for (const id of idsToPersist) {
+              inFlightUpdateIds.add(id);
             }
-            if (committed) {
-              const flushRes = await flushLocalMessagesPersist();
-              if (flushRes.ok) {
-                await ackIncomingTelegramUpdates(processedIds);
-              }
-            }
+            const commitWait = commitWaitPromise;
+            persistAckChain = persistAckChain
+              .then(async () => {
+                if (!isMounted) {
+                  for (const id of idsToPersist) inFlightUpdateIds.delete(id);
+                  return;
+                }
+                let committed = true;
+                if (commitWait) {
+                  committed = await Promise.race([
+                    commitWait,
+                    new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 5000)),
+                  ]);
+                }
+                if (!committed || !isMounted) {
+                  for (const id of idsToPersist) inFlightUpdateIds.delete(id);
+                  return;
+                }
+                const flushRes = await flushLocalMessagesPersist();
+                if (flushRes.ok) {
+                  for (const id of idsToPersist) {
+                    inFlightUpdateIds.delete(id);
+                    pendingServerAckIds.add(id);
+                  }
+                  while (pendingServerAckIds.size > 2000) {
+                    const oldest = pendingServerAckIds.values().next().value;
+                    if (oldest === undefined) break;
+                    pendingServerAckIds.delete(oldest);
+                  }
+                  await flushPendingServerAcks();
+                } else {
+                  for (const id of idsToPersist) inFlightUpdateIds.delete(id);
+                }
+              })
+              .catch(() => {
+                for (const id of idsToPersist) inFlightUpdateIds.delete(id);
+              });
           }
         }
       } catch (err) {
@@ -4634,6 +4699,12 @@ export default function App() {
       {
         onStatusChange: (connected) => {
           sseConnected = connected;
+          if (!connected) {
+            hasSseDisconnected = true;
+          } else if (hasSseDisconnected) {
+            hasSseDisconnected = false;
+            void runUpdatePoll();
+          }
         },
       }
     );
@@ -4642,12 +4713,17 @@ export default function App() {
       if (!sseConnected) {
         void runUpdatePoll();
       }
-    }, 4000);
+    }, 1500);
+    const handleOnline = () => {
+      void runUpdatePoll();
+    };
+    window.addEventListener('online', handleOnline);
 
     return () => {
       isMounted = false;
       unsubscribeSse();
       clearInterval(fallbackPollInterval);
+      window.removeEventListener('online', handleOnline);
     };
   }, [isMemberAuthenticated]);
 

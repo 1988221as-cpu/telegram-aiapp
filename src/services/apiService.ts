@@ -1964,11 +1964,22 @@ export function subscribeTelegramUpdatesStream(
   let closed = false;
   let controller: AbortController | null = null;
   let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
-  let retryDelayMs = 1000;
+  let retryDelayMs = 500;
+  const SSE_INACTIVITY_TIMEOUT_MS = 45_000;
 
   const connect = async () => {
     if (closed) return;
     controller = new AbortController();
+    let inactivityTimer: ReturnType<typeof setTimeout> | null = null;
+    const armInactivityWatchdog = () => {
+      if (inactivityTimer) clearTimeout(inactivityTimer);
+      inactivityTimer = setTimeout(() => {
+        try {
+          controller?.abort();
+        } catch {}
+      }, SSE_INACTIVITY_TIMEOUT_MS);
+    };
+
     const acc = String(options?.accountId || '').trim();
     const query = acc ? `?accountId=${encodeURIComponent(acc)}` : '';
     try {
@@ -1981,7 +1992,8 @@ export function subscribeTelegramUpdatesStream(
         throw new Error(`SSE HTTP ${res.status}`);
       }
       options?.onStatusChange?.(true);
-      retryDelayMs = 1000;
+      retryDelayMs = 500;
+      armInactivityWatchdog();
 
       const reader = res.body.getReader();
       const decoder = new TextDecoder();
@@ -1989,6 +2001,7 @@ export function subscribeTelegramUpdatesStream(
       while (!closed) {
         const { done, value } = await reader.read();
         if (done) break;
+        armInactivityWatchdog();
         buffer += decoder.decode(value, { stream: true });
         let boundary = buffer.indexOf('\n\n');
         while (boundary !== -1) {
@@ -2013,10 +2026,14 @@ export function subscribeTelegramUpdatesStream(
     } catch {
       // Reconnect handled cleanly below
     } finally {
+      if (inactivityTimer) {
+        clearTimeout(inactivityTimer);
+        inactivityTimer = null;
+      }
       options?.onStatusChange?.(false);
       if (!closed) {
         const waitMs = retryDelayMs;
-        retryDelayMs = Math.min(10000, Math.round(retryDelayMs * 1.6));
+        retryDelayMs = Math.min(8000, Math.round(retryDelayMs * 1.6));
         reconnectTimer = setTimeout(() => {
           reconnectTimer = null;
           void connect();
@@ -2305,7 +2322,7 @@ export async function fetchAiQaWorkflowPlaybookApi(engineLicenseKey?: string): P
     const res = await fetchWithTimeout(
       '/api/ai/qa/workflow-playbook',
       { method: 'GET', headers },
-      15000
+      25000
     );
     const data = await res.json().catch(() => null);
     if (res.status === 401) {
@@ -2396,7 +2413,7 @@ export async function askAiQaAssistantApi(
           stream: false,
         }),
       },
-      90000
+      100000
     );
     const data = (await res.json().catch(() => null)) as AiQaResponse | null;
     if (res.status === 401) {
