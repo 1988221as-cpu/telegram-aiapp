@@ -1,4 +1,4 @@
-const { app, BrowserWindow, Menu, dialog, shell, ipcMain, safeStorage, powerMonitor } = require('electron');
+const { app, BrowserWindow, Menu, dialog, shell, ipcMain, safeStorage, powerMonitor, screen } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const http = require('http');
@@ -39,6 +39,9 @@ if (!gotTheLock) {
 
 const FIXED_APP_PORT = 38271;
 let mainWindow = null;
+let aiAssistantWindow = null;
+let aiAssistantAlwaysOnTop = true;
+let pendingAiCloseAction = null;
 let currentPort = FIXED_APP_PORT;
 let backendChild = null;
 let isQuitting = false;
@@ -746,6 +749,352 @@ async function createWindow() {
 
   mainWindow.on('closed', () => {
     mainWindow = null;
+    if (aiAssistantWindow && !aiAssistantWindow.isDestroyed()) {
+      try {
+        aiAssistantWindow.close();
+      } catch {}
+    }
+  });
+}
+
+// 7.5 Detached AI Assistant Pop-Out Window (Frameless, Resizable, Always-On-Top)
+function getAiWindowBoundsPath() {
+  const dataDir = path.join(app.getPath('userData'), 'data');
+  if (!fs.existsSync(dataDir)) {
+    try {
+      fs.mkdirSync(dataDir, { recursive: true });
+    } catch {}
+  }
+  return path.join(dataDir, 'ai_window_bounds.json');
+}
+
+function loadAiWindowBounds() {
+  try {
+    const filePath = getAiWindowBoundsPath();
+    if (fs.existsSync(filePath)) {
+      const parsed = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+      if (parsed && typeof parsed === 'object') {
+        return {
+          x: Number.isFinite(Number(parsed.x)) ? Math.round(Number(parsed.x)) : undefined,
+          y: Number.isFinite(Number(parsed.y)) ? Math.round(Number(parsed.y)) : undefined,
+          width: Number.isFinite(Number(parsed.width)) ? Math.max(360, Math.min(1400, Math.round(Number(parsed.width)))) : 450,
+          height: Number.isFinite(Number(parsed.height)) ? Math.max(460, Math.min(1100, Math.round(Number(parsed.height)))) : 680,
+          alwaysOnTop: typeof parsed.alwaysOnTop === 'boolean' ? parsed.alwaysOnTop : true,
+        };
+      }
+    }
+  } catch {}
+  return { width: 450, height: 680, alwaysOnTop: true };
+}
+
+function saveAiWindowBounds(boundsPatch = {}) {
+  try {
+    const current = loadAiWindowBounds();
+    const next = { ...current, ...boundsPatch };
+    fs.writeFileSync(getAiWindowBoundsPath(), JSON.stringify(next), 'utf8');
+  } catch {}
+}
+
+function clampAiBoundsToDisplay(rect) {
+  const width = Math.max(360, Math.min(1400, Math.round(rect.width || 450)));
+  const height = Math.max(460, Math.min(1100, Math.round(rect.height || 680)));
+  const probePoint = {
+    x: Number.isFinite(rect.x) ? Math.round(rect.x + width / 2) : 400,
+    y: Number.isFinite(rect.y) ? Math.round(rect.y + 40) : 300,
+  };
+  let workArea = { x: 0, y: 0, width: 1280, height: 800 };
+  try {
+    const display = screen.getDisplayNearestPoint(probePoint);
+    if (display && display.workArea) {
+      workArea = display.workArea;
+    }
+  } catch {}
+
+  const clampedW = Math.min(width, Math.max(360, workArea.width - 16));
+  const clampedH = Math.min(height, Math.max(460, workArea.height - 16));
+  const minX = workArea.x + 8;
+  const maxX = Math.max(minX, workArea.x + workArea.width - clampedW - 8);
+  const minY = workArea.y + 8;
+  const maxY = Math.max(minY, workArea.y + workArea.height - clampedH - 8);
+  const rawX = Number.isFinite(rect.x) ? Math.round(rect.x) : workArea.x + Math.round((workArea.width - clampedW) / 2);
+  const rawY = Number.isFinite(rect.y) ? Math.round(rect.y) : workArea.y + Math.round((workArea.height - clampedH) / 2);
+
+  return {
+    x: Math.min(maxX, Math.max(minX, rawX)),
+    y: Math.min(maxY, Math.max(minY, rawY)),
+    width: clampedW,
+    height: clampedH,
+  };
+}
+
+function getAiWindowStatePayload(extra = {}) {
+  const isOpen = Boolean(aiAssistantWindow && !aiAssistantWindow.isDestroyed());
+  return {
+    isElectron: true,
+    supported: true,
+    isOpen,
+    isMinimized: isOpen ? aiAssistantWindow.isMinimized() : false,
+    isMaximized: isOpen ? aiAssistantWindow.isMaximized() : false,
+    alwaysOnTop: isOpen ? aiAssistantWindow.isAlwaysOnTop() : aiAssistantAlwaysOnTop,
+    ...extra,
+  };
+}
+
+function broadcastAiWindowState(extra = {}) {
+  const payload = getAiWindowStatePayload(extra);
+  for (const win of [mainWindow, aiAssistantWindow]) {
+    try {
+      if (win && !win.isDestroyed() && win.webContents && !win.webContents.isDestroyed()) {
+        win.webContents.send('hs-ai-window:state', payload);
+      }
+    } catch {}
+  }
+  return payload;
+}
+
+function openOrFocusAiAssistantWindow(options = {}) {
+  const saved = loadAiWindowBounds();
+  if (typeof options.alwaysOnTop === 'boolean') {
+    aiAssistantAlwaysOnTop = options.alwaysOnTop;
+  } else if (aiAssistantWindow && !aiAssistantWindow.isDestroyed()) {
+    aiAssistantAlwaysOnTop = aiAssistantWindow.isAlwaysOnTop();
+  } else {
+    aiAssistantAlwaysOnTop = saved.alwaysOnTop !== false;
+  }
+
+  if (aiAssistantWindow && !aiAssistantWindow.isDestroyed()) {
+    if (aiAssistantWindow.isMinimized()) aiAssistantWindow.restore();
+    aiAssistantWindow.setAlwaysOnTop(Boolean(aiAssistantAlwaysOnTop), 'floating');
+    aiAssistantWindow.show();
+    aiAssistantWindow.focus();
+    return broadcastAiWindowState({ action: 'focus' });
+  }
+
+  const targetWidth = Number.isFinite(Number(options.width)) ? Number(options.width) : saved.width;
+  const targetHeight = Number.isFinite(Number(options.height)) ? Number(options.height) : saved.height;
+
+  let targetX = saved.x;
+  let targetY = saved.y;
+
+  if (Number.isFinite(Number(options.screenX)) && Number.isFinite(Number(options.screenY))) {
+    const grabOffsetX = Number.isFinite(Number(options.grabOffsetX)) ? Number(options.grabOffsetX) : Math.round(targetWidth / 2);
+    const grabOffsetY = Number.isFinite(Number(options.grabOffsetY)) ? Number(options.grabOffsetY) : 24;
+    targetX = Math.round(Number(options.screenX) - grabOffsetX);
+    targetY = Math.round(Number(options.screenY) - grabOffsetY);
+  } else if (!Number.isFinite(targetX) || !Number.isFinite(targetY)) {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      const mainBounds = mainWindow.getBounds();
+      targetX = mainBounds.x + mainBounds.width + 16;
+      targetY = mainBounds.y + Math.max(0, Math.round((mainBounds.height - targetHeight) / 2));
+    }
+  }
+
+  const finalBounds = clampAiBoundsToDisplay({
+    x: targetX,
+    y: targetY,
+    width: targetWidth,
+    height: targetHeight,
+  });
+
+  aiAssistantWindow = new BrowserWindow({
+    x: finalBounds.x,
+    y: finalBounds.y,
+    width: finalBounds.width,
+    height: finalBounds.height,
+    minWidth: 360,
+    minHeight: 460,
+    frame: false,
+    resizable: true,
+    minimizable: true,
+    maximizable: true,
+    alwaysOnTop: Boolean(aiAssistantAlwaysOnTop),
+    skipTaskbar: false,
+    title: 'AI助手 - HumanSense',
+    icon: resolveAppIcon(),
+    backgroundColor: '#09111b',
+    autoHideMenuBar: true,
+    show: true,
+    webPreferences: {
+      nodeIntegration: false,
+      contextIsolation: true,
+      sandbox: true,
+      preload: path.join(__dirname, 'electron', 'preload.cjs'),
+    },
+  });
+
+  aiAssistantWindow.setMenuBarVisibility(false);
+  aiAssistantWindow.setAlwaysOnTop(Boolean(aiAssistantAlwaysOnTop), 'floating');
+  aiAssistantWindow.on('page-title-updated', (event, nextTitle) => {
+    const expected = 'AI助手 - HumanSense';
+    if (nextTitle !== expected) {
+      event.preventDefault();
+      if (!aiAssistantWindow.isDestroyed()) aiAssistantWindow.setTitle(expected);
+    }
+  });
+
+  const allowDevTools =
+    !app.isPackaged ||
+    process.argv.includes('--devtools') ||
+    process.env.LX_ENABLE_DEVTOOLS === '1';
+  if (allowDevTools) {
+    aiAssistantWindow.webContents.on('before-input-event', (event, input) => {
+      if (input.key === 'F12' || (input.control && input.shift && (input.key === 'I' || input.key === 'i'))) {
+        aiAssistantWindow?.webContents.toggleDevTools();
+        event.preventDefault();
+      }
+    });
+  }
+
+  aiAssistantWindow.webContents.setWindowOpenHandler(({ url }) => {
+    if (/^https?:\/\//i.test(url) && !url.startsWith(`http://127.0.0.1:${FIXED_APP_PORT}`)) {
+      shell.openExternal(url).catch((err) => writeLog('warn', `Failed to open external URL ${url}: ${err.message}`));
+    }
+    return { action: 'deny' };
+  });
+
+  aiAssistantWindow.webContents.on('will-navigate', (event, url) => {
+    try {
+      const parsed = new URL(url);
+      const isLocalApp =
+        parsed.protocol === 'http:' &&
+        !parsed.username &&
+        !parsed.password &&
+        parsed.port === String(FIXED_APP_PORT) &&
+        (parsed.hostname === '127.0.0.1' || parsed.hostname === 'localhost');
+      if (isLocalApp) return;
+      event.preventDefault();
+      if (parsed.protocol === 'http:' || parsed.protocol === 'https:') {
+        shell.openExternal(url).catch((err) => writeLog('warn', `Failed to open external URL ${url}: ${err.message}`));
+      }
+    } catch {
+      event.preventDefault();
+    }
+  });
+
+  const persistCurrentBounds = () => {
+    if (!aiAssistantWindow || aiAssistantWindow.isDestroyed() || aiAssistantWindow.isMaximized()) return;
+    const b = aiAssistantWindow.getBounds();
+    saveAiWindowBounds({
+      x: b.x,
+      y: b.y,
+      width: b.width,
+      height: b.height,
+      alwaysOnTop: aiAssistantAlwaysOnTop,
+    });
+  };
+
+  aiAssistantWindow.on('move', persistCurrentBounds);
+  aiAssistantWindow.on('resize', persistCurrentBounds);
+  aiAssistantWindow.on('maximize', () => broadcastAiWindowState({ action: 'maximize' }));
+  aiAssistantWindow.on('unmaximize', () => broadcastAiWindowState({ action: 'maximize' }));
+  aiAssistantWindow.on('minimize', () => broadcastAiWindowState({ action: 'minimize' }));
+  aiAssistantWindow.on('restore', () => broadcastAiWindowState({ action: 'focus' }));
+
+  aiAssistantWindow.on('closed', () => {
+    const action = pendingAiCloseAction || 'close';
+    pendingAiCloseAction = null;
+    aiAssistantWindow = null;
+    broadcastAiWindowState({ action, reason: 'closed' });
+  });
+
+  saveAiWindowBounds({
+    x: finalBounds.x,
+    y: finalBounds.y,
+    width: finalBounds.width,
+    height: finalBounds.height,
+    alwaysOnTop: aiAssistantAlwaysOnTop,
+  });
+
+  const portToUse = Number.isInteger(currentPort) && currentPort > 0 ? currentPort : FIXED_APP_PORT;
+  aiAssistantWindow.loadURL(`http://127.0.0.1:${portToUse}/?mode=ai-assistant`);
+
+  return broadcastAiWindowState({ action: 'open' });
+}
+
+function registerAiWindowIpcHandlers() {
+  ipcMain.handle('hs-ai-window:get-state', (event) => {
+    if (!isAuthorizedCryptoIpcEvent(event)) {
+      return { isElectron: true, supported: false, isOpen: false, alwaysOnTop: true };
+    }
+    return getAiWindowStatePayload();
+  });
+
+  ipcMain.handle('hs-ai-window:open', (event, options = {}) => {
+    if (!isAuthorizedCryptoIpcEvent(event)) {
+      return { ok: false, error: '未授权的窗口控制请求' };
+    }
+    const state = openOrFocusAiAssistantWindow(options || {});
+    return { ok: true, state };
+  });
+
+  ipcMain.handle('hs-ai-window:focus', (event) => {
+    if (!isAuthorizedCryptoIpcEvent(event)) return { ok: false };
+    if (aiAssistantWindow && !aiAssistantWindow.isDestroyed()) {
+      if (aiAssistantWindow.isMinimized()) aiAssistantWindow.restore();
+      aiAssistantWindow.show();
+      aiAssistantWindow.focus();
+      return { ok: true, state: broadcastAiWindowState({ action: 'focus' }) };
+    }
+    return { ok: false, state: getAiWindowStatePayload() };
+  });
+
+  ipcMain.handle('hs-ai-window:minimize', (event) => {
+    if (!isAuthorizedCryptoIpcEvent(event)) return { ok: false };
+    if (aiAssistantWindow && !aiAssistantWindow.isDestroyed()) {
+      aiAssistantWindow.minimize();
+      return { ok: true, state: getAiWindowStatePayload({ action: 'minimize' }) };
+    }
+    return { ok: false };
+  });
+
+  ipcMain.handle('hs-ai-window:toggle-maximize', (event) => {
+    if (!isAuthorizedCryptoIpcEvent(event)) return { ok: false };
+    if (aiAssistantWindow && !aiAssistantWindow.isDestroyed()) {
+      if (aiAssistantWindow.isMaximized()) {
+        aiAssistantWindow.unmaximize();
+      } else {
+        aiAssistantWindow.maximize();
+      }
+      return { ok: true, state: broadcastAiWindowState({ action: 'maximize' }) };
+    }
+    return { ok: false };
+  });
+
+  ipcMain.handle('hs-ai-window:set-always-on-top', (event, enabled) => {
+    if (!isAuthorizedCryptoIpcEvent(event)) return { ok: false };
+    aiAssistantAlwaysOnTop = Boolean(enabled);
+    saveAiWindowBounds({ alwaysOnTop: aiAssistantAlwaysOnTop });
+    if (aiAssistantWindow && !aiAssistantWindow.isDestroyed()) {
+      aiAssistantWindow.setAlwaysOnTop(aiAssistantAlwaysOnTop, 'floating');
+    }
+    return { ok: true, state: broadcastAiWindowState({ action: 'pin' }) };
+  });
+
+  ipcMain.handle('hs-ai-window:dock-back', (event) => {
+    if (!isAuthorizedCryptoIpcEvent(event)) return { ok: false };
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      if (mainWindow.isMinimized()) mainWindow.restore();
+      mainWindow.show();
+      mainWindow.focus();
+    }
+    if (aiAssistantWindow && !aiAssistantWindow.isDestroyed()) {
+      pendingAiCloseAction = 'dock-back';
+      aiAssistantWindow.close();
+    } else {
+      broadcastAiWindowState({ action: 'dock-back' });
+    }
+    return { ok: true, state: getAiWindowStatePayload({ action: 'dock-back' }) };
+  });
+
+  ipcMain.handle('hs-ai-window:close', (event) => {
+    if (!isAuthorizedCryptoIpcEvent(event)) return { ok: false };
+    if (aiAssistantWindow && !aiAssistantWindow.isDestroyed()) {
+      pendingAiCloseAction = 'close';
+      aiAssistantWindow.close();
+    } else {
+      broadcastAiWindowState({ action: 'close' });
+    }
+    return { ok: true, state: getAiWindowStatePayload({ action: 'close' }) };
   });
 }
 
@@ -1584,6 +1933,7 @@ function registerUpdaterIpcHandlers() {
 
 app.whenReady().then(() => {
   registerCryptoIpcHandlers();
+  registerAiWindowIpcHandlers();
   registerUpdaterIpcHandlers();
   if (powerMonitor && typeof powerMonitor.on === 'function') {
     let lastResumeNotifyAt = 0;

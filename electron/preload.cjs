@@ -22,3 +22,22 @@ contextBridge.exposeInMainWorld('humanSenseUpdater', {
     return () => ipcRenderer.removeListener('hs-updater:state', listener);
   },
 });
+
+contextBridge.exposeInMainWorld('humanSenseAiWindow', {
+  isAvailable: true,
+  open: (options) => ipcRenderer.invoke('hs-ai-window:open', options || {}),
+  dockBack: () => ipcRenderer.invoke('hs-ai-window:dock-back'),
+  close: () => ipcRenderer.invoke('hs-ai-window:close'),
+  focus: () => ipcRenderer.invoke('hs-ai-window:focus'),
+  minimize: () => ipcRenderer.invoke('hs-ai-window:minimize'),
+  toggleMaximize: () => ipcRenderer.invoke('hs-ai-window:toggle-maximize'),
+  setAlwaysOnTop: (alwaysOnTop) =>
+    ipcRenderer.invoke('hs-ai-window:set-always-on-top', Boolean(alwaysOnTop)),
+  getState: () => ipcRenderer.invoke('hs-ai-window:get-state'),
+  onStateChange: (callback) => {
+    if (typeof callback !== 'function') return () => {};
+    const listener = (_event, state) => callback(state);
+    ipcRenderer.on('hs-ai-window:state', listener);
+    return () => ipcRenderer.removeListener('hs-ai-window:state', listener);
+  },
+});

@@ -20,6 +20,11 @@ import {
 } from './components/TelegramSettingsModal';
 import { MemberAuthModal } from './components/MemberAuthModal';
 import { AiAssistantModal } from './components/AiAssistantModal';
+import {
+  clearAiAssistantSnapshot,
+  getDesktopAiWindowBridge,
+  publishAiAssistantState,
+} from './services/aiAssistantSync';
 import { getMasterVoiceprint, hydrateMasterVoiceprint } from './services/voiceprintStorage';
 import {
   APPEARANCE_STORAGE_KEY,
@@ -738,8 +743,10 @@ export default function App() {
 
   const openRightPanel = (tab: RightPanelTab) => {
     setIsChatInfoOpen(false);
-    setIsAiAssistantOpen(false);
-    setIsAiAssistantMinimized(false);
+    if (!isAiAssistantPoppedOut) {
+      setIsAiAssistantOpen(false);
+      setIsAiAssistantMinimized(false);
+    }
     setActiveRightPanel(tab);
   };
 
@@ -747,7 +754,7 @@ export default function App() {
     setIsChatInfoOpen(false);
     setActiveRightPanel((prev) => {
       const next = prev === tab ? null : tab;
-      if (next) {
+      if (next && !isAiAssistantPoppedOut) {
         setIsAiAssistantOpen(false);
         setIsAiAssistantMinimized(false);
       }
@@ -759,7 +766,7 @@ export default function App() {
     setIsChatInfoOpen(false);
     setActiveRightPanel((prev) => {
       const next = prev === 'memory' ? null : 'memory';
-      if (next) {
+      if (next && !isAiAssistantPoppedOut) {
         setIsAiAssistantOpen(false);
         setIsAiAssistantMinimized(false);
       }
@@ -822,6 +829,7 @@ export default function App() {
   const [isSystemSettingsOpen, setIsSystemSettingsOpen] = useState(false);
   const [isAiAssistantOpen, setIsAiAssistantOpen] = useState(false);
   const [isAiAssistantMinimized, setIsAiAssistantMinimized] = useState(false);
+  const [isAiAssistantPoppedOut, setIsAiAssistantPoppedOut] = useState(false);
   const [aiAssistantRestoreSignal, setAiAssistantRestoreSignal] = useState(0);
   const [viewportWidth, setViewportWidth] = useState<number>(() =>
     typeof window !== 'undefined' ? window.innerWidth : 1440
@@ -831,6 +839,46 @@ export default function App() {
     const handleResize = () => setViewportWidth(window.innerWidth);
     window.addEventListener('resize', handleResize);
     return () => window.removeEventListener('resize', handleResize);
+  }, []);
+
+  useEffect(() => {
+    const bridge = getDesktopAiWindowBridge();
+    if (!bridge) return;
+    let active = true;
+    void bridge.getState().then((st) => {
+      if (!active || !st) return;
+      if (st.isOpen) {
+        setIsAiAssistantPoppedOut(true);
+        setIsAiAssistantOpen(true);
+        setIsAiAssistantMinimized(false);
+      }
+    }).catch(() => {});
+
+    const unsub = bridge.onStateChange((st) => {
+      if (!st) return;
+      if (st.action === 'dock-back') {
+        setIsAiAssistantPoppedOut(false);
+        setIsAiAssistantOpen(true);
+        setIsAiAssistantMinimized(false);
+        setAiAssistantRestoreSignal((n) => n + 1);
+        return;
+      }
+      if (st.action === 'close' || (!st.isOpen && !st.action)) {
+        setIsAiAssistantPoppedOut(false);
+        setIsAiAssistantOpen(false);
+        setIsAiAssistantMinimized(false);
+        return;
+      }
+      if (st.isOpen) {
+        setIsAiAssistantPoppedOut(true);
+        setIsAiAssistantOpen(true);
+        setIsAiAssistantMinimized(false);
+      }
+    });
+    return () => {
+      active = false;
+      unsub();
+    };
   }, []);
 
   const [isMasterVoiceActive, setIsMasterVoiceActive] = useState(() => {
@@ -1051,6 +1099,7 @@ export default function App() {
     document.documentElement.classList.toggle('theme-aurora', theme === 'aurora');
     document.documentElement.classList.toggle('theme-linen', theme === 'linen');
     applyAppearanceToDocument(appearance);
+    publishAiAssistantState({ appearance });
   }, [appearance, theme]);
 
   useEffect(() => {
@@ -1716,6 +1765,11 @@ export default function App() {
     setIsMemberAuthenticated(false);
     setCurrentMember(null);
     setIsTelegramMenuOpen(false);
+    setIsAiAssistantOpen(false);
+    setIsAiAssistantMinimized(false);
+    setIsAiAssistantPoppedOut(false);
+    clearAiAssistantSnapshot();
+    void getDesktopAiWindowBridge()?.close();
     try {
       const status = await fetchAuthStatus();
       setTotalMembersCount(status.totalMembers || 0);
@@ -6895,6 +6949,24 @@ export default function App() {
 
   const currentAccount = accounts.find((a) => a.id === activeAccountId) || accounts[0];
 
+  useEffect(() => {
+    if (!isAiAssistantOpen && !isAiAssistantPoppedOut) return;
+    publishAiAssistantState({
+      activeChatTitle: currentChat?.title,
+      engineLicenseKey: customLLMConfig.engineLicenseKey,
+      operatorAvatarUrl: currentAccount
+        ? resolveAccountAvatarSrc(currentAccount.id, currentAccount.avatarUrl)
+        : undefined,
+      operatorInitial: currentAccount?.avatarInitial || '我',
+    });
+  }, [
+    isAiAssistantOpen,
+    isAiAssistantPoppedOut,
+    currentChat?.title,
+    customLLMConfig.engineLicenseKey,
+    currentAccount,
+  ]);
+
   const accountsWithUnread = useMemo(() => {
     const unreadByAccount = new Map<string, number>();
     for (const chat of chats) {
@@ -6961,6 +7033,10 @@ export default function App() {
         onOpenMasterVoiceprint={() => toggleRightPanel('voice')}
         onOpenKnowledgeEvolution={() => toggleRightPanel('persona')}
         onOpenAiAssistant={() => {
+          if (isAiAssistantPoppedOut) {
+            void getDesktopAiWindowBridge()?.focus();
+            return;
+          }
           setIsChatInfoOpen(false);
           setActiveRightPanel(null);
           if (isAiAssistantOpen && isAiAssistantMinimized) {
@@ -6981,8 +7057,10 @@ export default function App() {
           if (tab === 'chats') {
             setActiveRightPanel(null);
             setIsMultiAccountOpen(false);
-            setIsAiAssistantOpen(false);
-            setIsAiAssistantMinimized(false);
+            if (!isAiAssistantPoppedOut) {
+              setIsAiAssistantOpen(false);
+              setIsAiAssistantMinimized(false);
+            }
           }
         }}
       />
@@ -7264,9 +7342,12 @@ export default function App() {
           isOpen={isAiAssistantOpen}
           restoreSignal={aiAssistantRestoreSignal}
           onMinimizedChange={setIsAiAssistantMinimized}
+          isPoppedOut={isAiAssistantPoppedOut}
+          onPopOutChange={(popped) => setIsAiAssistantPoppedOut(popped)}
           onClose={() => {
             setIsAiAssistantOpen(false);
             setIsAiAssistantMinimized(false);
+            setIsAiAssistantPoppedOut(false);
           }}
           engineLicenseKey={customLLMConfig.engineLicenseKey}
           activeChatTitle={currentChat?.title}
@@ -7274,6 +7355,7 @@ export default function App() {
             currentAccount ? resolveAccountAvatarSrc(currentAccount.id, currentAccount.avatarUrl) : undefined
           }
           operatorInitial={currentAccount?.avatarInitial || '我'}
+          appearance={appearance}
         />
 
         {/* 3.5 Unified Feature Modal Page Overlay (Standalone 5-Tab Modal) */}

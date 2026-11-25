@@ -19,27 +19,44 @@ import {
   Maximize2,
   RotateCcw,
   PanelRight,
+  ExternalLink,
+  Pin,
+  PinOff,
+  GripVertical,
 } from 'lucide-react';
 import {
   AiQaLocalChatItem,
   AiQaMatchedKnowledge,
   AiQaTurnMessage,
+  ChatAppearanceSettings,
   WorkflowPlaybookItem,
 } from '../types';
 import {
   askAiQaAssistantApi,
   fetchAiQaWorkflowPlaybookApi,
 } from '../services/apiService';
+import {
+  getDesktopAiWindowBridge,
+  loadAiAssistantSnapshot,
+  publishAiAssistantState,
+  requestAiAssistantSync,
+  subscribeAiAssistantSync,
+} from '../services/aiAssistantSync';
 
 interface AiAssistantModalProps {
   isOpen: boolean;
   onClose: () => void;
   restoreSignal?: number;
   onMinimizedChange?: (minimized: boolean) => void;
+  hostMode?: 'in-app' | 'popout';
+  isPoppedOut?: boolean;
+  onPopOutChange?: (poppedOut: boolean) => void;
+  sessionReady?: boolean;
   engineLicenseKey?: string;
   activeChatTitle?: string;
   operatorAvatarUrl?: string;
   operatorInitial?: string;
+  appearance?: ChatAppearanceSettings;
 }
 
 type LayoutMode = 'standalone' | 'floating' | 'fullscreen';
@@ -47,6 +64,7 @@ type LayoutMode = 'standalone' | 'floating' | 'fullscreen';
 const MAX_IMAGES = 6;
 const PLAYBOOK_CACHE_STORAGE_KEY = 'hs_ai_qa_workflow_playbook_cache';
 const WINDOW_SIZE_STORAGE_KEY = 'hs_ai_qa_window_size_v1';
+const CAPSULE_POS_STORAGE_KEY = 'hs_ai_qa_capsule_pos_v1';
 
 const DEFAULT_WIDTH = 450;
 const DEFAULT_HEIGHT = 680;
@@ -58,6 +76,37 @@ interface WindowRect {
   y: number;
   width: number;
   height: number;
+}
+
+interface CapsulePos {
+  x: number;
+  y: number;
+}
+
+function loadSavedCapsulePos(): CapsulePos | null {
+  try {
+    const raw = localStorage.getItem(CAPSULE_POS_STORAGE_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      const x = Number(parsed?.x);
+      const y = Number(parsed?.y);
+      if (Number.isFinite(x) && Number.isFinite(y)) {
+        return { x, y };
+      }
+    }
+  } catch {}
+  return null;
+}
+
+function clampCapsulePosToViewport(pos: CapsulePos, el?: HTMLElement | null): CapsulePos {
+  const vw = typeof window !== 'undefined' ? window.innerWidth : 1280;
+  const vh = typeof window !== 'undefined' ? window.innerHeight : 800;
+  const w = el?.offsetWidth ? Math.max(140, el.offsetWidth) : 185;
+  const h = el?.offsetHeight ? Math.max(36, el.offsetHeight) : 44;
+  return {
+    x: Math.min(Math.max(8, pos.x), Math.max(8, vw - w - 8)),
+    y: Math.min(Math.max(8, pos.y), Math.max(8, vh - h - 8)),
+  };
 }
 
 function loadSavedSize(): { width: number; height: number } {
@@ -349,16 +398,59 @@ export const AiAssistantModal: React.FC<AiAssistantModalProps> = ({
   onClose,
   restoreSignal = 0,
   onMinimizedChange,
+  hostMode = 'in-app',
+  isPoppedOut = false,
+  onPopOutChange,
+  sessionReady = true,
   engineLicenseKey,
   activeChatTitle,
   operatorAvatarUrl,
   operatorInitial = '我',
+  appearance,
 }) => {
+  const isPopoutHost = hostMode === 'popout';
+  const desktopAiBridge = getDesktopAiWindowBridge();
+  const isDesktopPopoutSupported = Boolean(desktopAiBridge?.isAvailable);
+
+  const initialSnapshotRef = useRef<ReturnType<typeof loadAiAssistantSnapshot> | null>(null);
+  if (initialSnapshotRef.current === null) {
+    initialSnapshotRef.current = loadAiAssistantSnapshot() || {};
+  }
+  const initialSnap = initialSnapshotRef.current;
+
   const [isMinimized, setIsMinimized] = useState(false);
   const [layoutMode, setLayoutMode] = useState<LayoutMode>('standalone');
   const [preFullscreenMode, setPreFullscreenMode] = useState<'standalone' | 'floating'>('standalone');
   const [avatarLoadFailed, setAvatarLoadFailed] = useState(false);
+  const [isAlwaysOnTop, setIsAlwaysOnTop] = useState(true);
+  const [isPopoutMaximized, setIsPopoutMaximized] = useState(false);
+  const [isDraggingOutsideWindow, setIsDraggingOutsideWindow] = useState(false);
   const pointerDownOnBackdropRef = useRef(false);
+
+  const [syncedContextMeta, setSyncedContextMeta] = useState<{
+    activeChatTitle?: string;
+    engineLicenseKey?: string;
+    operatorAvatarUrl?: string;
+    operatorInitial?: string;
+  }>(() => ({
+    activeChatTitle: initialSnap?.activeChatTitle,
+    engineLicenseKey: initialSnap?.engineLicenseKey,
+    operatorAvatarUrl: initialSnap?.operatorAvatarUrl,
+    operatorInitial: initialSnap?.operatorInitial,
+  }));
+
+  const effectiveActiveChatTitle = isPopoutHost
+    ? (syncedContextMeta.activeChatTitle ?? activeChatTitle)
+    : activeChatTitle;
+  const effectiveEngineLicenseKey = isPopoutHost
+    ? (syncedContextMeta.engineLicenseKey ?? engineLicenseKey)
+    : engineLicenseKey;
+  const effectiveOperatorAvatarUrl = isPopoutHost
+    ? (syncedContextMeta.operatorAvatarUrl ?? operatorAvatarUrl)
+    : operatorAvatarUrl;
+  const effectiveOperatorInitial = isPopoutHost
+    ? (syncedContextMeta.operatorInitial ?? operatorInitial)
+    : operatorInitial;
 
   const [rect, setRect] = useState<WindowRect>(() => {
     const saved = loadSavedSize();
@@ -373,11 +465,27 @@ export const AiAssistantModal: React.FC<AiAssistantModalProps> = ({
     });
   });
 
-  const [messages, setMessages] = useState<AiQaLocalChatItem[]>([]);
-  const [inputText, setInputText] = useState('');
-  const [pendingImages, setPendingImages] = useState<string[]>([]);
-  const [activeContextText, setActiveContextText] = useState<string>('');
-  const [activeContextLabel, setActiveContextLabel] = useState<string>('');
+  const [capsulePos, setCapsulePos] = useState<CapsulePos | null>(() => loadSavedCapsulePos());
+  const [isDraggingCapsule, setIsDraggingCapsule] = useState(false);
+  const capsuleRef = useRef<HTMLDivElement | null>(null);
+  const capsulePosRef = useRef<CapsulePos | null>(capsulePos);
+  capsulePosRef.current = capsulePos;
+
+  const [messages, setMessages] = useState<AiQaLocalChatItem[]>(() =>
+    Array.isArray(initialSnap?.messages) ? initialSnap.messages : []
+  );
+  const [inputText, setInputText] = useState(() =>
+    typeof initialSnap?.inputText === 'string' ? initialSnap.inputText : ''
+  );
+  const [pendingImages, setPendingImages] = useState<string[]>(() =>
+    Array.isArray(initialSnap?.pendingImages) ? initialSnap.pendingImages : []
+  );
+  const [activeContextText, setActiveContextText] = useState<string>(() =>
+    typeof initialSnap?.activeContextText === 'string' ? initialSnap.activeContextText : ''
+  );
+  const [activeContextLabel, setActiveContextLabel] = useState<string>(() =>
+    typeof initialSnap?.activeContextLabel === 'string' ? initialSnap.activeContextLabel : ''
+  );
   const [isSending, setIsSending] = useState(false);
   const [isDragOver, setIsDragOver] = useState(false);
 
@@ -393,7 +501,9 @@ export const AiAssistantModal: React.FC<AiAssistantModalProps> = ({
   });
   const [isLoadingPlaybook, setIsLoadingPlaybook] = useState(false);
   const [playbookError, setPlaybookError] = useState<string | null>(null);
-  const [selectedPlaybookDay, setSelectedPlaybookDay] = useState<WorkflowPlaybookItem | null>(null);
+  const [selectedPlaybookDay, setSelectedPlaybookDay] = useState<WorkflowPlaybookItem | null>(() =>
+    initialSnap?.selectedPlaybookDay ?? null
+  );
 
   const [expandedKbByMsg, setExpandedKbByMsg] = useState<Record<string, boolean>>({});
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
@@ -410,15 +520,57 @@ export const AiAssistantModal: React.FC<AiAssistantModalProps> = ({
   const rectRef = useRef(rect);
   rectRef.current = rect;
   const dragCleanupRef = useRef<(() => void) | null>(null);
+  const remoteAppliedValuesRef = useRef<{
+    messages: AiQaLocalChatItem[];
+    inputText: string;
+    pendingImages: string[];
+    activeContextText: string;
+    activeContextLabel: string;
+    selectedPlaybookDay: WorkflowPlaybookItem | null;
+  }>({
+    messages,
+    inputText,
+    pendingImages,
+    activeContextText,
+    activeContextLabel,
+    selectedPlaybookDay,
+  });
+  const hasHydratedSyncRef = useRef(false);
+  const latestSyncPayloadRef = useRef({
+    messages,
+    inputText,
+    pendingImages,
+    activeContextText,
+    activeContextLabel,
+    selectedPlaybookDay,
+    activeChatTitle: effectiveActiveChatTitle,
+    engineLicenseKey: effectiveEngineLicenseKey,
+    operatorAvatarUrl: effectiveOperatorAvatarUrl,
+    operatorInitial: effectiveOperatorInitial,
+    appearance,
+  });
+  latestSyncPayloadRef.current = {
+    messages,
+    inputText,
+    pendingImages,
+    activeContextText,
+    activeContextLabel,
+    selectedPlaybookDay,
+    activeChatTitle: effectiveActiveChatTitle,
+    engineLicenseKey: effectiveEngineLicenseKey,
+    operatorAvatarUrl: effectiveOperatorAvatarUrl,
+    operatorInitial: effectiveOperatorInitial,
+    appearance,
+  };
 
-  const isFullscreen = layoutMode === 'fullscreen';
-  const isFloating = layoutMode === 'floating';
-  const isStandalone = layoutMode === 'standalone';
+  const isFullscreen = !isPopoutHost && layoutMode === 'fullscreen';
+  const isFloating = !isPopoutHost && layoutMode === 'floating';
+  const isStandalone = !isPopoutHost && layoutMode === 'standalone';
 
   const showToast = useCallback((msg: string) => {
     setToastMsg(msg);
     if (toastTimerRef.current) window.clearTimeout(toastTimerRef.current);
-    toastTimerRef.current = window.setTimeout(() => setToastMsg(null), 2400);
+    toastTimerRef.current = window.setTimeout(() => setToastMsg(null), 2600);
   }, []);
 
   const markCopied = useCallback((key: string, label = '已复制') => {
@@ -430,7 +582,7 @@ export const AiAssistantModal: React.FC<AiAssistantModalProps> = ({
 
   useEffect(() => {
     setAvatarLoadFailed(false);
-  }, [operatorAvatarUrl]);
+  }, [effectiveOperatorAvatarUrl]);
 
   useEffect(() => {
     return () => {
@@ -441,14 +593,179 @@ export const AiAssistantModal: React.FC<AiAssistantModalProps> = ({
     };
   }, []);
 
-  // Re-clamp floating rect if viewport resizes
+  // Live cross-window state sync (main window <-> popped-out desktop window)
+  useEffect(() => {
+    const unsubscribe = subscribeAiAssistantSync(
+      (remote) => {
+        if ('messages' in remote && Array.isArray(remote.messages)) {
+          remoteAppliedValuesRef.current.messages = remote.messages;
+          setMessages(remote.messages);
+        }
+        if ('inputText' in remote && typeof remote.inputText === 'string') {
+          remoteAppliedValuesRef.current.inputText = remote.inputText;
+          setInputText(remote.inputText);
+        }
+        if ('pendingImages' in remote && Array.isArray(remote.pendingImages)) {
+          remoteAppliedValuesRef.current.pendingImages = remote.pendingImages;
+          setPendingImages(remote.pendingImages);
+        }
+        if ('activeContextText' in remote && typeof remote.activeContextText === 'string') {
+          remoteAppliedValuesRef.current.activeContextText = remote.activeContextText;
+          setActiveContextText(remote.activeContextText);
+        }
+        if ('activeContextLabel' in remote && typeof remote.activeContextLabel === 'string') {
+          remoteAppliedValuesRef.current.activeContextLabel = remote.activeContextLabel;
+          setActiveContextLabel(remote.activeContextLabel);
+        }
+        if ('selectedPlaybookDay' in remote) {
+          const nextDay = remote.selectedPlaybookDay ?? null;
+          remoteAppliedValuesRef.current.selectedPlaybookDay = nextDay;
+          setSelectedPlaybookDay(nextDay);
+        }
+        if (
+          isPopoutHost &&
+          ('activeChatTitle' in remote ||
+            'engineLicenseKey' in remote ||
+            'operatorAvatarUrl' in remote ||
+            'operatorInitial' in remote)
+        ) {
+          setSyncedContextMeta((prev) => ({
+            activeChatTitle:
+              'activeChatTitle' in remote ? remote.activeChatTitle : prev.activeChatTitle,
+            engineLicenseKey:
+              'engineLicenseKey' in remote ? remote.engineLicenseKey : prev.engineLicenseKey,
+            operatorAvatarUrl:
+              'operatorAvatarUrl' in remote ? remote.operatorAvatarUrl : prev.operatorAvatarUrl,
+            operatorInitial:
+              'operatorInitial' in remote ? remote.operatorInitial : prev.operatorInitial,
+          }));
+        }
+      },
+      () => {
+        if (!isPopoutHost) {
+          publishAiAssistantState(latestSyncPayloadRef.current);
+        }
+      }
+    );
+
+    if (isPopoutHost) {
+      requestAiAssistantSync();
+    }
+
+    return unsubscribe;
+  }, [isPopoutHost]);
+
+  // Publish state edits when user interacts in either window (echo-free post-commit check)
+  useEffect(() => {
+    if (!hasHydratedSyncRef.current) {
+      hasHydratedSyncRef.current = true;
+      remoteAppliedValuesRef.current = {
+        messages,
+        inputText,
+        pendingImages,
+        activeContextText,
+        activeContextLabel,
+        selectedPlaybookDay,
+      };
+      return;
+    }
+    const r = remoteAppliedValuesRef.current;
+    if (
+      messages === r.messages &&
+      inputText === r.inputText &&
+      pendingImages === r.pendingImages &&
+      activeContextText === r.activeContextText &&
+      activeContextLabel === r.activeContextLabel &&
+      selectedPlaybookDay === r.selectedPlaybookDay
+    ) {
+      return;
+    }
+    remoteAppliedValuesRef.current = {
+      messages,
+      inputText,
+      pendingImages,
+      activeContextText,
+      activeContextLabel,
+      selectedPlaybookDay,
+    };
+    publishAiAssistantState({
+      messages,
+      inputText,
+      pendingImages,
+      activeContextText,
+      activeContextLabel,
+      selectedPlaybookDay,
+    });
+  }, [
+    messages,
+    inputText,
+    pendingImages,
+    activeContextText,
+    activeContextLabel,
+    selectedPlaybookDay,
+  ]);
+
+  // Sync Electron pop-out window pin/maximize state in both main and pop-out windows
+  useEffect(() => {
+    if (!desktopAiBridge) return;
+    let active = true;
+    void desktopAiBridge.getState().then((st) => {
+      if (!active || !st) return;
+      setIsAlwaysOnTop(st.alwaysOnTop !== false);
+      if (isPopoutHost) {
+        setIsPopoutMaximized(Boolean(st.isMaximized));
+      }
+    }).catch(() => {});
+
+    const unsub = desktopAiBridge.onStateChange((st) => {
+      if (!st) return;
+      setIsAlwaysOnTop(st.alwaysOnTop !== false);
+      if (isPopoutHost) {
+        setIsPopoutMaximized(Boolean(st.isMaximized));
+      }
+    });
+    return () => {
+      active = false;
+      unsub();
+    };
+  }, [isPopoutHost, desktopAiBridge]);
+
+  // Re-clamp floating rect and minimized capsule position if viewport resizes
   useEffect(() => {
     const onResize = () => {
       setRect((prev) => clampRectToViewport(prev));
+      setCapsulePos((prev) => {
+        if (!prev) return prev;
+        return clampCapsulePosToViewport(prev, capsuleRef.current);
+      });
     };
     window.addEventListener('resize', onResize);
     return () => window.removeEventListener('resize', onResize);
   }, []);
+
+  // Initialize default bottom-right capsule position once rendered in minimized state
+  useEffect(() => {
+    if (!isOpen || !isMinimized || isPopoutHost || isPoppedOut) return;
+    const rafId = window.requestAnimationFrame(() => {
+      const el = capsuleRef.current;
+      if (!el) return;
+      if (!capsulePosRef.current) {
+        const vw = window.innerWidth;
+        const vh = window.innerHeight;
+        const w = el.offsetWidth || 185;
+        const h = el.offsetHeight || 44;
+        setCapsulePos(
+          clampCapsulePosToViewport(
+            { x: Math.max(8, vw - w - 16), y: Math.max(8, vh - h - 16) },
+            el
+          )
+        );
+      } else {
+        setCapsulePos((prev) => (prev ? clampCapsulePosToViewport(prev, el) : prev));
+      }
+    });
+    return () => window.cancelAnimationFrame(rafId);
+  }, [isOpen, isMinimized, isPopoutHost, isPoppedOut]);
 
   // Reset minimized state when reopened cleanly
   useEffect(() => {
@@ -470,8 +787,8 @@ export const AiAssistantModal: React.FC<AiAssistantModalProps> = ({
 
   // Notify parent whenever minimized state changes
   useEffect(() => {
-    onMinimizedChange?.(isOpen && isMinimized);
-  }, [isOpen, isMinimized, onMinimizedChange]);
+    onMinimizedChange?.(isOpen && !isPoppedOut && isMinimized);
+  }, [isOpen, isPoppedOut, isMinimized, onMinimizedChange]);
 
   useEffect(() => {
     if (!isOpen || isMinimized) return;
@@ -504,7 +821,7 @@ export const AiAssistantModal: React.FC<AiAssistantModalProps> = ({
     if (isLoadingPlaybook && !forceRefresh) return;
     setIsLoadingPlaybook(true);
     setPlaybookError(null);
-    const res = await fetchAiQaWorkflowPlaybookApi(engineLicenseKey);
+    const res = await fetchAiQaWorkflowPlaybookApi(effectiveEngineLicenseKey);
     setIsLoadingPlaybook(false);
     if (res.ok && res.items.length > 0) {
       setPlaybookItems(res.items);
@@ -514,14 +831,14 @@ export const AiAssistantModal: React.FC<AiAssistantModalProps> = ({
     } else if (!res.ok) {
       setPlaybookError(res.error || '暂时无法同步 1-7 天流程指引');
     }
-  }, [engineLicenseKey, isLoadingPlaybook]);
+  }, [effectiveEngineLicenseKey, isLoadingPlaybook]);
 
   useEffect(() => {
-    if (isOpen) {
+    if (sessionReady && (isOpen || isPopoutHost)) {
       void loadPlaybook(false);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isOpen]);
+  }, [isOpen, isPopoutHost, sessionReady]);
 
   // Auto-scroll messages
   useEffect(() => {
@@ -636,28 +953,86 @@ export const AiAssistantModal: React.FC<AiAssistantModalProps> = ({
     }
   };
 
-  // Drag titlebar: if standalone, dragging > 16px detaches into in-app floating window; if floating, moves freely
-  const handleStartDragWindow = (e: React.MouseEvent<HTMLDivElement>) => {
-    if (isFullscreen) return;
+  const triggerDesktopPopOut = useCallback(async (coords?: {
+    screenX?: number;
+    screenY?: number;
+    grabOffsetX?: number;
+    grabOffsetY?: number;
+  }) => {
+    if (!desktopAiBridge) {
+      showToast('网页端受浏览器沙箱限制仅支持窗口内移动；使用桌面端可拖出软件框外');
+      return;
+    }
+    publishAiAssistantState(latestSyncPayloadRef.current);
+    const currentBox = panelRef.current?.getBoundingClientRect();
+    const res = await desktopAiBridge.open({
+      screenX: coords?.screenX,
+      screenY: coords?.screenY,
+      grabOffsetX: coords?.grabOffsetX,
+      grabOffsetY: coords?.grabOffsetY,
+      width: isFloating ? rectRef.current.width : Math.min(560, Math.max(MIN_WIDTH, Math.round(currentBox?.width || rectRef.current.width))),
+      height: isFloating ? rectRef.current.height : Math.min(820, Math.max(MIN_HEIGHT, Math.round(currentBox?.height || rectRef.current.height))),
+    });
+    if (res?.ok) {
+      onPopOutChange?.(true);
+    } else {
+      showToast(res?.error || '打开独立桌面窗口失败');
+    }
+  }, [desktopAiBridge, isFloating, onPopOutChange, showToast]);
+
+  // Drag titlebar: if standalone, dragging > 16px detaches into floating; dragging past main window edge pops out to external desktop window
+  const handleStartDragWindow = (e: React.PointerEvent<HTMLElement>) => {
+    if (isPopoutHost || isFullscreen || e.button !== 0) return;
     if ((e.target as HTMLElement).closest('button, input, textarea')) return;
     e.preventDefault();
     dragCleanupRef.current?.();
+
+    const headerEl = e.currentTarget;
+    const pointerId = e.pointerId;
+    try {
+      headerEl.setPointerCapture(pointerId);
+    } catch {}
+
     const startX = e.clientX;
     const startY = e.clientY;
     const panelBox = panelRef.current?.getBoundingClientRect();
+    const targetPopWidth = isFloating
+      ? rectRef.current.width
+      : panelBox
+      ? Math.max(MIN_WIDTH, Math.min(560, Math.round(panelBox.width)))
+      : rectRef.current.width;
+    const rawRelX = panelBox && panelBox.width > 0 ? (e.clientX - panelBox.left) / panelBox.width : 0.5;
+    const grabOffsetX = panelBox
+      ? Math.max(24, Math.min(targetPopWidth - 24, Math.round(rawRelX * targetPopWidth)))
+      : 180;
+    const grabOffsetY = panelBox ? Math.max(10, Math.min(44, Math.round(e.clientY - panelBox.top))) : 24;
+
     let detachedFromStandalone = false;
+    let poppedOutDuringDrag = false;
+    let showedWebBoundaryHint = false;
     let startRect = { ...rectRef.current };
 
     if (isStandalone && panelBox) {
+      const clampedW = targetPopWidth;
+      const clampedH = Math.min(rectRef.current.height, Math.max(MIN_HEIGHT, Math.round(panelBox.height - 24)));
       startRect = clampRectToViewport({
-        x: panelBox.left,
+        x: Math.round(e.clientX - grabOffsetX),
         y: Math.max(12, panelBox.top),
-        width: Math.max(MIN_WIDTH, Math.min(560, Math.round(panelBox.width))),
-        height: Math.min(rectRef.current.height, Math.max(MIN_HEIGHT, Math.round(panelBox.height - 24))),
+        width: clampedW,
+        height: clampedH,
       });
     }
 
-    const onMove = (mv: MouseEvent) => {
+    const computeOutsideMargin = (cx: number, cy: number): number => {
+      const overLeft = -cx;
+      const overRight = cx - window.innerWidth;
+      const overTop = -cy;
+      const overBottom = cy - window.innerHeight;
+      return Math.max(overLeft, overRight, overTop, overBottom);
+    };
+
+    const onMove = (mv: PointerEvent) => {
+      if (mv.pointerId !== pointerId || poppedOutDuringDrag) return;
       const dx = mv.clientX - startX;
       const dy = mv.clientY - startY;
 
@@ -666,6 +1041,30 @@ export const AiAssistantModal: React.FC<AiAssistantModalProps> = ({
         detachedFromStandalone = true;
         setLayoutMode('floating');
         setPreFullscreenMode('floating');
+      }
+
+      const outsideMargin = computeOutsideMargin(mv.clientX, mv.clientY);
+      if (outsideMargin >= 18) {
+        if (isDesktopPopoutSupported) {
+          setIsDraggingOutsideWindow(true);
+          if (outsideMargin >= 64) {
+            poppedOutDuringDrag = true;
+            setIsDraggingOutsideWindow(false);
+            cleanup();
+            void triggerDesktopPopOut({
+              screenX: mv.screenX,
+              screenY: mv.screenY,
+              grabOffsetX,
+              grabOffsetY,
+            });
+            return;
+          }
+        } else if (!showedWebBoundaryHint && outsideMargin >= 28) {
+          showedWebBoundaryHint = true;
+          showToast('网页端受浏览器限制仅支持窗口内移动；使用桌面客户端可拖出软件框外');
+        }
+      } else {
+        setIsDraggingOutsideWindow(false);
       }
 
       setRect(
@@ -678,18 +1077,42 @@ export const AiAssistantModal: React.FC<AiAssistantModalProps> = ({
     };
 
     const cleanup = () => {
-      window.removeEventListener('mousemove', onMove);
-      window.removeEventListener('mouseup', onUp);
+      setIsDraggingOutsideWindow(false);
+      try {
+        if (headerEl.hasPointerCapture(pointerId)) {
+          headerEl.releasePointerCapture(pointerId);
+        }
+      } catch {}
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+      window.removeEventListener('pointercancel', onCancel);
       if (dragCleanupRef.current === cleanup) dragCleanupRef.current = null;
     };
 
-    const onUp = () => {
+    const onUp = (up: PointerEvent) => {
+      if (up.pointerId !== pointerId) return;
+      const outsideMargin = computeOutsideMargin(up.clientX, up.clientY);
+      const shouldPopOut = !poppedOutDuringDrag && isDesktopPopoutSupported && outsideMargin >= 18;
+      cleanup();
+      if (shouldPopOut) {
+        void triggerDesktopPopOut({
+          screenX: up.screenX,
+          screenY: up.screenY,
+          grabOffsetX,
+          grabOffsetY,
+        });
+      }
+    };
+
+    const onCancel = (ev: PointerEvent) => {
+      if (ev.pointerId !== pointerId) return;
       cleanup();
     };
 
     dragCleanupRef.current = cleanup;
-    window.addEventListener('mousemove', onMove);
-    window.addEventListener('mouseup', onUp);
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
+    window.addEventListener('pointercancel', onCancel);
   };
 
   // Drag any edge/corner to resize floating window
@@ -837,7 +1260,7 @@ export const AiAssistantModal: React.FC<AiAssistantModalProps> = ({
     });
 
     const mergedContext = [
-      activeChatTitle ? `当前右侧主窗口选中会话：${activeChatTitle}` : '',
+      effectiveActiveChatTitle ? `当前右侧主窗口选中会话：${effectiveActiveChatTitle}` : '',
       activeContextText ? activeContextText : '',
     ]
       .filter(Boolean)
@@ -863,7 +1286,7 @@ export const AiAssistantModal: React.FC<AiAssistantModalProps> = ({
           temperature: 0.4,
         },
         {
-          engineLicenseKey,
+          engineLicenseKey: effectiveEngineLicenseKey,
           signal: controller.signal,
         }
       );
@@ -939,18 +1362,106 @@ export const AiAssistantModal: React.FC<AiAssistantModalProps> = ({
     showToast(`已将「${labelText}」设为当前提问背景`);
   };
 
-  if (!isOpen) return null;
+  if (!isPopoutHost && (!isOpen || isPoppedOut)) return null;
 
-  // Minimized floating capsule restore button
-  if (isMinimized) {
+  // Minimized floating capsule restore button (freely draggable across viewport)
+  if (!isPopoutHost && isMinimized) {
+    const fallbackCapsuleX = typeof window !== 'undefined' ? Math.max(8, window.innerWidth - 201) : 1000;
+    const fallbackCapsuleY = typeof window !== 'undefined' ? Math.max(8, window.innerHeight - 60) : 700;
+    const activeCapsulePos = capsulePos || { x: fallbackCapsuleX, y: fallbackCapsuleY };
+
+    const handleCapsulePointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
+      if (e.button !== 0) return;
+      if ((e.target as HTMLElement).closest('[data-capsule-action="true"]')) return;
+      e.preventDefault();
+      dragCleanupRef.current?.();
+      const capsuleEl = e.currentTarget;
+      const pointerId = e.pointerId;
+      try {
+        capsuleEl.setPointerCapture(pointerId);
+      } catch {}
+
+      const box = capsuleEl.getBoundingClientRect();
+      const startPos: CapsulePos = capsulePosRef.current || { x: box.left, y: box.top };
+      const startClientX = e.clientX;
+      const startClientY = e.clientY;
+      let hasDragged = false;
+      let finished = false;
+      let latestPos = startPos;
+
+      const onMove = (mv: PointerEvent) => {
+        if (mv.pointerId !== pointerId) return;
+        const dx = mv.clientX - startClientX;
+        const dy = mv.clientY - startClientY;
+        if (!hasDragged && Math.hypot(dx, dy) >= 5) {
+          hasDragged = true;
+          setIsDraggingCapsule(true);
+        }
+        if (hasDragged) {
+          latestPos = clampCapsulePosToViewport(
+            { x: startPos.x + dx, y: startPos.y + dy },
+            capsuleEl
+          );
+          setCapsulePos(latestPos);
+        }
+      };
+
+      const finish = (isClickCandidate: boolean) => {
+        if (finished) return;
+        finished = true;
+        setIsDraggingCapsule(false);
+        try {
+          if (capsuleEl.hasPointerCapture(pointerId)) {
+            capsuleEl.releasePointerCapture(pointerId);
+          }
+        } catch {}
+        window.removeEventListener('pointermove', onMove);
+        window.removeEventListener('pointerup', onUp);
+        window.removeEventListener('pointercancel', onCancel);
+        if (dragCleanupRef.current === cleanupCapsule) dragCleanupRef.current = null;
+        if (hasDragged) {
+          try {
+            localStorage.setItem(CAPSULE_POS_STORAGE_KEY, JSON.stringify(latestPos));
+          } catch {}
+        } else if (isClickCandidate) {
+          setIsMinimized(false);
+        }
+      };
+
+      const cleanupCapsule = () => finish(false);
+
+      const onUp = (up: PointerEvent) => {
+        if (up.pointerId !== pointerId) return;
+        finish(true);
+      };
+
+      const onCancel = (ev: PointerEvent) => {
+        if (ev.pointerId !== pointerId) return;
+        finish(false);
+      };
+
+      dragCleanupRef.current = cleanupCapsule;
+      window.addEventListener('pointermove', onMove);
+      window.addEventListener('pointerup', onUp);
+      window.addEventListener('pointercancel', onCancel);
+    };
+
     return (
-      <div className="fixed bottom-4 right-4 z-[60] flex items-center gap-1 rounded-full pl-2 pr-1.5 py-1.5 shadow-lg border bg-white/95 dark:bg-[#0b1523]/95 aurora:bg-[#0c1a21]/95 linen:bg-[#f6efe2]/95 border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#1f3b46] linen:border-[#cbbba2] text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118] backdrop-blur-md transition-all duration-150">
-        <button
-          type="button"
-          onClick={() => setIsMinimized(false)}
-          className="flex items-center gap-2 pr-1.5 text-xs font-semibold cursor-pointer whitespace-nowrap shrink-0 hover:opacity-85 transition-opacity"
-          title="恢复 AI助手 窗口"
-        >
+      <div
+        ref={capsuleRef}
+        onPointerDown={handleCapsulePointerDown}
+        style={{
+          transform: `translate3d(${activeCapsulePos.x}px, ${activeCapsulePos.y}px, 0)`,
+        }}
+        title="按住可自由拖动到任意位置，轻点展开 AI助手"
+        className={`fixed top-0 left-0 z-[60] flex items-center gap-1 rounded-full pl-2 pr-1.5 py-1.5 shadow-lg border bg-white/95 dark:bg-[#0b1523]/95 aurora:bg-[#0c1a21]/95 linen:bg-[#f6efe2]/95 border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#1f3b46] linen:border-[#cbbba2] text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118] backdrop-blur-md select-none touch-none ${
+          isDraggingCapsule
+            ? 'cursor-grabbing shadow-xl ring-2 ring-[#2481cc]/35 dark:ring-[#2ba0ff]/35 aurora:ring-[#2dd4bf]/35 linen:ring-[#a86a43]/35'
+            : 'cursor-grab transition-shadow duration-150'
+        }`}
+      >
+        <div className="flex items-center gap-1.5 pr-1.5 text-xs font-semibold whitespace-nowrap shrink-0">
+          <GripVertical className="w-3.5 h-3.5 opacity-45 shrink-0" />
           <span className="w-6 h-6 rounded-full bg-[#e8f3ff] dark:bg-[#132942] aurora:bg-[#112e37] linen:bg-[#a86a43]/15 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#5eead4] linen:text-[#8c522d] flex items-center justify-center shrink-0">
             {isSending ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Bot className="w-3.5 h-3.5" />}
           </span>
@@ -960,10 +1471,11 @@ export const AiAssistantModal: React.FC<AiAssistantModalProps> = ({
               {messages.length}
             </span>
           )}
-        </button>
+        </div>
         <div className="w-px h-3.5 bg-black/10 dark:bg-white/10 aurora:bg-white/10 linen:bg-[#cbbba2]" />
         <button
           type="button"
+          data-capsule-action="true"
           onClick={() => setIsMinimized(false)}
           title="还原窗口"
           className="p-1.5 rounded-full text-[#475569] dark:text-[#9cb2c9] aurora:text-[#9cbdc8] linen:text-[#5c4b3b] hover:bg-black/5 dark:hover:bg-white/10 aurora:hover:bg-white/10 linen:hover:bg-[#e5d8c2] transition-colors cursor-pointer shrink-0"
@@ -972,6 +1484,7 @@ export const AiAssistantModal: React.FC<AiAssistantModalProps> = ({
         </button>
         <button
           type="button"
+          data-capsule-action="true"
           onClick={onClose}
           title="关闭 AI助手"
           className="p-1.5 rounded-full text-[#475569] dark:text-[#9cb2c9] aurora:text-[#9cbdc8] linen:text-[#5c4b3b] hover:bg-rose-500/15 hover:text-rose-500 transition-colors cursor-pointer shrink-0"
@@ -994,7 +1507,9 @@ export const AiAssistantModal: React.FC<AiAssistantModalProps> = ({
             : `正在加载第${d}天流程内容...`,
         }));
 
-  const containerStyle: React.CSSProperties = isFullscreen
+  const containerStyle: React.CSSProperties = isPopoutHost
+    ? {}
+    : isFullscreen
     ? { top: 10, left: 10, right: 10, bottom: 10, width: 'auto', height: 'auto' }
     : isFloating
     ? {
@@ -1005,19 +1520,23 @@ export const AiAssistantModal: React.FC<AiAssistantModalProps> = ({
       }
     : {};
 
-  const containerClassName = isStandalone
-    ? `w-full max-w-4xl h-[88vh] max-h-[840px] rounded-2xl flex flex-col overflow-hidden border shadow-2xl linen:shadow-sm bg-[#f8fafc] dark:bg-[#09111b] aurora:bg-[#0b151c] linen:bg-[#f6efe2] border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#1d3944] linen:border-[#cbbba2] text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118] animate-in zoom-in-95 fade-in duration-150 ${
-        isDragOver ? 'ring-2 ring-[#2481cc] dark:ring-[#2ba0ff] aurora:ring-[#2dd4bf] linen:ring-[#a86a43]' : ''
-      }`
-    : `fixed z-[55] flex flex-col rounded-2xl overflow-hidden border shadow-2xl linen:shadow-xl transition-[box-shadow] bg-[#f8fafc] dark:bg-[#09111b] aurora:bg-[#0b151c] linen:bg-[#f6efe2] border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#1d3944] linen:border-[#cbbba2] text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118] ${
-        isDragOver ? 'ring-2 ring-[#2481cc] dark:ring-[#2ba0ff] aurora:ring-[#2dd4bf] linen:ring-[#a86a43]' : ''
-      }`;
+  const detachRingClass = isDraggingOutsideWindow
+    ? 'ring-2 ring-[#2481cc] dark:ring-[#2ba0ff] aurora:ring-[#2dd4bf] linen:ring-[#a86a43]'
+    : isDragOver
+    ? 'ring-2 ring-[#2481cc] dark:ring-[#2ba0ff] aurora:ring-[#2dd4bf] linen:ring-[#a86a43]'
+    : '';
+
+  const containerClassName = isPopoutHost
+    ? `w-screen h-screen flex flex-col overflow-hidden border bg-[#f8fafc] dark:bg-[#09111b] aurora:bg-[#0b151c] linen:bg-[#f6efe2] border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#1d3944] linen:border-[#cbbba2] text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118] ${detachRingClass}`
+    : isStandalone
+    ? `w-full max-w-4xl h-[88vh] max-h-[840px] rounded-2xl flex flex-col overflow-hidden border shadow-2xl linen:shadow-sm bg-[#f8fafc] dark:bg-[#09111b] aurora:bg-[#0b151c] linen:bg-[#f6efe2] border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#1d3944] linen:border-[#cbbba2] text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118] animate-in zoom-in-95 fade-in duration-150 ${detachRingClass}`
+    : `fixed z-[55] flex flex-col rounded-2xl overflow-hidden border shadow-2xl linen:shadow-xl transition-[box-shadow] bg-[#f8fafc] dark:bg-[#09111b] aurora:bg-[#0b151c] linen:bg-[#f6efe2] border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#1d3944] linen:border-[#cbbba2] text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118] ${detachRingClass}`;
 
   const panelNode = (
       <aside
         ref={panelRef}
-        role={isStandalone || isFullscreen ? 'dialog' : 'region'}
-        aria-modal={isStandalone || isFullscreen ? true : undefined}
+        role={isPopoutHost ? 'main' : isStandalone || isFullscreen ? 'dialog' : 'region'}
+        aria-modal={!isPopoutHost && (isStandalone || isFullscreen) ? true : undefined}
         aria-label="AI助手"
         style={containerStyle}
         onClick={(e) => e.stopPropagation()}
@@ -1036,7 +1555,7 @@ export const AiAssistantModal: React.FC<AiAssistantModalProps> = ({
         onDrop={handleDrop}
         className={containerClassName}
       >
-        {/* 8-Direction Resize Handles in Floating Mode */}
+        {/* 8-Direction Resize Handles in In-App Floating Mode */}
         {isFloating && (
           <>
             <div onMouseDown={handleStartResize('w')} className="absolute left-0 top-2 bottom-2 w-1.5 cursor-ew-resize z-20" />
@@ -1050,12 +1569,20 @@ export const AiAssistantModal: React.FC<AiAssistantModalProps> = ({
           </>
         )}
 
-        {/* Top Header Bar (Standalone / Drag to Float / Minimize / Fullscreen / Close) */}
+        {/* Top Header Bar */}
         <header
-          onMouseDown={handleStartDragWindow}
-          title={isStandalone ? '独立工作台（按住拖拽可转为自由悬浮窗）' : isFloating ? '按住拖拽移动位置' : undefined}
+          onPointerDown={!isPopoutHost ? handleStartDragWindow : undefined}
+          title={
+            isPopoutHost
+              ? '按住拖拽可移动到屏幕任意位置，双击可最大化/还原'
+              : isStandalone
+              ? '按住拖拽可转为悬浮窗；拖出软件框外可弹出为独立桌面窗口'
+              : isFloating
+              ? '按住拖拽移动；拖出软件框外可弹出为独立桌面窗口'
+              : undefined
+          }
           className={`px-4 py-3 flex items-center justify-between gap-2 border-b border-[#e2e8f0] dark:border-[#162436] aurora:border-[#182b34] linen:border-[#dfd2bc] bg-white/90 dark:bg-[#0d1725]/95 aurora:bg-[#0e1b22]/95 linen:bg-[#f1e7d6]/95 shrink-0 select-none ${
-            isFullscreen ? 'cursor-default' : 'cursor-move'
+            isPopoutHost ? 'hs-app-drag cursor-move' : isFullscreen ? 'cursor-default' : 'cursor-move'
           }`}
         >
           <div className="flex items-center gap-2 min-w-0">
@@ -1065,7 +1592,7 @@ export const AiAssistantModal: React.FC<AiAssistantModalProps> = ({
             <h2 className="text-[15px] font-semibold tracking-tight truncate">AI助手</h2>
           </div>
 
-          <div className="flex items-center gap-1 shrink-0">
+          <div className={`flex items-center gap-1 shrink-0 ${isPopoutHost ? 'hs-app-no-drag' : ''}`}>
             {messages.length > 0 && (
               <button
                 type="button"
@@ -1080,38 +1607,116 @@ export const AiAssistantModal: React.FC<AiAssistantModalProps> = ({
                 <Trash2 className="w-3.5 h-3.5" />
               </button>
             )}
-            {isFloating && (
-              <button
-                type="button"
-                onClick={() => {
-                  setLayoutMode('standalone');
-                  setPreFullscreenMode('standalone');
-                }}
-                title="恢复居中独立工作台"
-                className="w-7 h-7 rounded-lg flex items-center justify-center text-[#475569] dark:text-[#9cb2c9] aurora:text-[#9cbdc8] linen:text-[#5c4b3b] hover:bg-black/5 dark:hover:bg-white/10 aurora:hover:bg-white/10 linen:hover:bg-[#e5d8c2] transition-colors cursor-pointer"
-              >
-                <PanelRight className="w-3.5 h-3.5" />
-              </button>
+
+            {isPopoutHost ? (
+              <>
+                <button
+                  type="button"
+                  onClick={() => {
+                    const next = !isAlwaysOnTop;
+                    setIsAlwaysOnTop(next);
+                    void desktopAiBridge?.setAlwaysOnTop(next);
+                  }}
+                  title={isAlwaysOnTop ? '已开启窗口置顶（点击取消置顶）' : '点击开启窗口置顶'}
+                  className={`w-7 h-7 rounded-lg flex items-center justify-center transition-colors cursor-pointer ${
+                    isAlwaysOnTop
+                      ? 'bg-[#e8f3ff] dark:bg-[#2ba0ff]/20 aurora:bg-[#112d36] linen:bg-[#a86a43]/15 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#5eead4] linen:text-[#8c522d]'
+                      : 'text-[#475569] dark:text-[#9cb2c9] aurora:text-[#9cbdc8] linen:text-[#5c4b3b] hover:bg-black/5 dark:hover:bg-white/10 aurora:hover:bg-white/10 linen:hover:bg-[#e5d8c2]'
+                  }`}
+                >
+                  {isAlwaysOnTop ? <Pin className="w-3.5 h-3.5" /> : <PinOff className="w-3.5 h-3.5" />}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    publishAiAssistantState(latestSyncPayloadRef.current);
+                    void desktopAiBridge?.dockBack();
+                  }}
+                  title="放回主窗口"
+                  className="w-7 h-7 rounded-lg flex items-center justify-center text-[#475569] dark:text-[#9cb2c9] aurora:text-[#9cbdc8] linen:text-[#5c4b3b] hover:bg-black/5 dark:hover:bg-white/10 aurora:hover:bg-white/10 linen:hover:bg-[#e5d8c2] transition-colors cursor-pointer"
+                >
+                  <PanelRight className="w-3.5 h-3.5" />
+                </button>
+              </>
+            ) : (
+              <>
+                <button
+                  type="button"
+                  onClick={() => void triggerDesktopPopOut()}
+                  title={
+                    isDesktopPopoutSupported
+                      ? '弹出为桌面独立小窗（可拖到软件框外并置顶）'
+                      : '弹出独立窗口（桌面客户端可拖到软件框外）'
+                  }
+                  className="w-7 h-7 rounded-lg flex items-center justify-center text-[#475569] dark:text-[#9cb2c9] aurora:text-[#9cbdc8] linen:text-[#5c4b3b] hover:bg-black/5 dark:hover:bg-white/10 aurora:hover:bg-white/10 linen:hover:bg-[#e5d8c2] transition-colors cursor-pointer"
+                >
+                  <ExternalLink className="w-3.5 h-3.5" />
+                </button>
+                {isFloating && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setLayoutMode('standalone');
+                      setPreFullscreenMode('standalone');
+                    }}
+                    title="恢复居中独立工作台"
+                    className="w-7 h-7 rounded-lg flex items-center justify-center text-[#475569] dark:text-[#9cb2c9] aurora:text-[#9cbdc8] linen:text-[#5c4b3b] hover:bg-black/5 dark:hover:bg-white/10 aurora:hover:bg-white/10 linen:hover:bg-[#e5d8c2] transition-colors cursor-pointer"
+                  >
+                    <PanelRight className="w-3.5 h-3.5" />
+                  </button>
+                )}
+              </>
             )}
+
             <button
               type="button"
-              onClick={() => setIsMinimized(true)}
-              title="缩小"
+              onClick={() => {
+                if (isPopoutHost) {
+                  void desktopAiBridge?.minimize();
+                } else {
+                  setIsMinimized(true);
+                }
+              }}
+              title={isPopoutHost ? '最小化独立窗口' : '缩小'}
               className="w-7 h-7 rounded-lg flex items-center justify-center text-[#475569] dark:text-[#9cb2c9] aurora:text-[#9cbdc8] linen:text-[#5c4b3b] hover:bg-black/5 dark:hover:bg-white/10 aurora:hover:bg-white/10 linen:hover:bg-[#e5d8c2] transition-colors cursor-pointer"
             >
               <Minus className="w-4 h-4" />
             </button>
             <button
               type="button"
-              onClick={handleToggleFullscreen}
-              title={isFullscreen ? '还原窗口大小' : '全屏'}
+              onClick={() => {
+                if (isPopoutHost) {
+                  void desktopAiBridge?.toggleMaximize();
+                } else {
+                  handleToggleFullscreen();
+                }
+              }}
+              title={
+                isPopoutHost
+                  ? isPopoutMaximized
+                    ? '还原窗口大小'
+                    : '最大化'
+                  : isFullscreen
+                  ? '还原窗口大小'
+                  : '全屏'
+              }
               className="w-7 h-7 rounded-lg flex items-center justify-center text-[#475569] dark:text-[#9cb2c9] aurora:text-[#9cbdc8] linen:text-[#5c4b3b] hover:bg-black/5 dark:hover:bg-white/10 aurora:hover:bg-white/10 linen:hover:bg-[#e5d8c2] transition-colors cursor-pointer"
             >
-              {isFullscreen ? <RotateCcw className="w-3.5 h-3.5" /> : <Square className="w-3.5 h-3.5" />}
+              {(isPopoutHost ? isPopoutMaximized : isFullscreen) ? (
+                <RotateCcw className="w-3.5 h-3.5" />
+              ) : (
+                <Square className="w-3.5 h-3.5" />
+              )}
             </button>
             <button
               type="button"
-              onClick={onClose}
+              onClick={() => {
+                if (isPopoutHost) {
+                  void desktopAiBridge?.close();
+                } else {
+                  onClose();
+                }
+              }}
               title="关闭"
               className="w-7 h-7 rounded-lg flex items-center justify-center text-[#475569] dark:text-[#9cb2c9] aurora:text-[#9cbdc8] linen:text-[#5c4b3b] hover:bg-rose-500/15 hover:text-rose-600 dark:hover:text-rose-400 transition-colors cursor-pointer"
             >
@@ -1119,6 +1724,12 @@ export const AiAssistantModal: React.FC<AiAssistantModalProps> = ({
             </button>
           </div>
         </header>
+
+        {isDraggingOutsideWindow && isDesktopPopoutSupported && (
+          <div className="px-3 py-1.5 text-center text-[11px] font-medium bg-[#e8f3ff] dark:bg-[#132942] aurora:bg-[#112e37] linen:bg-[#eadcc5] text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#5eead4] linen:text-[#8c522d] border-b border-[#bfdbfe] dark:border-[#255285] aurora:border-[#1c525c] linen:border-[#d2c1a8] shrink-0">
+            松开鼠标即可拖出软件框外，弹出为置顶独立窗口
+          </div>
+        )}
 
         {/* Main Chat Message Area */}
         <div className="relative flex-1 min-h-0 overflow-y-auto px-3.5 py-3 space-y-3.5 bg-[#f4f7fb] dark:bg-[#060c14] aurora:bg-[#081116] linen:bg-[#f2eadc]">
@@ -1216,15 +1827,15 @@ export const AiAssistantModal: React.FC<AiAssistantModalProps> = ({
 
                   {/* Operator Avatar */}
                   <div className="w-7 h-7 rounded-full shrink-0 overflow-hidden bg-[#2481cc] dark:bg-[#2ba0ff] aurora:bg-[#14b8a6] linen:bg-[#8c522d] text-white text-[11px] font-semibold flex items-center justify-center shadow-xs">
-                    {operatorAvatarUrl && !avatarLoadFailed ? (
+                    {effectiveOperatorAvatarUrl && !avatarLoadFailed ? (
                       <img
-                        src={operatorAvatarUrl}
+                        src={effectiveOperatorAvatarUrl}
                         alt="我"
                         onError={() => setAvatarLoadFailed(true)}
                         className="w-full h-full object-cover"
                       />
                     ) : (
-                      <span>{operatorInitial}</span>
+                      <span>{effectiveOperatorInitial}</span>
                     )}
                   </div>
                 </div>
@@ -1634,7 +2245,9 @@ export const AiAssistantModal: React.FC<AiAssistantModalProps> = ({
 
   return (
     <>
-      {isStandalone ? (
+      {isPopoutHost ? (
+        panelNode
+      ) : isStandalone ? (
         <div
           onMouseDown={(e) => {
             pointerDownOnBackdropRef.current = e.target === e.currentTarget;

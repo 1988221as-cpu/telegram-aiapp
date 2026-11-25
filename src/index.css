@@ -181,6 +181,14 @@
   background-image: linear-gradient(180deg, #f4ede3 0%, #ede4d6 100%);
 }
 
+@utility hs-app-drag {
+  -webkit-app-region: drag;
+}
+
+@utility hs-app-no-drag {
+  -webkit-app-region: no-drag;
+}
+
 .theme-linen .tg-chat-pattern {
   background-color: #d4c7b3;
   background-image:
