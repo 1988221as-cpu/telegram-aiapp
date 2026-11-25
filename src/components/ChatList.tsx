@@ -141,6 +141,9 @@ interface ChatListProps {
     position: 'before' | 'after'
   ) => void;
   onResetChatOrder?: () => void;
+  maxWidthCap?: number;
+  hiddenOnNarrow?: boolean;
+  expandOnNarrow?: boolean;
 }
 
 interface ContextMenuState {
@@ -173,6 +176,9 @@ export const ChatList: React.FC<ChatListProps> = React.memo(({
   customChatOrder = [],
   onReorderChats,
   onResetChatOrder,
+  maxWidthCap,
+  hiddenOnNarrow = false,
+  expandOnNarrow = false,
 }) => {
   // 1. Resizable Width State with Persistence
   const [width, setWidth] = useState<number>(() => {
@@ -332,8 +338,9 @@ export const ChatList: React.FC<ChatListProps> = React.memo(({
 
     const handleMouseMove = (moveEvent: MouseEvent) => {
       const deltaX = moveEvent.clientX - startXRef.current;
-      const minW = 230;
-      const maxW = Math.min(window.innerWidth * 0.55, 650);
+      const dynamicCap = typeof maxWidthCap === 'number' && Number.isFinite(maxWidthCap) ? maxWidthCap : 650;
+      const minW = Math.min(230, Math.max(180, dynamicCap));
+      const maxW = Math.max(minW, Math.min(window.innerWidth * 0.55, 650, dynamicCap));
       const newWidth = Math.max(minW, Math.min(maxW, Math.round(startWidthRef.current + deltaX)));
       setWidth(newWidth);
     };
@@ -542,10 +549,17 @@ export const ChatList: React.FC<ChatListProps> = React.memo(({
     });
   }, [filteredChats, customChatOrder, activeCustomFolder]);
 
+  const effectiveWidth =
+    typeof maxWidthCap === 'number' && Number.isFinite(maxWidthCap)
+      ? Math.max(180, Math.min(width, Math.round(maxWidthCap)))
+      : width;
+
   return (
     <div
-      style={{ width: `clamp(168px, 36vw, ${width}px)` }}
-      className="bg-white dark:bg-[#09111d] aurora:bg-[#0f171c] linen:hs-linen-list-bg border-r border-[#e2e8f0] dark:border-[#162436] aurora:border-[#182b34] linen:border-[#cbbba2] flex flex-col h-full shrink-0 select-none transition-colors relative"
+      style={expandOnNarrow ? undefined : { width: `clamp(168px, 36vw, ${effectiveWidth}px)` }}
+      className={`${
+        hiddenOnNarrow ? 'hidden' : expandOnNarrow ? 'flex flex-1 min-w-0' : 'flex shrink-0'
+      } bg-white dark:bg-[#09111d] aurora:bg-[#0f171c] linen:hs-linen-list-bg border-r border-[#e2e8f0] dark:border-[#162436] aurora:border-[#182b34] linen:border-[#cbbba2] flex-col h-full select-none transition-colors relative`}
     >
       {/* 1. Top Header: Search Bar + Compact New Chat Button */}
       <div className="h-[56px] px-2.5 flex items-center gap-2 border-b border-[#e2e8f0] dark:border-[#162436] aurora:border-[#182b34] linen:border-[#d5c6b0] shrink-0">

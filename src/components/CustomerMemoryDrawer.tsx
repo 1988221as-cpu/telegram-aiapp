@@ -39,6 +39,8 @@ interface CustomerMemoryDrawerProps {
   messages?: any[];
   embedded?: boolean;
   sideDocked?: boolean;
+  dockedWidth?: number;
+  forceOverlay?: boolean;
 }
 
 export const CustomerMemoryDrawer: React.FC<CustomerMemoryDrawerProps> = ({
@@ -53,6 +55,8 @@ export const CustomerMemoryDrawer: React.FC<CustomerMemoryDrawerProps> = ({
   messages,
   embedded = false,
   sideDocked = false,
+  dockedWidth,
+  forceOverlay = false,
 }) => {
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [isSavingProfile, setIsSavingProfile] = useState(false);
@@ -1129,16 +1133,20 @@ export const CustomerMemoryDrawer: React.FC<CustomerMemoryDrawerProps> = ({
   }
 
   if (sideDocked) {
+    const resolvedWidth = typeof dockedWidth === 'number' && Number.isFinite(dockedWidth) ? dockedWidth : 400;
     return (
       <>
         <div
           onClick={onClose}
-          className="fixed inset-0 bg-black/50 backdrop-blur-[2px] z-30 lg:hidden animate-in fade-in duration-150"
+          className={`fixed inset-0 bg-black/50 backdrop-blur-[2px] z-30 ${forceOverlay ? '' : 'lg:hidden'} animate-in fade-in duration-150`}
           aria-hidden="true"
         />
         <aside
           aria-label={`${chatTitle || '当前联系人'} · 全息记忆`}
-          className="fixed inset-y-0 right-0 z-40 w-full max-w-[400px] lg:static lg:z-20 lg:w-[400px] lg:shrink-0 h-full flex flex-col overflow-hidden bg-white dark:bg-[#0b131f] aurora:bg-[#0c151b] linen:bg-[#f8f2e7] border-l border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] linen:border-[#d5c6ae] shadow-2xl lg:shadow-none linen:shadow-sm text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118] select-none animate-in slide-in-from-right duration-200"
+          style={forceOverlay ? undefined : { width: `${resolvedWidth}px` }}
+          className={`fixed inset-y-0 right-0 z-40 w-full max-w-[400px] ${
+            forceOverlay ? '' : 'lg:static lg:z-20 lg:shrink-0'
+          } h-full flex flex-col overflow-hidden bg-white dark:bg-[#0b131f] aurora:bg-[#0c151b] linen:bg-[#f8f2e7] border-l border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] linen:border-[#d5c6ae] shadow-2xl lg:shadow-none linen:shadow-sm text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118] select-none animate-in slide-in-from-right duration-200`}
         >
           {bodyContent}
         </aside>

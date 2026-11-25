@@ -6601,6 +6601,7 @@ app.post('/api/auth/logout', requireTenantAuth, async (req: Request, res: Respon
   activeTelegramCalls.clear();
   telegramStickerThumbCache.clear();
   pendingLocalUpdates.length = 0;
+  clearPendingLocalUpdatesInDb();
 
   if (revokeTelegramSessions) {
     try {
@@ -29220,6 +29221,7 @@ app.post('/api/telegram/user/disconnect', requireTenantAuth, async (req: Request
           pendingLocalUpdates.splice(i, 1);
         }
       }
+      deletePendingLocalUpdatesByAccountsInDb(Array.from(targetAccountIds));
     }
 
     res.json({
@@ -36673,6 +36675,119 @@ export interface LocalIncomingUpdate {
 }
 export const pendingLocalUpdates: LocalIncomingUpdate[] = [];
 
+let pendingLocalUpdatesDbChain: Promise<void> = Promise.resolve();
+
+function enqueuePendingLocalUpdateDbOp(task: () => Promise<void>): void {
+  pendingLocalUpdatesDbChain = pendingLocalUpdatesDbChain
+    .then(async () => {
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        try {
+          await task();
+          return;
+        } catch (err: any) {
+          const msg = String(err?.message || err || '');
+          const isBusy = /SQLITE_BUSY|database is locked/i.test(msg);
+          if (!isBusy || attempt >= 2) {
+            throw err;
+          }
+          await new Promise((r) => setTimeout(r, 40 * (attempt + 1)));
+        }
+      }
+    })
+    .catch((err: any) => {
+      const msg = String(err?.message || err || '');
+      if (!/no such table/i.test(msg)) {
+        console.warn('[PendingLocalUpdates DB] Sync error:', msg);
+      }
+    });
+}
+
+export async function flushPendingLocalUpdatesDbQueue(): Promise<void> {
+  await pendingLocalUpdatesDbChain.catch(() => {});
+}
+
+export async function loadPendingLocalUpdatesFromDb(): Promise<number> {
+  try {
+    const rows = (await db
+      .prepare('SELECT payload_json FROM pending_local_updates ORDER BY seq ASC LIMIT 2400')
+      .all()) as Array<{ payload_json?: string }>;
+    if (!Array.isArray(rows) || rows.length === 0) return 0;
+    const existingIds = new Set(pendingLocalUpdates.map((u) => String(u.id)));
+    let restored = 0;
+    for (const row of rows) {
+      if (!row?.payload_json) continue;
+      try {
+        const parsed = JSON.parse(row.payload_json) as LocalIncomingUpdate;
+        if (parsed && parsed.id && !existingIds.has(String(parsed.id))) {
+          existingIds.add(String(parsed.id));
+          pendingLocalUpdates.push(parsed);
+          restored += 1;
+        }
+      } catch {}
+    }
+    if (restored > 0) {
+      console.log(`[PendingLocalUpdates] Restored ${restored} un-ACKed real-time update(s) from SQLite`);
+    }
+    return restored;
+  } catch (err: any) {
+    console.warn('[PendingLocalUpdates] Load error:', err?.message || err);
+    return 0;
+  }
+}
+
+async function deletePendingLocalUpdateIdsSql(ids: string[]): Promise<void> {
+  if (ids.length === 0) return;
+  const CHUNK_SIZE = 300;
+  for (let i = 0; i < ids.length; i += CHUNK_SIZE) {
+    const chunk = ids.slice(i, i + CHUNK_SIZE);
+    const placeholders = chunk.map(() => '?').join(',');
+    await db
+      .prepare(`DELETE FROM pending_local_updates WHERE update_id IN (${placeholders})`)
+      .run(...chunk);
+  }
+}
+
+function persistPushAndEvictionsToDb(upd: LocalIncomingUpdate, evictedIds: string[]): void {
+  enqueuePendingLocalUpdateDbOp(async () => {
+    await db
+      .prepare(
+        `INSERT OR REPLACE INTO pending_local_updates (update_id, account_id, update_type, payload_json, created_at)
+         VALUES (?, ?, ?, ?, ?)`
+      )
+      .run(
+        String(upd.id),
+        String(upd.accountId || ''),
+        String(upd.type || 'message'),
+        JSON.stringify(upd),
+        Number(upd.createdAt || Date.now())
+      );
+    if (evictedIds.length > 0) {
+      await deletePendingLocalUpdateIdsSql(evictedIds);
+    }
+  });
+}
+
+function deletePendingLocalUpdateIdsInDb(ids: string[]): void {
+  if (ids.length === 0) return;
+  enqueuePendingLocalUpdateDbOp(() => deletePendingLocalUpdateIdsSql(ids));
+}
+
+function deletePendingLocalUpdatesByAccountsInDb(accountIds: string[]): void {
+  if (accountIds.length === 0) return;
+  const placeholders = accountIds.map(() => '?').join(',');
+  enqueuePendingLocalUpdateDbOp(async () => {
+    await db
+      .prepare(`DELETE FROM pending_local_updates WHERE account_id IN (${placeholders})`)
+      .run(...accountIds);
+  });
+}
+
+function clearPendingLocalUpdatesInDb(): void {
+  enqueuePendingLocalUpdateDbOp(async () => {
+    await db.prepare('DELETE FROM pending_local_updates').run();
+  });
+}
+
 interface SseUpdateSubscriber {
   id: string;
   scopedAccountFilter: string;
@@ -36794,13 +36909,17 @@ function notifySseUpdateAvailable(upd: LocalIncomingUpdate): void {
 
 export function pushPendingLocalUpdate(upd: LocalIncomingUpdate, maxPerAccount = 600, maxTotal = 2400) {
   pendingLocalUpdates.push(upd);
+  const evictedIds: string[] = [];
   let accountCount = 0;
   for (let i = 0; i < pendingLocalUpdates.length; i++) {
     if (pendingLocalUpdates[i].accountId === upd.accountId) accountCount++;
   }
   if (accountCount > maxPerAccount) {
     const oldestIdx = pendingLocalUpdates.findIndex((item) => item.accountId === upd.accountId);
-    if (oldestIdx >= 0) pendingLocalUpdates.splice(oldestIdx, 1);
+    if (oldestIdx >= 0) {
+      const [removed] = pendingLocalUpdates.splice(oldestIdx, 1);
+      if (removed?.id) evictedIds.push(String(removed.id));
+    }
   }
   while (pendingLocalUpdates.length > maxTotal) {
     const countsByAcc = new Map<string, number>();
@@ -36816,8 +36935,10 @@ export function pushPendingLocalUpdate(upd: LocalIncomingUpdate, maxPerAccount =
       }
     }
     const evictIdx = pendingLocalUpdates.findIndex((item) => item.accountId === busiestAcc);
-    pendingLocalUpdates.splice(evictIdx >= 0 ? evictIdx : 0, 1);
+    const [removed] = pendingLocalUpdates.splice(evictIdx >= 0 ? evictIdx : 0, 1);
+    if (removed?.id) evictedIds.push(String(removed.id));
   }
+  persistPushAndEvictionsToDb(upd, evictedIds);
   notifySseUpdateAvailable(upd);
 }
 
@@ -36935,15 +37056,20 @@ app.post('/api/telegram/user/ack-updates', requireTenantAuth, (req: Request, res
 
   const ackSet = new Set<string>(ids);
   const beforeLen = pendingLocalUpdates.length;
+  const ackedIds: string[] = [];
   const remaining = pendingLocalUpdates.filter((upd) => {
     if (!ackSet.has(String(upd.id))) return true;
     if (scopedAccountFilter && !doesUpdateBelongToAccount(upd.accountId, scopedAccountFilter)) {
       return true;
     }
+    ackedIds.push(String(upd.id));
     return false;
   });
   pendingLocalUpdates.length = 0;
   pendingLocalUpdates.push(...remaining);
+  if (ackedIds.length > 0) {
+    deletePendingLocalUpdateIdsInDb(ackedIds);
+  }
   res.json({ ok: true, ackedCount: beforeLen - remaining.length });
 });
 
@@ -40159,6 +40285,7 @@ export async function gracefulShutdownServer(reason = 'shutdown'): Promise<void>
   } catch {}
 
   await flushMessageDbWriteQueue({ timeoutMs: 3000 });
+  await flushPendingLocalUpdatesDbQueue();
   await checkpointSqliteWal();
 
   if (activeHttpServer) {
@@ -40187,6 +40314,7 @@ async function startServer() {
   try {
     dbInitError = null;
     await initDatabase();
+    await loadPendingLocalUpdatesFromDb();
     await loadRevokedJwtTokensFromDb();
     await purgePersistedTelegramApiCredentialsFromDb();
     await loadSystemProxyConfigFromDb();

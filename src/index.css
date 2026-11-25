@@ -193,6 +193,16 @@
   -webkit-backdrop-filter: blur(16px);
 }
 
+/* Long chat virtualization assist: skip layout/paint for off-screen message rows */
+.hs-msg-item {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 76px;
+}
+.hs-msg-item-active {
+  content-visibility: visible;
+  contain-intrinsic-size: auto;
+}
+
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after {
     animation-duration: 0.01ms !important;

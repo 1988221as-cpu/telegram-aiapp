@@ -55,6 +55,7 @@ import {
   Eye,
 } from 'lucide-react';
 import { Chat, Message, TranslationSettings, MasterVoiceprint, TelegramStickerItem, TelegramContact, TelegramChatFullInfo, TelegramMessageReadParticipant } from '../types';
+import { ChatMessageItem, type ChatMessageItemActions } from './ChatMessageItem';
 import { VoiceCloneStudioModal } from './VoiceCloneStudioModal';
 import { MasterVoiceprintModal } from './MasterVoiceprintModal';
 import { TelegramEmojiPicker } from './TelegramEmojiPicker';
@@ -793,10 +794,16 @@ const ChatAreaActive: React.FC<ChatAreaProps & { chat: Chat }> = ({
 }) => {
   const draftScopeKey = `${currentAccountId || 'default'}::${chat.id}`;
   const [inputText, setInputText] = useState(() => chatDraftTextCache.get(draftScopeKey) || '');
-  const [visibleMsgWindow, setVisibleMsgWindow] = useState(200);
+  const DEFAULT_MSG_WINDOW = 200;
+  const MAX_ACTIVE_MSG_WINDOW = 360;
+  const WINDOW_STEP = 150;
+  const [msgWindowState, setMsgWindowState] = useState<{ count: number; tailHidden: number }>({
+    count: DEFAULT_MSG_WINDOW,
+    tailHidden: 0,
+  });
   useEffect(() => {
     pendingWindowAnchorRef.current = null;
-    setVisibleMsgWindow(200);
+    setMsgWindowState({ count: DEFAULT_MSG_WINDOW, tailHidden: 0 });
   }, [chat?.id, currentAccountId]);
   const activeChatIdRef = useRef<string | null>(chat?.id || null);
   activeChatIdRef.current = chat?.id || null;
@@ -880,7 +887,6 @@ const ChatAreaActive: React.FC<ChatAreaProps & { chat: Chat }> = ({
   const [showOriginalMsgIds, setShowOriginalMsgIds] = useState<Set<string>>(new Set());
   const [isTranslateBarVisible, setIsTranslateBarVisible] = useState(true);
   const [isLangMenuOpen, setIsLangMenuOpen] = useState(false);
-  const [langMenuAnchor, setLangMenuAnchor] = useState<'top' | 'bottom'>('top');
   const [langMenuSearch, setLangMenuSearch] = useState('');
   const [isHeaderMoreMenuOpen, setIsHeaderMoreMenuOpen] = useState(false);
   const [showEmojiPicker, setShowEmojiPicker] = useState(false);
@@ -1628,7 +1634,6 @@ const ChatAreaActive: React.FC<ChatAreaProps & { chat: Chat }> = ({
 
   const langMenuRef = useRef<HTMLDivElement>(null);
   const langButtonRef = useRef<HTMLButtonElement>(null);
-  const composerLangButtonRef = useRef<HTMLButtonElement>(null);
   const langDropdownRef = useRef<HTMLDivElement>(null);
   const [langMenuPos, setLangMenuPos] = useState<{ top: number; left: number; maxHeight: number } | null>(null);
   const headerMoreButtonRef = useRef<HTMLButtonElement>(null);
@@ -1640,8 +1645,20 @@ const ChatAreaActive: React.FC<ChatAreaProps & { chat: Chat }> = ({
   const emojiButtonRef = useRef<HTMLButtonElement>(null);
   const scrollViewportRef = useRef<HTMLDivElement>(null);
   const messagesContentRef = useRef<HTMLDivElement>(null);
-  const pendingWindowAnchorRef = useRef<{ prevHeight: number; prevTop: number } | null>(null);
-  const pendingOlderAnchorRef = useRef<{ scopeKey: string; prevHeight: number; prevTop: number } | null>(null);
+  const pendingWindowAnchorRef = useRef<{
+    msgId?: string;
+    offsetTop: number;
+    prevHeight: number;
+    prevTop: number;
+  } | null>(null);
+  const pendingOlderAnchorRef = useRef<{
+    scopeKey: string;
+    msgId?: string;
+    offsetTop: number;
+    prevHeight: number;
+    prevTop: number;
+    appliedTailShift?: boolean;
+  } | null>(null);
   const suppressAutoScrollRef = useRef(false);
   const loadOlderCooldownUntilRef = useRef<number>(0);
   const isNearBottomRef = useRef(true);
@@ -1681,17 +1698,79 @@ const ChatAreaActive: React.FC<ChatAreaProps & { chat: Chat }> = ({
     };
   }, []);
 
-  const expandLocalMessageWindow = useCallback((step = 150) => {
+  const captureViewportAnchor = useCallback((): {
+    msgId?: string;
+    offsetTop: number;
+    prevHeight: number;
+    prevTop: number;
+  } | null => {
     const viewport = scrollViewportRef.current;
-    if (viewport && !pendingWindowAnchorRef.current) {
-      pendingWindowAnchorRef.current = {
-        prevHeight: viewport.scrollHeight,
-        prevTop: viewport.scrollTop,
-      };
-      suppressAutoScrollRef.current = true;
+    if (!viewport) return null;
+    const msgEls = viewport.querySelectorAll<HTMLElement>('[data-msg-id]');
+    let anchorMsgId: string | undefined;
+    let offsetTop = 0;
+    const vpRect = viewport.getBoundingClientRect();
+    for (let i = 0; i < msgEls.length; i++) {
+      const el = msgEls[i];
+      const r = el.getBoundingClientRect();
+      if (r.bottom >= vpRect.top + 8) {
+        anchorMsgId = el.dataset.msgId;
+        offsetTop = r.top - vpRect.top;
+        break;
+      }
     }
-    setVisibleMsgWindow((w) => w + step);
+    return {
+      msgId: anchorMsgId,
+      offsetTop,
+      prevHeight: viewport.scrollHeight,
+      prevTop: viewport.scrollTop,
+    };
   }, []);
+
+  const expandLocalMessageWindow = useCallback(
+    (step = WINDOW_STEP) => {
+      if (!pendingWindowAnchorRef.current) {
+        const anchor = captureViewportAnchor();
+        if (anchor) {
+          pendingWindowAnchorRef.current = anchor;
+          suppressAutoScrollRef.current = true;
+        }
+      }
+      setMsgWindowState((prev) => {
+        if (prev.count < MAX_ACTIVE_MSG_WINDOW) {
+          return {
+            count: Math.min(MAX_ACTIVE_MSG_WINDOW, prev.count + step),
+            tailHidden: prev.tailHidden,
+          };
+        }
+        return {
+          count: MAX_ACTIVE_MSG_WINDOW,
+          tailHidden: prev.tailHidden + step,
+        };
+      });
+    },
+    [captureViewportAnchor]
+  );
+
+  const shiftWindowDown = useCallback(
+    (step = WINDOW_STEP) => {
+      if (!pendingWindowAnchorRef.current) {
+        const anchor = captureViewportAnchor();
+        if (anchor) {
+          pendingWindowAnchorRef.current = anchor;
+          suppressAutoScrollRef.current = true;
+        }
+      }
+      setMsgWindowState((prev) => {
+        if (prev.tailHidden <= 0) return prev;
+        return {
+          count: prev.count,
+          tailHidden: Math.max(0, prev.tailHidden - step),
+        };
+      });
+    },
+    [captureViewportAnchor]
+  );
 
   useLayoutEffect(() => {
     const anchor = pendingWindowAnchorRef.current;
@@ -1699,12 +1778,21 @@ const ChatAreaActive: React.FC<ChatAreaProps & { chat: Chat }> = ({
     pendingWindowAnchorRef.current = null;
     const viewport = scrollViewportRef.current;
     if (viewport) {
-      viewport.scrollTop = Math.max(0, viewport.scrollHeight - anchor.prevHeight + anchor.prevTop);
+      const anchoredEl = anchor.msgId
+        ? (viewport.querySelector(`[data-msg-id="${CSS.escape(anchor.msgId)}"]`) as HTMLElement | null)
+        : null;
+      if (anchoredEl) {
+        const vpRect = viewport.getBoundingClientRect();
+        const elRect = anchoredEl.getBoundingClientRect();
+        viewport.scrollTop = Math.max(0, viewport.scrollTop + (elRect.top - vpRect.top - anchor.offsetTop));
+      } else {
+        viewport.scrollTop = Math.max(0, viewport.scrollHeight - anchor.prevHeight + anchor.prevTop);
+      }
     }
     requestAnimationFrame(() => {
       suppressAutoScrollRef.current = false;
     });
-  }, [visibleMsgWindow]);
+  }, [msgWindowState]);
 
   useLayoutEffect(() => {
     const anchor = pendingOlderAnchorRef.current;
@@ -1717,6 +1805,22 @@ const ChatAreaActive: React.FC<ChatAreaProps & { chat: Chat }> = ({
     }
     const viewport = scrollViewportRef.current;
     if (!viewport) return;
+    const anchoredEl = anchor.msgId
+      ? (viewport.querySelector(`[data-msg-id="${CSS.escape(anchor.msgId)}"]`) as HTMLElement | null)
+      : null;
+    if (anchoredEl) {
+      const vpRect = viewport.getBoundingClientRect();
+      const elRect = anchoredEl.getBoundingClientRect();
+      const delta = elRect.top - vpRect.top - anchor.offsetTop;
+      if (Math.abs(delta) > 0.5 || anchor.appliedTailShift) {
+        pendingOlderAnchorRef.current = null;
+        viewport.scrollTop = Math.max(0, viewport.scrollTop + delta);
+        const rafId = requestAnimationFrame(() => {
+          suppressAutoScrollRef.current = false;
+        });
+        return () => cancelAnimationFrame(rafId);
+      }
+    }
     if (viewport.scrollHeight === anchor.prevHeight) {
       const safetyRaf = requestAnimationFrame(() => {
         if (pendingOlderAnchorRef.current === anchor) {
@@ -1732,7 +1836,7 @@ const ChatAreaActive: React.FC<ChatAreaProps & { chat: Chat }> = ({
       suppressAutoScrollRef.current = false;
     });
     return () => cancelAnimationFrame(rafId);
-  }, [messages, visibleMsgWindow, chat.id, currentAccountId]);
+  }, [messages, msgWindowState, chat.id, currentAccountId]);
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const audioPlaySeqRef = useRef(0);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
@@ -2141,9 +2245,10 @@ const ChatAreaActive: React.FC<ChatAreaProps & { chat: Chat }> = ({
     if (!chat?.id || !onLoadOlderMessages || isLoadingOlder) return;
     if (fromScroll && Date.now() < loadOlderCooldownUntilRef.current) return;
     const originScopeKey = `${currentAccountId || 'default'}::${chat.id}`;
+    const anchorBefore = captureViewportAnchor();
     const viewport = scrollViewportRef.current;
-    const prevHeight = viewport?.scrollHeight || 0;
-    const prevTop = viewport?.scrollTop || 0;
+    const prevHeight = anchorBefore?.prevHeight ?? viewport?.scrollHeight ?? 0;
+    const prevTop = anchorBefore?.prevTop ?? viewport?.scrollTop ?? 0;
     suppressAutoScrollRef.current = true;
     setIsLoadingOlder(true);
     try {
@@ -2189,12 +2294,28 @@ const ChatAreaActive: React.FC<ChatAreaProps & { chat: Chat }> = ({
         return;
       }
       if (totalLoaded > 0 && activeChatScopeKeyRef.current === originScopeKey) {
+        let appliedTailShift = false;
+        setMsgWindowState((prev) => {
+          if (prev.count < MAX_ACTIVE_MSG_WINDOW) {
+            return {
+              count: Math.min(MAX_ACTIVE_MSG_WINDOW, prev.count + totalLoaded),
+              tailHidden: prev.tailHidden,
+            };
+          }
+          appliedTailShift = true;
+          return {
+            count: MAX_ACTIVE_MSG_WINDOW,
+            tailHidden: prev.tailHidden + totalLoaded,
+          };
+        });
         pendingOlderAnchorRef.current = {
           scopeKey: originScopeKey,
+          msgId: anchorBefore?.msgId,
+          offsetTop: anchorBefore?.offsetTop ?? 0,
           prevHeight,
           prevTop,
+          appliedTailShift,
         };
-        setVisibleMsgWindow((w) => w + totalLoaded);
       }
     } finally {
       setIsLoadingOlder(false);
@@ -2331,7 +2452,6 @@ const ChatAreaActive: React.FC<ChatAreaProps & { chat: Chat }> = ({
       const target = e.target as Node;
       if (
         (!langMenuRef.current || !langMenuRef.current.contains(target)) &&
-        (!composerLangButtonRef.current || !composerLangButtonRef.current.contains(target)) &&
         (!langDropdownRef.current || !langDropdownRef.current.contains(target))
       ) {
         setIsLangMenuOpen(false);
@@ -2349,13 +2469,10 @@ const ChatAreaActive: React.FC<ChatAreaProps & { chat: Chat }> = ({
       return;
     }
     const updatePos = () => {
-      const anchor = langMenuAnchor === 'bottom' ? composerLangButtonRef.current : langButtonRef.current;
       setLangMenuPos(
-        computeAnchoredPopupPos(anchor, {
+        computeAnchoredPopupPos(langButtonRef.current, {
           width: 256,
           maxHeight: 320,
-          preferAbove: langMenuAnchor === 'bottom',
-          alignRight: langMenuAnchor === 'bottom',
         })
       );
     };
@@ -2366,7 +2483,7 @@ const ChatAreaActive: React.FC<ChatAreaProps & { chat: Chat }> = ({
       window.removeEventListener('resize', updatePos);
       window.removeEventListener('scroll', updatePos, true);
     };
-  }, [isLangMenuOpen, langMenuAnchor]);
+  }, [isLangMenuOpen]);
 
   useEffect(() => {
     if (!isHeaderMoreMenuOpen) return;
@@ -2654,14 +2771,34 @@ const ChatAreaActive: React.FC<ChatAreaProps & { chat: Chat }> = ({
     resetChatFontScale,
   ]);
 
+  const focusWindowAroundIndex = useCallback((targetIdx: number, totalCount: number) => {
+    if (totalCount <= DEFAULT_MSG_WINDOW) {
+      setMsgWindowState({ count: DEFAULT_MSG_WINDOW, tailHidden: 0 });
+      return;
+    }
+    const sliceEnd = Math.min(totalCount, Math.max(DEFAULT_MSG_WINDOW, targetIdx + 80));
+    const sliceStart = Math.max(0, sliceEnd - MAX_ACTIVE_MSG_WINDOW);
+    setMsgWindowState({
+      count: Math.max(DEFAULT_MSG_WINDOW, sliceEnd - sliceStart),
+      tailHidden: Math.max(0, totalCount - sliceEnd),
+    });
+  }, []);
+
   const scrollToBottom = useCallback((behavior: 'auto' | 'smooth' = 'auto') => {
+    setMsgWindowState((prev) =>
+      prev.tailHidden === 0 && prev.count <= DEFAULT_MSG_WINDOW
+        ? prev
+        : { count: DEFAULT_MSG_WINDOW, tailHidden: 0 }
+    );
     const viewport = scrollViewportRef.current;
     isNearBottomRef.current = true;
     setShowScrollToBottom(false);
     setUnreadWhileScrolledCount(0);
     if (viewport) {
       if (behavior === 'smooth') {
-        viewport.scrollTo({ top: viewport.scrollHeight, behavior: 'smooth' });
+        requestAnimationFrame(() => {
+          viewport.scrollTo({ top: viewport.scrollHeight, behavior: 'smooth' });
+        });
       } else {
         viewport.scrollTop = viewport.scrollHeight;
       }
@@ -2672,20 +2809,22 @@ const ChatAreaActive: React.FC<ChatAreaProps & { chat: Chat }> = ({
 
   const handleJumpToMessage = (targetMsg: Message) => {
     if (!targetMsg) return;
-    const matched =
-      messages.find(
-        (m) =>
-          m.id === targetMsg.id ||
-          (typeof targetMsg.telegramMessageId === 'number' &&
-            m.telegramMessageId === targetMsg.telegramMessageId)
-      ) || targetMsg;
+    const matchedIdx = messages.findIndex(
+      (m) =>
+        m.id === targetMsg.id ||
+        (typeof targetMsg.telegramMessageId === 'number' &&
+          m.telegramMessageId === targetMsg.telegramMessageId)
+    );
+    const matched = matchedIdx >= 0 ? messages[matchedIdx] : targetMsg;
 
     if (isSearchingInChat || chatSearchQuery || cloudSearchResults !== null) {
       setIsSearchingInChat(false);
       setChatSearchQuery('');
       setCloudSearchResults(null);
     }
-    setVisibleMsgWindow((w) => Math.max(w, messages.length));
+    if (matchedIdx >= 0) {
+      focusWindowAroundIndex(matchedIdx, messages.length);
+    }
 
     const targetScopeKey = `${currentAccountId || 'default'}::${chat?.id || ''}`;
     requestAnimationFrame(() => {
@@ -2785,16 +2924,15 @@ const ChatAreaActive: React.FC<ChatAreaProps & { chat: Chat }> = ({
     const pending = pendingJumpTargetRef.current;
     const scopeKey = `${currentAccountId || 'default'}::${chat?.id || ''}`;
     if (pending && pending.scopeKey === scopeKey) {
-      const matched = messages.find(
+      const matchedIdx = messages.findIndex(
         (m) =>
           m.id === pending.msgId ||
           (typeof pending.telegramMessageId === 'number' &&
             m.telegramMessageId === pending.telegramMessageId)
       );
+      const matched = matchedIdx >= 0 ? messages[matchedIdx] : undefined;
       if (matched) {
-        if (messages.length > visibleMsgWindow) {
-          setVisibleMsgWindow((w) => Math.max(w, messages.length));
-        }
+        focusWindowAroundIndex(matchedIdx, messages.length);
         requestAnimationFrame(() => {
           const targetEl = scrollViewportRef.current?.querySelector(
             `[data-msg-id="${CSS.escape(matched.id)}"]`
@@ -2844,14 +2982,14 @@ const ChatAreaActive: React.FC<ChatAreaProps & { chat: Chat }> = ({
     if (suppressAutoScrollRef.current) return;
 
     if (tailAppended) {
-      if (lastMsg?.sender === 'me' || isNearBottomRef.current) {
+      if (lastMsg?.sender === 'me' || (isNearBottomRef.current && msgWindowState.tailHidden === 0)) {
         scrollToBottom('auto');
       } else {
         setShowScrollToBottom(true);
         setUnreadWhileScrolledCount((c) => c + Math.max(1, messages.length - prevCount));
       }
     }
-  }, [chat?.id, currentAccountId, messages, visibleMsgWindow, scrollToBottom]);
+  }, [chat?.id, currentAccountId, messages, msgWindowState, scrollToBottom, focusWindowAroundIndex]);
 
   // Keep viewport anchored at bottom when window or media content resizes while user is near bottom
   useEffect(() => {
@@ -4494,13 +4632,20 @@ const ChatAreaActive: React.FC<ChatAreaProps & { chat: Chat }> = ({
       uncontrolledMsgPatches[m.id] ? { ...m, ...uncontrolledMsgPatches[m.id] } : m
     );
   }, [baseDisplayedMessages, uncontrolledMsgPatches]);
-  const hiddenLoadedCount =
-    cloudSearchResults === null && !chatSearchQuery.trim() && displayedMessages.length > visibleMsgWindow
-      ? displayedMessages.length - visibleMsgWindow
-      : 0;
+  const isWindowingActive = cloudSearchResults === null && !chatSearchQuery.trim();
+  const safeTailHidden = isWindowingActive
+    ? Math.min(msgWindowState.tailHidden, Math.max(0, displayedMessages.length - 50))
+    : 0;
+  const windowSliceEnd = isWindowingActive ? displayedMessages.length - safeTailHidden : displayedMessages.length;
+  const windowSliceStart = isWindowingActive ? Math.max(0, windowSliceEnd - msgWindowState.count) : 0;
+  const hiddenLoadedCount = windowSliceStart;
+  const hiddenNewerCount = displayedMessages.length - windowSliceEnd;
   const renderedMessages = useMemo(
-    () => (hiddenLoadedCount > 0 ? displayedMessages.slice(hiddenLoadedCount) : displayedMessages),
-    [displayedMessages, hiddenLoadedCount]
+    () =>
+      hiddenLoadedCount > 0 || hiddenNewerCount > 0
+        ? displayedMessages.slice(windowSliceStart, windowSliceEnd)
+        : displayedMessages,
+    [displayedMessages, hiddenLoadedCount, hiddenNewerCount, windowSliceStart, windowSliceEnd]
   );
 
   const pinnedMessages = useMemo(() => messages.filter((m) => m.isPinned), [messages]);
@@ -4516,7 +4661,31 @@ const ChatAreaActive: React.FC<ChatAreaProps & { chat: Chat }> = ({
       ? customLLMConfig.modelName || '自有模型网关'
       : 'HumanSense 云端引擎';
 
-  const msgRenderActionsRef = useRef({
+  const retrySendMessageFromBubble = useCallback(async (msgId: string) => {
+    const retryFn = msgRenderActionsRef.current.onRetryMessage;
+    if (!retryFn) return;
+    setRetryingMsgIds((prev) => {
+      if (prev.has(msgId)) return prev;
+      const next = new Set(prev);
+      next.add(msgId);
+      return next;
+    });
+    try {
+      const res = await retryFn(msgId);
+      if (!res.ok) {
+        setSyncNotice(`重发失败：${res.error || '请检查 Telegram 在线状态'}`);
+        setTimeout(() => setSyncNotice(null), 3500);
+      }
+    } finally {
+      setRetryingMsgIds((prev) => {
+        const next = new Set(prev);
+        next.delete(msgId);
+        return next;
+      });
+    }
+  }, []);
+
+  const msgRenderActionsRef = useRef<ChatMessageItemActions>({
     toggleSelectMessage,
     handleMessageContextMenu,
     handleOpenForwardModal,
@@ -4536,6 +4705,42 @@ const ChatAreaActive: React.FC<ChatAreaProps & { chat: Chat }> = ({
     onDiscardPausedMessage,
     onDeleteMessage,
     handleTelegramBubbleImageError,
+    resolveDisplayUrl,
+    appendThumbQueryIfTelegramMedia,
+    triggerManualTranslate,
+    onPromptDeleteMessage: (target) => {
+      setRevokeSingleDelete(true);
+      setMessageToDelete(target);
+    },
+    onStartReply: (target) => {
+      setReplyingTo(target);
+      setEditingMessage(null);
+    },
+    onStartEditMessage: (target) => {
+      setEditingMessage(target);
+      setTranslateOnEdit(false);
+      setInputText(target.text);
+      setReplyingTo(null);
+    },
+    onClearHoveredMenu: () => setHoveredMessageId(null),
+    onMarkAvatarFailed: (url) => {
+      setFailedAvatarUrls((prev) => {
+        if (prev.has(url)) return prev;
+        const next = new Set(prev);
+        next.add(url);
+        return next;
+      });
+    },
+    onOpenVideoLightbox: (payload) => setLightboxMedia(payload),
+    onToggleShowOriginal: (msgId) => {
+      setShowOriginalMsgIds((prev) => {
+        const next = new Set(prev);
+        if (next.has(msgId)) next.delete(msgId);
+        else next.add(msgId);
+        return next;
+      });
+    },
+    onRetrySendMessage: retrySendMessageFromBubble,
   });
   msgRenderActionsRef.current = {
     toggleSelectMessage,
@@ -4557,1169 +4762,116 @@ const ChatAreaActive: React.FC<ChatAreaProps & { chat: Chat }> = ({
     onDiscardPausedMessage,
     onDeleteMessage,
     handleTelegramBubbleImageError,
+    resolveDisplayUrl,
+    appendThumbQueryIfTelegramMedia,
+    triggerManualTranslate,
+    onPromptDeleteMessage: (target) => {
+      setRevokeSingleDelete(true);
+      setMessageToDelete(target);
+    },
+    onStartReply: (target) => {
+      setReplyingTo(target);
+      setEditingMessage(null);
+    },
+    onStartEditMessage: (target) => {
+      setEditingMessage(target);
+      setTranslateOnEdit(false);
+      setInputText(target.text);
+      setReplyingTo(null);
+    },
+    onClearHoveredMenu: () => setHoveredMessageId(null),
+    onMarkAvatarFailed: (url) => {
+      setFailedAvatarUrls((prev) => {
+        if (prev.has(url)) return prev;
+        const next = new Set(prev);
+        next.add(url);
+        return next;
+      });
+    },
+    onOpenVideoLightbox: (payload) => setLightboxMedia(payload),
+    onToggleShowOriginal: (msgId) => {
+      setShowOriginalMsgIds((prev) => {
+        const next = new Set(prev);
+        if (next.has(msgId)) next.delete(msgId);
+        else next.add(msgId);
+        return next;
+      });
+    },
+    onRetrySendMessage: retrySendMessageFromBubble,
   };
   const hasRetranslateHandler = Boolean(onRetranslateMessage);
   const hasDeleteHandler = Boolean(onDeleteMessage);
   const showOriginalAndTranslationPref = translationSettings?.showOriginalAndTranslation !== false;
 
   const renderedMessageNodes = useMemo(() => {
-    const actions = msgRenderActionsRef.current;
+    const isGroupChat = Boolean(chat.isGroup);
+    const isChannelChat = Boolean(chat.isChannel);
+    const readOutboxMax = chat.readOutboxMaxId;
     return renderedMessages.map((msg, idx) => {
-      const isMe = msg.sender === 'me';
-      const isSystemNotice = msg.sender === 'system';
-      const isGroupPeer = Boolean(chat.isGroup && !isMe && !isSystemNotice);
-      const dayKey = getMessageDayKey(msg);
       const prevMsg = idx > 0 ? renderedMessages[idx - 1] : null;
       const nextMsg = idx < renderedMessages.length - 1 ? renderedMessages[idx + 1] : null;
       const prevDayKey = prevMsg ? getMessageDayKey(prevMsg) : null;
       const nextDayKey = nextMsg ? getMessageDayKey(nextMsg) : null;
-      const showDayDivider = idx === 0 || dayKey !== prevDayKey;
-      const isSelectedMulti = selectedMessageIds.has(msg.id);
-
-      const cleanSenderName = normalizeGroupMemberDisplayName(msg.senderName);
-      const senderGroupKey = isGroupPeer
-        ? msg.senderId || cleanSenderName || `msg_${msg.id}`
-        : '';
-      const prevGroupKey =
-        isGroupPeer && prevMsg && prevMsg.sender !== 'me' && prevMsg.sender !== 'system' && prevDayKey === dayKey
+      const prevSenderKey =
+        isGroupChat && prevMsg && prevMsg.sender !== 'me' && prevMsg.sender !== 'system'
           ? prevMsg.senderId || normalizeGroupMemberDisplayName(prevMsg.senderName) || `msg_${prevMsg.id}`
           : '';
-      const nextGroupKey =
-        isGroupPeer && nextMsg && nextMsg.sender !== 'me' && nextMsg.sender !== 'system' && nextDayKey === dayKey
+      const nextSenderKey =
+        isGroupChat && nextMsg && nextMsg.sender !== 'me' && nextMsg.sender !== 'system'
           ? nextMsg.senderId || normalizeGroupMemberDisplayName(nextMsg.senderName) || `msg_${nextMsg.id}`
           : '';
-      const isSameSenderAsPrev = Boolean(isGroupPeer && senderGroupKey && senderGroupKey === prevGroupKey);
-      const isSameSenderAsNext = Boolean(isGroupPeer && senderGroupKey && senderGroupKey === nextGroupKey);
-      const showGroupSenderName = isGroupPeer && !isSameSenderAsPrev && Boolean(cleanSenderName);
-      const showGroupSenderAvatar = isGroupPeer && !isSameSenderAsNext;
-      const senderColorIdx = getTelegramSenderColorIndex(msg.senderId || cleanSenderName || msg.id);
-      const safeMemberAvatarUrl = (msg.senderAvatarUrl ? resolveDisplayUrl(msg.senderAvatarUrl) : '') || '';
-      const showAvatarImage = Boolean(safeMemberAvatarUrl && !failedAvatarUrls.has(safeMemberAvatarUrl));
-      const hasMediaBubble = Boolean((msg.isImage && msg.imageUrl) || (msg.isVideo && msg.videoUrl));
-      const hasVisibleMediaCaption = Boolean(
-        msg.text?.trim() &&
-          !isSystemMediaPlaceholder(msg.text, msg) &&
-          !/\.(jpg|jpeg|png|gif|webp|bmp|svg|heic|mp4|mov|webm|mkv|avi|m4v)$/i.test(msg.text.trim())
+      const rawMediaUrl = msg.isImage
+        ? msg.imageUrl
+        : msg.isVideo
+        ? msg.videoUrl
+        : msg.isFile
+        ? msg.fileUrl
+        : msg.audioUrl;
+      const resolvedMediaHref = rawMediaUrl ? resolveDisplayUrl(rawMediaUrl) : undefined;
+      const resolvedAvatarUrl = (msg.senderAvatarUrl ? resolveDisplayUrl(msg.senderAvatarUrl) : '') || '';
+      const isAvatarFailed = Boolean(resolvedAvatarUrl && failedAvatarUrls.has(resolvedAvatarUrl));
+      const isReadByPeer = Boolean(
+        typeof readOutboxMax === 'number' &&
+          typeof msg.telegramMessageId === 'number' &&
+          msg.telegramMessageId <= readOutboxMax
       );
-      const hasInlineMediaFooterContent = Boolean(
-        hasVisibleMediaCaption ||
-          msg.isTranslating ||
-          msg.translatedText ||
-          msg.translationError ||
-          (msg.reactions && Object.keys(msg.reactions).length > 0) ||
-          msg.deliveryStatus === 'failed' ||
-          msg.deliveryStatus === 'paused'
-      );
-      const hasOverlayImageTimestamp = Boolean(
-        msg.isImage && msg.imageUrl && resolveDisplayUrl(msg.imageUrl) && !hasInlineMediaFooterContent
-      );
-
-      if (isSystemNotice) {
-        const isLeaveEvent = msg.systemEventType === 'leave' || /退出了群组|移出了群组/.test(msg.text || '');
-        const isJoinEvent = msg.systemEventType === 'join' || /加入了群组/.test(msg.text || '');
-        return (
-          <React.Fragment key={msg.id}>
-            {showDayDivider && (
-              <div className="flex items-center justify-center my-1">
-                <span className="px-3 py-0.5 rounded-full bg-white/90 dark:bg-[#0e1726]/80 aurora:bg-[#101c23]/85 linen:bg-[#f6efe2]/95 border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#1c323c] linen:border-[#cbbba2] text-[11px] font-medium text-[#64748b] dark:text-[#b4c6d8] aurora:text-[#b7d0d8] linen:text-[#5c4a38] shadow-xs">
-                  {formatMessageDayLabel(dayKey)}
-                </span>
-              </div>
-            )}
-            <div
-              data-msg-id={msg.id}
-              data-system-event={msg.systemEventType || (isLeaveEvent ? 'leave' : isJoinEvent ? 'join' : 'service')}
-              onClick={isMultiSelectMode ? () => msgRenderActionsRef.current.toggleSelectMessage(msg.id) : undefined}
-              className={`w-full flex items-center justify-center my-1.5 px-2 ${isMultiSelectMode ? 'cursor-pointer' : ''}`}
-            >
-              <div
-                className={`group/sys inline-flex items-center gap-1.5 max-w-[88%] px-3 py-1 rounded-full text-[11.5px] leading-snug border shadow-xs transition-colors ${
-                  isSelectedMulti
-                    ? 'bg-[#2481cc]/15 dark:bg-[#2ba0ff]/20 aurora:bg-[#14b8a6]/20 linen:bg-[#a86a43]/20 border-[#2481cc] dark:border-[#2ba0ff] aurora:border-[#2dd4bf] linen:border-[#a86a43] text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118]'
-                    : 'bg-white/90 dark:bg-[#0e1726]/85 aurora:bg-[#101c23]/90 linen:bg-[#f6efe2]/95 border-[#e2e8f0] dark:border-[#1e3148] aurora:border-[#203742] linen:border-[#cbbba2] text-[#475569] dark:text-[#b4c6d8] aurora:text-[#b7d0d8] linen:text-[#5c4a38]'
-                }`}
-              >
-                {isMultiSelectMode && (
-                  <span className="shrink-0">
-                    {isSelectedMulti ? (
-                      <CheckSquare className="w-3.5 h-3.5 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#5eead4] linen:text-[#a86a43]" />
-                    ) : (
-                      <Square className="w-3.5 h-3.5 opacity-60" />
-                    )}
-                  </span>
-                )}
-                {isLeaveEvent ? (
-                  <UserMinus className="w-3.5 h-3.5 shrink-0 text-amber-600 dark:text-amber-400 aurora:text-amber-300 linen:text-[#a64234]" />
-                ) : (
-                  <UserPlus className="w-3.5 h-3.5 shrink-0 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#5eead4] linen:text-[#8c522d]" />
-                )}
-                <span className="truncate">{(msg.text || '').replace(/^(?:👤|🚪)\s*/, '')}</span>
-                {msg.timestamp && (
-                  <span className="text-[10px] opacity-65 tabular-nums shrink-0">{msg.timestamp}</span>
-                )}
-                {!isMultiSelectMode && hasDeleteHandler && (
-                  <button
-                    type="button"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      setRevokeSingleDelete(true);
-                      setMessageToDelete(msg);
-                    }}
-                    aria-label={`删除群提示: ${msg.text}`}
-                    title="删除此条入/退群提示"
-                    className="ml-0.5 p-1 rounded-full text-rose-500/80 hover:text-rose-600 dark:text-rose-400/85 dark:hover:text-rose-300 hover:bg-rose-500/12 transition-colors cursor-pointer shrink-0"
-                  >
-                    <Trash2 className="w-3 h-3" />
-                  </button>
-                )}
-              </div>
-            </div>
-          </React.Fragment>
-        );
-      }
 
       return (
-        <React.Fragment key={msg.id}>
-          {showDayDivider && (
-            <div className="flex items-center justify-center my-1">
-              <span className="px-3 py-0.5 rounded-full bg-white/90 dark:bg-[#0e1726]/80 aurora:bg-[#101c23]/85 linen:bg-[#f6efe2]/95 border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#1c323c] linen:border-[#cbbba2] text-[11px] font-medium text-[#64748b] dark:text-[#b4c6d8] aurora:text-[#b7d0d8] linen:text-[#5c4a38] shadow-xs">
-                {formatMessageDayLabel(dayKey)}
-              </span>
-            </div>
-          )}
-
-          {/* [用户锁定规则 - 禁止添加 onMouseEnter/onMouseLeave] 看消息（鼠标移入）绝不自动弹出快捷操作栏，仅支持同一条消息右按两次弹出 */}
-          <div
-            data-msg-id={msg.id}
-            onClick={isMultiSelectMode ? () => msgRenderActionsRef.current.toggleSelectMessage(msg.id) : undefined}
-            className={`w-full min-w-0 flex ${isMultiSelectMode ? 'items-center gap-2.5 cursor-pointer rounded-xl px-1.5 py-0.5 transition-colors ' + (isSelectedMulti ? 'bg-[#2481cc]/10 dark:bg-[#2ba0ff]/15 aurora:bg-[#14b8a6]/15 linen:bg-[#a86a43]/15' : 'hover:bg-black/5 dark:hover:bg-white/5 aurora:hover:bg-white/5') : 'flex-col'} ${
-              isMe ? (isMultiSelectMode ? 'justify-end' : 'items-end') : (isMultiSelectMode ? 'justify-start' : 'items-start')
-            } group relative ${hoveredMessageId === msg.id ? 'z-30' : ''} ${isSameSenderAsPrev ? 'mt-0.5' : 'mt-1'} ${isSameSenderAsNext ? 'mb-0.5' : 'mb-1'}`}
-            onContextMenu={(e) => {
-              if (!isMultiSelectMode) msgRenderActionsRef.current.handleMessageContextMenu(e, msg);
-            }}
-          >
-            {isMultiSelectMode && (
-              <button
-                type="button"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  msgRenderActionsRef.current.toggleSelectMessage(msg.id);
-                }}
-                className={`shrink-0 p-1 rounded-lg transition-colors cursor-pointer ${
-                  isSelectedMulti
-                    ? 'text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#5eead4] linen:text-[#a86a43]'
-                    : 'text-[#94a3b8] dark:text-[#64748b] aurora:text-[#5a7782] linen:text-[#8f7e6c]'
-                }`}
-              >
-                {isSelectedMulti ? <CheckSquare className="w-4 h-4" /> : <Square className="w-4 h-4" />}
-              </button>
-            )}
-
-            {/* Telegram Floating Quick Action Menu — [LOCKED: Double Right-Click Only, DO NOT switch back to hover] */}
-            {!isMultiSelectMode && hoveredMessageId === msg.id && (
-              <div
-                className={`absolute ${idx === 0 ? 'top-1' : '-top-4'} z-40 max-w-full overflow-x-auto no-scrollbar flex items-center gap-0.5 bg-white dark:bg-[#0e1726] aurora:bg-[#101c23] linen:bg-[#faf5ec] border border-[#e2e8f0] dark:border-[#1e3148] aurora:border-[#203742] linen:border-[#cbbba2] rounded-full px-1.5 py-0.5 shadow-lg animate-in fade-in zoom-in-95 duration-100 ${
-                  isMe ? 'right-2' : isGroupPeer ? 'left-10' : 'left-2'
-                }`}
-              >
-                {/* Quick Reactions Bar */}
-                <div className="flex items-center gap-0.5 pr-1 border-r border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] linen:border-[#dfd2bc]">
-                  {['👍', '❤️', '🔥', '🎉'].map((emoji) => (
-                    <button
-                      key={emoji}
-                      type="button"
-                      onClick={() => msgRenderActionsRef.current.onToggleReaction?.(msg.id, emoji)}
-                      className="text-xs hover:scale-130 transition-transform p-0.5 cursor-pointer leading-none"
-                      title={`回应 ${emoji}`}
-                    >
-                      {emoji}
-                    </button>
-                  ))}
-                </div>
-
-                {/* Reply Button */}
-                <button
-                  type="button"
-                  onClick={() => {
-                    setReplyingTo(msg);
-                    setEditingMessage(null);
-                  }}
-                  className="p-1 text-[#64748b] hover:text-[#2481cc] dark:text-[#7b93ad] dark:hover:text-[#2ba0ff] aurora:text-[#7e9aa5] aurora:hover:text-[#5eead4] linen:text-[#7a6957] linen:hover:text-[#a86a43] cursor-pointer"
-                  title="回复消息"
-                >
-                  <Reply className="w-3.5 h-3.5" />
-                </button>
-
-                {/* Forward Button */}
-                <button
-                  type="button"
-                  onClick={() => msgRenderActionsRef.current.handleOpenForwardModal([msg])}
-                  className="p-1 text-[#64748b] hover:text-[#2481cc] dark:text-[#7b93ad] dark:hover:text-[#2ba0ff] aurora:text-[#7e9aa5] aurora:hover:text-[#5eead4] linen:text-[#7a6957] linen:hover:text-[#a86a43] cursor-pointer"
-                  title="转发消息"
-                >
-                  <Forward className="w-3.5 h-3.5" />
-                </button>
-
-                {/* Manual Translate / Retranslate Button */}
-                {hasRetranslateHandler &&
-                  !msg.isCall &&
-                  (!msg.isAudio || msg.sttText) &&
-                  Boolean((msg.sttText || msg.text || msg.imageCaption || '').trim()) && (
-                  <button
-                    type="button"
-                    disabled={Boolean(msg.isTranslating)}
-                    onClick={() => void triggerManualTranslate(msg)}
-                    className="p-1 text-[#64748b] hover:text-[#2481cc] dark:text-[#7b93ad] dark:hover:text-[#2ba0ff] aurora:text-[#7e9aa5] aurora:hover:text-[#5eead4] linen:text-[#7a6957] linen:hover:text-[#a86a43] cursor-pointer disabled:opacity-50"
-                    title={msg.translatedText ? '重新翻译' : '翻译此消息'}
-                  >
-                    {msg.isTranslating ? (
-                      <RotateCw className="w-3.5 h-3.5 animate-spin text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf] linen:text-[#a86a43]" />
-                    ) : (
-                      <Languages className="w-3.5 h-3.5" />
-                    )}
-                  </button>
-                )}
-
-                {/* Pin Button */}
-                <button
-                  type="button"
-                  onClick={() => msgRenderActionsRef.current.onTogglePinMessage?.(msg.id)}
-                  className="p-1 text-[#64748b] hover:text-[#2481cc] dark:text-[#7b93ad] dark:hover:text-[#2ba0ff] aurora:text-[#7e9aa5] aurora:hover:text-[#5eead4] linen:text-[#7a6957] linen:hover:text-[#a86a43] cursor-pointer"
-                  title={msg.isPinned ? '取消置顶' : '置顶此消息'}
-                >
-                  <Pin className={`w-3.5 h-3.5 ${msg.isPinned ? 'text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf] linen:text-[#a86a43] fill-current' : ''}`} />
-                </button>
-
-                {/* Edit Button (For delivered non-audio sent messages) */}
-                {isMe &&
-                  !msg.isAudio &&
-                  !msg.isCall &&
-                  msg.deliveryStatus !== 'failed' &&
-                  msg.deliveryStatus !== 'pending' &&
-                  msg.deliveryStatus !== 'paused' &&
-                  (!chat.id.startsWith('tg_') || typeof msg.telegramMessageId === 'number') && (
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setEditingMessage(msg);
-                      setTranslateOnEdit(false);
-                      setInputText(msg.text);
-                      setReplyingTo(null);
-                    }}
-                    className="p-1 text-[#64748b] hover:text-[#2481cc] dark:text-[#7b93ad] dark:hover:text-[#2ba0ff] aurora:text-[#7e9aa5] aurora:hover:text-[#5eead4] linen:text-[#7a6957] linen:hover:text-[#a86a43] cursor-pointer"
-                    title="编辑消息"
-                  >
-                    <Edit2 className="w-3.5 h-3.5" />
-                  </button>
-                )}
-
-                {/* Copy Text or Copy Image */}
-                <button
-                  type="button"
-                  onClick={() => {
-                    if (msg.isImage && msg.imageUrl) {
-                      msgRenderActionsRef.current.copyImageToClipboard(msg.imageUrl, msg.id);
-                    } else {
-                      msgRenderActionsRef.current.copyToClipboard(msg.text, msg.id);
-                    }
-                  }}
-                  className="p-1 text-[#64748b] hover:text-[#2481cc] dark:text-[#7b93ad] dark:hover:text-[#2ba0ff] aurora:text-[#7e9aa5] aurora:hover:text-[#5eead4] linen:text-[#7a6957] linen:hover:text-[#a86a43] cursor-pointer"
-                  title={msg.isImage ? '复制照片到剪贴板' : '复制消息内容'}
-                >
-                  {copiedId === msg.id ? (
-                    <Check className="w-3.5 h-3.5 text-emerald-500" />
-                  ) : (
-                    <Copy className="w-3.5 h-3.5" />
-                  )}
-                </button>
-
-                {/* Delete Button */}
-                <button
-                  type="button"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    setHoveredMessageId(null);
-                    setRevokeSingleDelete(true);
-                    setMessageToDelete(msg);
-                  }}
-                  className="p-1 text-[#64748b] hover:text-rose-500 dark:text-[#7b93ad] dark:hover:text-rose-400 aurora:text-[#7e9aa5] aurora:hover:text-rose-400 cursor-pointer"
-                  title="删除消息"
-                >
-                  <Trash2 className="w-3.5 h-3.5" />
-                </button>
-              </div>
-            )}
-
-            <div className={isGroupPeer ? 'flex items-end gap-2 max-w-[86%] sm:max-w-[78%] min-w-0' : 'contents'}>
-              {isGroupPeer && (
-                showGroupSenderAvatar ? (
-                  <div
-                    onClick={() => {
-                      if (!isMultiSelectMode && msg.senderId) {
-                        void msgRenderActionsRef.current.handleOpenGroupMemberProfile({
-                          senderId: msg.senderId,
-                          name: cleanSenderName || msg.senderName,
-                          avatarUrl: msg.senderAvatarUrl,
-                        });
-                      }
-                    }}
-                    className={`w-8 h-8 rounded-full shrink-0 overflow-hidden select-none shadow-xs ${
-                      !isMultiSelectMode && msg.senderId
-                        ? 'cursor-pointer hover:ring-2 hover:ring-[#2481cc]/50 dark:hover:ring-[#2ba0ff]/60 aurora:hover:ring-[#2dd4bf]/60 transition-shadow'
-                        : ''
-                    }`}
-                    title={!isMultiSelectMode && msg.senderId ? '点击查看成员个人资料' : undefined}
-                  >
-                    {showAvatarImage ? (
-                      <img
-                        src={safeMemberAvatarUrl}
-                        alt={cleanSenderName || ''}
-                        loading="lazy"
-                        decoding="async"
-                        className="w-full h-full object-cover"
-                        onError={() => {
-                          setFailedAvatarUrls((prev) => {
-                            if (prev.has(safeMemberAvatarUrl)) return prev;
-                            const next = new Set(prev);
-                            next.add(safeMemberAvatarUrl);
-                            return next;
-                          });
-                        }}
-                      />
-                    ) : (
-                      <div
-                        className={`w-full h-full bg-gradient-to-br ${TG_SENDER_AVATAR_BGS[senderColorIdx]} flex items-center justify-center text-white text-[13px] font-semibold`}
-                      >
-                        {getSenderAvatarInitial(cleanSenderName, msg.senderId)}
-                      </div>
-                    )}
-                  </div>
-                ) : (
-                  <div className="w-8 shrink-0" />
-                )
-              )}
-
-              <div
-                className={`${isGroupPeer ? 'min-w-0 max-w-full' : 'min-w-0 max-w-[84%] sm:max-w-[78%]'} rounded-xl ${
-                  hasMediaBubble ? 'p-1' : 'py-1.5 px-2.5'
-                } relative transition-colors select-text ${
-                  highlightedMsgId === msg.id ? 'ring-2 ring-amber-400 shadow-lg' : ''
-                } ${
-                  isMe
-                    ? 'bg-[#1e88e5] text-white dark:bg-[#1b4975] dark:text-white aurora:bg-[#11434d] aurora:border aurora:border-[#2dd4bf]/25 linen:bg-[#3a6652] linen:text-white linen:border linen:border-[#2d5241] rounded-br-xs shadow-[0_1px_3px_rgba(30,136,229,0.22)] linen:shadow-[0_1px_4px_rgba(43,33,24,0.16)]'
-                    : 'bg-white text-[#0f172a] border border-[#e2e8f0] dark:bg-[#101b2a] dark:text-[#eef4fb] dark:border-[#1a2b40] aurora:bg-[#101c23] aurora:text-[#ecf6f8] aurora:border-[#1c323c] linen:bg-[#faf6ee] linen:text-[#2b2118] linen:border-[#d5c6b0] rounded-bl-xs shadow-[0_1px_2px_rgba(15,23,42,0.04)] linen:shadow-[0_1px_3px_rgba(43,33,24,0.08)]'
-                }`}
-              >
-                {/* Official Telegram Group Member Name */}
-                {showGroupSenderName && (
-                  <div
-                    onClick={() => {
-                      if (!isMultiSelectMode && msg.senderId) {
-                        void msgRenderActionsRef.current.handleOpenGroupMemberProfile({
-                          senderId: msg.senderId,
-                          name: cleanSenderName || msg.senderName,
-                          avatarUrl: msg.senderAvatarUrl,
-                        });
-                      }
-                    }}
-                    className={`mb-1 ${hasMediaBubble ? 'px-1.5 pt-0.5' : ''} text-[12px] font-semibold leading-tight truncate select-none ${TG_SENDER_NAME_COLORS[senderColorIdx]} ${
-                      !isMultiSelectMode && msg.senderId ? 'cursor-pointer hover:underline' : ''
-                    }`}
-                    title={!isMultiSelectMode && msg.senderId ? '点击查看成员个人资料' : undefined}
-                  >
-                    {cleanSenderName}
-                  </div>
-                )}
-              {/* Forwarded Label */}
-              {msg.forwardFrom && (
-                <div
-                  className={`mb-1 ${hasMediaBubble ? 'px-1.5 pt-0.5' : ''} flex items-center gap-1 text-[10.5px] font-medium ${
-                    isMe ? 'text-white/85' : 'text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#5eead4] linen:text-[#8c522d]'
-                  }`}
-                >
-                  <Forward className="w-3 h-3 shrink-0" />
-                  <span className="truncate">转发自 {msg.forwardFrom}</span>
-                </div>
-              )}
-
-              {/* Telegram Reply Quote Header */}
-              {msg.replyTo && (
-                <div
-                  className={`mb-2 pl-2.5 py-1 border-l-2 rounded-r ${chatFontClasses.replySender} select-none ${
-                    isMe
-                      ? 'border-white/70 bg-white/12 text-white'
-                      : 'border-[#2481cc] dark:border-[#2ba0ff] aurora:border-[#2dd4bf] linen:border-[#a86a43] bg-[#f8fafc] dark:bg-white/5 aurora:bg-[#081014]/60 linen:bg-[#f2e9da] text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118]'
-                  }`}
-                >
-                  <div
-                    className={`font-semibold truncate ${
-                      isMe ? 'text-white' : 'text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#5eead4] linen:text-[#8c522d]'
-                    }`}
-                  >
-                    {msg.replyTo.senderName || '回复消息'}
-                  </div>
-                  <div className={`opacity-85 truncate ${chatFontClasses.replyBody}`}>{msg.replyTo.text}</div>
-                </div>
-              )}
-
-            {/* Image / Sticker Attachment with Copy and Download Overlay */}
-            {msg.isImage && msg.imageUrl && (() => {
-              const safeImageHref = resolveDisplayUrl(msg.imageUrl);
-              if (!safeImageHref) return null;
-              const baseBubbleThumbHref = appendThumbQueryIfTelegramMedia(safeImageHref) || safeImageHref;
-              const mediaRetryNonce = mediaRetryNonces[msg.id] || 0;
-              const bubbleThumbSrc =
-                mediaRetryNonce > 0
-                  ? `${baseBubbleThumbHref}${baseBubbleThumbHref.includes('?') ? '&' : '?'}_r=${mediaRetryNonce}`
-                  : baseBubbleThumbHref;
-              const hasVisibleImageCaption = Boolean(
-                msg.text?.trim() &&
-                  !isSystemMediaPlaceholder(msg.text, msg) &&
-                  !/\.(jpg|jpeg|png|gif|webp|bmp|svg|heic)$/i.test(msg.text.trim())
-              );
-              return (
-                <div className={`${hasVisibleImageCaption ? 'mb-1.5' : ''} rounded-xl overflow-hidden w-full max-w-[280px] min-h-[112px] bg-black/5 dark:bg-white/5 shadow-xs relative group/img select-none`}>
-                  <img
-                    src={bubbleThumbSrc}
-                    alt={msg.imageCaption || 'image'}
-                    loading="lazy"
-                    decoding="async"
-                    title="双击全屏查看大图"
-                    onDoubleClick={(e) => {
-                      if (isMultiSelectMode) return;
-                      e.preventDefault();
-                      e.stopPropagation();
-                      msgRenderActionsRef.current.openImageGalleryLightbox(msg);
-                    }}
-                    className="w-full h-auto object-cover max-h-72 cursor-pointer hover:opacity-95 transition-opacity rounded-[9px]"
-                    onLoad={(e) => {
-                      e.currentTarget.style.display = '';
-                    }}
-                    onError={() => {
-                      void msgRenderActionsRef.current.handleTelegramBubbleImageError(msg.id, msg.imageUrl, bubbleThumbSrc);
-                    }}
-                  />
-                  {/* Hover actions for image: Zoom, Copy Image and Download Image */}
-                  <div className="absolute top-2 right-2 flex items-center gap-1 opacity-0 group-hover/img:opacity-100 transition-opacity bg-black/75 rounded-lg p-1 text-white shadow-md">
-                    <button
-                      type="button"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        msgRenderActionsRef.current.openImageGalleryLightbox(msg);
-                      }}
-                      title="全屏查看大图"
-                      className="p-1 hover:bg-white/20 rounded-md cursor-pointer transition-colors"
-                    >
-                      <Maximize2 className="w-3.5 h-3.5" />
-                    </button>
-                    <button
-                      type="button"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        msgRenderActionsRef.current.copyImageToClipboard(safeImageHref, msg.id);
-                      }}
-                      title="复制照片到剪贴板"
-                      className="p-1 hover:bg-white/20 rounded-md cursor-pointer transition-colors"
-                    >
-                      {copiedId === msg.id ? (
-                        <Check className="w-3.5 h-3.5 text-emerald-400" />
-                      ) : (
-                        <Copy className="w-3.5 h-3.5" />
-                      )}
-                    </button>
-                    <a
-                      href={safeImageHref}
-                      download={buildSafeMediaDownloadName(msg.imageCaption, 'tg_photo', 'png')}
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        const resolved = resolveDisplayUrl(msg.imageUrl);
-                        if (!resolved) {
-                          e.preventDefault();
-                          return;
-                        }
-                        if (msg.imageUrl && isSignedResourceUrlExpiringSoon(resolved)) {
-                          e.preventDefault();
-                          void msgRenderActionsRef.current.triggerSilentUrlRefresh(msg.imageUrl, true).then((nextUrl) => {
-                            const safeDownloadHref = sanitizeSafeResourceUrl(nextUrl) || resolved;
-                            if (!safeDownloadHref) return;
-                            const a = document.createElement('a');
-                            a.href = safeDownloadHref;
-                            a.download = buildSafeMediaDownloadName(msg.imageCaption, 'tg_photo', 'png');
-                            document.body.appendChild(a);
-                            a.click();
-                            document.body.removeChild(a);
-                          });
-                        }
-                      }}
-                      title="下载保存照片"
-                      className="p-1 hover:bg-white/20 rounded-md cursor-pointer transition-colors"
-                    >
-                      <Download className="w-3.5 h-3.5" />
-                    </a>
-                  </div>
-                  {hasOverlayImageTimestamp && (
-                    <div className="absolute bottom-1.5 right-1.5 px-1.5 py-0.5 rounded-full bg-black/65 text-white text-[10px] flex items-center gap-1 pointer-events-none select-none tabular-nums shadow-xs">
-                      {msg.isPinned && <Pin className="w-2.5 h-2.5 fill-current text-white/95" />}
-                      {msg.isEdited && <span className="text-[9.5px] opacity-90">已编辑</span>}
-                      <span>{msg.timestamp}</span>
-                      {isMe && (
-                        msg.deliveryStatus === 'pending' || msg.deliveryStatus === 'retrying' || retryingMsgIds.has(msg.id) ? (
-                          <RotateCw className="w-2.5 h-2.5 animate-spin text-white/90" />
-                        ) : chat.isChannel ? (
-                          <CheckCheck className="w-3 h-3 text-white/95" />
-                        ) : chat.id.startsWith('tg_') && currentAccountId !== 'acc_telegram_bot' && typeof msg.telegramMessageId === 'number' ? (
-                          typeof chat.readOutboxMaxId === 'number' && msg.telegramMessageId <= chat.readOutboxMaxId ? (
-                            <CheckCheck className="w-3 h-3 text-[#7cc4ff]" />
-                          ) : (
-                            <Check className="w-3 h-3 text-white/85" />
-                          )
-                        ) : (
-                          <CheckCheck className="w-3 h-3 text-white/95" />
-                        )
-                      )}
-                    </div>
-                  )}
-                </div>
-              );
-            })()}
-
-            {/* Video Attachment with Inline Player, Duration Badge, and Download */}
-            {msg.isVideo && msg.videoUrl && (() => {
-              const safeVideoHref = resolveDisplayUrl(msg.videoUrl);
-              if (!safeVideoHref) return null;
-              const hasVisibleVideoCaption = Boolean(
-                msg.text?.trim() &&
-                  !isSystemMediaPlaceholder(msg.text, msg) &&
-                  !/\.(mp4|mov|webm|mkv|avi|m4v)$/i.test(msg.text.trim())
-              );
-              return (
-                <div
-                  className={`${hasVisibleVideoCaption ? 'mb-1.5' : ''} rounded-xl overflow-hidden w-full max-w-[320px] min-h-[160px] shadow-sm relative group/vid bg-black/10 dark:bg-black/40 select-none`}
-                  onDoubleClick={(e) => {
-                    if (isMultiSelectMode) return;
-                    e.preventDefault();
-                    e.stopPropagation();
-                    const vid = e.currentTarget.querySelector('video');
-                    if (vid) vid.pause();
-                    if (document.fullscreenElement) {
-                      document.exitFullscreen().catch(() => {});
-                    }
-                    setLightboxMedia({
-                      type: 'video',
-                      url: safeVideoHref,
-                      rawUrl: msg.videoUrl,
-                      caption: hasVisibleVideoCaption ? msg.text : undefined,
-                      msgId: msg.id,
-                    });
-                  }}
-                >
-                  <video
-                    src={safeVideoHref}
-                    controls
-                    preload="metadata"
-                    className="w-full h-auto max-h-80 object-contain rounded-xl bg-black cursor-pointer"
-                    onError={() => {
-                      void msgRenderActionsRef.current.triggerSilentUrlRefresh(msg.videoUrl, true);
-                    }}
-                  />
-                  <div className="absolute top-2 right-2 flex items-center gap-1 opacity-0 group-hover/vid:opacity-100 transition-opacity bg-black/75 rounded-lg p-1 text-white shadow-md z-10">
-                    <button
-                      type="button"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        const vid = e.currentTarget.closest('.group\\/vid')?.querySelector('video');
-                        if (vid) vid.pause();
-                        setLightboxMedia({
-                          type: 'video',
-                          url: safeVideoHref,
-                          rawUrl: msg.videoUrl,
-                          caption: hasVisibleVideoCaption ? msg.text : undefined,
-                          msgId: msg.id,
-                        });
-                      }}
-                      title="全屏弹出播放"
-                      className="p-1 hover:bg-white/20 rounded-md cursor-pointer transition-colors"
-                    >
-                      <Maximize2 className="w-3.5 h-3.5" />
-                    </button>
-                    <a
-                      href={safeVideoHref}
-                      download={`tg_video_${Date.now()}.mp4`}
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        const resolved = resolveDisplayUrl(msg.videoUrl);
-                        if (!resolved) {
-                          e.preventDefault();
-                          return;
-                        }
-                        if (msg.videoUrl && isSignedResourceUrlExpiringSoon(resolved)) {
-                          e.preventDefault();
-                          void msgRenderActionsRef.current.triggerSilentUrlRefresh(msg.videoUrl, true).then((nextUrl) => {
-                            const safeDownloadHref = sanitizeSafeResourceUrl(nextUrl) || resolved;
-                            if (!safeDownloadHref) return;
-                            const a = document.createElement('a');
-                            a.href = safeDownloadHref;
-                            a.download = `tg_video_${Date.now()}.mp4`;
-                            document.body.appendChild(a);
-                            a.click();
-                            document.body.removeChild(a);
-                          });
-                        }
-                      }}
-                      title="下载保存视频"
-                      className="p-1 hover:bg-white/20 rounded-md cursor-pointer transition-colors"
-                    >
-                      <Download className="w-3.5 h-3.5" />
-                    </a>
-                  </div>
-                </div>
-              );
-            })()}
-
-            {/* File Attachment */}
-            {msg.isFile && (() => {
-              const safeFileHref = resolveDisplayUrl(msg.fileUrl);
-              return (
-                <div className={`p-2.5 rounded-xl flex items-center justify-between gap-3 ${chatFontClasses.secondary} mb-1.5 ${isMe ? 'bg-white/12' : 'bg-black/5 dark:bg-white/10 aurora:bg-[#15252e] linen:bg-[#f2e8d7]'}`}>
-                  <div className="flex items-center gap-2 min-w-0">
-                    <FileText className={`w-6 h-6 shrink-0 ${isMe ? 'text-white/90' : 'text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#5eead4] linen:text-[#a86a43]'}`} />
-                    <div className="min-w-0">
-                      <div className="font-semibold truncate">{msg.fileName || '文档附件'}</div>
-                      <div className="text-[10px] opacity-70">{msg.fileSize || '128 KB'}</div>
-                    </div>
-                  </div>
-                  {safeFileHref ? (
-                    <a
-                      href={safeFileHref}
-                      download={msg.fileName || 'file'}
-                      onClick={(e) => {
-                        const resolved = resolveDisplayUrl(msg.fileUrl);
-                        if (!resolved) {
-                          e.preventDefault();
-                          return;
-                        }
-                        if (msg.fileUrl && isSignedResourceUrlExpiringSoon(resolved)) {
-                          e.preventDefault();
-                          void msgRenderActionsRef.current.triggerSilentUrlRefresh(msg.fileUrl, true).then((nextUrl) => {
-                            const safeDownloadHref = sanitizeSafeResourceUrl(nextUrl) || resolved;
-                            if (!safeDownloadHref) return;
-                            const a = document.createElement('a');
-                            a.href = safeDownloadHref;
-                            a.download = msg.fileName || 'file';
-                            document.body.appendChild(a);
-                            a.click();
-                            document.body.removeChild(a);
-                          });
-                        }
-                      }}
-                      className={`p-1.5 rounded-lg cursor-pointer ${isMe ? 'text-white hover:bg-white/15' : 'text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#5eead4] linen:text-[#a86a43] hover:bg-[#2481cc]/10 aurora:hover:bg-[#14b8a6]/15 linen:hover:bg-[#a86a43]/12'}`}
-                      title="下载附件"
-                    >
-                      <Download className="w-4 h-4" />
-                    </a>
-                  ) : (
-                    <span className="text-[10px] opacity-60 px-1.5 py-0.5 rounded bg-black/5 dark:bg-white/10">
-                      未缓存
-                    </span>
-                  )}
-                </div>
-              );
-            })()}
-
-            {/* Audio voice note message */}
-            {msg.isAudio ? (
-              <div className="flex flex-col gap-2 w-full min-w-0 sm:min-w-[220px]">
-                <div className="flex items-center gap-3">
-                  <button
-                    onClick={() => void msgRenderActionsRef.current.handlePlayAudio(msg.id, msg.audioUrl)}
-                    className={`w-9 h-9 rounded-full flex items-center justify-center cursor-pointer transition-transform hover:scale-105 shrink-0 ${
-                      isMe
-                        ? 'bg-white/20 hover:bg-white/30 text-white'
-                        : 'bg-[#2481cc] dark:bg-[#2ba0ff] aurora:bg-[#0d9488] linen:bg-[#a86a43] text-white'
-                    }`}
-                  >
-                    {playingAudioId === msg.id ? (
-                      <Pause className="w-4 h-4 fill-current" />
-                    ) : (
-                      <Play className="w-4 h-4 fill-current ml-0.5" />
-                    )}
-                  </button>
-
-                  {/* Waveform progress bar */}
-                  <div className="flex-1">
-                    <div className={`h-1.5 w-full rounded-full overflow-hidden ${isMe ? 'bg-white/25' : 'bg-black/10 dark:bg-white/20 aurora:bg-white/15 linen:bg-[#e5d6be]'}`}>
-                      <div
-                        className={`h-full transition-all duration-100 ${
-                          isMe ? 'bg-white' : 'bg-[#2481cc] dark:bg-[#2ba0ff] aurora:bg-[#2dd4bf] linen:bg-[#a86a43]'
-                        }`}
-                        style={{ width: `${audioProgress[msg.id] || 0}%` }}
-                      />
-                    </div>
-                    <div className="flex items-center justify-between text-[11px] mt-1 opacity-75 tabular-nums">
-                      <span>
-                        {msg.audioDuration && msg.audioDuration > 0
-                          ? `${Math.floor(msg.audioDuration / 60)}:${String(Math.floor(msg.audioDuration % 60)).padStart(2, '0')}`
-                          : '--'}
-                      </span>
-                      {msg.voiceName && (
-                        <span className={`text-[10px] ${isMe ? 'text-white/90' : 'text-[#2481cc] dark:text-[#7cc4ff] aurora:text-[#5eead4] linen:text-[#8c522d]'}`}>
-                          🎙️ {msg.voiceName}
-                        </span>
-                      )}
-                    </div>
-                  </div>
-                </div>
-
-                {/* Speech to Text Transcribe toggle */}
-                {msg.sttText ? (
-                  <div className={`mt-1 pt-1.5 border-t ${chatFontClasses.secondary} ${isMe ? 'border-white/20' : 'border-black/10 dark:border-white/10 aurora:border-white/10 linen:border-[#dfd2bc]'}`}>
-                    <div className="text-[11px] opacity-70 mb-0.5 select-none">转文字:</div>
-                    <p className="select-text cursor-text">{msg.sttText}</p>
-                    {msg.translatedText ? (
-                      <p className={`mt-1 font-medium select-text cursor-text ${isMe ? 'text-white/95' : 'text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#5eead4] linen:text-[#8c522d]'}`}>
-                        译文: {msg.translatedText}
-                      </p>
-                    ) : msg.translationError ? (
-                      <div className={`mt-1 text-[11px] flex items-center justify-between gap-2 ${isMe ? 'text-amber-200' : 'text-rose-600 dark:text-rose-400 aurora:text-rose-300'}`}>
-                        <span className="min-w-0 break-words">
-                          翻译失败，请检查翻译通道
-                        </span>
-                        {hasRetranslateHandler && (
-                          <button
-                            type="button"
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              void triggerManualTranslate(msg);
-                            }}
-                            className={`shrink-0 px-1.5 py-0.5 rounded font-semibold text-[10px] cursor-pointer transition-colors ${
-                              isMe
-                                ? 'bg-white/20 hover:bg-white/30 text-white'
-                                : 'bg-rose-500/15 hover:bg-rose-500/25 text-rose-700 dark:text-rose-300 aurora:text-rose-300'
-                            }`}
-                          >
-                            重试翻译
-                          </button>
-                        )}
-                      </div>
-                    ) : null}
-                  </div>
-                ) : (
-                  <button
-                    onClick={() => msgRenderActionsRef.current.handleTranscribeAudio(msg)}
-                    disabled={transcribingMap[msg.id]}
-                    className={`text-[11px] hover:underline self-start cursor-pointer mt-0.5 ${isMe ? 'text-white/90' : 'text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#5eead4] linen:text-[#8c522d]'}`}
-                  >
-                    {transcribingMap[msg.id] ? '正在转文字中...' : '转为文字'}
-                  </button>
-                )}
-              </div>
-            ) : (
-              /* Standard Text Message or Photo Caption */
-              <div className="min-w-0">
-                {(() => {
-                  const showOriginalAndTranslation = showOriginalAndTranslationPref;
-                  const isTranslationOnlyPeer =
-                    isChatTransEnabled &&
-                    !isMe &&
-                    !showOriginalAndTranslation &&
-                    Boolean(msg.translatedText) &&
-                    !msg.isCall &&
-                    !msg.isImage &&
-                    !msg.isFile &&
-                    !msg.isVideo;
-                  const isShowingOriginalOverlay = showOriginalMsgIds.has(msg.id);
-
-                  if (isTranslationOnlyPeer) {
-                    return (
-                      <div className="min-w-0">
-                        <p className={`${chatFontClasses.composer} leading-relaxed whitespace-pre-wrap break-words [overflow-wrap:anywhere] select-text cursor-text`}>
-                          {msg.translatedText}
-                        </p>
-                        <div className="mt-1.5 flex items-center gap-2 select-none">
-                          <span className="inline-flex items-center gap-1 text-[10px] font-medium text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#5eead4] linen:text-[#8c522d]">
-                            <Languages className="w-3 h-3" />
-                            <span>仅显示译文</span>
-                          </span>
-                          <button
-                            type="button"
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              setShowOriginalMsgIds((prev) => {
-                                const next = new Set(prev);
-                                if (next.has(msg.id)) next.delete(msg.id);
-                                else next.add(msg.id);
-                                return next;
-                              });
-                            }}
-                            className="text-[10.5px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a] hover:text-[#2481cc] dark:hover:text-[#2ba0ff] aurora:hover:text-[#5eead4] linen:hover:text-[#8c522d] hover:underline cursor-pointer"
-                          >
-                            {isShowingOriginalOverlay ? '收起原文' : '查看原文'}
-                          </button>
-                        </div>
-                        {isShowingOriginalOverlay && msg.text && (
-                          <div className={`mt-1.5 p-2 rounded-lg bg-[#f8fafc] dark:bg-[#0b131f]/80 aurora:bg-[#0c161c]/85 linen:bg-[#f4ecdf] border border-[#e2e8f0] dark:border-[#1e3148] aurora:border-[#1e343e] linen:border-[#dccdb8] ${chatFontClasses.secondary} text-[#475569] dark:text-[#cbd5e1] aurora:text-[#b7d0d8] linen:text-[#4e3f32] select-text`}>
-                            <div className="text-[10px] opacity-70 mb-0.5 select-none">原文：</div>
-                            <p className="whitespace-pre-wrap break-words [overflow-wrap:anywhere]">{msgRenderActionsRef.current.renderMessageTextWithLinks(msg.text, false)}</p>
-                          </div>
-                        )}
-                      </div>
-                    );
-                  }
-
-                  return (
-                    <>
-                      {msg.isCall ? (
-                        <div className="flex items-center gap-2.5 py-0.5 select-text">
-                          <span
-                            className={`w-8 h-8 rounded-full flex items-center justify-center shrink-0 ${
-                              msg.callType === 'missed'
-                                ? 'bg-rose-500/15 text-rose-500 dark:text-rose-400'
-                                : isMe
-                                  ? 'bg-white/20 text-white'
-                                  : 'bg-[#2481cc]/12 text-[#2481cc] dark:bg-[#2ba0ff]/15 dark:text-[#7cc4ff] aurora:bg-[#2dd4bf]/15 aurora:text-[#5eead4] linen:bg-[#a86a43]/15 linen:text-[#8c522d]'
-                            }`}
-                          >
-                            {msg.isVideoCall ? <Video className="w-4 h-4" /> : <Phone className="w-4 h-4" />}
-                          </span>
-                          <div className="min-w-0">
-                            <div
-                              className={`${chatFontClasses.body} font-medium leading-snug ${
-                                msg.callType === 'missed' && !isMe
-                                  ? 'text-rose-600 dark:text-rose-400 aurora:text-rose-300'
-                                  : ''
-                              }`}
-                            >
-                              {msg.callType === 'missed'
-                                ? (msg.isVideoCall ? '未接视频来电' : '未接语音来电')
-                                : (msg.isVideoCall ? '视频通话' : '语音通话')}
-                            </div>
-                            <div className={`text-[11px] leading-tight tabular-nums ${isMe ? 'text-white/80' : 'opacity-75'}`}>
-                              {msg.callType === 'missed'
-                                ? '对方来电未接听'
-                                : msg.callDuration && msg.callDuration > 0
-                                  ? `时长 ${Math.floor(msg.callDuration / 3600) > 0 ? `${Math.floor(msg.callDuration / 3600)}:` : ''}${String(Math.floor((msg.callDuration % 3600) / 60)).padStart(2, '0')}:${String(Math.floor(msg.callDuration % 60)).padStart(2, '0')}`
-                                  : (isMe ? '未接听' : '已结束')}
-                            </div>
-                          </div>
-                        </div>
-                      ) : !msg.isImage && !msg.isFile && !msg.isVideo && (
-                        <p className={`${chatFontClasses.body} leading-snug whitespace-pre-wrap break-words [overflow-wrap:anywhere] select-text cursor-text`}>
-                          {msgRenderActionsRef.current.renderMessageTextWithLinks(msg.text, isMe)}
-                        </p>
-                      )}
-                      {msg.isImage &&
-                        msg.text &&
-                        msg.text.trim() &&
-                        (!msg.imageUrl ||
-                          (!isSystemMediaPlaceholder(msg.text, msg) &&
-                            !/\.(jpg|jpeg|png|gif|webp|bmp|svg|heic)$/i.test(msg.text.trim()))) && (
-                        <p className={`${chatFontClasses.body} leading-snug whitespace-pre-wrap break-words [overflow-wrap:anywhere] select-text cursor-text mt-1 px-1.5`}>
-                          {msgRenderActionsRef.current.renderMessageTextWithLinks(msg.text, isMe)}
-                        </p>
-                      )}
-                      {msg.isVideo &&
-                        msg.text &&
-                        msg.text.trim() &&
-                        (!msg.videoUrl ||
-                          (!isSystemMediaPlaceholder(msg.text, msg) &&
-                            !/\.(mp4|mov|webm|mkv|avi|m4v)$/i.test(msg.text.trim()))) && (
-                        <p className={`${chatFontClasses.body} leading-snug whitespace-pre-wrap break-words [overflow-wrap:anywhere] select-text cursor-text mt-1 px-1.5`}>
-                          {msgRenderActionsRef.current.renderMessageTextWithLinks(msg.text, isMe)}
-                        </p>
-                      )}
-
-                      {/* Official Telegram Inline Translation Card */}
-                      {((!isChatTransEnabled && !msg.isTranslating && !msg.translatedText && !msg.translationError) ||
-                        msg.isCall ||
-                        (msg.isImage && msg.imageUrl && (!msg.text?.trim() || isSystemMediaPlaceholder(msg.text, msg))) ||
-                        (msg.isVideo && msg.videoUrl && (!msg.text?.trim() || isSystemMediaPlaceholder(msg.text, msg)))) ? null : msg.isTranslating ? (
-                        <div
-                          className={`mt-1.5 px-2 py-1 rounded-lg border text-[10.5px] flex items-center gap-1.5 ${
-                            isMe
-                              ? 'bg-white/10 border-white/20 text-white/85'
-                              : 'bg-[#f8fafc] dark:bg-[#0b131f]/80 aurora:bg-[#0c161c]/85 linen:bg-[#f3eadc] border-[#e2e8f0] dark:border-[#1e3148] aurora:border-[#1e343e] linen:border-[#d5c6b0] text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#5eead4] linen:text-[#8c522d]'
-                          }`}
-                        >
-                          <RotateCw className="w-3 h-3 animate-spin shrink-0" />
-                          <span>正在翻译中...</span>
-                        </div>
-                      ) : msg.translatedText ? (
-                        <div
-                          className={`mt-1.5 px-2 py-1.5 rounded-lg border ${chatFontClasses.translation} select-text cursor-text ${
-                            isMe
-                              ? 'bg-white/12 border-white/20 linen:bg-black/15 linen:border-white/15 text-white/95'
-                              : 'bg-[#f8fafc] dark:bg-[#0b131f]/80 aurora:bg-[#0c161c]/85 linen:bg-[#f4ecdf] border-[#e2e8f0] dark:border-[#1e3148] aurora:border-[#1e343e] linen:border-[#dccdb8] text-[#1e293b] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118]'
-                          }`}
-                        >
-                          <div className="flex items-center justify-between gap-2 mb-0.5 select-none">
-                            <span
-                              className={`inline-flex items-center gap-1 text-[10px] font-medium ${
-                                isMe ? 'text-white/85' : 'text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#5eead4] linen:text-[#7c5838]'
-                              }`}
-                            >
-                              <Languages className="w-3 h-3" />
-                              <span>{isMe ? '已发送对照译文' : '实时译文'}</span>
-                            </span>
-                            <div className="flex items-center gap-1">
-                              {hasRetranslateHandler && (
-                                <button
-                                  type="button"
-                                  onClick={(e) => {
-                                    e.stopPropagation();
-                                    void triggerManualTranslate(msg);
-                                  }}
-                                  title="重新翻译"
-                                  className={`p-0.5 rounded transition-colors cursor-pointer ${
-                                    isMe
-                                      ? 'text-white/75 hover:text-white hover:bg-white/10'
-                                      : 'text-[#64748b] hover:text-[#2481cc] hover:bg-black/5 dark:text-[#7b93ad] dark:hover:text-white aurora:text-[#7e9aa5] aurora:hover:text-[#5eead4] linen:text-[#6e5c4a] linen:hover:text-[#8c522d] linen:hover:bg-[#a86a43]/10'
-                                  }`}
-                                >
-                                  <RotateCw className="w-3 h-3" />
-                                </button>
-                              )}
-                              <button
-                                type="button"
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  msgRenderActionsRef.current.copyToClipboard(msg.translatedText || '', `${msg.id}_tr`);
-                                }}
-                                title="复制译文"
-                                className={`p-0.5 rounded transition-colors cursor-pointer ${
-                                  isMe
-                                    ? 'text-white/75 hover:text-white hover:bg-white/10'
-                                    : 'text-[#64748b] hover:text-[#2481cc] hover:bg-black/5 dark:text-[#7b93ad] dark:hover:text-white aurora:text-[#7e9aa5] aurora:hover:text-[#5eead4] linen:text-[#6e5c4a] linen:hover:text-[#8c522d] linen:hover:bg-[#a86a43]/10'
-                                }`}
-                              >
-                                {copiedId === `${msg.id}_tr` ? (
-                                  <Check className={`w-3 h-3 ${isMe ? 'text-emerald-300' : 'text-emerald-600 dark:text-emerald-400 aurora:text-emerald-300'}`} />
-                                ) : (
-                                  <Copy className="w-3 h-3" />
-                                )}
-                              </button>
-                            </div>
-                          </div>
-                          <p className="leading-snug font-normal whitespace-pre-wrap break-words [overflow-wrap:anywhere] select-text cursor-text">{msg.translatedText}</p>
-                        </div>
-                      ) : msg.translationError ? (
-                        <div
-                          className={`mt-1.5 pt-1 border-t text-[10.5px] flex items-center justify-between gap-2 select-text cursor-text ${
-                            isMe
-                              ? 'border-white/20 text-amber-200'
-                              : 'border-rose-500/20 text-rose-600 dark:text-rose-400 aurora:text-rose-300'
-                          }`}
-                        >
-                          <span className="min-w-0 break-words">
-                            翻译失败，请检查翻译通道
-                          </span>
-                          {hasRetranslateHandler && (
-                            <button
-                              type="button"
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                void triggerManualTranslate(msg);
-                              }}
-                              className={`shrink-0 px-2 py-0.5 rounded font-semibold text-[10.5px] cursor-pointer transition-colors ${
-                                isMe
-                                  ? 'bg-white/20 hover:bg-white/30 text-white'
-                                  : 'bg-rose-500/15 hover:bg-rose-500/25 text-rose-700 dark:text-rose-300 aurora:text-rose-300'
-                              }`}
-                            >
-                              重试翻译
-                            </button>
-                          )}
-                        </div>
-                      ) : null}
-                    </>
-                  );
-                })()}
-              </div>
-            )}
-
-            {/* Message Reactions Pills */}
-            {msg.reactions && Object.keys(msg.reactions).length > 0 && (
-              <div
-                className={`flex flex-wrap items-center gap-1 mt-1 pt-1 border-t ${
-                  isMe ? 'border-white/15' : 'border-black/5 dark:border-white/10 aurora:border-white/10 linen:border-[#cbbba2]/50'
-                }`}
-              >
-                {Object.entries(msg.reactions).map(([emoji, count]) => {
-                  const isMine = msg.myReactions?.includes(emoji);
-                  return (
-                    <button
-                      key={emoji}
-                      type="button"
-                      onClick={() => msgRenderActionsRef.current.onToggleReaction?.(msg.id, emoji)}
-                      className={`px-2 py-0.5 rounded-full text-[11px] font-medium flex items-center gap-1 border transition-colors cursor-pointer ${
-                        isMe
-                          ? isMine
-                            ? 'bg-white/25 border-white/50 text-white'
-                            : 'bg-white/10 border-transparent text-white/90 hover:bg-white/20'
-                          : isMine
-                          ? 'bg-[#e8f3ff] border-[#2481cc] text-[#2481cc] dark:bg-[#2ba0ff]/20 dark:border-[#2ba0ff]/60 dark:text-[#2ba0ff] aurora:bg-[#112d36] aurora:border-[#2dd4bf] aurora:text-[#5eead4] linen:bg-[#a86a43]/15 linen:border-[#a86a43] linen:text-[#8c522d]'
-                          : 'bg-[#f1f5f9] dark:bg-white/10 aurora:bg-[#13252e] linen:bg-[#efe6d6] border-transparent text-[#0f172a] dark:text-white/90 aurora:text-[#ecf6f8] linen:text-[#4e3f32] hover:bg-[#e2e8f0] dark:hover:bg-white/15 aurora:hover:bg-[#18303b] linen:hover:bg-[#e5d9c5]'
-                      }`}
-                    >
-                      <span>{emoji}</span>
-                      <span className="font-semibold tabular-nums">{count}</span>
-                    </button>
-                  );
-                })}
-              </div>
-            )}
-
-            {/* Message Timestamp & Status Checks */}
-            {!hasOverlayImageTimestamp && (
-              <div
-                className={`flex items-center justify-end gap-1 ${hasMediaBubble ? 'mt-0.5 px-1.5 pb-0.5' : 'mt-1'} text-[10px] select-none tabular-nums ${
-                  isMe ? 'text-white/80' : 'text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#84725e]'
-                }`}
-              >
-                {hasRetranslateHandler &&
-                  !isMultiSelectMode &&
-                  !msg.isCall &&
-                  (!msg.isAudio || Boolean(msg.sttText?.trim())) &&
-                  !(msg.isImage && msg.imageUrl && (!msg.text?.trim() || isSystemMediaPlaceholder(msg.text, msg))) &&
-                  !(msg.isVideo && msg.videoUrl && (!msg.text?.trim() || isSystemMediaPlaceholder(msg.text, msg))) &&
-                  Boolean((msg.sttText || msg.text || msg.imageCaption || '').trim()) &&
-                  !msg.translatedText &&
-                  !msg.translationError && (
-                  <button
-                    type="button"
-                    disabled={Boolean(msg.isTranslating)}
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      void triggerManualTranslate(msg);
-                    }}
-                    title={msg.isTranslating ? '正在翻译中...' : '手动翻译此消息'}
-                    className={`inline-flex items-center gap-0.5 px-1.5 py-[1px] rounded text-[10px] font-medium transition-colors cursor-pointer disabled:opacity-60 mr-1 ${
-                      isMe
-                        ? 'bg-white/15 hover:bg-white/25 text-white/95'
-                        : 'bg-[#2481cc]/10 hover:bg-[#2481cc]/20 text-[#2481cc] dark:bg-[#2ba0ff]/15 dark:hover:bg-[#2ba0ff]/25 dark:text-[#7cc4ff] aurora:bg-[#2dd4bf]/12 aurora:hover:bg-[#2dd4bf]/22 aurora:text-[#5eead4] linen:bg-[#a86a43]/12 linen:hover:bg-[#a86a43]/22 linen:text-[#8c522d]'
-                    }`}
-                  >
-                    {msg.isTranslating ? (
-                      <RotateCw className="w-2.5 h-2.5 animate-spin" />
-                    ) : (
-                      <Languages className="w-2.5 h-2.5" />
-                    )}
-                    <span>{msg.isTranslating ? '翻译中' : '翻译'}</span>
-                  </button>
-                )}
-                {msg.isPinned && (
-                  <Pin
-                    className={`w-3 h-3 fill-current mr-0.5 ${
-                      isMe ? 'text-white/90' : 'text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf] linen:text-[#a86a43]'
-                    }`}
-                  />
-                )}
-                {msg.isEdited && (
-                  <span className="text-[9.5px] opacity-80 mr-0.5">已编辑</span>
-                )}
-                <span>{msg.timestamp}</span>
-                {isMe && (
-                  msg.deliveryStatus === 'pending' || msg.deliveryStatus === 'retrying' || retryingMsgIds.has(msg.id) ? (
-                    <span className="inline-flex items-center gap-0.5 text-white/80" title="正在投递到 Telegram">
-                      <RotateCw className="w-3 h-3 animate-spin" />
-                    </span>
-                  ) : msg.deliveryStatus === 'paused' ? (
-                    <span
-                      className="inline-flex items-center gap-1.5 flex-wrap"
-                      title={msg.queuePauseReason || '发送已暂停，等待手动确认'}
-                    >
-                      <span className="inline-flex items-center gap-0.5 text-amber-200 dark:text-amber-300 font-medium">
-                        <Pause className="w-3 h-3" />
-                        <span>已暂停</span>
-                      </span>
-                      <button
-                        type="button"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          void msgRenderActionsRef.current.onResumePausedMessage?.(msg.id);
-                        }}
-                        className="px-1.5 py-0.5 rounded bg-white/20 hover:bg-white/30 text-white text-[10px] font-medium cursor-pointer transition-colors"
-                        title={msg.queuePauseReason || '继续发送此消息'}
-                      >
-                        继续发送
-                      </button>
-                      <button
-                        type="button"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          void msgRenderActionsRef.current.onDiscardPausedMessage?.(msg.id);
-                        }}
-                        className="px-1.5 py-0.5 rounded bg-rose-500/40 hover:bg-rose-500/60 text-white text-[10px] font-medium cursor-pointer transition-colors"
-                        title="丢弃此未发送消息"
-                      >
-                        丢弃
-                      </button>
-                    </span>
-                  ) : msg.deliveryStatus === 'failed' ? (
-                    <button
-                      type="button"
-                      onClick={async () => {
-                        const retryFn = msgRenderActionsRef.current.onRetryMessage;
-                        if (!retryFn || retryingMsgIds.has(msg.id)) return;
-                        setRetryingMsgIds((prev) => new Set(prev).add(msg.id));
-                        try {
-                          const res = await retryFn(msg.id);
-                          if (!res.ok) {
-                            setSyncNotice(`重发失败：${res.error || '请检查 Telegram 在线状态'}`);
-                            setTimeout(() => setSyncNotice(null), 3500);
-                          }
-                        } finally {
-                          setRetryingMsgIds((prev) => {
-                            const next = new Set(prev);
-                            next.delete(msg.id);
-                            return next;
-                          });
-                        }
-                      }}
-                      title="消息投递失败，点击重试发送"
-                      className="inline-flex items-center gap-1 text-rose-200 hover:underline cursor-pointer font-medium"
-                    >
-                      <ShieldAlert className="w-3 h-3" />
-                      <span>失败 · 重发</span>
-                    </button>
-                  ) : chat.isChannel ? (
-                    <span title="已发送至频道" className="inline-flex items-center">
-                      <CheckCheck className="w-3.5 h-3.5 text-white/95 dark:text-[#7cc4ff] aurora:text-[#5eead4]" />
-                    </span>
-                  ) : chat.id.startsWith('tg_') && currentAccountId !== 'acc_telegram_bot' && typeof msg.telegramMessageId === 'number' ? (
-                    typeof chat.readOutboxMaxId === 'number' && msg.telegramMessageId <= chat.readOutboxMaxId ? (
-                      chat.isGroup && !isMultiSelectMode ? (
-                        <button
-                          type="button"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            void msgRenderActionsRef.current.handleOpenReadReceipts(msg);
-                          }}
-                          title="已有成员已读（点击查看谁已读）"
-                          className="inline-flex items-center hover:opacity-80 cursor-pointer"
-                        >
-                          <CheckCheck className="w-3.5 h-3.5 text-white/95 dark:text-[#7cc4ff] aurora:text-[#5eead4]" />
-                        </button>
-                      ) : (
-                        <span title="对方已读" className="inline-flex items-center">
-                          <CheckCheck className="w-3.5 h-3.5 text-white/95 dark:text-[#7cc4ff] aurora:text-[#5eead4]" />
-                        </span>
-                      )
-                    ) : (
-                      <span title={chat.isGroup ? '已送达（暂未有成员已读）' : '已送达（对方未读）'} className="inline-flex items-center">
-                        <Check className="w-3.5 h-3.5 text-white/80 dark:text-[#7b93ad] aurora:text-[#7e9aa5]" />
-                      </span>
-                    )
-                  ) : (
-                    <CheckCheck className="w-3.5 h-3.5 text-white/95 dark:text-[#7cc4ff] aurora:text-[#5eead4]" />
-                  )
-                )}
-              </div>
-            )}
-          </div>
-          </div>
-        </div>
-        </React.Fragment>
+        <ChatMessageItem
+          key={msg.id}
+          msg={msg}
+          idx={idx}
+          prevDayKey={prevDayKey}
+          prevSenderKey={prevSenderKey}
+          nextSenderKey={nextSenderKey}
+          nextDayKey={nextDayKey}
+          chatId={chat.id}
+          isGroup={isGroupChat}
+          isChannel={isChannelChat}
+          currentAccountId={currentAccountId}
+          isReadByPeer={isReadByPeer}
+          isMultiSelectMode={isMultiSelectMode}
+          isSelectedMulti={selectedMessageIds.has(msg.id)}
+          isHoveredMenuOpen={hoveredMessageId === msg.id}
+          isHighlighted={highlightedMsgId === msg.id}
+          isCopiedMain={copiedId === msg.id}
+          isCopiedTranslation={copiedId === `${msg.id}_tr`}
+          isPlayingAudio={playingAudioId === msg.id}
+          audioProgressPercent={audioProgress[msg.id] || 0}
+          isTranscribing={Boolean(transcribingMap[msg.id])}
+          isRetrying={retryingMsgIds.has(msg.id)}
+          mediaRetryNonce={mediaRetryNonces[msg.id] || 0}
+          isShowingOriginalOverlay={showOriginalMsgIds.has(msg.id)}
+          resolvedAvatarUrl={resolvedAvatarUrl}
+          isAvatarFailed={isAvatarFailed}
+          resolvedMediaHref={resolvedMediaHref}
+          chatFontClasses={chatFontClasses}
+          isChatTransEnabled={isChatTransEnabled}
+          showOriginalAndTranslationPref={showOriginalAndTranslationPref}
+          hasRetranslateHandler={hasRetranslateHandler}
+          hasDeleteHandler={hasDeleteHandler}
+          actionsRef={msgRenderActionsRef}
+        />
       );
     });
   }, [
@@ -5747,14 +4899,22 @@ const ChatAreaActive: React.FC<ChatAreaProps & { chat: Chat }> = ({
     hasRetranslateHandler,
     hasDeleteHandler,
     resolveDisplayUrl,
-    appendThumbQueryIfTelegramMedia,
-    triggerManualTranslate,
   ]);
 
   return (
     <div className="flex-1 min-w-0 bg-[#f4f7fb] dark:bg-[#060b12] aurora:bg-[#081116] linen:bg-[#ddd2bc] flex flex-col h-full relative overflow-hidden transition-colors">
       {/* 1. Official Telegram Top Bar Header (Image 2 Layout) */}
       <header className="h-[56px] bg-white/90 dark:bg-[#09111d]/90 aurora:bg-[#0d171d]/92 linen:bg-[#f2e8d9]/95 backdrop-blur-md border-b border-[#e2e8f0] dark:border-[#162436] aurora:border-[#182b34] linen:border-[#cbbba2] flex items-center justify-between px-4 shrink-0 z-10 transition-colors">
+        {onCloseChat && (
+          <button
+            type="button"
+            onClick={onCloseChat}
+            title="返回会话列表"
+            className="lg:hidden mr-1.5 w-8 h-8 rounded-lg hover:bg-[#f1f5f9] dark:hover:bg-[#142236] aurora:hover:bg-[#15252e] linen:hover:bg-[#e7dac5] flex items-center justify-center shrink-0 cursor-pointer text-[#64748b] dark:text-[#9bb3c9] aurora:text-[#7e9aa5] linen:text-[#5f4d3b]"
+          >
+            <ChevronLeft className="w-5 h-5" />
+          </button>
+        )}
         {/* Left: Contact Info (Click to view Profile & Shared Media) */}
         <div
           onClick={() => setChatInfoOpen(true)}
@@ -6126,8 +5286,11 @@ const ChatAreaActive: React.FC<ChatAreaProps & { chat: Chat }> = ({
                   showSyncNotice('该置顶消息不在当前已加载窗口，可点击上方“加载更早历史消息”拉取', 3000);
                 }
               };
-              if (hiddenLoadedCount > 0) {
-                setVisibleMsgWindow((w) => Math.max(w, displayedMessages.length));
+              if (hiddenLoadedCount > 0 || hiddenNewerCount > 0) {
+                const pinnedIdx = displayedMessages.findIndex((m) => m.id === activePinnedMessage.id);
+                if (pinnedIdx >= 0) {
+                  focusWindowAroundIndex(pinnedIdx, displayedMessages.length);
+                }
                 requestAnimationFrame(() => setTimeout(runPinnedJump, 40));
               } else {
                 runPinnedJump();
@@ -6215,14 +5378,7 @@ const ChatAreaActive: React.FC<ChatAreaProps & { chat: Chat }> = ({
               <button
                 ref={langButtonRef}
                 type="button"
-                onClick={() => {
-                  if (isLangMenuOpen && langMenuAnchor === 'top') {
-                    setIsLangMenuOpen(false);
-                  } else {
-                    setLangMenuAnchor('top');
-                    setIsLangMenuOpen(true);
-                  }
-                }}
+                onClick={() => setIsLangMenuOpen((prev) => !prev)}
                 className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md hover:bg-[#e8f3ff]/70 dark:hover:bg-[#152438] aurora:hover:bg-[#152934] linen:hover:bg-[#e2d3bd] text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#5eead4] linen:text-[#3d2e20] cursor-pointer transition-colors font-medium text-[11.5px]"
               >
                 <span>发信目标: {getLanguageDisplayName(outboundTargetLang)}</span>
@@ -6349,11 +5505,19 @@ const ChatAreaActive: React.FC<ChatAreaProps & { chat: Chat }> = ({
               const distFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
               const nearBottom = distFromBottom <= 72;
               isNearBottomRef.current = nearBottom;
-              if (nearBottom) {
+              if (nearBottom && hiddenNewerCount === 0) {
                 setShowScrollToBottom((prev) => (prev ? false : prev));
                 setUnreadWhileScrolledCount((prev) => (prev !== 0 ? 0 : prev));
+                setMsgWindowState((prev) =>
+                  prev.tailHidden === 0 && prev.count > DEFAULT_MSG_WINDOW + 60
+                    ? { count: DEFAULT_MSG_WINDOW, tailHidden: 0 }
+                    : prev
+                );
               } else {
                 setShowScrollToBottom((prev) => (!prev ? true : prev));
+                if (nearBottom && hiddenNewerCount > 0 && !pendingWindowAnchorRef.current) {
+                  shiftWindowDown(WINDOW_STEP);
+                }
               }
               if (
                 el.scrollHeight > el.clientHeight + 40 &&
@@ -6362,7 +5526,7 @@ const ChatAreaActive: React.FC<ChatAreaProps & { chat: Chat }> = ({
                 cloudSearchResults === null &&
                 !pendingWindowAnchorRef.current
               ) {
-                expandLocalMessageWindow(150);
+                expandLocalMessageWindow(WINDOW_STEP);
               } else if (
                 el.scrollHeight > el.clientHeight + 40 &&
                 el.scrollTop <= 80 &&
@@ -6410,6 +5574,17 @@ const ChatAreaActive: React.FC<ChatAreaProps & { chat: Chat }> = ({
           <div ref={messagesContentRef} className="space-y-1.5">
             {renderedMessageNodes}
           </div>
+          {hiddenNewerCount > 0 && (
+            <div className="flex items-center justify-center my-1.5">
+              <button
+                type="button"
+                onClick={() => shiftWindowDown(WINDOW_STEP)}
+                className="px-3 py-1 rounded-full bg-white/85 dark:bg-[#0e1726]/85 border border-[#e2e8f0] dark:border-[#1e3148] text-[11px] font-medium text-[#2481cc] dark:text-[#2ba0ff] cursor-pointer transition-colors"
+              >
+                向下展开更多较新消息（下方还有 {hiddenNewerCount} 条）
+              </button>
+            </div>
+          )}
           <div ref={messagesEndRef} style={{ overflowAnchor: 'none' }} />
         </div>
 
@@ -6993,75 +6168,8 @@ const ChatAreaActive: React.FC<ChatAreaProps & { chat: Chat }> = ({
           </div>
         )}
 
-        {/* Composer Action Row Above Input Box (Image 1 Layout) */}
-        <div className="flex items-center justify-between gap-2 mb-2 text-[11.5px]">
-          <div className="flex items-center gap-2 min-w-0">
-            <button
-              type="button"
-              onClick={handleGenerateAiSuggestion}
-              disabled={isGeneratingAi}
-              title={
-                aiCooldownSeconds > 0
-                  ? `大模型冷却中（剩余 ${aiCooldownSeconds} 秒）`
-                  : '基于人设与最近30条对话生成 AI 拟真回复'
-              }
-              className={`inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-[11.5px] font-medium transition-all cursor-pointer shrink-0 shadow-xs ${
-                isGeneratingAi
-                  ? 'bg-[#e8f3ff] text-[#2481cc] dark:bg-[#2ba0ff]/20 dark:text-[#2ba0ff] aurora:bg-[#112e37] aurora:text-[#5eead4] linen:bg-[#b87b53] linen:text-white'
-                  : aiCooldownSeconds > 0
-                  ? 'bg-[#f1f5f9] text-[#64748b] hover:bg-[#e2e8f0]/80 dark:bg-[#152438] dark:text-[#7b93ad] dark:hover:bg-[#1b2f48] aurora:bg-[#13252e] aurora:text-[#7e9aa5] aurora:hover:bg-[#18303b] linen:bg-[#c9b399] linen:text-[#5c4836] linen:hover:bg-[#bfa68a]'
-                  : 'bg-[#2481cc] hover:bg-[#1d6fb3] text-white dark:bg-[#2ba0ff] dark:hover:bg-[#1e8ee8] aurora:bg-[#0d9488] aurora:hover:bg-[#0f766e] linen:bg-[#a86a43] linen:hover:bg-[#935a36] linen:text-white'
-              }`}
-            >
-              <Sparkles className={`w-3.5 h-3.5 ${isGeneratingAi ? 'animate-spin' : ''}`} />
-              <span>
-                {isGeneratingAi
-                  ? '生成中...'
-                  : aiCooldownSeconds > 0
-                  ? `AI 建议回复 (${aiCooldownSeconds}s)`
-                  : 'AI 建议回复'}
-              </span>
-            </button>
-
-            <button
-              type="button"
-              disabled={isSynthesizingVoice}
-              onClick={() => void handleDirectVoiceSynthesis()}
-              title="使用已保存声纹直接将当前文本合成为语音发送"
-              className={`inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-[11.5px] font-medium transition-all cursor-pointer shrink-0 shadow-xs bg-[#0f766e] hover:bg-[#115e59] text-white dark:bg-[#174857] dark:hover:bg-[#1c596b] aurora:bg-[#11434d] aurora:hover:bg-[#165562] linen:bg-[#3a6652] linen:hover:bg-[#2f5544] linen:text-white ${
-                isSynthesizingVoice ? 'opacity-65 pointer-events-none' : ''
-              }`}
-            >
-              <Mic className={`w-3.5 h-3.5 ${isSynthesizingVoice ? 'animate-pulse' : ''}`} />
-              <span>{isSynthesizingVoice ? '合成中...' : '音色合成'}</span>
-            </button>
-          </div>
-
-          <button
-            ref={composerLangButtonRef}
-            type="button"
-            onClick={() => {
-              if (isLangMenuOpen && langMenuAnchor === 'bottom') {
-                setIsLangMenuOpen(false);
-              } else {
-                setLangMenuAnchor('bottom');
-                setIsLangMenuOpen(true);
-              }
-            }}
-            title={
-              isChatTransEnabled
-                ? `点击切换发信目标语言（当前：${getLanguageDisplayName(outboundTargetLang)}）`
-                : `${chatTransScopeLabel}已关闭（点击仍可预设目标语言）`
-            }
-            className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] linen:border-[#cbbba2] bg-white dark:bg-[#0e1726] aurora:bg-[#101c23] linen:bg-[#faf5ec] hover:bg-[#f1f5f9] dark:hover:bg-[#152438] aurora:hover:bg-[#152934] linen:hover:bg-[#efe4d3] text-[#334155] dark:text-[#d3e2ef] aurora:text-[#d5ebee] linen:text-[#3d2e20] text-[11.5px] font-medium cursor-pointer transition-colors shrink-0 shadow-2xs"
-          >
-            <span className="truncate max-w-[140px]">目标语言: {getLanguageDisplayName(outboundTargetLang)}</span>
-            <ChevronDown className="w-3.5 h-3.5 opacity-75 shrink-0" />
-          </button>
-        </div>
-
         {/* Main Input Container + Bottom Compact Action Row */}
-        <div className="rounded-xl border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#1e343e] linen:border-[#cbbba2] bg-[#f8fafc] dark:bg-[#0e1726] aurora:bg-[#111d24] linen:bg-[#fdfaf4] focus-within:bg-white dark:focus-within:bg-[#101b2c] aurora:focus-within:bg-[#13222b] linen:focus-within:bg-[#fffdf9] focus-within:border-[#2481cc] dark:focus-within:border-[#2ba0ff] aurora:focus-within:border-[#2dd4bf] linen:focus-within:border-[#a86a43] transition-all">
+        <div className="@container rounded-xl border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#1e343e] linen:border-[#cbbba2] bg-[#f8fafc] dark:bg-[#0e1726] aurora:bg-[#111d24] linen:bg-[#fdfaf4] focus-within:bg-white dark:focus-within:bg-[#101b2c] aurora:focus-within:bg-[#13222b] linen:focus-within:bg-[#fffdf9] focus-within:border-[#2481cc] dark:focus-within:border-[#2ba0ff] aurora:focus-within:border-[#2dd4bf] linen:focus-within:border-[#a86a43] transition-all">
           <textarea
             ref={textareaRef}
             rows={1}
@@ -7085,15 +6193,15 @@ const ChatAreaActive: React.FC<ChatAreaProps & { chat: Chat }> = ({
             className={`w-full max-h-36 resize-none bg-transparent text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118] ${chatFontClasses.composer} leading-relaxed px-3.5 pt-2.5 pb-1.5 focus:outline-none placeholder-[#94a3b8] dark:placeholder-[#566d85] aurora:placeholder-[#5a7782] linen:placeholder-[#9c8c7a] overflow-y-hidden`}
           />
 
-          <div className="px-2.5 pb-2 pt-1 flex items-center justify-between border-t border-[#e2e8f0]/60 dark:border-white/5 aurora:border-[#182b34] linen:border-[#e6dac6]">
+          <div className="px-2 @[520px]:px-2.5 pb-2 pt-1 flex items-center justify-between gap-1.5 @[520px]:gap-2 border-t border-[#e2e8f0]/60 dark:border-white/5 aurora:border-[#182b34] linen:border-[#e6dac6]">
             {/* Left Tools */}
-            <div className="flex items-center gap-1">
+            <div className="flex items-center flex-nowrap gap-0.5 @[520px]:gap-1 min-w-0 overflow-x-auto no-scrollbar">
               <button
                 ref={attachmentButtonRef}
                 type="button"
                 onClick={() => setIsAttachmentMenuOpen(!isAttachmentMenuOpen)}
                 title="附加文件、图片或文档"
-                className={`w-8 h-8 rounded-lg flex items-center justify-center transition-colors cursor-pointer ${
+                className={`w-7 h-7 @[520px]:w-8 @[520px]:h-8 rounded-lg flex items-center justify-center shrink-0 transition-colors cursor-pointer ${
                   isAttachmentMenuOpen
                     ? 'bg-[#e8f3ff] text-[#2481cc] dark:bg-[#2ba0ff]/20 dark:text-[#2ba0ff] aurora:bg-[#112e37] aurora:text-[#5eead4] linen:bg-[#eadcc6] linen:text-[#a86a43]'
                     : 'hover:bg-[#e2e8f0]/60 dark:hover:bg-[#152438] aurora:hover:bg-[#152934] linen:hover:bg-[#eee2cf] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#7a6957] hover:text-[#2481cc] dark:hover:text-[#2ba0ff] aurora:hover:text-[#5eead4] linen:hover:text-[#a86a43]'
@@ -7107,7 +6215,7 @@ const ChatAreaActive: React.FC<ChatAreaProps & { chat: Chat }> = ({
                 type="button"
                 onClick={() => setShowEmojiPicker(!showEmojiPicker)}
                 title="表情与贴纸"
-                className={`w-8 h-8 rounded-lg flex items-center justify-center transition-colors cursor-pointer ${
+                className={`w-7 h-7 @[520px]:w-8 @[520px]:h-8 rounded-lg flex items-center justify-center shrink-0 transition-colors cursor-pointer ${
                   showEmojiPicker
                     ? 'bg-[#e8f3ff] text-[#2481cc] dark:bg-[#2ba0ff]/20 dark:text-[#2ba0ff] aurora:bg-[#112e37] aurora:text-[#5eead4] linen:bg-[#eadcc6] linen:text-[#a86a43]'
                     : 'hover:bg-[#e2e8f0]/60 dark:hover:bg-[#152438] aurora:hover:bg-[#152934] linen:hover:bg-[#eee2cf] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#7a6957] hover:text-[#2481cc] dark:hover:text-[#2ba0ff] aurora:hover:text-[#5eead4] linen:hover:text-[#a86a43]'
@@ -7126,7 +6234,7 @@ const ChatAreaActive: React.FC<ChatAreaProps & { chat: Chat }> = ({
                   }
                 }}
                 title="真人声纹样本克隆"
-                className="w-8 h-8 rounded-lg flex items-center justify-center text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#7a6957] hover:text-[#2481cc] dark:hover:text-[#2ba0ff] aurora:hover:text-[#5eead4] linen:hover:text-[#a86a43] hover:bg-[#e2e8f0]/60 dark:hover:bg-[#152438] aurora:hover:bg-[#152934] linen:hover:bg-[#eee2cf] transition-colors cursor-pointer"
+                className="w-7 h-7 @[520px]:w-8 @[520px]:h-8 rounded-lg flex items-center justify-center shrink-0 text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#7a6957] hover:text-[#2481cc] dark:hover:text-[#2ba0ff] aurora:hover:text-[#5eead4] linen:hover:text-[#a86a43] hover:bg-[#e2e8f0]/60 dark:hover:bg-[#152438] aurora:hover:bg-[#152934] linen:hover:bg-[#eee2cf] transition-colors cursor-pointer"
               >
                 <AudioWaveform className="w-4 h-4" />
               </button>
@@ -7135,7 +6243,7 @@ const ChatAreaActive: React.FC<ChatAreaProps & { chat: Chat }> = ({
                 type="button"
                 onClick={handleToggleRecordMic}
                 title={isRecordingMic ? '点击停止录音并发送' : '点击录制语音消息'}
-                className={`h-8 px-2 rounded-lg flex items-center gap-1 text-xs font-medium transition-colors cursor-pointer ${
+                className={`h-7 px-1.5 @[520px]:h-8 @[520px]:px-2 rounded-lg flex items-center gap-1 shrink-0 text-xs font-medium transition-colors cursor-pointer ${
                   isRecordingMic
                     ? 'bg-rose-500 text-white animate-pulse'
                     : 'hover:bg-[#e2e8f0]/60 dark:hover:bg-[#152438] aurora:hover:bg-[#152934] linen:hover:bg-[#eee2cf] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#7a6957] hover:text-[#2481cc] dark:hover:text-[#2ba0ff] aurora:hover:text-[#5eead4] linen:hover:text-[#a86a43]'
@@ -7144,11 +6252,51 @@ const ChatAreaActive: React.FC<ChatAreaProps & { chat: Chat }> = ({
                 <Volume2 className="w-4 h-4" />
                 {isRecordingMic && <span className="tabular-nums">{recordDuration}s</span>}
               </button>
+
+              <button
+                type="button"
+                onClick={handleGenerateAiSuggestion}
+                disabled={isGeneratingAi}
+                title={
+                  aiCooldownSeconds > 0
+                    ? `大模型冷却中（剩余 ${aiCooldownSeconds} 秒）`
+                    : '基于人设与最近30条对话生成 AI 拟真回复'
+                }
+                className={`ml-0.5 @[520px]:ml-1 h-7 inline-flex items-center gap-1 @[520px]:gap-1.5 px-2 @[520px]:px-2.5 rounded-full text-[11.5px] font-medium whitespace-nowrap transition-all cursor-pointer shrink-0 shadow-xs ${
+                  isGeneratingAi
+                    ? 'bg-[#e8f3ff] text-[#2481cc] dark:bg-[#2ba0ff]/20 dark:text-[#2ba0ff] aurora:bg-[#112e37] aurora:text-[#5eead4] linen:bg-[#b87b53] linen:text-white'
+                    : aiCooldownSeconds > 0
+                    ? 'bg-[#f1f5f9] text-[#64748b] hover:bg-[#e2e8f0]/80 dark:bg-[#152438] dark:text-[#7b93ad] dark:hover:bg-[#1b2f48] aurora:bg-[#13252e] aurora:text-[#7e9aa5] aurora:hover:bg-[#18303b] linen:bg-[#c9b399] linen:text-[#5c4836] linen:hover:bg-[#bfa68a]'
+                    : 'bg-[#2481cc] hover:bg-[#1d6fb3] text-white dark:bg-[#2ba0ff] dark:hover:bg-[#1e8ee8] aurora:bg-[#0d9488] aurora:hover:bg-[#0f766e] linen:bg-[#a86a43] linen:hover:bg-[#935a36] linen:text-white'
+                }`}
+              >
+                <Sparkles className={`w-3.5 h-3.5 ${isGeneratingAi ? 'animate-spin' : ''}`} />
+                <span>
+                  {isGeneratingAi
+                    ? '生成中...'
+                    : aiCooldownSeconds > 0
+                    ? `AI 建议回复 (${aiCooldownSeconds}s)`
+                    : 'AI 建议回复'}
+                </span>
+              </button>
+
+              <button
+                type="button"
+                disabled={isSynthesizingVoice}
+                onClick={() => void handleDirectVoiceSynthesis()}
+                title="使用已保存声纹直接将当前文本合成为语音发送"
+                className={`ml-0.5 h-7 inline-flex items-center gap-1 @[520px]:gap-1.5 px-2 @[520px]:px-2.5 rounded-full text-[11.5px] font-medium whitespace-nowrap transition-all cursor-pointer shrink-0 shadow-xs bg-[#0f766e] hover:bg-[#115e59] text-white dark:bg-[#174857] dark:hover:bg-[#1c596b] aurora:bg-[#11434d] aurora:hover:bg-[#165562] linen:bg-[#3a6652] linen:hover:bg-[#2f5544] linen:text-white ${
+                  isSynthesizingVoice ? 'opacity-65 pointer-events-none' : ''
+                }`}
+              >
+                <Mic className={`w-3.5 h-3.5 ${isSynthesizingVoice ? 'animate-pulse' : ''}`} />
+                <span>{isSynthesizingVoice ? '合成中...' : '音色合成'}</span>
+              </button>
             </div>
 
             {/* Right Actions: Shortcut hint + Send Button */}
-            <div className="flex items-center gap-2.5">
-              <span className="hidden sm:inline text-[11px] text-[#94a3b8] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#84725e] select-none">
+            <div className="flex items-center gap-2 @[620px]:gap-2.5 shrink-0">
+              <span className="hidden @[620px]:inline whitespace-nowrap text-[11px] text-[#94a3b8] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#84725e] select-none">
                 {sendWithEnter ? 'Enter 发送 · Shift+Enter 换行' : 'Ctrl+Enter 发送 · Enter 换行'}
               </span>
 
@@ -7156,8 +6304,14 @@ const ChatAreaActive: React.FC<ChatAreaProps & { chat: Chat }> = ({
                 type="button"
                 disabled={isSending || (!inputText.trim() && !pastedImage && !editingMessage)}
                 onClick={pastedImage ? handleSendPastedImage : () => void handleSendText()}
-                title={editingMessage ? '保存修改' : pastedImage ? '发送照片' : '发送消息'}
-                className={`h-8 px-4 rounded-full bg-[#2481cc] hover:bg-[#1d6fb3] dark:bg-[#2ba0ff] dark:hover:bg-[#1e8ee8] aurora:bg-[#0d9488] aurora:hover:bg-[#0f766e] linen:bg-[#3a6652] linen:hover:bg-[#2f5544] text-white text-xs font-medium flex items-center gap-1.5 transition-all cursor-pointer shadow-xs shrink-0 disabled:opacity-55 disabled:cursor-default`}
+                title={
+                  editingMessage
+                    ? '保存修改'
+                    : pastedImage
+                    ? `发送照片（${sendWithEnter ? 'Enter 发送 · Shift+Enter 换行' : 'Ctrl+Enter 发送 · Enter 换行'}）`
+                    : `发送消息（${sendWithEnter ? 'Enter 发送 · Shift+Enter 换行' : 'Ctrl+Enter 发送 · Enter 换行'}）`
+                }
+                className={`h-7 @[520px]:h-8 px-3 @[520px]:px-4 rounded-full bg-[#2481cc] hover:bg-[#1d6fb3] dark:bg-[#2ba0ff] dark:hover:bg-[#1e8ee8] aurora:bg-[#0d9488] aurora:hover:bg-[#0f766e] linen:bg-[#3a6652] linen:hover:bg-[#2f5544] text-white text-xs font-medium flex items-center gap-1.5 whitespace-nowrap transition-all cursor-pointer shadow-xs shrink-0 disabled:opacity-55 disabled:cursor-default`}
               >
                 {editingMessage ? <Check className="w-3.5 h-3.5" /> : <Send className="w-3.5 h-3.5" />}
                 <span>{editingMessage ? '保存' : pastedImage ? '发送照片' : '发送'}</span>
@@ -8678,7 +7832,7 @@ const ChatAreaActive: React.FC<ChatAreaProps & { chat: Chat }> = ({
 export const ChatArea: React.FC<ChatAreaProps> = React.memo((props) => {
   if (!props.chat) {
     return (
-      <div className="flex-1 min-w-0 bg-[#f4f7fb] dark:bg-[#060b12] aurora:bg-[#081116] linen:bg-[#ddd2bc] tg-chat-pattern flex flex-col items-center justify-center select-none text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6f5d4b] transition-colors px-6">
+      <div className="hidden lg:flex flex-1 min-w-0 bg-[#f4f7fb] dark:bg-[#060b12] aurora:bg-[#081116] linen:bg-[#ddd2bc] tg-chat-pattern flex-col items-center justify-center select-none text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6f5d4b] transition-colors px-6">
         <div className="flex flex-col items-center text-center max-w-xs space-y-2.5 px-6 py-5 rounded-2xl bg-white/80 dark:bg-[#0a1320]/80 aurora:bg-[#0e1b23]/82 linen:bg-[#f7f1e5]/92 backdrop-blur-md border border-[#e2e8f0] dark:border-[#162436] aurora:border-[#2dd4bf]/35 linen:border-[#cbbba2] shadow-xs aurora:shadow-[0_0_28px_rgba(34,211,238,0.12)]">
           <div className="w-10 h-10 rounded-xl bg-[#e8f3ff] dark:bg-[#2ba0ff]/12 aurora:bg-[#112d36] linen:bg-[#efe2ce] border border-[#bfdbfe] dark:border-[#2ba0ff]/25 aurora:border-[#2dd4bf]/35 linen:border-[#d4bc9c] flex items-center justify-center text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#5eead4] linen:text-[#a86a43]">
             <Sparkles className="w-5 h-5" />

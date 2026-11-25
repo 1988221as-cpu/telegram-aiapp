@@ -587,6 +587,17 @@ export async function initDatabase() {
       updated_at INTEGER NOT NULL,
       PRIMARY KEY (account_id, chat_id)
     );
+
+    -- 10. Persistent Pending Real-time Local Updates Queue (survives restart before client ACK)
+    CREATE TABLE IF NOT EXISTS pending_local_updates (
+      seq INTEGER PRIMARY KEY AUTOINCREMENT,
+      update_id TEXT NOT NULL UNIQUE,
+      account_id TEXT NOT NULL,
+      update_type TEXT NOT NULL DEFAULT 'message',
+      payload_json TEXT NOT NULL,
+      created_at INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_pending_local_updates_account_seq ON pending_local_updates (account_id, seq);
   `);
 
   try {
@@ -1932,6 +1943,7 @@ export async function purgeDatabaseBusinessData(): Promise<{
     'chat_language_prefs',
     'training_logs',
     'custom_llm_daily_usage',
+    'pending_local_updates',
   ];
 
   for (const tbl of tablesToClear) {

@@ -38,6 +38,9 @@ interface AiAssistantModalProps {
   activeChatTitle?: string;
   operatorAvatarUrl?: string;
   operatorInitial?: string;
+  maxDockedWidthBudget?: number;
+  forceOverlayDocked?: boolean;
+  onDockedLayoutChange?: (info: { isDockedInFlow: boolean; width: number }) => void;
 }
 
 type LayoutMode = 'docked' | 'floating' | 'fullscreen';
@@ -63,10 +66,13 @@ interface WindowRect {
   height: number;
 }
 
-function clampDockedWidth(width: number): number {
+function clampDockedWidth(width: number, maxBudget?: number): number {
   const vw = typeof window !== 'undefined' ? window.innerWidth : 1280;
-  const maxAllowed = Math.max(MIN_DOCKED_WIDTH, Math.min(MAX_DOCKED_WIDTH, vw - 560));
-  return Math.min(maxAllowed, Math.max(MIN_DOCKED_WIDTH, Math.round(width)));
+  const fallbackBudget = vw - 560;
+  const rawBudget = typeof maxBudget === 'number' && Number.isFinite(maxBudget) ? maxBudget : fallbackBudget;
+  const maxAllowed = Math.max(280, Math.min(MAX_DOCKED_WIDTH, Math.round(rawBudget)));
+  const minAllowed = Math.min(MIN_DOCKED_WIDTH, maxAllowed);
+  return Math.min(maxAllowed, Math.max(minAllowed, Math.round(width)));
 }
 
 function loadSavedDockedWidth(): number {
@@ -371,6 +377,9 @@ export const AiAssistantModal: React.FC<AiAssistantModalProps> = ({
   activeChatTitle,
   operatorAvatarUrl,
   operatorInitial = '我',
+  maxDockedWidthBudget,
+  forceOverlayDocked = false,
+  onDockedLayoutChange,
 }) => {
   const [isMinimized, setIsMinimized] = useState(false);
   const [layoutMode, setLayoutMode] = useState<LayoutMode>('docked');
@@ -462,11 +471,17 @@ export const AiAssistantModal: React.FC<AiAssistantModalProps> = ({
     };
   }, []);
 
-  // Re-clamp floating rect & docked width if viewport resizes
+  const effectiveDockedWidth = clampDockedWidth(dockedWidth, maxDockedWidthBudget);
+  const isDockedInFlow = Boolean(isOpen && !isMinimized && isDocked && !forceOverlayDocked);
+
+  useEffect(() => {
+    onDockedLayoutChange?.({ isDockedInFlow, width: effectiveDockedWidth });
+  }, [isDockedInFlow, effectiveDockedWidth, onDockedLayoutChange]);
+
+  // Re-clamp floating rect if viewport resizes (docked width uses dynamic effectiveDockedWidth)
   useEffect(() => {
     const onResize = () => {
       setRect((prev) => clampRectToViewport(prev));
-      setDockedWidth((prev) => clampDockedWidth(prev));
     };
     window.addEventListener('resize', onResize);
     return () => window.removeEventListener('resize', onResize);
@@ -623,12 +638,14 @@ export const AiAssistantModal: React.FC<AiAssistantModalProps> = ({
     e.stopPropagation();
     dragCleanupRef.current?.();
     const startX = e.clientX;
-    const startW = dockedWidthRef.current;
+    const startW = effectiveDockedWidth;
+    let didMove = false;
     setIsResizingDocked(true);
 
     const onMove = (mv: MouseEvent) => {
       const delta = startX - mv.clientX; // dragging left widens the right docked panel
-      setDockedWidth(clampDockedWidth(startW + delta));
+      if (Math.abs(delta) >= 1) didMove = true;
+      setDockedWidth(clampDockedWidth(startW + delta, maxDockedWidthBudget));
     };
 
     const cleanup = () => {
@@ -640,9 +657,11 @@ export const AiAssistantModal: React.FC<AiAssistantModalProps> = ({
     const onUp = () => {
       cleanup();
       setIsResizingDocked(false);
-      try {
-        localStorage.setItem(DOCKED_WIDTH_STORAGE_KEY, String(dockedWidthRef.current));
-      } catch {}
+      if (didMove) {
+        try {
+          localStorage.setItem(DOCKED_WIDTH_STORAGE_KEY, String(dockedWidthRef.current));
+        } catch {}
+      }
     };
 
     dragCleanupRef.current = cleanup;
@@ -1016,12 +1035,20 @@ export const AiAssistantModal: React.FC<AiAssistantModalProps> = ({
         width: rect.width,
         height: rect.height,
       }
+    : isDocked && forceOverlayDocked
+    ? {
+        width: `min(92vw, ${effectiveDockedWidth}px)`,
+      }
     : {
-        width: `${dockedWidth}px`,
+        width: `${effectiveDockedWidth}px`,
       };
 
   const containerClassName = isDocked
-    ? `relative h-full max-w-[92vw] shrink-0 z-20 flex flex-col overflow-hidden border-l bg-[#f8fafc] dark:bg-[#09111b] aurora:bg-[#0b151c] linen:bg-[#f6efe2] border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#1d3944] linen:border-[#cbbba2] text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118] ${
+    ? `${
+        forceOverlayDocked
+          ? 'fixed inset-y-0 right-0 z-40 shadow-2xl'
+          : 'relative h-full shrink-0 z-20'
+      } max-w-[92vw] flex flex-col overflow-hidden border-l bg-[#f8fafc] dark:bg-[#09111b] aurora:bg-[#0b151c] linen:bg-[#f6efe2] border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#1d3944] linen:border-[#cbbba2] text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118] ${
         isDragOver ? 'ring-2 ring-inset ring-[#2481cc] dark:ring-[#2ba0ff] aurora:ring-[#2dd4bf] linen:ring-[#a86a43]' : ''
       }`
     : `fixed z-[55] flex flex-col rounded-2xl overflow-hidden border shadow-2xl linen:shadow-xl transition-[box-shadow] bg-[#f8fafc] dark:bg-[#09111b] aurora:bg-[#0b151c] linen:bg-[#f6efe2] border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#1d3944] linen:border-[#cbbba2] text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118] ${
@@ -1030,6 +1057,13 @@ export const AiAssistantModal: React.FC<AiAssistantModalProps> = ({
 
   return (
     <>
+      {isDocked && forceOverlayDocked && (
+        <div
+          onClick={onClose}
+          className="fixed inset-0 bg-black/45 backdrop-blur-[2px] z-30 animate-in fade-in duration-150"
+          aria-hidden="true"
+        />
+      )}
       {/* Docked Right Split Panel (default, shrinks ChatArea to center) or In-App Floating / Fullscreen Window */}
       <aside
         ref={panelRef}
@@ -1056,7 +1090,7 @@ export const AiAssistantModal: React.FC<AiAssistantModalProps> = ({
           <div
             onMouseDown={handleStartResizeDocked}
             onDoubleClick={() => {
-              const resetW = clampDockedWidth(DEFAULT_DOCKED_WIDTH);
+              const resetW = clampDockedWidth(DEFAULT_DOCKED_WIDTH, maxDockedWidthBudget);
               setDockedWidth(resetW);
               try {
                 localStorage.setItem(DOCKED_WIDTH_STORAGE_KEY, String(resetW));

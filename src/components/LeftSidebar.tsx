@@ -53,6 +53,7 @@ interface LeftSidebarProps {
   isMasterVoiceActive?: boolean;
   activeTab: 'chats' | 'memory' | 'llm' | 'translation' | 'voice' | 'persona';
   setActiveTab: (tab: 'chats' | 'memory' | 'llm' | 'translation' | 'voice' | 'persona') => void;
+  compact?: boolean;
 }
 
 export const LeftSidebar: React.FC<LeftSidebarProps> = React.memo(({
@@ -81,6 +82,7 @@ export const LeftSidebar: React.FC<LeftSidebarProps> = React.memo(({
   isMasterVoiceActive,
   activeTab,
   setActiveTab,
+  compact = false,
 }) => {
   const [failedAvatarKeys, setFailedAvatarKeys] = useState<Record<string, string>>({});
   const [avatarRetryNonce, setAvatarRetryNonce] = useState<Record<string, number>>({});
@@ -311,7 +313,7 @@ export const LeftSidebar: React.FC<LeftSidebarProps> = React.memo(({
   const totalUnread = accounts.reduce((acc, curr) => acc + (curr.unreadTotal || 0), 0);
 
   const railItemClass = (isActive: boolean) =>
-    `w-full h-14 flex flex-col items-center justify-center rounded-xl transition-all cursor-pointer relative group border ${
+    `w-full ${compact ? 'h-11' : 'h-14'} flex flex-col items-center justify-center rounded-xl transition-all cursor-pointer relative group border ${
       isActive
         ? 'bg-[#e8f3ff] dark:bg-[#12253c] aurora:bg-[#112e37] linen:bg-[#a6907c]/75 border-[#bfdbfe] dark:border-[#2ba0ff]/35 aurora:border-[#2dd4bf]/55 linen:border-[#f3e6d3]/40 text-[#0284c7] dark:text-[#2ba0ff] aurora:text-[#5eead4] linen:text-[#fff9f0] font-medium shadow-[inset_3px_0_0_#2ba0ff] aurora:shadow-[0_0_16px_rgba(45,212,191,0.22),inset_3px_0_0_#2dd4bf] linen:shadow-xs'
         : 'border-transparent text-[#64748b] dark:text-[#7f95ab] aurora:text-[#7e9aa5] linen:text-[#eee4d6]/90 hover:text-[#0f172a] dark:hover:text-[#eef4fb] aurora:hover:text-[#ecf6f8] linen:hover:text-white hover:bg-black/5 dark:hover:bg-[#101c2d] aurora:hover:bg-[#112028] linen:hover:bg-white/10'
@@ -320,7 +322,7 @@ export const LeftSidebar: React.FC<LeftSidebarProps> = React.memo(({
   return (
     <aside
       ref={asideRef}
-      className="w-[120px] bg-[#f8fafc]/95 dark:bg-[#060b13]/95 aurora:bg-[#0b1318]/95 linen:hs-linen-rail-bg backdrop-blur-md border-r border-[#e2e8f0] dark:border-[#162436] aurora:border-[#182b34] linen:border-[#5d4c3e] flex flex-col items-center py-3.5 shrink-0 select-none h-full z-30 relative transition-colors text-[#475569] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#f5ede2]"
+      className={`${compact ? 'w-[68px]' : 'w-[120px]'} bg-[#f8fafc]/95 dark:bg-[#060b13]/95 aurora:bg-[#0b1318]/95 linen:hs-linen-rail-bg backdrop-blur-md border-r border-[#e2e8f0] dark:border-[#162436] aurora:border-[#182b34] linen:border-[#5d4c3e] flex flex-col items-center py-3.5 shrink-0 select-none h-full z-30 relative transition-[width,colors] duration-150 text-[#475569] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#f5ede2]`}
     >
       {/* 1. Top Section: HumanSense Brand Logo + Main Menu + Feature Activity Rail */}
       <div ref={topSectionRef} className="flex flex-col items-center w-full gap-2 shrink-0">
@@ -341,7 +343,7 @@ export const LeftSidebar: React.FC<LeftSidebarProps> = React.memo(({
         <div className="w-10 h-px bg-[#e2e8f0] dark:bg-[#18273a] aurora:bg-[#1a2e38] linen:bg-white/20 my-0.5" />
 
         {/* Feature Navigation Rail Items */}
-        <div className="w-full flex flex-col items-center gap-2 px-2.5">
+        <div className={`w-full flex flex-col items-center gap-2 ${compact ? 'px-1.5' : 'px-2.5'}`}>
           {/* 1. 所有消息 (Chats) */}
           <button
             onClick={() => setActiveTab('chats')}
@@ -356,7 +358,7 @@ export const LeftSidebar: React.FC<LeftSidebarProps> = React.memo(({
                 </span>
               )}
             </div>
-            <span className="text-xs leading-none mt-1.5 whitespace-nowrap tracking-wide">聊天</span>
+            {!compact && <span className="text-xs leading-none mt-1.5 whitespace-nowrap tracking-wide">聊天</span>}
           </button>
 
           {/* 1.5 独立 AI助手入口 (位于聊天正下方、展开/收起上方，不随功能区折叠) */}
@@ -367,7 +369,7 @@ export const LeftSidebar: React.FC<LeftSidebarProps> = React.memo(({
             className={railItemClass(Boolean(isAiAssistantOpen))}
           >
             <Bot className="w-5 h-5 group-hover:scale-105 transition-transform" />
-            <span className="text-xs leading-none mt-1.5 whitespace-nowrap tracking-wide">AI助手</span>
+            {!compact && <span className="text-xs leading-none mt-1.5 whitespace-nowrap tracking-wide">AI助手</span>}
           </button>
 
           {/* Collapse/Expand Toggle for Feature Tools (图2) */}
@@ -380,12 +382,12 @@ export const LeftSidebar: React.FC<LeftSidebarProps> = React.memo(({
             {isToolsCollapsed ? (
               <>
                 <ChevronDown className="w-3.5 h-3.5" />
-                <span>展开</span>
+                {!compact && <span>展开</span>}
               </>
             ) : (
               <>
                 <ChevronUp className="w-3.5 h-3.5" />
-                <span>收起</span>
+                {!compact && <span>收起</span>}
               </>
             )}
           </button>
@@ -407,7 +409,7 @@ export const LeftSidebar: React.FC<LeftSidebarProps> = React.memo(({
             className={railItemClass(activeTab === 'memory')}
           >
             <Brain className="w-5 h-5 group-hover:scale-105 transition-transform" />
-            <span className="text-xs leading-none mt-1.5 whitespace-nowrap tracking-wide">记忆</span>
+            {!compact && <span className="text-xs leading-none mt-1.5 whitespace-nowrap tracking-wide">记忆</span>}
           </button>
 
           {/* 3. 大模型接入 (LLM Integration) */}
@@ -420,7 +422,7 @@ export const LeftSidebar: React.FC<LeftSidebarProps> = React.memo(({
             className={railItemClass(activeTab === 'llm')}
           >
             <Cpu className="w-5 h-5 group-hover:scale-105 transition-transform" />
-            <span className="text-xs leading-none mt-1.5 whitespace-nowrap tracking-wide">模型</span>
+            {!compact && <span className="text-xs leading-none mt-1.5 whitespace-nowrap tracking-wide">模型</span>}
           </button>
 
           {/* 4. 翻译调整 (Translation Settings) */}
@@ -433,7 +435,7 @@ export const LeftSidebar: React.FC<LeftSidebarProps> = React.memo(({
             className={railItemClass(activeTab === 'translation')}
           >
             <Languages className="w-5 h-5 group-hover:scale-105 transition-transform" />
-            <span className="text-xs leading-none mt-1.5 whitespace-nowrap tracking-wide">翻译</span>
+            {!compact && <span className="text-xs leading-none mt-1.5 whitespace-nowrap tracking-wide">翻译</span>}
           </button>
 
           {/* 5. 预设音色与参考录音 */}
@@ -451,7 +453,7 @@ export const LeftSidebar: React.FC<LeftSidebarProps> = React.memo(({
                 <span className="absolute -top-0.5 -right-0.5 w-2 h-2 rounded-full bg-[#2ba0ff] aurora:bg-[#2dd4bf] linen:bg-[#e9b87a] ring-2 ring-[#f8fafc] dark:ring-[#060b13] aurora:ring-[#0b1318] linen:ring-[#6d5b4b]" />
               )}
             </div>
-            <span className="text-xs leading-none mt-1.5 whitespace-nowrap tracking-wide">音色</span>
+            {!compact && <span className="text-xs leading-none mt-1.5 whitespace-nowrap tracking-wide">音色</span>}
           </button>
 
           {/* 6. 人设资料 (Persona Profile Studio) */}
@@ -464,7 +466,7 @@ export const LeftSidebar: React.FC<LeftSidebarProps> = React.memo(({
             className={railItemClass(activeTab === 'persona')}
           >
             <Sparkles className="w-5 h-5 group-hover:scale-105 transition-transform" />
-            <span className="text-xs leading-none mt-1.5 whitespace-nowrap tracking-wide">人设</span>
+            {!compact && <span className="text-xs leading-none mt-1.5 whitespace-nowrap tracking-wide">人设</span>}
           </button>
             </div>
           </div>
@@ -662,7 +664,7 @@ export const LeftSidebar: React.FC<LeftSidebarProps> = React.memo(({
                         openRemarkEditor(acc, e.currentTarget.parentElement);
                       }}
                       title={remarkText ? `编辑自定义名与分组：${remarkText}` : '设置自定义名与分组'}
-                      className="opacity-0 group-hover:opacity-100 focus:opacity-100 absolute -top-1 right-3.5 w-4 h-4 rounded-full bg-white dark:bg-[#0f1a29] aurora:bg-[#101c23] linen:bg-[#f8f2e7] border border-[#cbd5e1] dark:border-[#243952] aurora:border-[#223d47] linen:border-[#cbbba2] text-[#475569] dark:text-[#9cb2c9] aurora:text-[#8eb2bd] linen:text-[#5c4b3b] hover:text-[#2ba0ff] aurora:hover:text-[#2dd4bf] linen:hover:text-[#a86a43] flex items-center justify-center shadow-xs transition-opacity cursor-pointer z-10"
+                      className={`opacity-0 group-hover:opacity-100 focus:opacity-100 absolute -top-1 ${compact ? 'right-1' : 'right-3.5'} w-4 h-4 rounded-full bg-white dark:bg-[#0f1a29] aurora:bg-[#101c23] linen:bg-[#f8f2e7] border border-[#cbd5e1] dark:border-[#243952] aurora:border-[#223d47] linen:border-[#cbbba2] text-[#475569] dark:text-[#9cb2c9] aurora:text-[#8eb2bd] linen:text-[#5c4b3b] hover:text-[#2ba0ff] aurora:hover:text-[#2dd4bf] linen:hover:text-[#a86a43] flex items-center justify-center shadow-xs transition-opacity cursor-pointer z-10`}
                     >
                       <Pencil className="w-2.5 h-2.5" />
                     </button>
@@ -681,7 +683,7 @@ export const LeftSidebar: React.FC<LeftSidebarProps> = React.memo(({
                         }
                       }}
                       title={`自定义名: ${remarkText}（原名: ${acc.name}）`}
-                      className={`mt-1 w-[108px] max-w-[108px] truncate px-1.5 py-0.5 rounded text-[10px] leading-tight cursor-pointer transition-colors text-center ${
+                      className={`mt-1 ${compact ? 'w-[56px] max-w-[56px] px-1' : 'w-[108px] max-w-[108px] px-1.5'} truncate py-0.5 rounded text-[10px] leading-tight cursor-pointer transition-colors text-center ${
                         isSelected
                           ? 'bg-[#e8f3ff] dark:bg-[#12253c] aurora:bg-[#112e37] linen:bg-[#a6907c]/80 text-[#0284c7] dark:text-[#2ba0ff] aurora:text-[#5eead4] linen:text-white font-medium'
                           : 'text-[#64748b] dark:text-[#8ea4ba] aurora:text-[#8ca9b3] linen:text-[#efe5d7]/90 hover:text-[#0f172a] dark:hover:text-[#eef4fb] linen:hover:text-white'
@@ -870,10 +872,10 @@ export const LeftSidebar: React.FC<LeftSidebarProps> = React.memo(({
               type="button"
               onClick={(e) => openGroupEditor('create', undefined, e.currentTarget)}
               title="新建账号分组"
-              className="w-12 h-6 rounded-md border border-dashed border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#213a45] linen:border-white/30 hover:border-[#2ba0ff] aurora:hover:border-[#2dd4bf] linen:hover:border-[#fff8ee] linen:bg-white/10 text-[#64748b] dark:text-[#7f95ab] aurora:text-[#7e9aa5] linen:text-[#f5ede2] hover:text-[#0284c7] dark:hover:text-[#2ba0ff] aurora:hover:text-[#5eead4] linen:hover:text-white flex items-center justify-center gap-1 text-[10px] transition-colors cursor-pointer shrink-0"
+              className={`${compact ? 'w-10' : 'w-12'} h-6 rounded-md border border-dashed border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#213a45] linen:border-white/30 hover:border-[#2ba0ff] aurora:hover:border-[#2dd4bf] linen:hover:border-[#fff8ee] linen:bg-white/10 text-[#64748b] dark:text-[#7f95ab] aurora:text-[#7e9aa5] linen:text-[#f5ede2] hover:text-[#0284c7] dark:hover:text-[#2ba0ff] aurora:hover:text-[#5eead4] linen:hover:text-white flex items-center justify-center gap-1 text-[10px] transition-colors cursor-pointer shrink-0`}
             >
               <FolderPlus className="w-3 h-3" />
-              <span>分组</span>
+              {!compact && <span>分组</span>}
             </button>
           )}
         </div>

@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useMemo } from 'react';
+import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import { LeftSidebar } from './components/LeftSidebar';
 import { ChatList } from './components/ChatList';
 import { ChatArea, detectClientLangCode } from './components/ChatArea';
@@ -761,6 +761,26 @@ export default function App() {
   const [isDatabaseOpen, setIsDatabaseOpen] = useState(false);
   const [isSystemSettingsOpen, setIsSystemSettingsOpen] = useState(false);
   const [isAiAssistantOpen, setIsAiAssistantOpen] = useState(false);
+  const [viewportWidth, setViewportWidth] = useState<number>(() =>
+    typeof window !== 'undefined' ? window.innerWidth : 1440
+  );
+  const [aiDockedInfo, setAiDockedInfo] = useState<{ isDockedInFlow: boolean; width: number }>({
+    isDockedInFlow: false,
+    width: 420,
+  });
+
+  useEffect(() => {
+    const handleResize = () => setViewportWidth(window.innerWidth);
+    window.addEventListener('resize', handleResize);
+    return () => window.removeEventListener('resize', handleResize);
+  }, []);
+
+  const handleAiDockedLayoutChange = useCallback((info: { isDockedInFlow: boolean; width: number }) => {
+    setAiDockedInfo((prev) =>
+      prev.isDockedInFlow === info.isDockedInFlow && prev.width === info.width ? prev : info
+    );
+  }, []);
+
   const [isMasterVoiceActive, setIsMasterVoiceActive] = useState(() => {
     const mv = getMasterVoiceprint();
     return !!mv?.enabledAsDefault;
@@ -6837,10 +6857,37 @@ export default function App() {
     [contacts]
   );
 
+  const MIN_CHAT_AREA_WIDTH = 460;
+  const isNarrowViewport = viewportWidth < 1024;
+  const isMediumViewport = viewportWidth >= 1024 && viewportWidth < 1360;
+  const isMemoryOpenForChat = isChatMemoryOpen && Boolean(activeChatId);
+  const isAiDockedActive = isAiAssistantOpen && aiDockedInfo.isDockedInFlow && !isNarrowViewport;
+  const forceMemoryOverlay = isNarrowViewport || (isAiDockedActive && viewportWidth < 1520);
+  const isMemoryDockedInFlow = isMemoryOpenForChat && !forceMemoryOverlay;
+  const hasRightDockedInFlow = isMemoryDockedInFlow || isAiDockedActive;
+  const isCompactLeftRail = isNarrowViewport || (isMediumViewport && hasRightDockedInFlow);
+  const leftRailWidth = isCompactLeftRail ? 68 : 120;
+  const memoryDockedWidth = viewportWidth < 1100 ? 316 : isMediumViewport ? 340 : 400;
+  const reservedMemoryWidth = isMemoryDockedInFlow ? memoryDockedWidth : 0;
+  const maxAiDockedBudget = Math.max(
+    280,
+    viewportWidth - leftRailWidth - 200 - reservedMemoryWidth - MIN_CHAT_AREA_WIDTH
+  );
+  const effectiveAiDockedWidth = isAiDockedActive
+    ? Math.min(aiDockedInfo.width, maxAiDockedBudget)
+    : 0;
+  const maxChatListWidthCap = isNarrowViewport
+    ? undefined
+    : Math.max(
+        180,
+        viewportWidth - leftRailWidth - reservedMemoryWidth - effectiveAiDockedWidth - MIN_CHAT_AREA_WIDTH
+      );
+
   return (
     <div className="flex h-screen w-screen overflow-hidden bg-[#f4f7fb] text-[#0f172a] dark:bg-[#05080f] dark:text-[#eef4fb] aurora:bg-[#081116] aurora:text-[#ecf6f8] linen:bg-[#ddd2bc] linen:text-[#2b2118] font-sans antialiased transition-colors">
-      {/* 1. Leftmost Features & Multi-Account Activity Rail (56px) */}
+      {/* 1. Leftmost Features & Multi-Account Activity Rail (120px default / 68px compact) */}
       <LeftSidebar
+        compact={isCompactLeftRail}
         accounts={accountsWithUnread}
         accountGroups={accountGroups}
         activeAccountId={activeAccountId}
@@ -7024,6 +7071,9 @@ export default function App() {
           customChatOrder={activeAccountId ? (chatOrderByAccount[activeAccountId] || []) : []}
           onReorderChats={handleReorderChats}
           onResetChatOrder={handleResetChatOrder}
+          maxWidthCap={maxChatListWidthCap}
+          hiddenOnNarrow={isNarrowViewport && Boolean(activeChatId)}
+          expandOnNarrow={isNarrowViewport && !activeChatId}
         />
 
         {/* 3. Official Telegram Center Main Chat Workbench Pane (flex-1) */}
@@ -7160,6 +7210,8 @@ export default function App() {
         <CustomerMemoryDrawer
           isOpen={isChatMemoryOpen && Boolean(activeChatId)}
           sideDocked={true}
+          dockedWidth={memoryDockedWidth}
+          forceOverlay={forceMemoryOverlay}
           onClose={() => setIsChatMemoryOpen(false)}
           profile={customerProfile}
           chatId={activeChatId || ''}
@@ -7199,6 +7251,9 @@ export default function App() {
             currentAccount ? resolveAccountAvatarSrc(currentAccount.id, currentAccount.avatarUrl) : undefined
           }
           operatorInitial={currentAccount?.avatarInitial || '我'}
+          maxDockedWidthBudget={maxAiDockedBudget}
+          forceOverlayDocked={isNarrowViewport}
+          onDockedLayoutChange={handleAiDockedLayoutChange}
         />
 
         {/* 3.5 Unified Feature Modal Page Overlay (Standalone 5-Tab Modal) */}
