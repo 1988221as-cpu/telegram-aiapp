@@ -457,6 +457,33 @@ export interface EvolutionLogItem {
 
 export type AppThemeMode = 'light' | 'dark' | 'aurora' | 'linen';
 
+export type OfficialThemePresetId =
+  | 'tg_classic'
+  | 'tg_day_blue'
+  | 'tg_night'
+  | 'tg_tinted'
+  | 'aurora'
+  | 'linen';
+
+export type OfficialWallpaperId =
+  | 'default'
+  | 'tg_doodle'
+  | 'tg_sky'
+  | 'tg_ocean'
+  | 'tg_sunset'
+  | 'solid';
+
+export type BubbleCornerStyle = 'compact' | 'standard' | 'rounded';
+
+export interface ChatAppearanceSettings {
+  presetId: OfficialThemePresetId;
+  baseTheme: AppThemeMode;
+  accentColor: string | null; // null = theme default accent
+  wallpaperId: OfficialWallpaperId;
+  wallpaperIntensity: number; // 0..100
+  bubbleStyle: BubbleCornerStyle;
+}
+
 export interface WorkflowPlaybookItem {
   day: number;
   label: string;

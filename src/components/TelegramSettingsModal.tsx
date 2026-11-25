@@ -29,7 +29,21 @@ import {
   ShieldAlert,
   ShieldCheck,
 } from 'lucide-react';
-import { Account, AppThemeMode, Chat, TelegramContact } from '../types';
+import {
+  Account,
+  AppThemeMode,
+  Chat,
+  ChatAppearanceSettings,
+  TelegramContact,
+} from '../types';
+import {
+  BUBBLE_CORNER_OPTIONS,
+  OFFICIAL_ACCENT_SWATCHES,
+  OFFICIAL_THEME_PRESETS,
+  OFFICIAL_WALLPAPER_OPTIONS,
+  computeDerivedThemeTokens,
+  getDefaultAppearance,
+} from '../services/appearanceConfig';
 import {
   updateTelegramUserProfileApi,
   fetchTelegramUserSettingsApi,
@@ -98,6 +112,8 @@ interface TelegramSettingsModalProps {
   theme: AppThemeMode;
   onToggleTheme: () => void;
   onSelectTheme?: (theme: AppThemeMode) => void;
+  appearance?: ChatAppearanceSettings;
+  onUpdateAppearance?: (next: ChatAppearanceSettings) => void;
   onOpenSystemAdmin?: () => void;
   clientPrefs?: TelegramClientPrefs;
   onUpdateClientPrefs?: (updated: TelegramClientPrefs) => void;
@@ -129,6 +145,8 @@ export const TelegramSettingsModal: React.FC<TelegramSettingsModalProps> = ({
   theme,
   onToggleTheme,
   onSelectTheme,
+  appearance,
+  onUpdateAppearance,
   onOpenSystemAdmin,
   clientPrefs: externalPrefs,
   onUpdateClientPrefs,
@@ -137,6 +155,19 @@ export const TelegramSettingsModal: React.FC<TelegramSettingsModalProps> = ({
   refreshSignal,
   accountChats = [],
 }) => {
+  const effectiveAppearance: ChatAppearanceSettings = appearance || getDefaultAppearance(theme);
+  const derivedTokens = computeDerivedThemeTokens(effectiveAppearance);
+  const applyAppearancePatch = (patch: Partial<ChatAppearanceSettings>) => {
+    const next: ChatAppearanceSettings = {
+      ...effectiveAppearance,
+      ...patch,
+    };
+    if (onUpdateAppearance) {
+      onUpdateAppearance(next);
+    } else if (patch.baseTheme && onSelectTheme) {
+      onSelectTheme(patch.baseTheme);
+    }
+  };
   const [activeTab, setActiveTab] = useState<'profile' | 'privacy' | 'notifications' | 'appearance' | 'folders'>('profile');
 
   // Profile state
@@ -872,79 +903,120 @@ export const TelegramSettingsModal: React.FC<TelegramSettingsModalProps> = ({
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/55 dark:bg-black/75 aurora:bg-black/80 linen:bg-black/45 backdrop-blur-xs select-none">
-      <div className="relative w-full max-w-2xl bg-white dark:bg-[#0b131f] aurora:bg-[#0c151b] linen:bg-[#f8f2e7] rounded-2xl shadow-2xl linen:shadow-sm border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] linen:border-[#d5c6ae] overflow-hidden flex flex-col md:flex-row max-h-[85vh]">
-        {/* Left Settings Sidebar */}
-        <div className="w-full md:w-56 bg-[#f8fafc] dark:bg-[#0d1726] aurora:bg-[#0e1920] linen:bg-[#f0e6d5] border-b md:border-b-0 md:border-r border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] linen:border-[#dfd2bc] p-3 flex flex-col shrink-0">
-          <div className="px-3 py-2 text-xs font-bold text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a] uppercase tracking-wider mb-1">
-            电报设置
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-2.5 sm:p-4 bg-black/55 dark:bg-black/75 aurora:bg-black/80 linen:bg-black/45 backdrop-blur-xs select-none">
+      <div className="relative w-full max-w-2xl bg-white dark:bg-[#0b131f] aurora:bg-[#0c151b] linen:bg-[#f8f2e7] rounded-2xl shadow-2xl linen:shadow-sm border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] linen:border-[#d5c6ae] overflow-hidden flex flex-col md:flex-row max-h-[92vh] md:max-h-[85vh]">
+        {/* Left Settings Sidebar (Desktop) / Compact Horizontal Segmented Bar (Narrow < 768px) */}
+        <div className="w-full md:w-56 bg-[#f8fafc] dark:bg-[#0d1726] aurora:bg-[#0e1920] linen:bg-[#f0e6d5] border-b md:border-b-0 md:border-r border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] linen:border-[#dfd2bc] px-3 pt-2.5 pb-2 md:p-3 flex flex-col gap-2 md:gap-0 shrink-0">
+          <div className="flex items-center justify-between gap-2 px-1 md:px-3 md:py-2 md:mb-1">
+            <div className="text-xs font-bold text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a] uppercase tracking-wider">
+              电报设置
+            </div>
+            <div className="flex items-center gap-1 md:hidden">
+              {onOpenSystemAdmin && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    onClose();
+                    onOpenSystemAdmin();
+                  }}
+                  title="工作台系统管理"
+                  className="px-2 py-1 rounded-lg text-[11px] font-medium text-[#2481cc] dark:text-[#7cc4ff] aurora:text-[#5eead4] linen:text-[#8c522d] hover:bg-[#e2e8f0]/60 dark:hover:bg-[#132234] aurora:hover:bg-[#13252e] linen:hover:bg-[#e5d9c5] flex items-center gap-1 cursor-pointer transition-colors whitespace-nowrap"
+                >
+                  <Sliders className="w-3.5 h-3.5" />
+                  <span>系统管理</span>
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={loadOfficialCloudSettings}
+                disabled={isLoadingCloud}
+                title="从 Telegram 云端刷新最新设置"
+                className="p-1.5 rounded-lg text-[#64748b] hover:text-[#0f172a] dark:text-[#7b93ad] dark:hover:text-[#eef4fb] aurora:text-[#7e9aa5] aurora:hover:text-[#ecf6f8] linen:text-[#6e5c4a] linen:hover:text-[#2b2118] hover:bg-[#e2e8f0]/60 dark:hover:bg-[#132234] aurora:hover:bg-[#13252e] linen:hover:bg-[#e5d9c5] transition-colors cursor-pointer disabled:opacity-50"
+              >
+                <RefreshCw className={`w-3.5 h-3.5 ${isLoadingCloud ? 'animate-spin' : ''}`} />
+              </button>
+              <button
+                type="button"
+                onClick={onClose}
+                title="关闭"
+                className="p-1.5 rounded-lg text-[#64748b] hover:text-[#0f172a] dark:text-[#7b93ad] dark:hover:text-[#eef4fb] aurora:text-[#7e9aa5] aurora:hover:text-[#ecf6f8] linen:text-[#6e5c4a] linen:hover:text-[#2b2118] hover:bg-[#e2e8f0]/60 dark:hover:bg-[#132234] aurora:hover:bg-[#13252e] linen:hover:bg-[#e5d9c5] transition-colors cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
           </div>
 
-          <div className="space-y-1 text-xs font-medium">
+          <div className="flex md:flex-col items-center md:items-stretch gap-1 p-1 md:p-0 rounded-xl md:rounded-none bg-[#e9eff6]/80 dark:bg-[#08101a] aurora:bg-[#081116] linen:bg-[#e6dac7] md:bg-transparent md:dark:bg-transparent md:aurora:bg-transparent md:linen:bg-transparent overflow-x-auto no-scrollbar text-xs font-medium">
             <button
+              type="button"
               onClick={() => { setActiveTab('profile'); setActionFeedback(null); }}
-              className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-left cursor-pointer transition-colors ${
+              className={`flex-1 md:flex-none md:w-full flex items-center justify-center md:justify-start gap-1.5 md:gap-3 px-2.5 py-1.5 md:px-3 md:py-2.5 rounded-lg md:rounded-xl text-left cursor-pointer transition-colors whitespace-nowrap shrink-0 ${
                 activeTab === 'profile'
                   ? 'bg-[#2481cc] dark:bg-[#2ba0ff] aurora:bg-[#0d9488] linen:bg-[#a86a43] text-white shadow-xs'
-                  : 'text-[#0f172a] dark:text-[#b4c6d8] aurora:text-[#b7d0d8] linen:text-[#4e3f32] hover:bg-[#e2e8f0]/60 dark:hover:bg-[#132234] aurora:hover:bg-[#13252e] linen:hover:bg-[#e5d9c5]'
+                  : 'text-[#0f172a] dark:text-[#b4c6d8] aurora:text-[#b7d0d8] linen:text-[#4e3f32] hover:bg-white/70 md:hover:bg-[#e2e8f0]/60 dark:hover:bg-[#132234] aurora:hover:bg-[#13252e] linen:hover:bg-[#f4ede0] md:linen:hover:bg-[#e5d9c5]'
               }`}
             >
-              <User className="w-4 h-4 shrink-0" />
+              <User className="w-3.5 h-3.5 md:w-4 md:h-4 shrink-0" />
               <span>个人资料</span>
             </button>
 
             <button
+              type="button"
               onClick={() => { setActiveTab('privacy'); setActionFeedback(null); }}
-              className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-left cursor-pointer transition-colors ${
+              className={`flex-1 md:flex-none md:w-full flex items-center justify-center md:justify-start gap-1.5 md:gap-3 px-2.5 py-1.5 md:px-3 md:py-2.5 rounded-lg md:rounded-xl text-left cursor-pointer transition-colors whitespace-nowrap shrink-0 ${
                 activeTab === 'privacy'
                   ? 'bg-[#2481cc] dark:bg-[#2ba0ff] aurora:bg-[#0d9488] linen:bg-[#a86a43] text-white shadow-xs'
-                  : 'text-[#0f172a] dark:text-[#b4c6d8] aurora:text-[#b7d0d8] linen:text-[#4e3f32] hover:bg-[#e2e8f0]/60 dark:hover:bg-[#132234] aurora:hover:bg-[#13252e] linen:hover:bg-[#e5d9c5]'
+                  : 'text-[#0f172a] dark:text-[#b4c6d8] aurora:text-[#b7d0d8] linen:text-[#4e3f32] hover:bg-white/70 md:hover:bg-[#e2e8f0]/60 dark:hover:bg-[#132234] aurora:hover:bg-[#13252e] linen:hover:bg-[#f4ede0] md:linen:hover:bg-[#e5d9c5]'
               }`}
             >
-              <Shield className="w-4 h-4 shrink-0" />
+              <Shield className="w-3.5 h-3.5 md:w-4 md:h-4 shrink-0" />
               <span>隐私与安全</span>
             </button>
 
             <button
+              type="button"
               onClick={() => { setActiveTab('notifications'); setActionFeedback(null); }}
-              className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-left cursor-pointer transition-colors ${
+              className={`flex-1 md:flex-none md:w-full flex items-center justify-center md:justify-start gap-1.5 md:gap-3 px-2.5 py-1.5 md:px-3 md:py-2.5 rounded-lg md:rounded-xl text-left cursor-pointer transition-colors whitespace-nowrap shrink-0 ${
                 activeTab === 'notifications'
                   ? 'bg-[#2481cc] dark:bg-[#2ba0ff] aurora:bg-[#0d9488] linen:bg-[#a86a43] text-white shadow-xs'
-                  : 'text-[#0f172a] dark:text-[#b4c6d8] aurora:text-[#b7d0d8] linen:text-[#4e3f32] hover:bg-[#e2e8f0]/60 dark:hover:bg-[#132234] aurora:hover:bg-[#13252e] linen:hover:bg-[#e5d9c5]'
+                  : 'text-[#0f172a] dark:text-[#b4c6d8] aurora:text-[#b7d0d8] linen:text-[#4e3f32] hover:bg-white/70 md:hover:bg-[#e2e8f0]/60 dark:hover:bg-[#132234] aurora:hover:bg-[#13252e] linen:hover:bg-[#f4ede0] md:linen:hover:bg-[#e5d9c5]'
               }`}
             >
-              <Bell className="w-4 h-4 shrink-0" />
+              <Bell className="w-3.5 h-3.5 md:w-4 md:h-4 shrink-0" />
               <span>通知与声音</span>
             </button>
 
             <button
+              type="button"
               onClick={() => { setActiveTab('appearance'); setActionFeedback(null); }}
-              className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-left cursor-pointer transition-colors ${
+              className={`flex-1 md:flex-none md:w-full flex items-center justify-center md:justify-start gap-1.5 md:gap-3 px-2.5 py-1.5 md:px-3 md:py-2.5 rounded-lg md:rounded-xl text-left cursor-pointer transition-colors whitespace-nowrap shrink-0 ${
                 activeTab === 'appearance'
                   ? 'bg-[#2481cc] dark:bg-[#2ba0ff] aurora:bg-[#0d9488] linen:bg-[#a86a43] text-white shadow-xs'
-                  : 'text-[#0f172a] dark:text-[#b4c6d8] aurora:text-[#b7d0d8] linen:text-[#4e3f32] hover:bg-[#e2e8f0]/60 dark:hover:bg-[#132234] aurora:hover:bg-[#13252e] linen:hover:bg-[#e5d9c5]'
+                  : 'text-[#0f172a] dark:text-[#b4c6d8] aurora:text-[#b7d0d8] linen:text-[#4e3f32] hover:bg-white/70 md:hover:bg-[#e2e8f0]/60 dark:hover:bg-[#132234] aurora:hover:bg-[#13252e] linen:hover:bg-[#f4ede0] md:linen:hover:bg-[#e5d9c5]'
               }`}
             >
-              <Palette className="w-4 h-4 shrink-0" />
+              <Palette className="w-3.5 h-3.5 md:w-4 md:h-4 shrink-0" />
               <span>对话与外观</span>
             </button>
 
             <button
+              type="button"
               onClick={() => { setActiveTab('folders'); setActionFeedback(null); }}
-              className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-left cursor-pointer transition-colors ${
+              className={`flex-1 md:flex-none md:w-full flex items-center justify-center md:justify-start gap-1.5 md:gap-3 px-2.5 py-1.5 md:px-3 md:py-2.5 rounded-lg md:rounded-xl text-left cursor-pointer transition-colors whitespace-nowrap shrink-0 ${
                 activeTab === 'folders'
                   ? 'bg-[#2481cc] dark:bg-[#2ba0ff] aurora:bg-[#0d9488] linen:bg-[#a86a43] text-white shadow-xs'
-                  : 'text-[#0f172a] dark:text-[#b4c6d8] aurora:text-[#b7d0d8] linen:text-[#4e3f32] hover:bg-[#e2e8f0]/60 dark:hover:bg-[#132234] aurora:hover:bg-[#13252e] linen:hover:bg-[#e5d9c5]'
+                  : 'text-[#0f172a] dark:text-[#b4c6d8] aurora:text-[#b7d0d8] linen:text-[#4e3f32] hover:bg-white/70 md:hover:bg-[#e2e8f0]/60 dark:hover:bg-[#132234] aurora:hover:bg-[#13252e] linen:hover:bg-[#f4ede0] md:linen:hover:bg-[#e5d9c5]'
               }`}
             >
-              <Folder className="w-4 h-4 shrink-0" />
+              <Folder className="w-3.5 h-3.5 md:w-4 md:h-4 shrink-0" />
               <span>对话分组</span>
             </button>
           </div>
 
           {onOpenSystemAdmin && (
-            <div className="mt-auto pt-4 border-t border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] linen:border-[#dfd2bc]">
+            <div className="hidden md:block mt-auto pt-4 border-t border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] linen:border-[#dfd2bc]">
               <button
+                type="button"
                 onClick={() => {
                   onClose();
                   onOpenSystemAdmin();
@@ -959,9 +1031,9 @@ export const TelegramSettingsModal: React.FC<TelegramSettingsModalProps> = ({
         </div>
 
         {/* Right Settings Content */}
-        <div className="flex-1 flex flex-col min-w-0 bg-white dark:bg-[#0b131f] aurora:bg-[#0c151b] linen:bg-[#f8f2e7]">
-          {/* Header */}
-          <div className="h-14 px-6 bg-[#f8fafc] dark:bg-[#0d1726] aurora:bg-[#0e1920] linen:bg-[#f0e6d5] border-b border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] linen:border-[#dfd2bc] flex items-center justify-between shrink-0">
+        <div className="flex-1 min-h-0 flex flex-col min-w-0 bg-white dark:bg-[#0b131f] aurora:bg-[#0c151b] linen:bg-[#f8f2e7]">
+          {/* Header (Desktop Only — merged into compact bar on <768px to maximize vertical scroll area) */}
+          <div className="hidden md:flex h-14 px-6 bg-[#f8fafc] dark:bg-[#0d1726] aurora:bg-[#0e1920] linen:bg-[#f0e6d5] border-b border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] linen:border-[#dfd2bc] items-center justify-between shrink-0">
             <h3 className="font-semibold text-sm text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118]">
               {activeTab === 'profile' && '个人资料'}
               {activeTab === 'privacy' && '隐私与安全'}
@@ -980,6 +1052,7 @@ export const TelegramSettingsModal: React.FC<TelegramSettingsModalProps> = ({
                 <RefreshCw className={`w-4 h-4 ${isLoadingCloud ? 'animate-spin' : ''}`} />
               </button>
               <button
+                type="button"
                 onClick={onClose}
                 className="p-1.5 rounded-lg text-[#64748b] hover:text-[#0f172a] dark:text-[#7b93ad] dark:hover:text-[#eef4fb] aurora:text-[#7e9aa5] aurora:hover:text-[#ecf6f8] linen:text-[#6e5c4a] linen:hover:text-[#2b2118] hover:bg-[#e2e8f0]/60 dark:hover:bg-[#132234] aurora:hover:bg-[#13252e] linen:hover:bg-[#e5d9c5] transition-colors cursor-pointer"
               >
@@ -989,7 +1062,7 @@ export const TelegramSettingsModal: React.FC<TelegramSettingsModalProps> = ({
           </div>
 
           {/* Form Content */}
-          <div className="p-6 flex-1 overflow-y-auto">
+          <div className="p-4 sm:p-6 flex-1 min-h-0 overflow-y-auto">
             {activeTab !== 'appearance' && renderCloudStatusBanner()}
 
             {actionFeedback && (
@@ -2003,53 +2076,276 @@ export const TelegramSettingsModal: React.FC<TelegramSettingsModalProps> = ({
             )}
 
             {activeTab === 'appearance' && (
-              <div className="space-y-4 max-w-md text-xs">
-                <div className="p-3.5 rounded-xl bg-[#f8fafc] dark:bg-[#0e1726]/85 aurora:bg-[#101c23]/90 linen:bg-[#efe6d6]/90 space-y-3 border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] linen:border-[#dfd2bc]">
-                  <div>
-                    <div className="font-semibold text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118]">界面色调模式</div>
-                    <div className="text-[11px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a]">
-                      当前主题: {theme === 'linen' ? '羊皮深纹主题' : theme === 'aurora' ? '极光青暗模式' : theme === 'dark' ? '深夜暗色主题' : '经典亮白主题'}
+              <div className="space-y-4 max-w-xl text-xs">
+                {/* 1. Live Official Telegram Chat Preview Canvas */}
+                <div className="rounded-xl border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] linen:border-[#dfd2bc] overflow-hidden">
+                  <div className="px-3.5 py-2 bg-[#f8fafc] dark:bg-[#0e1726]/90 aurora:bg-[#101c23]/90 linen:bg-[#efe6d6]/90 border-b border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] linen:border-[#dfd2bc] flex items-center justify-between gap-2">
+                    <span className="font-semibold text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118]">
+                      聊天主题实时预览
+                    </span>
+                    <span className="text-[11px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a] tabular-nums">
+                      {OFFICIAL_THEME_PRESETS.find((p) => p.id === effectiveAppearance.presetId)?.name || '自定义'} ·{' '}
+                      {OFFICIAL_WALLPAPER_OPTIONS.find((w) => w.id === effectiveAppearance.wallpaperId)?.label || '默认'}
+                    </span>
+                  </div>
+                  <div className="tg-chat-pattern p-3.5 space-y-2.5">
+                    <div className="flex justify-start">
+                      <div className="hs-msg-bubble max-w-[78%] px-3 py-2 bg-white text-[#0f172a] border border-[#e2e8f0] dark:bg-[#101b2a] dark:text-[#eef4fb] dark:border-[#1a2b40] aurora:bg-[#101c23] aurora:text-[#ecf6f8] aurora:border-[#1c323c] linen:bg-[#faf6ee] linen:text-[#2b2118] linen:border-[#d5c6b0] shadow-xs">
+                        <div className="text-[12px] leading-relaxed">
+                          Good morning! Ready for today&apos;s session?
+                        </div>
+                        <div className="mt-1 pt-1 border-t border-black/10 dark:border-white/10 text-[11px] opacity-80">
+                          早上好！准备好今天的沟通了吗？
+                        </div>
+                      </div>
+                    </div>
+                    <div className="flex justify-end">
+                      <div
+                        style={
+                          derivedTokens.hasCustomAccent
+                            ? {
+                                backgroundColor: derivedTokens.bubbleOutHex,
+                                color: derivedTokens.bubbleOutTextHex,
+                                borderColor: derivedTokens.borderGlowRgba,
+                              }
+                            : undefined
+                        }
+                        className="hs-msg-bubble hs-bubble-out max-w-[78%] px-3 py-2 bg-[#1e88e5] text-white dark:bg-[#1b4975] aurora:bg-[#11434d] aurora:border aurora:border-[#2dd4bf]/25 linen:bg-[#3a6652] linen:border linen:border-[#2d5241] shadow-xs"
+                      >
+                        <div className="text-[12px] leading-relaxed">
+                          已经就绪，随时可以开始。
+                        </div>
+                        <div className="text-[10px] opacity-75 text-right mt-0.5 tabular-nums">
+                          14:20 ✓✓
+                        </div>
+                      </div>
                     </div>
                   </div>
-                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-                    {(
-                      [
-                        { id: 'light', label: '经典亮白', swatch: 'bg-[#f4f7fb] border-[#cbd5e1]' },
-                        { id: 'dark', label: '深夜蓝黑', swatch: 'bg-[#09111d] border-[#2ba0ff]' },
-                        { id: 'aurora', label: '极光青暗', swatch: 'bg-[#081116] border-[#2dd4bf]' },
-                        { id: 'linen', label: '羊皮', swatch: 'bg-[#d5c8ae] border-[#a86a43]' },
-                      ] as const
-                    ).map((opt) => {
-                      const isActive = theme === opt.id;
+                </div>
+
+                {/* 2. Official Theme Presets */}
+                <div className="p-3.5 rounded-xl bg-[#f8fafc] dark:bg-[#0e1726]/85 aurora:bg-[#101c23]/90 linen:bg-[#efe6d6]/90 space-y-3 border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] linen:border-[#dfd2bc]">
+                  <div className="flex items-center justify-between gap-2">
+                    <div>
+                      <div className="font-semibold text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118]">
+                        Telegram 官方预设主题
+                      </div>
+                      <div className="text-[11px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a]">
+                        一键应用官方经典日间、深夜蓝黑、极光青暗或羊皮暖沙主题方案
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const reset = getDefaultAppearance(effectiveAppearance.baseTheme);
+                        applyAppearancePatch(reset);
+                      }}
+                      className="px-2.5 py-1 rounded-lg text-[11px] font-medium border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] linen:border-[#cbbba2] text-[#475569] dark:text-[#b4c6d8] aurora:text-[#b7d0d8] linen:text-[#5b4b3c] hover:bg-white dark:hover:bg-[#132234] cursor-pointer whitespace-nowrap shrink-0"
+                    >
+                      恢复预设默认
+                    </button>
+                  </div>
+                  <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+                    {OFFICIAL_THEME_PRESETS.map((preset) => {
+                      const isActive = effectiveAppearance.presetId === preset.id;
                       return (
                         <button
-                          key={opt.id}
+                          key={preset.id}
                           type="button"
                           onClick={() => {
-                            if (onSelectTheme) {
-                              onSelectTheme(opt.id);
+                            if (onUpdateAppearance) {
+                              onUpdateAppearance({
+                                ...effectiveAppearance,
+                                presetId: preset.id,
+                                baseTheme: preset.baseTheme,
+                                accentColor: null,
+                                wallpaperId: preset.defaultWallpaper,
+                              });
+                            } else if (onSelectTheme) {
+                              onSelectTheme(preset.baseTheme);
                             } else {
                               onToggleTheme();
                             }
                           }}
-                          className={`p-2 rounded-xl border text-left transition-all cursor-pointer flex items-center gap-2 ${
+                          className={`p-2.5 rounded-xl border text-left transition-all cursor-pointer flex flex-col gap-2 ${
                             isActive
-                              ? opt.id === 'linen'
-                                ? 'bg-[#f4ede0] border-[#a86a43] text-[#7c4828] font-semibold'
-                                : opt.id === 'aurora'
-                                ? 'bg-[#112d36] border-[#2dd4bf] text-[#5eead4] font-semibold'
-                                : 'bg-[#e8f3ff] dark:bg-[#2ba0ff]/15 border-[#2481cc] dark:border-[#2ba0ff] text-[#0284c7] dark:text-[#7cc4ff] font-semibold'
-                              : 'bg-white dark:bg-[#0b131f] aurora:bg-[#0c151b] linen:bg-[#faf6ee] border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] linen:border-[#cbbba2] text-[#475569] dark:text-[#b4c6d8] aurora:text-[#b7d0d8] linen:text-[#5b4b3c] hover:border-[#94a3b8] dark:hover:border-[#2ba0ff]/40 aurora:hover:border-[#2dd4bf]/40 linen:hover:border-[#a86a43]/60'
+                              ? 'bg-[#e8f3ff] dark:bg-[#2ba0ff]/15 aurora:bg-[#112d36] linen:bg-[#f4ede0] border-[#2481cc] dark:border-[#2ba0ff] aurora:border-[#2dd4bf] linen:border-[#a86a43] text-[#0284c7] dark:text-[#7cc4ff] aurora:text-[#5eead4] linen:text-[#7c4828] font-semibold'
+                              : 'bg-white dark:bg-[#0b131f] aurora:bg-[#0c151b] linen:bg-[#faf6ee] border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] linen:border-[#cbbba2] text-[#475569] dark:text-[#b4c6d8] aurora:text-[#b7d0d8] linen:text-[#5b4b3c] hover:border-[#94a3b8]'
                           }`}
                         >
-                          <span className={`w-3.5 h-3.5 rounded-full border shrink-0 ${opt.swatch}`} />
-                          <span className="truncate">{opt.label}</span>
+                          <div
+                            className="w-full h-9 rounded-lg border p-1.5 flex flex-col justify-between"
+                            style={{
+                              backgroundColor: preset.previewBg,
+                              borderColor: preset.previewBorder,
+                            }}
+                          >
+                            <span
+                              className="w-8 h-2 rounded-sm self-start"
+                              style={{ backgroundColor: preset.previewBubbleIn }}
+                            />
+                            <span
+                              className="w-10 h-2 rounded-sm self-end"
+                              style={{ backgroundColor: preset.previewBubbleOut }}
+                            />
+                          </div>
+                          <div className="flex items-center justify-between gap-1 min-w-0">
+                            <span className="truncate text-[11.5px]">{preset.name}</span>
+                            {isActive && <Check className="w-3.5 h-3.5 shrink-0" />}
+                          </div>
                         </button>
                       );
                     })}
                   </div>
                 </div>
 
+                {/* 3. Accent Color Swatches & Custom Picker */}
+                <div className="p-3.5 rounded-xl bg-[#f8fafc] dark:bg-[#0e1726]/85 aurora:bg-[#101c23]/90 linen:bg-[#efe6d6]/90 space-y-2.5 border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] linen:border-[#dfd2bc]">
+                  <div className="flex items-center justify-between gap-2">
+                    <div>
+                      <div className="font-semibold text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118]">
+                        强调色与发送气泡色 (Accent Color)
+                      </div>
+                      <div className="text-[11px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a]">
+                        自动联动发送气泡、主按钮、未读角标与选中会话高亮
+                      </div>
+                    </div>
+                    {effectiveAppearance.accentColor && (
+                      <button
+                        type="button"
+                        onClick={() => applyAppearancePatch({ accentColor: null })}
+                        className="text-[11px] font-medium text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#5eead4] linen:text-[#8c522d] hover:underline cursor-pointer whitespace-nowrap shrink-0"
+                      >
+                        恢复主题原色
+                      </button>
+                    )}
+                  </div>
+                  <div className="flex flex-wrap items-center gap-2">
+                    {OFFICIAL_ACCENT_SWATCHES.map((sw) => {
+                      const activeAccent = (effectiveAppearance.accentColor || derivedTokens.primaryHex).toLowerCase();
+                      const isSelected = activeAccent === sw.hex.toLowerCase();
+                      return (
+                        <button
+                          key={sw.hex}
+                          type="button"
+                          title={sw.label}
+                          onClick={() => applyAppearancePatch({ accentColor: sw.hex })}
+                          style={{ backgroundColor: sw.hex }}
+                          className={`w-7 h-7 rounded-full flex items-center justify-center transition-transform cursor-pointer border-2 ${
+                            isSelected
+                              ? 'border-white dark:border-[#0b131f] ring-2 ring-[#2481cc] dark:ring-[#2ba0ff] scale-110'
+                              : 'border-white/70 dark:border-black/30 hover:scale-105'
+                          }`}
+                        >
+                          {isSelected && <Check className="w-3.5 h-3.5 text-white drop-shadow" />}
+                        </button>
+                      );
+                    })}
+                    <label
+                      title="自定义取色"
+                      className="h-7 px-2.5 rounded-full border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] linen:border-[#cbbba2] bg-white dark:bg-[#0b131f] aurora:bg-[#0c151b] linen:bg-[#faf6ee] flex items-center gap-1.5 cursor-pointer text-[11px] text-[#475569] dark:text-[#b4c6d8] aurora:text-[#b7d0d8] linen:text-[#5b4b3c]"
+                    >
+                      <input
+                        type="color"
+                        value={effectiveAppearance.accentColor || derivedTokens.primaryHex}
+                        onChange={(e) => applyAppearancePatch({ accentColor: e.target.value })}
+                        className="w-4 h-4 rounded-full border-0 p-0 bg-transparent cursor-pointer"
+                      />
+                      <span>自定义</span>
+                    </label>
+                  </div>
+                </div>
+
+                {/* 4. Chat Wallpaper & Bubble Corner Style */}
+                <div className="p-3.5 rounded-xl bg-[#f8fafc] dark:bg-[#0e1726]/85 aurora:bg-[#101c23]/90 linen:bg-[#efe6d6]/90 space-y-3 border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] linen:border-[#dfd2bc]">
+                  <div>
+                    <div className="font-semibold text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118]">
+                      聊天背景壁纸与气泡圆角
+                    </div>
+                    <div className="text-[11px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a]">
+                      选择官方矢量暗纹、氛围渐变或极简纯色底图
+                    </div>
+                  </div>
+                  <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+                    {OFFICIAL_WALLPAPER_OPTIONS.map((wp) => {
+                      const active = effectiveAppearance.wallpaperId === wp.id;
+                      return (
+                        <button
+                          key={wp.id}
+                          type="button"
+                          onClick={() => applyAppearancePatch({ wallpaperId: wp.id })}
+                          className={`px-2.5 py-2 rounded-xl border text-left transition-all cursor-pointer ${
+                            active
+                              ? 'bg-[#e8f3ff] dark:bg-[#2ba0ff]/15 aurora:bg-[#112d36] linen:bg-[#f4ede0] border-[#2481cc] dark:border-[#2ba0ff] aurora:border-[#2dd4bf] linen:border-[#a86a43] text-[#0284c7] dark:text-[#7cc4ff] aurora:text-[#5eead4] linen:text-[#7c4828]'
+                              : 'bg-white dark:bg-[#0b131f] aurora:bg-[#0c151b] linen:bg-[#faf6ee] border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#203742] linen:border-[#cbbba2] text-[#475569] dark:text-[#b4c6d8] aurora:text-[#b7d0d8] linen:text-[#5b4b3c]'
+                          }`}
+                        >
+                          <div className="font-semibold text-[11.5px] truncate">{wp.label}</div>
+                          <div className="text-[10px] opacity-75 truncate mt-0.5">{wp.description}</div>
+                        </button>
+                      );
+                    })}
+                  </div>
+
+                  {/* Wallpaper Pattern / Gradient Intensity Slider */}
+                  <div className="pt-2 border-t border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] linen:border-[#dfd2bc] space-y-1.5">
+                    <div className="flex items-center justify-between gap-2">
+                      <div>
+                        <span className="font-medium text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118]">
+                          壁纸底纹浓度
+                        </span>
+                        <span className="ml-2 text-[10.5px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a]">
+                          {effectiveAppearance.wallpaperId === 'solid'
+                            ? '纯净素色下无纹理叠加'
+                            : '实时调节暗纹与光晕深浅'}
+                        </span>
+                      </div>
+                      <span className="text-[11px] font-mono tabular-nums font-semibold text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#5eead4] linen:text-[#8c522d]">
+                        {effectiveAppearance.wallpaperIntensity}%
+                      </span>
+                    </div>
+                    <input
+                      type="range"
+                      min={10}
+                      max={100}
+                      step={5}
+                      disabled={effectiveAppearance.wallpaperId === 'solid'}
+                      value={effectiveAppearance.wallpaperIntensity}
+                      onChange={(e) =>
+                        applyAppearancePatch({ wallpaperIntensity: Number(e.target.value) })
+                      }
+                      aria-label="壁纸底纹浓度"
+                      className="w-full h-1.5 rounded-lg bg-[#e2e8f0] dark:bg-[#18273a] aurora:bg-[#1b323d] linen:bg-[#d7c8b0] cursor-pointer disabled:opacity-45 disabled:cursor-not-allowed"
+                    />
+                  </div>
+
+                  <div className="pt-2 border-t border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] linen:border-[#dfd2bc] flex flex-wrap items-center justify-between gap-2">
+                    <span className="font-medium text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118]">
+                      消息气泡圆角风格
+                    </span>
+                    <div className="grid grid-cols-3 gap-1 p-1 rounded-lg bg-white dark:bg-[#08101a] aurora:bg-[#081014] linen:bg-[#e7dccb] border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] linen:border-[#cbbba2]">
+                      {BUBBLE_CORNER_OPTIONS.map((opt) => {
+                        const isCur = effectiveAppearance.bubbleStyle === opt.id;
+                        return (
+                          <button
+                            key={opt.id}
+                            type="button"
+                            onClick={() => applyAppearancePatch({ bubbleStyle: opt.id })}
+                            className={`px-2.5 py-1 rounded-md text-[11px] font-medium transition-colors cursor-pointer whitespace-nowrap ${
+                              isCur
+                                ? 'bg-[#2481cc] dark:bg-[#2ba0ff] aurora:bg-[#0d9488] linen:bg-[#a86a43] text-white shadow-xs'
+                                : 'text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a] hover:text-[#0f172a] dark:hover:text-[#eef4fb]'
+                            }`}
+                          >
+                            {opt.label}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                </div>
+
+                {/* 5. Enter to Send */}
                 <div className="p-3.5 rounded-xl bg-[#f8fafc] dark:bg-[#0e1726]/85 aurora:bg-[#101c23]/90 linen:bg-[#efe6d6]/90 border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] linen:border-[#dfd2bc] flex items-center justify-between">
                   <div>
                     <div className="font-semibold text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118]">回车发送消息</div>

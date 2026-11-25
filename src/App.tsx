@@ -3,7 +3,6 @@ import { LeftSidebar } from './components/LeftSidebar';
 import { ChatList } from './components/ChatList';
 import { ChatArea, detectClientLangCode } from './components/ChatArea';
 import { UnifiedRightDock, RightPanelTab } from './components/UnifiedRightDock';
-import { CustomerMemoryDrawer } from './components/CustomerMemoryDrawer';
 import { MultiAccountModal } from './components/MultiAccountModal';
 import { TelegramMenuDrawer } from './components/TelegramMenuDrawer';
 import { DatabaseModal } from './components/DatabaseModal';
@@ -23,6 +22,13 @@ import { MemberAuthModal } from './components/MemberAuthModal';
 import { AiAssistantModal } from './components/AiAssistantModal';
 import { getMasterVoiceprint, hydrateMasterVoiceprint } from './services/voiceprintStorage';
 import {
+  APPEARANCE_STORAGE_KEY,
+  OFFICIAL_THEME_PRESETS,
+  applyAppearanceToDocument,
+  defaultPresetForTheme,
+  loadStoredAppearance,
+} from './services/appearanceConfig';
+import {
   INITIAL_ACCOUNTS,
   INITIAL_CHATS,
   INITIAL_TRANSLATION_SETTINGS,
@@ -41,6 +47,7 @@ import {
   TelegramContact,
   TelegramCallRecord,
   AppThemeMode,
+  ChatAppearanceSettings,
 } from './types';
 import {
   fetchChatsFromDb,
@@ -727,31 +734,84 @@ export default function App() {
   const [searchQuery, setSearchQuery] = useState('');
   const [activeRightPanel, setActiveRightPanel] = useState<RightPanelTab | null>(null);
   const [isChatInfoOpen, setIsChatInfoOpen] = useState(false);
-  const [isChatMemoryOpen, setIsChatMemoryOpen] = useState(false);
   const [chatHasMoreMap, setChatHasMoreMap] = useState<Record<string, boolean>>({});
 
   const openRightPanel = (tab: RightPanelTab) => {
     setIsChatInfoOpen(false);
+    setIsAiAssistantOpen(false);
+    setIsAiAssistantMinimized(false);
     setActiveRightPanel(tab);
   };
 
   const toggleRightPanel = (tab: RightPanelTab) => {
     setIsChatInfoOpen(false);
-    setActiveRightPanel((prev) => (prev === tab ? null : tab));
+    setActiveRightPanel((prev) => {
+      const next = prev === tab ? null : tab;
+      if (next) {
+        setIsAiAssistantOpen(false);
+        setIsAiAssistantMinimized(false);
+      }
+      return next;
+    });
   };
 
   const toggleChatMemoryPanel = () => {
     setIsChatInfoOpen(false);
-    setActiveRightPanel(null);
-    setIsChatMemoryOpen((prev) => !prev);
+    setActiveRightPanel((prev) => {
+      const next = prev === 'memory' ? null : 'memory';
+      if (next) {
+        setIsAiAssistantOpen(false);
+        setIsAiAssistantMinimized(false);
+      }
+      return next;
+    });
   };
 
   // 2. Modals & Drawers Visibility State
   const [isTelegramMenuOpen, setIsTelegramMenuOpen] = useState(false);
-  const [theme, setTheme] = useState<AppThemeMode>(() => {
-    const saved = localStorage.getItem('tg_pro_theme');
-    return saved === 'dark' || saved === 'aurora' || saved === 'light' || saved === 'linen' ? saved : 'linen';
+  const [appearance, setAppearance] = useState<ChatAppearanceSettings>(() => {
+    const savedTheme = localStorage.getItem('tg_pro_theme');
+    const fallbackTheme: AppThemeMode =
+      savedTheme === 'dark' || savedTheme === 'aurora' || savedTheme === 'light' || savedTheme === 'linen'
+        ? savedTheme
+        : 'linen';
+    return loadStoredAppearance(fallbackTheme);
   });
+  const theme = appearance.baseTheme;
+  const handleSelectThemeMode = useCallback((nextTheme: AppThemeMode) => {
+    setAppearance((prev) => {
+      const nextPreset = defaultPresetForTheme(nextTheme);
+      const presetObj = OFFICIAL_THEME_PRESETS.find((p) => p.id === nextPreset);
+      return {
+        ...prev,
+        baseTheme: nextTheme,
+        presetId: nextPreset,
+        accentColor: null,
+        wallpaperId: presetObj?.defaultWallpaper || 'default',
+      };
+    });
+  }, []);
+  const handleToggleThemeMode = useCallback(() => {
+    setAppearance((prev) => {
+      const nextTheme: AppThemeMode =
+        prev.baseTheme === 'light'
+          ? 'dark'
+          : prev.baseTheme === 'dark'
+          ? 'aurora'
+          : prev.baseTheme === 'aurora'
+          ? 'linen'
+          : 'light';
+      const nextPreset = defaultPresetForTheme(nextTheme);
+      const presetObj = OFFICIAL_THEME_PRESETS.find((p) => p.id === nextPreset);
+      return {
+        ...prev,
+        baseTheme: nextTheme,
+        presetId: nextPreset,
+        accentColor: null,
+        wallpaperId: presetObj?.defaultWallpaper || 'default',
+      };
+    });
+  }, []);
   const [clientPrefs, setClientPrefs] = useState<TelegramClientPrefs>(() =>
     loadStoredClientPrefs(activeAccountId)
   );
@@ -761,24 +821,16 @@ export default function App() {
   const [isDatabaseOpen, setIsDatabaseOpen] = useState(false);
   const [isSystemSettingsOpen, setIsSystemSettingsOpen] = useState(false);
   const [isAiAssistantOpen, setIsAiAssistantOpen] = useState(false);
+  const [isAiAssistantMinimized, setIsAiAssistantMinimized] = useState(false);
+  const [aiAssistantRestoreSignal, setAiAssistantRestoreSignal] = useState(0);
   const [viewportWidth, setViewportWidth] = useState<number>(() =>
     typeof window !== 'undefined' ? window.innerWidth : 1440
   );
-  const [aiDockedInfo, setAiDockedInfo] = useState<{ isDockedInFlow: boolean; width: number }>({
-    isDockedInFlow: false,
-    width: 420,
-  });
 
   useEffect(() => {
     const handleResize = () => setViewportWidth(window.innerWidth);
     window.addEventListener('resize', handleResize);
     return () => window.removeEventListener('resize', handleResize);
-  }, []);
-
-  const handleAiDockedLayoutChange = useCallback((info: { isDockedInFlow: boolean; width: number }) => {
-    setAiDockedInfo((prev) =>
-      prev.isDockedInFlow === info.isDockedInFlow && prev.width === info.width ? prev : info
-    );
   }, []);
 
   const [isMasterVoiceActive, setIsMasterVoiceActive] = useState(() => {
@@ -989,13 +1041,17 @@ export default function App() {
         activeAccountId === 'acc_telegram_bot'
     );
 
-  // Sync theme to DOM and localStorage
+  // Sync theme & official appearance settings to DOM and localStorage
   useEffect(() => {
-    localStorage.setItem('tg_pro_theme', theme);
+    try {
+      localStorage.setItem('tg_pro_theme', appearance.baseTheme);
+      localStorage.setItem(APPEARANCE_STORAGE_KEY, JSON.stringify(appearance));
+    } catch {}
     document.documentElement.classList.toggle('dark', theme === 'dark' || theme === 'aurora');
     document.documentElement.classList.toggle('theme-aurora', theme === 'aurora');
     document.documentElement.classList.toggle('theme-linen', theme === 'linen');
-  }, [theme]);
+    applyAppearanceToDocument(appearance);
+  }, [appearance, theme]);
 
   useEffect(() => {
     const targetAcc = activeAccountIdRef.current;
@@ -1266,9 +1322,11 @@ export default function App() {
       if (isRestore) {
         setContacts(getScopedContacts(resolvedActiveAccId || activeAccountIdRef.current));
         const savedTheme = localStorage.getItem('tg_pro_theme');
-        if (savedTheme === 'dark' || savedTheme === 'light' || savedTheme === 'aurora' || savedTheme === 'linen') {
-          setTheme(savedTheme);
-        }
+        const fallbackTheme: AppThemeMode =
+          savedTheme === 'dark' || savedTheme === 'light' || savedTheme === 'aurora' || savedTheme === 'linen'
+            ? savedTheme
+            : 'linen';
+        setAppearance(loadStoredAppearance(fallbackTheme));
         const prefsAccId = resolvedActiveAccId || activeAccountIdRef.current || nextAccounts?.[0]?.id || '';
         clientPrefsScopeRef.current = prefsAccId;
         setClientPrefs(loadStoredClientPrefs(prefsAccId));
@@ -6857,31 +6915,13 @@ export default function App() {
     [contacts]
   );
 
-  const MIN_CHAT_AREA_WIDTH = 460;
+  const MIN_CHAT_AREA_WIDTH = 380;
   const isNarrowViewport = viewportWidth < 1024;
-  const isMediumViewport = viewportWidth >= 1024 && viewportWidth < 1360;
-  const isMemoryOpenForChat = isChatMemoryOpen && Boolean(activeChatId);
-  const isAiDockedActive = isAiAssistantOpen && aiDockedInfo.isDockedInFlow && !isNarrowViewport;
-  const forceMemoryOverlay = isNarrowViewport || (isAiDockedActive && viewportWidth < 1520);
-  const isMemoryDockedInFlow = isMemoryOpenForChat && !forceMemoryOverlay;
-  const hasRightDockedInFlow = isMemoryDockedInFlow || isAiDockedActive;
-  const isCompactLeftRail = isNarrowViewport || (isMediumViewport && hasRightDockedInFlow);
+  const isCompactLeftRail = isNarrowViewport;
   const leftRailWidth = isCompactLeftRail ? 68 : 120;
-  const memoryDockedWidth = viewportWidth < 1100 ? 316 : isMediumViewport ? 340 : 400;
-  const reservedMemoryWidth = isMemoryDockedInFlow ? memoryDockedWidth : 0;
-  const maxAiDockedBudget = Math.max(
-    280,
-    viewportWidth - leftRailWidth - 200 - reservedMemoryWidth - MIN_CHAT_AREA_WIDTH
-  );
-  const effectiveAiDockedWidth = isAiDockedActive
-    ? Math.min(aiDockedInfo.width, maxAiDockedBudget)
-    : 0;
   const maxChatListWidthCap = isNarrowViewport
     ? undefined
-    : Math.max(
-        180,
-        viewportWidth - leftRailWidth - reservedMemoryWidth - effectiveAiDockedWidth - MIN_CHAT_AREA_WIDTH
-      );
+    : Math.max(180, viewportWidth - leftRailWidth - MIN_CHAT_AREA_WIDTH);
 
   return (
     <div className="flex h-screen w-screen overflow-hidden bg-[#f4f7fb] text-[#0f172a] dark:bg-[#05080f] dark:text-[#eef4fb] aurora:bg-[#081116] aurora:text-[#ecf6f8] linen:bg-[#ddd2bc] linen:text-[#2b2118] font-sans antialiased transition-colors">
@@ -6920,7 +6960,20 @@ export default function App() {
         onOpenCustomerMemory={() => toggleRightPanel('memory')}
         onOpenMasterVoiceprint={() => toggleRightPanel('voice')}
         onOpenKnowledgeEvolution={() => toggleRightPanel('persona')}
-        onOpenAiAssistant={() => setIsAiAssistantOpen((prev) => !prev)}
+        onOpenAiAssistant={() => {
+          setIsChatInfoOpen(false);
+          setActiveRightPanel(null);
+          if (isAiAssistantOpen && isAiAssistantMinimized) {
+            setIsAiAssistantMinimized(false);
+            setAiAssistantRestoreSignal((n) => n + 1);
+            return;
+          }
+          setIsAiAssistantOpen((prev) => {
+            const next = !prev;
+            if (!next) setIsAiAssistantMinimized(false);
+            return next;
+          });
+        }}
         isAiAssistantOpen={isAiAssistantOpen}
         isMasterVoiceActive={isMasterVoiceActive}
         activeTab={activeRightPanel || 'chats'}
@@ -6929,6 +6982,7 @@ export default function App() {
             setActiveRightPanel(null);
             setIsMultiAccountOpen(false);
             setIsAiAssistantOpen(false);
+            setIsAiAssistantMinimized(false);
           }
         }}
       />
@@ -7092,14 +7146,13 @@ export default function App() {
           onOpenKnowledgeEvolution={() => toggleRightPanel('persona')}
           onOpenVoiceprintConfig={() => openRightPanel('voice')}
           onOpenCustomerMemory={toggleChatMemoryPanel}
-          isCustomerMemoryOpen={isChatMemoryOpen}
+          isCustomerMemoryOpen={activeRightPanel === 'memory'}
           activeRightPanel={activeRightPanel}
           isChatInfoOpenExternal={isChatInfoOpen}
           onChatInfoOpenChange={(open) => {
             setIsChatInfoOpen(open);
             if (open) {
               setActiveRightPanel(null);
-              setIsChatMemoryOpen(false);
             }
           }}
           onDeleteMessage={handleDeleteMessage}
@@ -7206,54 +7259,21 @@ export default function App() {
           }}
         />
 
-        {/* 3.4 Standalone Chat-Docked Customer Memory Side Panel (Single-Page, No Extra Tabs) */}
-        <CustomerMemoryDrawer
-          isOpen={isChatMemoryOpen && Boolean(activeChatId)}
-          sideDocked={true}
-          dockedWidth={memoryDockedWidth}
-          forceOverlay={forceMemoryOverlay}
-          onClose={() => setIsChatMemoryOpen(false)}
-          profile={customerProfile}
-          chatId={activeChatId || ''}
-          currentAccountId={activeAccountId}
-          onUpdateProfile={(updated) => {
-            if (
-              updated.chatId &&
-              updated.chatId !== 'current' &&
-              activeChatIdRef.current &&
-              normalizeProfileChatId(updated.chatId) !== normalizeProfileChatId(activeChatIdRef.current)
-            ) {
-              return;
-            }
-            if (
-              updated.accountId &&
-              activeAccountIdRef.current &&
-              updated.accountId !== activeAccountIdRef.current &&
-              updated.accountId.replace(/^acc_tg_/, '') !==
-                activeAccountIdRef.current.replace(/^acc_tg_/, '')
-            ) {
-              return;
-            }
-            setCustomerProfile(updated);
-          }}
-          customConfig={customLLMConfig}
-          chatTitle={currentChat?.title || '当前联系人'}
-          messages={currentMessages}
-        />
-
-        {/* 3.45 Docked / Resizable AI助手 Panel (Auto-shrinks ChatArea to center when docked) */}
+        {/* 3.45 Standalone Detached AI助手 Desktop Overlay */}
         <AiAssistantModal
           isOpen={isAiAssistantOpen}
-          onClose={() => setIsAiAssistantOpen(false)}
+          restoreSignal={aiAssistantRestoreSignal}
+          onMinimizedChange={setIsAiAssistantMinimized}
+          onClose={() => {
+            setIsAiAssistantOpen(false);
+            setIsAiAssistantMinimized(false);
+          }}
           engineLicenseKey={customLLMConfig.engineLicenseKey}
           activeChatTitle={currentChat?.title}
           operatorAvatarUrl={
             currentAccount ? resolveAccountAvatarSrc(currentAccount.id, currentAccount.avatarUrl) : undefined
           }
           operatorInitial={currentAccount?.avatarInitial || '我'}
-          maxDockedWidthBudget={maxAiDockedBudget}
-          forceOverlayDocked={isNarrowViewport}
-          onDockedLayoutChange={handleAiDockedLayoutChange}
         />
 
         {/* 3.5 Unified Feature Modal Page Overlay (Standalone 5-Tab Modal) */}
@@ -7316,8 +7336,8 @@ export default function App() {
         onSelectChat={handleSelectChat}
         onDeleteAccount={handleDeleteAccount}
         theme={theme}
-        onToggleTheme={() => setTheme((prev) => (prev === 'light' ? 'dark' : prev === 'dark' ? 'aurora' : prev === 'aurora' ? 'linen' : 'light'))}
-        onSelectTheme={setTheme}
+        onToggleTheme={handleToggleThemeMode}
+        onSelectTheme={handleSelectThemeMode}
         onOpenNewGroup={() => setIsNewGroupOpen(true)}
         onOpenNewChannel={() => setIsNewChannelOpen(true)}
         onOpenContacts={() => setIsContactsOpen(true)}
@@ -7432,8 +7452,10 @@ export default function App() {
         currentAccount={currentAccount}
         onUpdateAccount={handleUpdateCurrentAccount}
         theme={theme}
-        onToggleTheme={() => setTheme((prev) => (prev === 'light' ? 'dark' : prev === 'dark' ? 'aurora' : prev === 'aurora' ? 'linen' : 'light'))}
-        onSelectTheme={setTheme}
+        onToggleTheme={handleToggleThemeMode}
+        onSelectTheme={handleSelectThemeMode}
+        appearance={appearance}
+        onUpdateAppearance={setAppearance}
         onOpenSystemAdmin={() => setIsSystemSettingsOpen(true)}
         clientPrefs={clientPrefs}
         onUpdateClientPrefs={setClientPrefs}

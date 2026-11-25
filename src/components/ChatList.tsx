@@ -564,7 +564,7 @@ export const ChatList: React.FC<ChatListProps> = React.memo(({
       {/* 1. Top Header: Search Bar + Compact New Chat Button */}
       <div className="h-[56px] px-2.5 flex items-center gap-2 border-b border-[#e2e8f0] dark:border-[#162436] aurora:border-[#182b34] linen:border-[#d5c6b0] shrink-0">
         {/* Search Input */}
-        <div className="relative flex-1 flex items-center">
+        <div className="relative flex-1 min-w-0 flex items-center">
           <Search className="w-3.5 h-3.5 text-[#64748b] dark:text-[#7f95ab] aurora:text-[#7e9aa5] linen:text-[#8c735a] absolute left-3 pointer-events-none" />
           <input
             type="text"
@@ -680,7 +680,7 @@ export const ChatList: React.FC<ChatListProps> = React.memo(({
         >
           <span>未读</span>
           {unreadCount > 0 && (
-            <span className="px-1.5 py-0.2 rounded-full text-[10px] bg-[#2ba0ff] aurora:bg-[#14b8a6] linen:bg-[#b56742] text-white font-bold leading-none tabular-nums">
+            <span className="hs-accent-bg px-1.5 py-0.2 rounded-full text-[10px] bg-[#2ba0ff] aurora:bg-[#14b8a6] linen:bg-[#b56742] text-white font-bold leading-none tabular-nums">
               {unreadCount}
             </span>
           )}
@@ -746,7 +746,7 @@ export const ChatList: React.FC<ChatListProps> = React.memo(({
             >
               <span>{folder.title}</span>
               {folderUnread > 0 && (
-                <span className="px-1.5 py-0.2 rounded-full text-[10px] bg-[#2ba0ff] aurora:bg-[#14b8a6] linen:bg-[#b56742] text-white font-bold leading-none tabular-nums">
+                <span className="hs-accent-bg px-1.5 py-0.2 rounded-full text-[10px] bg-[#2ba0ff] aurora:bg-[#14b8a6] linen:bg-[#b56742] text-white font-bold leading-none tabular-nums">
                   {folderUnread}
                 </span>
               )}
@@ -1097,7 +1097,7 @@ export const ChatList: React.FC<ChatListProps> = React.memo(({
                       {/* Unread Counter Badge */}
                       {chat.unreadCount > 0 && (
                         <span
-                          className={`min-w-[18px] h-[18px] px-1.5 rounded-full text-[10.5px] font-bold flex items-center justify-center tabular-nums leading-none ${
+                          className={`hs-accent-bg min-w-[18px] h-[18px] px-1.5 rounded-full text-[10.5px] font-bold flex items-center justify-center tabular-nums leading-none ${
                             isSelected
                               ? 'bg-[#2ba0ff] aurora:bg-[#14b8a6] linen:bg-[#b56742] text-white'
                               : 'bg-[#2ba0ff] aurora:bg-[#14b8a6] linen:bg-[#b56742] text-white'

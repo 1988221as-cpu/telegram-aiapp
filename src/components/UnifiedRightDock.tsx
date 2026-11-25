@@ -146,8 +146,8 @@ export const UnifiedRightDock: React.FC<UnifiedRightDockProps> = ({
         aria-label={activeMeta.title}
         onClick={(e) => e.stopPropagation()}
         className={`w-full ${
-          activePanel === 'persona' ? 'max-w-5xl' : 'max-w-3xl'
-        } h-[88vh] max-h-[860px] rounded-2xl flex flex-col overflow-hidden bg-white dark:bg-[#09111b] aurora:bg-[#0c151b] linen:bg-[#f8f2e7] border border-[#e2e8f0] dark:border-[#1e3148] aurora:border-[#1c343e] linen:border-[#d5c6ae] shadow-2xl linen:shadow-sm text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118] select-none outline-none transition-colors animate-in zoom-in-95 fade-in duration-150`}
+          activePanel === 'persona' || activePanel === 'memory' ? 'max-w-5xl' : 'max-w-4xl'
+        } h-[90vh] max-h-[880px] rounded-2xl flex flex-col overflow-hidden bg-white dark:bg-[#09111b] aurora:bg-[#0c151b] linen:bg-[#f8f2e7] border border-[#e2e8f0] dark:border-[#1e3148] aurora:border-[#1c343e] linen:border-[#d5c6ae] shadow-2xl linen:shadow-sm text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118] select-none outline-none transition-colors animate-in zoom-in-95 fade-in duration-150`}
       >
         {/* Top Precision Hairline Accent */}
         <div className="h-[2px] w-full bg-gradient-to-r from-transparent via-[#2481cc]/60 dark:via-[#2ba0ff]/75 aurora:via-[#2dd4bf]/80 linen:via-[#a86a43]/75 to-transparent shrink-0" />

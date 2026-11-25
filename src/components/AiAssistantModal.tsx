@@ -34,25 +34,19 @@ import {
 interface AiAssistantModalProps {
   isOpen: boolean;
   onClose: () => void;
+  restoreSignal?: number;
+  onMinimizedChange?: (minimized: boolean) => void;
   engineLicenseKey?: string;
   activeChatTitle?: string;
   operatorAvatarUrl?: string;
   operatorInitial?: string;
-  maxDockedWidthBudget?: number;
-  forceOverlayDocked?: boolean;
-  onDockedLayoutChange?: (info: { isDockedInFlow: boolean; width: number }) => void;
 }
 
-type LayoutMode = 'docked' | 'floating' | 'fullscreen';
+type LayoutMode = 'standalone' | 'floating' | 'fullscreen';
 
 const MAX_IMAGES = 6;
 const PLAYBOOK_CACHE_STORAGE_KEY = 'hs_ai_qa_workflow_playbook_cache';
 const WINDOW_SIZE_STORAGE_KEY = 'hs_ai_qa_window_size_v1';
-const DOCKED_WIDTH_STORAGE_KEY = 'hs_ai_qa_docked_width_v1';
-
-const DEFAULT_DOCKED_WIDTH = 420;
-const MIN_DOCKED_WIDTH = 340;
-const MAX_DOCKED_WIDTH = 720;
 
 const DEFAULT_WIDTH = 450;
 const DEFAULT_HEIGHT = 680;
@@ -64,26 +58,6 @@ interface WindowRect {
   y: number;
   width: number;
   height: number;
-}
-
-function clampDockedWidth(width: number, maxBudget?: number): number {
-  const vw = typeof window !== 'undefined' ? window.innerWidth : 1280;
-  const fallbackBudget = vw - 560;
-  const rawBudget = typeof maxBudget === 'number' && Number.isFinite(maxBudget) ? maxBudget : fallbackBudget;
-  const maxAllowed = Math.max(280, Math.min(MAX_DOCKED_WIDTH, Math.round(rawBudget)));
-  const minAllowed = Math.min(MIN_DOCKED_WIDTH, maxAllowed);
-  return Math.min(maxAllowed, Math.max(minAllowed, Math.round(width)));
-}
-
-function loadSavedDockedWidth(): number {
-  try {
-    const raw = localStorage.getItem(DOCKED_WIDTH_STORAGE_KEY);
-    const parsed = Number(raw);
-    if (Number.isFinite(parsed) && parsed > 0) {
-      return clampDockedWidth(parsed);
-    }
-  } catch {}
-  return clampDockedWidth(DEFAULT_DOCKED_WIDTH);
 }
 
 function loadSavedSize(): { width: number; height: number } {
@@ -373,20 +347,18 @@ const FormattedAnswerBody: React.FC<{
 export const AiAssistantModal: React.FC<AiAssistantModalProps> = ({
   isOpen,
   onClose,
+  restoreSignal = 0,
+  onMinimizedChange,
   engineLicenseKey,
   activeChatTitle,
   operatorAvatarUrl,
   operatorInitial = '我',
-  maxDockedWidthBudget,
-  forceOverlayDocked = false,
-  onDockedLayoutChange,
 }) => {
   const [isMinimized, setIsMinimized] = useState(false);
-  const [layoutMode, setLayoutMode] = useState<LayoutMode>('docked');
-  const [preFullscreenMode, setPreFullscreenMode] = useState<'docked' | 'floating'>('docked');
-  const [dockedWidth, setDockedWidth] = useState<number>(() => loadSavedDockedWidth());
-  const [isResizingDocked, setIsResizingDocked] = useState(false);
+  const [layoutMode, setLayoutMode] = useState<LayoutMode>('standalone');
+  const [preFullscreenMode, setPreFullscreenMode] = useState<'standalone' | 'floating'>('standalone');
   const [avatarLoadFailed, setAvatarLoadFailed] = useState(false);
+  const pointerDownOnBackdropRef = useRef(false);
 
   const [rect, setRect] = useState<WindowRect>(() => {
     const saved = loadSavedSize();
@@ -437,13 +409,11 @@ export const AiAssistantModal: React.FC<AiAssistantModalProps> = ({
   const toastTimerRef = useRef<number | null>(null);
   const rectRef = useRef(rect);
   rectRef.current = rect;
-  const dockedWidthRef = useRef(dockedWidth);
-  dockedWidthRef.current = dockedWidth;
   const dragCleanupRef = useRef<(() => void) | null>(null);
 
   const isFullscreen = layoutMode === 'fullscreen';
   const isFloating = layoutMode === 'floating';
-  const isDocked = layoutMode === 'docked';
+  const isStandalone = layoutMode === 'standalone';
 
   const showToast = useCallback((msg: string) => {
     setToastMsg(msg);
@@ -471,14 +441,7 @@ export const AiAssistantModal: React.FC<AiAssistantModalProps> = ({
     };
   }, []);
 
-  const effectiveDockedWidth = clampDockedWidth(dockedWidth, maxDockedWidthBudget);
-  const isDockedInFlow = Boolean(isOpen && !isMinimized && isDocked && !forceOverlayDocked);
-
-  useEffect(() => {
-    onDockedLayoutChange?.({ isDockedInFlow, width: effectiveDockedWidth });
-  }, [isDockedInFlow, effectiveDockedWidth, onDockedLayoutChange]);
-
-  // Re-clamp floating rect if viewport resizes (docked width uses dynamic effectiveDockedWidth)
+  // Re-clamp floating rect if viewport resizes
   useEffect(() => {
     const onResize = () => {
       setRect((prev) => clampRectToViewport(prev));
@@ -493,6 +456,48 @@ export const AiAssistantModal: React.FC<AiAssistantModalProps> = ({
       setIsMinimized(false);
     }
   }, [isOpen]);
+
+  // Restore & focus textarea when triggered from LeftSidebar while minimized
+  useEffect(() => {
+    if (isOpen && restoreSignal > 0) {
+      setIsMinimized(false);
+      const rafId = window.requestAnimationFrame(() => {
+        textareaRef.current?.focus();
+      });
+      return () => window.cancelAnimationFrame(rafId);
+    }
+  }, [isOpen, restoreSignal]);
+
+  // Notify parent whenever minimized state changes
+  useEffect(() => {
+    onMinimizedChange?.(isOpen && isMinimized);
+  }, [isOpen, isMinimized, onMinimizedChange]);
+
+  useEffect(() => {
+    if (!isOpen || isMinimized) return;
+    const handleEsc = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape') return;
+      if (lightboxImage) {
+        e.preventDefault();
+        e.stopPropagation();
+        setLightboxImage(null);
+        return;
+      }
+      if (selectedPlaybookDay) {
+        e.preventDefault();
+        e.stopPropagation();
+        setSelectedPlaybookDay(null);
+        return;
+      }
+      if (isStandalone || isFullscreen) {
+        e.preventDefault();
+        e.stopPropagation();
+        onClose();
+      }
+    };
+    window.addEventListener('keydown', handleEsc);
+    return () => window.removeEventListener('keydown', handleEsc);
+  }, [isOpen, isMinimized, isStandalone, isFullscreen, lightboxImage, selectedPlaybookDay, onClose]);
 
   // Fetch 1-7 day workflow playbook whenever modal opens (zero AI token cost)
   const loadPlaybook = useCallback(async (forceRefresh = false) => {
@@ -546,7 +551,7 @@ export const AiAssistantModal: React.FC<AiAssistantModalProps> = ({
     syncTextareaHeight();
     const rafId = requestAnimationFrame(syncTextareaHeight);
     return () => cancelAnimationFrame(rafId);
-  }, [syncTextareaHeight, isOpen, isMinimized, layoutMode, dockedWidth, rect.width]);
+  }, [syncTextareaHeight, isOpen, isMinimized, layoutMode, rect.width]);
 
   // Handle adding image files / blobs (max 6)
   const addImageBlobs = useCallback(async (blobs: Blob[], source: 'paste' | 'other' = 'other') => {
@@ -631,45 +636,7 @@ export const AiAssistantModal: React.FC<AiAssistantModalProps> = ({
     }
   };
 
-  // Drag left border in docked mode to freely resize right-split width
-  const handleStartResizeDocked = (e: React.MouseEvent<HTMLDivElement>) => {
-    if (!isDocked) return;
-    e.preventDefault();
-    e.stopPropagation();
-    dragCleanupRef.current?.();
-    const startX = e.clientX;
-    const startW = effectiveDockedWidth;
-    let didMove = false;
-    setIsResizingDocked(true);
-
-    const onMove = (mv: MouseEvent) => {
-      const delta = startX - mv.clientX; // dragging left widens the right docked panel
-      if (Math.abs(delta) >= 1) didMove = true;
-      setDockedWidth(clampDockedWidth(startW + delta, maxDockedWidthBudget));
-    };
-
-    const cleanup = () => {
-      window.removeEventListener('mousemove', onMove);
-      window.removeEventListener('mouseup', onUp);
-      if (dragCleanupRef.current === cleanup) dragCleanupRef.current = null;
-    };
-
-    const onUp = () => {
-      cleanup();
-      setIsResizingDocked(false);
-      if (didMove) {
-        try {
-          localStorage.setItem(DOCKED_WIDTH_STORAGE_KEY, String(dockedWidthRef.current));
-        } catch {}
-      }
-    };
-
-    dragCleanupRef.current = cleanup;
-    window.addEventListener('mousemove', onMove);
-    window.addEventListener('mouseup', onUp);
-  };
-
-  // Drag titlebar: if docked, dragging > 16px detaches into in-app floating window; if floating, moves freely
+  // Drag titlebar: if standalone, dragging > 16px detaches into in-app floating window; if floating, moves freely
   const handleStartDragWindow = (e: React.MouseEvent<HTMLDivElement>) => {
     if (isFullscreen) return;
     if ((e.target as HTMLElement).closest('button, input, textarea')) return;
@@ -678,14 +645,14 @@ export const AiAssistantModal: React.FC<AiAssistantModalProps> = ({
     const startX = e.clientX;
     const startY = e.clientY;
     const panelBox = panelRef.current?.getBoundingClientRect();
-    let detachedFromDock = false;
+    let detachedFromStandalone = false;
     let startRect = { ...rectRef.current };
 
-    if (isDocked && panelBox) {
+    if (isStandalone && panelBox) {
       startRect = clampRectToViewport({
         x: panelBox.left,
         y: Math.max(12, panelBox.top),
-        width: Math.max(MIN_WIDTH, Math.round(panelBox.width)),
+        width: Math.max(MIN_WIDTH, Math.min(560, Math.round(panelBox.width))),
         height: Math.min(rectRef.current.height, Math.max(MIN_HEIGHT, Math.round(panelBox.height - 24))),
       });
     }
@@ -694,9 +661,9 @@ export const AiAssistantModal: React.FC<AiAssistantModalProps> = ({
       const dx = mv.clientX - startX;
       const dy = mv.clientY - startY;
 
-      if (isDocked && !detachedFromDock) {
+      if (isStandalone && !detachedFromStandalone) {
         if (Math.hypot(dx, dy) < 16) return;
-        detachedFromDock = true;
+        detachedFromStandalone = true;
         setLayoutMode('floating');
         setPreFullscreenMode('floating');
       }
@@ -807,7 +774,7 @@ export const AiAssistantModal: React.FC<AiAssistantModalProps> = ({
     if (isFullscreen) {
       setLayoutMode(preFullscreenMode);
     } else {
-      setPreFullscreenMode(isFloating ? 'floating' : 'docked');
+      setPreFullscreenMode(isFloating ? 'floating' : 'standalone');
       setLayoutMode('fullscreen');
     }
   };
@@ -977,28 +944,29 @@ export const AiAssistantModal: React.FC<AiAssistantModalProps> = ({
   // Minimized floating capsule restore button
   if (isMinimized) {
     return (
-      <div className="fixed bottom-4 right-4 z-[60] flex items-center gap-1.5 rounded-full px-3.5 py-2 shadow-xl border bg-white/95 dark:bg-[#0b1523]/95 aurora:bg-[#0c1a21]/95 linen:bg-[#f6efe2]/95 border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#1f3b46] linen:border-[#cbbba2] text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118] backdrop-blur-md">
+      <div className="fixed bottom-4 right-4 z-[60] flex items-center gap-1 rounded-full pl-2 pr-1.5 py-1.5 shadow-lg border bg-white/95 dark:bg-[#0b1523]/95 aurora:bg-[#0c1a21]/95 linen:bg-[#f6efe2]/95 border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#1f3b46] linen:border-[#cbbba2] text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118] backdrop-blur-md transition-all duration-150">
         <button
           type="button"
           onClick={() => setIsMinimized(false)}
-          className="flex items-center gap-2 text-xs font-semibold cursor-pointer hover:opacity-85"
+          className="flex items-center gap-2 pr-1.5 text-xs font-semibold cursor-pointer whitespace-nowrap shrink-0 hover:opacity-85 transition-opacity"
           title="恢复 AI助手 窗口"
         >
-          <span className="w-6 h-6 rounded-full bg-[#e8f3ff] dark:bg-[#132942] aurora:bg-[#112e37] linen:bg-[#a86a43]/15 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#5eead4] linen:text-[#8c522d] flex items-center justify-center">
+          <span className="w-6 h-6 rounded-full bg-[#e8f3ff] dark:bg-[#132942] aurora:bg-[#112e37] linen:bg-[#a86a43]/15 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#5eead4] linen:text-[#8c522d] flex items-center justify-center shrink-0">
             {isSending ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Bot className="w-3.5 h-3.5" />}
           </span>
           <span>AI助手</span>
           {messages.length > 0 && (
-            <span className="px-1.5 py-0.5 rounded-full text-[10px] bg-black/5 dark:bg-white/10 aurora:bg-white/10 linen:bg-[#e5d8c2]">
+            <span className="px-1.5 py-0.5 rounded-full text-[10px] font-mono tabular-nums bg-black/[0.06] dark:bg-white/10 aurora:bg-white/10 linen:bg-[#e5d8c2]">
               {messages.length}
             </span>
           )}
         </button>
+        <div className="w-px h-3.5 bg-black/10 dark:bg-white/10 aurora:bg-white/10 linen:bg-[#cbbba2]" />
         <button
           type="button"
           onClick={() => setIsMinimized(false)}
           title="还原窗口"
-          className="p-1 rounded-full hover:bg-black/5 dark:hover:bg-white/10 aurora:hover:bg-white/10 linen:hover:bg-[#e5d8c2] cursor-pointer"
+          className="p-1.5 rounded-full text-[#475569] dark:text-[#9cb2c9] aurora:text-[#9cbdc8] linen:text-[#5c4b3b] hover:bg-black/5 dark:hover:bg-white/10 aurora:hover:bg-white/10 linen:hover:bg-[#e5d8c2] transition-colors cursor-pointer shrink-0"
         >
           <Maximize2 className="w-3.5 h-3.5" />
         </button>
@@ -1006,7 +974,7 @@ export const AiAssistantModal: React.FC<AiAssistantModalProps> = ({
           type="button"
           onClick={onClose}
           title="关闭 AI助手"
-          className="p-1 rounded-full hover:bg-rose-500/15 hover:text-rose-500 cursor-pointer"
+          className="p-1.5 rounded-full text-[#475569] dark:text-[#9cb2c9] aurora:text-[#9cbdc8] linen:text-[#5c4b3b] hover:bg-rose-500/15 hover:text-rose-500 transition-colors cursor-pointer shrink-0"
         >
           <X className="w-3.5 h-3.5" />
         </button>
@@ -1035,41 +1003,24 @@ export const AiAssistantModal: React.FC<AiAssistantModalProps> = ({
         width: rect.width,
         height: rect.height,
       }
-    : isDocked && forceOverlayDocked
-    ? {
-        width: `min(92vw, ${effectiveDockedWidth}px)`,
-      }
-    : {
-        width: `${effectiveDockedWidth}px`,
-      };
+    : {};
 
-  const containerClassName = isDocked
-    ? `${
-        forceOverlayDocked
-          ? 'fixed inset-y-0 right-0 z-40 shadow-2xl'
-          : 'relative h-full shrink-0 z-20'
-      } max-w-[92vw] flex flex-col overflow-hidden border-l bg-[#f8fafc] dark:bg-[#09111b] aurora:bg-[#0b151c] linen:bg-[#f6efe2] border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#1d3944] linen:border-[#cbbba2] text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118] ${
-        isDragOver ? 'ring-2 ring-inset ring-[#2481cc] dark:ring-[#2ba0ff] aurora:ring-[#2dd4bf] linen:ring-[#a86a43]' : ''
+  const containerClassName = isStandalone
+    ? `w-full max-w-4xl h-[88vh] max-h-[840px] rounded-2xl flex flex-col overflow-hidden border shadow-2xl linen:shadow-sm bg-[#f8fafc] dark:bg-[#09111b] aurora:bg-[#0b151c] linen:bg-[#f6efe2] border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#1d3944] linen:border-[#cbbba2] text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118] animate-in zoom-in-95 fade-in duration-150 ${
+        isDragOver ? 'ring-2 ring-[#2481cc] dark:ring-[#2ba0ff] aurora:ring-[#2dd4bf] linen:ring-[#a86a43]' : ''
       }`
     : `fixed z-[55] flex flex-col rounded-2xl overflow-hidden border shadow-2xl linen:shadow-xl transition-[box-shadow] bg-[#f8fafc] dark:bg-[#09111b] aurora:bg-[#0b151c] linen:bg-[#f6efe2] border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#1d3944] linen:border-[#cbbba2] text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118] ${
         isDragOver ? 'ring-2 ring-[#2481cc] dark:ring-[#2ba0ff] aurora:ring-[#2dd4bf] linen:ring-[#a86a43]' : ''
       }`;
 
-  return (
-    <>
-      {isDocked && forceOverlayDocked && (
-        <div
-          onClick={onClose}
-          className="fixed inset-0 bg-black/45 backdrop-blur-[2px] z-30 animate-in fade-in duration-150"
-          aria-hidden="true"
-        />
-      )}
-      {/* Docked Right Split Panel (default, shrinks ChatArea to center) or In-App Floating / Fullscreen Window */}
+  const panelNode = (
       <aside
         ref={panelRef}
-        role="region"
+        role={isStandalone || isFullscreen ? 'dialog' : 'region'}
+        aria-modal={isStandalone || isFullscreen ? true : undefined}
         aria-label="AI助手"
         style={containerStyle}
+        onClick={(e) => e.stopPropagation()}
         onPaste={handlePaste}
         onDragOver={(e) => {
           e.preventDefault();
@@ -1085,40 +1036,6 @@ export const AiAssistantModal: React.FC<AiAssistantModalProps> = ({
         onDrop={handleDrop}
         className={containerClassName}
       >
-        {/* Left-Edge Width Resize Handle in Docked Mode (|| grip matching layout reference) */}
-        {isDocked && (
-          <div
-            onMouseDown={handleStartResizeDocked}
-            onDoubleClick={() => {
-              const resetW = clampDockedWidth(DEFAULT_DOCKED_WIDTH, maxDockedWidthBudget);
-              setDockedWidth(resetW);
-              try {
-                localStorage.setItem(DOCKED_WIDTH_STORAGE_KEY, String(resetW));
-              } catch {}
-            }}
-            title="拖拽调节 AI助手 宽度（双击恢复默认宽度）"
-            className="group absolute left-0 top-0 bottom-0 w-2.5 cursor-col-resize z-30 flex items-center justify-center select-none"
-          >
-            <div
-              className={`w-[3px] h-full transition-colors ${
-                isResizingDocked
-                  ? 'bg-[#2481cc] dark:bg-[#2ba0ff] aurora:bg-[#2dd4bf] linen:bg-[#a86a43]'
-                  : 'bg-transparent group-hover:bg-[#2481cc]/40 dark:group-hover:bg-[#2ba0ff]/40 aurora:group-hover:bg-[#2dd4bf]/40 linen:group-hover:bg-[#a86a43]/40'
-              }`}
-            />
-            <div
-              className={`absolute left-0.5 w-3 h-8 rounded-r-md flex items-center justify-center gap-[2px] border border-l-0 transition-opacity ${
-                isResizingDocked
-                  ? 'opacity-100 bg-[#e8f3ff] dark:bg-[#132942] aurora:bg-[#112d36] linen:bg-[#e7dac5] border-[#2481cc] dark:border-[#2ba0ff] aurora:border-[#2dd4bf] linen:border-[#a86a43]'
-                  : 'opacity-70 group-hover:opacity-100 bg-white/90 dark:bg-[#0d1827]/90 aurora:bg-[#0e1c23]/90 linen:bg-[#f5ede0]/90 border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#1d3944] linen:border-[#cbbba2]'
-              }`}
-            >
-              <span className="w-[1.5px] h-3.5 rounded-full bg-[#64748b] dark:bg-[#7b93ad] aurora:bg-[#7e9aa5] linen:bg-[#8b7359]" />
-              <span className="w-[1.5px] h-3.5 rounded-full bg-[#64748b] dark:bg-[#7b93ad] aurora:bg-[#7e9aa5] linen:bg-[#8b7359]" />
-            </div>
-          </div>
-        )}
-
         {/* 8-Direction Resize Handles in Floating Mode */}
         {isFloating && (
           <>
@@ -1133,10 +1050,10 @@ export const AiAssistantModal: React.FC<AiAssistantModalProps> = ({
           </>
         )}
 
-        {/* Top Header Bar (Drag to Float / Minimize / Fullscreen / Close) */}
+        {/* Top Header Bar (Standalone / Drag to Float / Minimize / Fullscreen / Close) */}
         <header
           onMouseDown={handleStartDragWindow}
-          title={isDocked ? '按住拖拽可脱离停靠为软件内悬浮窗' : isFloating ? '按住拖拽移动位置' : undefined}
+          title={isStandalone ? '独立工作台（按住拖拽可转为自由悬浮窗）' : isFloating ? '按住拖拽移动位置' : undefined}
           className={`px-4 py-3 flex items-center justify-between gap-2 border-b border-[#e2e8f0] dark:border-[#162436] aurora:border-[#182b34] linen:border-[#dfd2bc] bg-white/90 dark:bg-[#0d1725]/95 aurora:bg-[#0e1b22]/95 linen:bg-[#f1e7d6]/95 shrink-0 select-none ${
             isFullscreen ? 'cursor-default' : 'cursor-move'
           }`}
@@ -1167,10 +1084,10 @@ export const AiAssistantModal: React.FC<AiAssistantModalProps> = ({
               <button
                 type="button"
                 onClick={() => {
-                  setLayoutMode('docked');
-                  setPreFullscreenMode('docked');
+                  setLayoutMode('standalone');
+                  setPreFullscreenMode('standalone');
                 }}
-                title="停靠到右侧边栏"
+                title="恢复居中独立工作台"
                 className="w-7 h-7 rounded-lg flex items-center justify-center text-[#475569] dark:text-[#9cb2c9] aurora:text-[#9cbdc8] linen:text-[#5c4b3b] hover:bg-black/5 dark:hover:bg-white/10 aurora:hover:bg-white/10 linen:hover:bg-[#e5d8c2] transition-colors cursor-pointer"
               >
                 <PanelRight className="w-3.5 h-3.5" />
@@ -1713,6 +1630,39 @@ export const AiAssistantModal: React.FC<AiAssistantModalProps> = ({
           </div>
         )}
       </aside>
+  );
+
+  return (
+    <>
+      {isStandalone ? (
+        <div
+          onMouseDown={(e) => {
+            pointerDownOnBackdropRef.current = e.target === e.currentTarget;
+          }}
+          onMouseUp={(e) => {
+            if (e.target !== e.currentTarget) pointerDownOnBackdropRef.current = false;
+          }}
+          onClick={(e) => {
+            const shouldClose = pointerDownOnBackdropRef.current && e.target === e.currentTarget;
+            pointerDownOnBackdropRef.current = false;
+            if (shouldClose) onClose();
+          }}
+          className="fixed inset-0 z-[55] flex items-center justify-center p-3 sm:p-6 bg-black/55 backdrop-blur-sm animate-in fade-in duration-150"
+        >
+          {panelNode}
+        </div>
+      ) : (
+        <>
+          {isFullscreen && (
+            <div
+              onClick={onClose}
+              className="fixed inset-0 z-[54] bg-black/55 backdrop-blur-sm animate-in fade-in duration-150"
+              aria-hidden="true"
+            />
+          )}
+          {panelNode}
+        </>
+      )}
 
       {/* Lightbox Image Viewer with One-Click Copy Image */}
       {lightboxImage && (

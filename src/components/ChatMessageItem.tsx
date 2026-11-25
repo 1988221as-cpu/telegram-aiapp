@@ -571,13 +571,13 @@ const ChatMessageItemInner: React.FC<ChatMessageItemProps> = ({
           )}
 
           <div
-            className={`${isGroupPeer ? 'min-w-0 max-w-full' : 'min-w-0 max-w-[84%] sm:max-w-[78%]'} rounded-xl ${
+            className={`${isGroupPeer ? 'min-w-0 max-w-full' : 'min-w-0 max-w-[84%] sm:max-w-[78%]'} hs-msg-bubble rounded-xl ${
               hasMediaBubble ? 'p-1' : 'py-1.5 px-2.5'
             } relative transition-colors select-text ${
               isHighlighted ? 'ring-2 ring-amber-400 shadow-lg' : ''
             } ${
               isMe
-                ? 'bg-[#1e88e5] text-white dark:bg-[#1b4975] dark:text-white aurora:bg-[#11434d] aurora:border aurora:border-[#2dd4bf]/25 linen:bg-[#3a6652] linen:text-white linen:border linen:border-[#2d5241] rounded-br-xs shadow-[0_1px_3px_rgba(30,136,229,0.22)] linen:shadow-[0_1px_4px_rgba(43,33,24,0.16)]'
+                ? 'hs-bubble-out bg-[#1e88e5] text-white dark:bg-[#1b4975] dark:text-white aurora:bg-[#11434d] aurora:border aurora:border-[#2dd4bf]/25 linen:bg-[#3a6652] linen:text-white linen:border linen:border-[#2d5241] rounded-br-xs shadow-[0_1px_3px_rgba(30,136,229,0.22)] linen:shadow-[0_1px_4px_rgba(43,33,24,0.16)]'
                 : 'bg-white text-[#0f172a] border border-[#e2e8f0] dark:bg-[#101b2a] dark:text-[#eef4fb] dark:border-[#1a2b40] aurora:bg-[#101c23] aurora:text-[#ecf6f8] aurora:border-[#1c323c] linen:bg-[#faf6ee] linen:text-[#2b2118] linen:border-[#d5c6b0] rounded-bl-xs shadow-[0_1px_2px_rgba(15,23,42,0.04)] linen:shadow-[0_1px_3px_rgba(43,33,24,0.08)]'
             }`}
           >

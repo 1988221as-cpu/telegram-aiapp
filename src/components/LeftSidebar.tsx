@@ -313,7 +313,7 @@ export const LeftSidebar: React.FC<LeftSidebarProps> = React.memo(({
   const totalUnread = accounts.reduce((acc, curr) => acc + (curr.unreadTotal || 0), 0);
 
   const railItemClass = (isActive: boolean) =>
-    `w-full ${compact ? 'h-11' : 'h-14'} flex flex-col items-center justify-center rounded-xl transition-all cursor-pointer relative group border ${
+    `w-full ${compact ? 'h-10' : 'h-14'} flex flex-col items-center justify-center rounded-xl transition-all cursor-pointer relative group border ${
       isActive
         ? 'bg-[#e8f3ff] dark:bg-[#12253c] aurora:bg-[#112e37] linen:bg-[#a6907c]/75 border-[#bfdbfe] dark:border-[#2ba0ff]/35 aurora:border-[#2dd4bf]/55 linen:border-[#f3e6d3]/40 text-[#0284c7] dark:text-[#2ba0ff] aurora:text-[#5eead4] linen:text-[#fff9f0] font-medium shadow-[inset_3px_0_0_#2ba0ff] aurora:shadow-[0_0_16px_rgba(45,212,191,0.22),inset_3px_0_0_#2dd4bf] linen:shadow-xs'
         : 'border-transparent text-[#64748b] dark:text-[#7f95ab] aurora:text-[#7e9aa5] linen:text-[#eee4d6]/90 hover:text-[#0f172a] dark:hover:text-[#eef4fb] aurora:hover:text-[#ecf6f8] linen:hover:text-white hover:bg-black/5 dark:hover:bg-[#101c2d] aurora:hover:bg-[#112028] linen:hover:bg-white/10'
@@ -322,10 +322,10 @@ export const LeftSidebar: React.FC<LeftSidebarProps> = React.memo(({
   return (
     <aside
       ref={asideRef}
-      className={`${compact ? 'w-[68px]' : 'w-[120px]'} bg-[#f8fafc]/95 dark:bg-[#060b13]/95 aurora:bg-[#0b1318]/95 linen:hs-linen-rail-bg backdrop-blur-md border-r border-[#e2e8f0] dark:border-[#162436] aurora:border-[#182b34] linen:border-[#5d4c3e] flex flex-col items-center py-3.5 shrink-0 select-none h-full z-30 relative transition-[width,colors] duration-150 text-[#475569] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#f5ede2]`}
+      className={`${compact ? 'w-[68px] py-2.5' : 'w-[120px] py-3.5'} bg-[#f8fafc]/95 dark:bg-[#060b13]/95 aurora:bg-[#0b1318]/95 linen:hs-linen-rail-bg backdrop-blur-md border-r border-[#e2e8f0] dark:border-[#162436] aurora:border-[#182b34] linen:border-[#5d4c3e] flex flex-col items-center shrink-0 select-none h-full z-30 relative transition-[width,colors] duration-150 text-[#475569] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#f5ede2]`}
     >
       {/* 1. Top Section: HumanSense Brand Logo + Main Menu + Feature Activity Rail */}
-      <div ref={topSectionRef} className="flex flex-col items-center w-full gap-2 shrink-0">
+      <div ref={topSectionRef} className={`flex flex-col items-center w-full ${compact ? 'gap-1.5' : 'gap-2'} shrink-0`}>
         {/* HumanSense Brand Icon & Main Menu Trigger */}
         <button
           onClick={onOpenMenuDrawer}
@@ -353,7 +353,7 @@ export const LeftSidebar: React.FC<LeftSidebarProps> = React.memo(({
             <div className="relative">
               <MessageSquare className="w-5 h-5" />
               {totalUnread > 0 && (
-                <span className="absolute -top-1.5 -right-3 min-w-[18px] h-[18px] px-1 bg-[#2ba0ff] aurora:bg-[#14b8a6] linen:bg-[#b56742] text-white text-[10px] font-bold rounded-full flex items-center justify-center tabular-nums shadow-xs border border-[#f8fafc] dark:border-[#060b13] aurora:border-[#0b1318] linen:border-[#786554]">
+                <span className="hs-accent-bg absolute -top-1.5 -right-3 min-w-[18px] h-[18px] px-1 bg-[#2ba0ff] aurora:bg-[#14b8a6] linen:bg-[#b56742] text-white text-[10px] font-bold rounded-full flex items-center justify-center tabular-nums shadow-xs border border-[#f8fafc] dark:border-[#060b13] aurora:border-[#0b1318] linen:border-[#786554]">
                   {totalUnread > 99 ? '99+' : totalUnread}
                 </span>
               )}

@@ -13,6 +13,9 @@
     --tg-bg-active: #2481cc;
     --tg-bg-bubble-in: #ffffff;
     --tg-bg-bubble-out: #1e88e5;
+    --tg-bubble-out-text: #ffffff;
+    --tg-bubble-radius: 12px;
+    --tg-wallpaper-opacity: 0.55;
     --tg-color-primary: #2481cc;
     --tg-color-accent-glow: rgba(36, 129, 204, 0.16);
     --tg-color-text-primary: #0f172a;
@@ -145,25 +148,25 @@
 .tg-chat-pattern {
   background-color: #f3f6fa;
   background-image:
-    radial-gradient(circle at 50% 0%, rgba(36, 129, 204, 0.05), transparent 60%),
-    radial-gradient(rgba(15, 23, 42, 0.05) 1px, transparent 0);
+    radial-gradient(circle at 50% 0%, rgb(36 129 204 / calc(0.09 * var(--tg-wallpaper-opacity, 0.55))), transparent 60%),
+    radial-gradient(rgb(15 23 42 / calc(0.09 * var(--tg-wallpaper-opacity, 0.55))) 1px, transparent 0);
   background-size: 100% 100%, 24px 24px;
 }
 
 .dark .tg-chat-pattern {
   background-color: #070d16;
   background-image:
-    radial-gradient(circle at 50% 0%, rgba(43, 160, 255, 0.07), transparent 55%),
-    radial-gradient(rgba(148, 197, 255, 0.045) 1px, transparent 0);
+    radial-gradient(circle at 50% 0%, rgb(43 160 255 / calc(0.13 * var(--tg-wallpaper-opacity, 0.55))), transparent 55%),
+    radial-gradient(rgb(148 197 255 / calc(0.08 * var(--tg-wallpaper-opacity, 0.55))) 1px, transparent 0);
   background-size: 100% 100%, 24px 24px;
 }
 
 .theme-aurora .tg-chat-pattern {
   background-color: #081116;
   background-image:
-    radial-gradient(ellipse 68% 44% at 50% 42%, rgba(34, 211, 238, 0.11), transparent 68%),
-    radial-gradient(circle at 50% -6%, rgba(45, 212, 191, 0.14), transparent 54%),
-    radial-gradient(rgba(94, 234, 212, 0.075) 1px, transparent 0);
+    radial-gradient(ellipse 68% 44% at 50% 42%, rgb(34 211 238 / calc(0.18 * var(--tg-wallpaper-opacity, 0.55))), transparent 68%),
+    radial-gradient(circle at 50% -6%, rgb(45 212 191 / calc(0.22 * var(--tg-wallpaper-opacity, 0.55))), transparent 54%),
+    radial-gradient(rgb(94 234 212 / calc(0.13 * var(--tg-wallpaper-opacity, 0.55))) 1px, transparent 0);
   background-size: 100% 100%, 100% 100%, 24px 24px;
 }
 
@@ -181,9 +184,158 @@
 .theme-linen .tg-chat-pattern {
   background-color: #d4c7b3;
   background-image:
-    radial-gradient(ellipse 80% 60% at 50% 45%, rgba(255, 250, 238, 0.14), transparent 72%),
+    radial-gradient(ellipse 80% 60% at 50% 45%, rgb(255 250 238 / calc(0.26 * var(--tg-wallpaper-opacity, 0.55))), transparent 72%),
     linear-gradient(180deg, #d8ccba 0%, #cfc1ab 100%);
   background-size: 100% 100%, 100% 100%;
+}
+
+/* Official Telegram-style Chat Wallpapers & Patterns */
+[data-wallpaper="solid"] .tg-chat-pattern {
+  background-image: none !important;
+}
+
+[data-wallpaper="tg_doodle"] .tg-chat-pattern {
+  background-color: #e7eff6;
+  background-image:
+    linear-gradient(rgb(231 239 246 / calc(1 - var(--tg-wallpaper-opacity, 0.55))), rgb(231 239 246 / calc(1 - var(--tg-wallpaper-opacity, 0.55)))),
+    url("data:image/svg+xml,%3Csvg width='120' height='120' viewBox='0 0 120 120' xmlns='http://www.w3.org/2000/svg'%3E%3Cg fill='none' stroke='%232481cc' stroke-opacity='0.18' stroke-width='1.35' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M16 26l14-6-5 15-3-5-6-4z'/%3E%3Ccircle cx='82' cy='24' r='7'/%3E%3Cpath d='M52 54c0-5 4-9 9-9s9 4 9 9c0 7-9 11-9 11s-9-4-9-11z'/%3E%3Cpath d='M18 88h18l4 5V78a3 3 0 0 0-3-3H18a3 3 0 0 0-3 3v7a3 3 0 0 0 3 3z'/%3E%3Cpath d='M86 84l6-6 6 6m-6-6v16'/%3E%3Cpath d='M48 18l3 6 6 1-4 4 1 6-6-3-6 3 1-6-4-4 6-1z'/%3E%3C/g%3E%3C/svg%3E"),
+    linear-gradient(135deg, rgba(219, 234, 254, 0.52) 0%, rgba(224, 242, 254, 0.36) 50%, rgba(236, 253, 245, 0.42) 100%);
+  background-size: 100% 100%, 120px 120px, 100% 100%;
+}
+
+.dark[data-wallpaper="tg_doodle"] .tg-chat-pattern {
+  background-color: #0b141e;
+  background-image:
+    linear-gradient(rgb(11 20 30 / calc(1 - var(--tg-wallpaper-opacity, 0.55))), rgb(11 20 30 / calc(1 - var(--tg-wallpaper-opacity, 0.55)))),
+    url("data:image/svg+xml,%3Csvg width='120' height='120' viewBox='0 0 120 120' xmlns='http://www.w3.org/2000/svg'%3E%3Cg fill='none' stroke='%237cc4ff' stroke-opacity='0.15' stroke-width='1.35' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M16 26l14-6-5 15-3-5-6-4z'/%3E%3Ccircle cx='82' cy='24' r='7'/%3E%3Cpath d='M52 54c0-5 4-9 9-9s9 4 9 9c0 7-9 11-9 11s-9-4-9-11z'/%3E%3Cpath d='M18 88h18l4 5V78a3 3 0 0 0-3-3H18a3 3 0 0 0-3 3v7a3 3 0 0 0 3 3z'/%3E%3Cpath d='M86 84l6-6 6 6m-6-6v16'/%3E%3Cpath d='M48 18l3 6 6 1-4 4 1 6-6-3-6 3 1-6-4-4 6-1z'/%3E%3C/g%3E%3C/svg%3E"),
+    linear-gradient(135deg, rgba(16, 32, 52, 0.72) 0%, rgba(10, 20, 34, 0.85) 100%);
+  background-size: 100% 100%, 120px 120px, 100% 100%;
+}
+
+.theme-aurora[data-wallpaper="tg_doodle"] .tg-chat-pattern {
+  background-color: #081116;
+  background-image:
+    linear-gradient(rgb(8 17 22 / calc(1 - var(--tg-wallpaper-opacity, 0.55))), rgb(8 17 22 / calc(1 - var(--tg-wallpaper-opacity, 0.55)))),
+    url("data:image/svg+xml,%3Csvg width='120' height='120' viewBox='0 0 120 120' xmlns='http://www.w3.org/2000/svg'%3E%3Cg fill='none' stroke='%232dd4bf' stroke-opacity='0.16' stroke-width='1.35' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M16 26l14-6-5 15-3-5-6-4z'/%3E%3Ccircle cx='82' cy='24' r='7'/%3E%3Cpath d='M52 54c0-5 4-9 9-9s9 4 9 9c0 7-9 11-9 11s-9-4-9-11z'/%3E%3Cpath d='M18 88h18l4 5V78a3 3 0 0 0-3-3H18a3 3 0 0 0-3 3v7a3 3 0 0 0 3 3z'/%3E%3Cpath d='M86 84l6-6 6 6m-6-6v16'/%3E%3Cpath d='M48 18l3 6 6 1-4 4 1 6-6-3-6 3 1-6-4-4 6-1z'/%3E%3C/g%3E%3C/svg%3E"),
+    radial-gradient(ellipse 68% 46% at 50% 34%, rgba(34, 211, 238, 0.14), transparent 70%),
+    linear-gradient(145deg, rgba(13, 36, 44, 0.78) 0%, rgba(8, 17, 22, 0.9) 100%);
+  background-size: 100% 100%, 120px 120px, 100% 100%, 100% 100%;
+}
+
+.theme-linen[data-wallpaper="tg_doodle"] .tg-chat-pattern {
+  background-color: #d6c8b2;
+  background-image:
+    linear-gradient(rgb(214 200 178 / calc(1 - var(--tg-wallpaper-opacity, 0.55))), rgb(214 200 178 / calc(1 - var(--tg-wallpaper-opacity, 0.55)))),
+    url("data:image/svg+xml,%3Csvg width='120' height='120' viewBox='0 0 120 120' xmlns='http://www.w3.org/2000/svg'%3E%3Cg fill='none' stroke='%236e4e34' stroke-opacity='0.19' stroke-width='1.35' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M16 26l14-6-5 15-3-5-6-4z'/%3E%3Ccircle cx='82' cy='24' r='7'/%3E%3Cpath d='M52 54c0-5 4-9 9-9s9 4 9 9c0 7-9 11-9 11s-9-4-9-11z'/%3E%3Cpath d='M18 88h18l4 5V78a3 3 0 0 0-3-3H18a3 3 0 0 0-3 3v7a3 3 0 0 0 3 3z'/%3E%3Cpath d='M86 84l6-6 6 6m-6-6v16'/%3E%3Cpath d='M48 18l3 6 6 1-4 4 1 6-6-3-6 3 1-6-4-4 6-1z'/%3E%3C/g%3E%3C/svg%3E"),
+    linear-gradient(180deg, #dacdb9 0%, #cfc0a8 100%);
+  background-size: 100% 100%, 120px 120px, 100% 100%;
+}
+
+[data-wallpaper="tg_sky"] .tg-chat-pattern {
+  background-color: #e4f0fb;
+  background-image:
+    radial-gradient(ellipse 75% 55% at 15% 15%, rgb(56 189 248 / calc(0.32 * var(--tg-wallpaper-opacity, 0.55))), transparent 65%),
+    radial-gradient(ellipse 65% 50% at 85% 80%, rgb(16 185 129 / calc(0.22 * var(--tg-wallpaper-opacity, 0.55))), transparent 65%),
+    linear-gradient(160deg, #eaf4fd 0%, #ddecf9 50%, #e4f3ef 100%);
+  background-size: 100% 100%, 100% 100%, 100% 100%;
+}
+
+.dark[data-wallpaper="tg_sky"] .tg-chat-pattern {
+  background-color: #09131f;
+  background-image:
+    radial-gradient(ellipse 70% 50% at 20% 20%, rgb(43 160 255 / calc(0.26 * var(--tg-wallpaper-opacity, 0.55))), transparent 65%),
+    radial-gradient(ellipse 60% 50% at 85% 80%, rgb(20 184 166 / calc(0.22 * var(--tg-wallpaper-opacity, 0.55))), transparent 65%),
+    linear-gradient(160deg, #08121d 0%, #0b1929 55%, #09161d 100%);
+  background-size: 100% 100%, 100% 100%, 100% 100%;
+}
+
+.theme-aurora[data-wallpaper="tg_sky"] .tg-chat-pattern {
+  background-color: #081217;
+  background-image:
+    radial-gradient(ellipse 72% 52% at 20% 18%, rgb(45 212 191 / calc(0.28 * var(--tg-wallpaper-opacity, 0.55))), transparent 65%),
+    radial-gradient(ellipse 62% 52% at 84% 82%, rgb(34 211 238 / calc(0.24 * var(--tg-wallpaper-opacity, 0.55))), transparent 65%),
+    linear-gradient(160deg, #071216 0%, #0b1c22 55%, #08141a 100%);
+  background-size: 100% 100%, 100% 100%, 100% 100%;
+}
+
+[data-wallpaper="tg_ocean"] .tg-chat-pattern {
+  background-color: #dce9f5;
+  background-image:
+    radial-gradient(ellipse 80% 60% at 50% 0%, rgb(36 129 204 / calc(0.28 * var(--tg-wallpaper-opacity, 0.55))), transparent 65%),
+    linear-gradient(180deg, #e1edf8 0%, #cfe1f2 100%);
+  background-size: 100% 100%, 100% 100%;
+}
+
+.dark[data-wallpaper="tg_ocean"] .tg-chat-pattern {
+  background-color: #09111b;
+  background-image:
+    radial-gradient(ellipse 75% 50% at 50% 0%, rgb(56 148 224 / calc(0.28 * var(--tg-wallpaper-opacity, 0.55))), transparent 68%),
+    radial-gradient(ellipse 65% 50% at 85% 90%, rgb(37 99 235 / calc(0.2 * var(--tg-wallpaper-opacity, 0.55))), transparent 65%),
+    linear-gradient(180deg, #0b1623 0%, #070e18 100%);
+  background-size: 100% 100%, 100% 100%, 100% 100%;
+}
+
+.theme-aurora[data-wallpaper="tg_ocean"] .tg-chat-pattern {
+  background-color: #081217;
+  background-image:
+    radial-gradient(ellipse 75% 52% at 50% 0%, rgb(20 184 166 / calc(0.28 * var(--tg-wallpaper-opacity, 0.55))), transparent 68%),
+    radial-gradient(ellipse 65% 50% at 85% 90%, rgb(14 165 233 / calc(0.22 * var(--tg-wallpaper-opacity, 0.55))), transparent 65%),
+    linear-gradient(180deg, #0a1a21 0%, #071015 100%);
+  background-size: 100% 100%, 100% 100%, 100% 100%;
+}
+
+[data-wallpaper="tg_sunset"] .tg-chat-pattern {
+  background-color: #f6ebe3;
+  background-image:
+    radial-gradient(ellipse 70% 55% at 20% 15%, rgb(244 114 182 / calc(0.26 * var(--tg-wallpaper-opacity, 0.55))), transparent 65%),
+    radial-gradient(ellipse 70% 55% at 85% 85%, rgb(245 158 11 / calc(0.26 * var(--tg-wallpaper-opacity, 0.55))), transparent 65%),
+    linear-gradient(145deg, #fbf0e8 0%, #f3e4dd 55%, #efe5eb 100%);
+  background-size: 100% 100%, 100% 100%, 100% 100%;
+}
+
+.dark[data-wallpaper="tg_sunset"] .tg-chat-pattern {
+  background-color: #13101a;
+  background-image:
+    radial-gradient(ellipse 70% 55% at 20% 15%, rgb(217 70 239 / calc(0.24 * var(--tg-wallpaper-opacity, 0.55))), transparent 65%),
+    radial-gradient(ellipse 70% 55% at 85% 85%, rgb(245 158 11 / calc(0.22 * var(--tg-wallpaper-opacity, 0.55))), transparent 65%),
+    linear-gradient(145deg, #171221 0%, #12111b 55%, #17131a 100%);
+  background-size: 100% 100%, 100% 100%, 100% 100%;
+}
+
+.theme-aurora[data-wallpaper="tg_sunset"] .tg-chat-pattern {
+  background-color: #0c1418;
+  background-image:
+    radial-gradient(ellipse 70% 55% at 20% 15%, rgb(45 212 191 / calc(0.24 * var(--tg-wallpaper-opacity, 0.55))), transparent 65%),
+    radial-gradient(ellipse 70% 55% at 85% 85%, rgb(245 158 11 / calc(0.22 * var(--tg-wallpaper-opacity, 0.55))), transparent 65%),
+    linear-gradient(145deg, #0b181d 0%, #0f171d 55%, #15141b 100%);
+  background-size: 100% 100%, 100% 100%, 100% 100%;
+}
+
+/* Custom Accent & Bubble Corner Radius Overrides */
+.hs-msg-bubble {
+  border-radius: var(--tg-bubble-radius, 12px);
+}
+.hs-msg-bubble.rounded-br-xs {
+  border-bottom-right-radius: 4px;
+}
+.hs-msg-bubble.rounded-bl-xs {
+  border-bottom-left-radius: 4px;
+}
+
+[data-custom-accent="true"] .hs-bubble-out {
+  background-color: var(--tg-bg-bubble-out) !important;
+  color: var(--tg-bubble-out-text, #ffffff) !important;
+  border-color: var(--tg-border-glow) !important;
+}
+
+[data-custom-accent="true"] .hs-accent-bg {
+  background-color: var(--tg-color-primary) !important;
+  border-color: var(--tg-color-primary) !important;
+  color: var(--tg-accent-text, #ffffff) !important;
+}
+
+[data-custom-accent="true"] .hs-accent-text {
+  color: var(--tg-color-primary) !important;
 }
 
 /* Frosted Glass Surface Utility */

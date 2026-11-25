@@ -610,8 +610,8 @@ async function createWindow() {
   mainWindow = new BrowserWindow({
     width: 1280,
     height: 820,
-    minWidth: 900,
-    minHeight: 650,
+    minWidth: 640,
+    minHeight: 560,
     title: windowTitle,
     icon: resolveAppIcon(),
     backgroundColor: '#0a111a',

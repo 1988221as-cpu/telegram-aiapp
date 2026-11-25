@@ -4902,15 +4902,15 @@ const ChatAreaActive: React.FC<ChatAreaProps & { chat: Chat }> = ({
   ]);
 
   return (
-    <div className="flex-1 min-w-0 bg-[#f4f7fb] dark:bg-[#060b12] aurora:bg-[#081116] linen:bg-[#ddd2bc] flex flex-col h-full relative overflow-hidden transition-colors">
+    <div className="@container flex-1 min-w-0 bg-[#f4f7fb] dark:bg-[#060b12] aurora:bg-[#081116] linen:bg-[#ddd2bc] flex flex-col h-full relative overflow-hidden transition-colors">
       {/* 1. Official Telegram Top Bar Header (Image 2 Layout) */}
-      <header className="h-[56px] bg-white/90 dark:bg-[#09111d]/90 aurora:bg-[#0d171d]/92 linen:bg-[#f2e8d9]/95 backdrop-blur-md border-b border-[#e2e8f0] dark:border-[#162436] aurora:border-[#182b34] linen:border-[#cbbba2] flex items-center justify-between px-4 shrink-0 z-10 transition-colors">
+      <header className="h-[56px] bg-white/90 dark:bg-[#09111d]/90 aurora:bg-[#0d171d]/92 linen:bg-[#f2e8d9]/95 backdrop-blur-md border-b border-[#e2e8f0] dark:border-[#162436] aurora:border-[#182b34] linen:border-[#cbbba2] flex items-center justify-between px-2.5 @[560px]:px-4 shrink-0 z-10 transition-colors gap-1.5">
         {onCloseChat && (
           <button
             type="button"
             onClick={onCloseChat}
             title="返回会话列表"
-            className="lg:hidden mr-1.5 w-8 h-8 rounded-lg hover:bg-[#f1f5f9] dark:hover:bg-[#142236] aurora:hover:bg-[#15252e] linen:hover:bg-[#e7dac5] flex items-center justify-center shrink-0 cursor-pointer text-[#64748b] dark:text-[#9bb3c9] aurora:text-[#7e9aa5] linen:text-[#5f4d3b]"
+            className="lg:hidden mr-0.5 w-7 h-7 @[560px]:w-8 @[560px]:h-8 rounded-lg hover:bg-[#f1f5f9] dark:hover:bg-[#142236] aurora:hover:bg-[#15252e] linen:hover:bg-[#e7dac5] flex items-center justify-center shrink-0 cursor-pointer text-[#64748b] dark:text-[#9bb3c9] aurora:text-[#7e9aa5] linen:text-[#5f4d3b]"
           >
             <ChevronLeft className="w-5 h-5" />
           </button>
@@ -4918,7 +4918,7 @@ const ChatAreaActive: React.FC<ChatAreaProps & { chat: Chat }> = ({
         {/* Left: Contact Info (Click to view Profile & Shared Media) */}
         <div
           onClick={() => setChatInfoOpen(true)}
-          className="flex items-center gap-3 flex-1 min-w-0 pr-2 cursor-pointer hover:opacity-90 transition-opacity"
+          className="flex items-center gap-2 @[560px]:gap-3 flex-1 min-w-0 pr-1 cursor-pointer hover:opacity-90 transition-opacity"
           title="点击查看联系人资料与共享媒体库"
         >
           <div
@@ -5030,13 +5030,13 @@ const ChatAreaActive: React.FC<ChatAreaProps & { chat: Chat }> = ({
         </div>
 
         {/* Right: Image 2 Header Actions ([私聊翻译] [全息记忆] [Search] [···] [⋮] [×]) */}
-        <div className="flex items-center gap-1.5 shrink-0 text-[#64748b] dark:text-[#9bb3c9] aurora:text-[#7e9aa5] linen:text-[#5f4d3b]">
+        <div className="flex items-center gap-1 @[560px]:gap-1.5 shrink-0 text-[#64748b] dark:text-[#9bb3c9] aurora:text-[#7e9aa5] linen:text-[#5f4d3b]">
           {/* Bidirectional Translation Bar Toggle */}
           <button
             type="button"
             onClick={() => setIsTranslateBarVisible(!isTranslateBarVisible)}
             title={isChatTransEnabled ? '展开或收起实时翻译栏' : '当前会话翻译已关闭（点击展开配置或重新开启）'}
-            className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11.5px] font-medium border transition-colors cursor-pointer ${
+            className={`flex items-center gap-1 @[560px]:gap-1.5 px-2 @[560px]:px-2.5 py-1 rounded-full text-[11.5px] font-medium border transition-colors cursor-pointer whitespace-nowrap shrink-0 ${
               !isChatTransEnabled
                 ? 'bg-slate-100 border-slate-300 text-slate-500 hover:text-slate-800 dark:bg-[#0e1726] dark:border-[#1e3148] dark:text-[#7b93ad] dark:hover:text-white aurora:bg-[#0e1920] aurora:border-[#1e343e] aurora:text-[#7e9aa5] aurora:hover:text-[#ecf6f8] linen:bg-[#e5d9c5] linen:border-[#cbbba2] linen:text-[#6f5d4b] linen:hover:text-[#2b2118]'
                 : isTranslateBarVisible
@@ -5044,9 +5044,12 @@ const ChatAreaActive: React.FC<ChatAreaProps & { chat: Chat }> = ({
                   : 'bg-[#f8fafc] border-[#e2e8f0] text-[#64748b] hover:text-[#0f172a] dark:bg-[#0e1726] dark:border-[#1a2b40] dark:text-[#8aa0b8] dark:hover:text-white aurora:bg-[#101c23] aurora:border-[#1e343e] aurora:text-[#7e9aa5] aurora:hover:text-[#ecf6f8] linen:bg-[#e9decb] linen:border-[#cbbba2] linen:text-[#5f4d3b] linen:hover:text-[#2b2118]'
             }`}
           >
-            <Languages className="w-3.5 h-3.5" />
-            <span className="hidden sm:inline">
+            <Languages className="w-3.5 h-3.5 shrink-0" />
+            <span className="hidden @[580px]:inline">
               {chatTransScopeLabel}: {isChatTransEnabled ? '开启' : '已关闭'}
+            </span>
+            <span className="hidden @[440px]:inline @[580px]:hidden">
+              {isChatTransEnabled ? '翻译' : '关译'}
             </span>
           </button>
 
@@ -5054,15 +5057,16 @@ const ChatAreaActive: React.FC<ChatAreaProps & { chat: Chat }> = ({
           <button
             type="button"
             onClick={onOpenCustomerMemory || onOpenKnowledgeEvolution}
-            title="全息记忆"
-            className={`flex items-center gap-1 px-2.5 py-1 rounded-full text-[11.5px] font-medium border transition-colors cursor-pointer ${
+            title="全息记忆（独立工作台）"
+            className={`flex items-center gap-1 px-2 @[560px]:px-2.5 py-1 rounded-full text-[11.5px] font-medium border transition-colors cursor-pointer whitespace-nowrap shrink-0 ${
               isCustomerMemoryOpen
                 ? 'bg-[#2481cc] border-[#2481cc] text-white dark:bg-[#2ba0ff]/20 dark:border-[#2ba0ff]/50 dark:text-[#2ba0ff] aurora:bg-[#112e37] aurora:border-[#2dd4bf]/55 aurora:text-[#5eead4] linen:bg-[#826832] linen:border-[#6f5828] linen:text-white linen:shadow-xs'
                 : 'bg-[#f0f7ff] hover:bg-[#e0efff] dark:bg-[#102033] dark:hover:bg-[#142840] aurora:bg-[#10242b] aurora:hover:bg-[#132d36] border-[#dbeafe] dark:border-[#2ba0ff]/25 aurora:border-[#2dd4bf]/30 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#5eead4] linen:bg-[#9e8244] linen:hover:bg-[#8a7039] linen:border-[#8a7039] linen:text-white linen:shadow-xs'
             }`}
           >
-            <Brain className="w-3.5 h-3.5" />
-            <span className="hidden lg:inline font-semibold">全息记忆</span>
+            <Brain className="w-3.5 h-3.5 shrink-0" />
+            <span className="hidden @[540px]:inline font-semibold">全息记忆</span>
+            <span className="hidden @[440px]:inline @[540px]:hidden font-semibold">记忆</span>
           </button>
 
           {/* In-Chat Search Button */}
@@ -5070,7 +5074,7 @@ const ChatAreaActive: React.FC<ChatAreaProps & { chat: Chat }> = ({
             type="button"
             onClick={() => setIsSearchingInChat(!isSearchingInChat)}
             title="搜索消息"
-            className={`w-8 h-8 rounded-lg flex items-center justify-center transition-colors cursor-pointer ${
+            className={`w-7 h-7 @[560px]:w-8 @[560px]:h-8 rounded-lg flex items-center justify-center shrink-0 transition-colors cursor-pointer ${
               isSearchingInChat
                 ? 'bg-[#e8f3ff] text-[#2481cc] dark:bg-[#2481cc]/20 dark:text-[#2ba0ff] aurora:bg-[#112e37] aurora:text-[#5eead4] linen:bg-[#e5d6be] linen:text-[#a86a43]'
                 : 'hover:bg-[#f1f5f9] dark:hover:bg-[#142236] aurora:hover:bg-[#15252e] linen:hover:bg-[#e7dac5] text-[#64748b] dark:text-[#9bb3c9] aurora:text-[#7e9aa5] linen:text-[#5f4d3b] hover:text-[#0f172a] dark:hover:text-white aurora:hover:text-[#ecf6f8] linen:hover:text-[#2b2118]'
@@ -5085,7 +5089,7 @@ const ChatAreaActive: React.FC<ChatAreaProps & { chat: Chat }> = ({
             type="button"
             onClick={() => setIsHeaderMoreMenuOpen((v) => !v)}
             title="刷新当前对话与字体大小调节"
-            className={`w-9 h-7 rounded-lg flex items-center justify-center transition-colors cursor-pointer ${
+            className={`w-8 h-7 @[560px]:w-9 rounded-lg flex items-center justify-center shrink-0 transition-colors cursor-pointer ${
               isHeaderMoreMenuOpen || isSyncingCloud || chatFontScale !== 1
                 ? 'bg-[#e8f3ff] text-[#2481cc] dark:bg-[#2481cc]/20 dark:text-[#2ba0ff] aurora:bg-[#112e37] aurora:text-[#5eead4] linen:bg-[#b57a54] linen:text-white linen:shadow-xs'
                 : 'hover:bg-[#f1f5f9] dark:hover:bg-[#142236] aurora:hover:bg-[#15252e] linen:bg-[#b57a54]/85 linen:hover:bg-[#a86a43] linen:text-white text-[#64748b] dark:text-[#9bb3c9] aurora:text-[#7e9aa5] hover:text-[#0f172a] dark:hover:text-white aurora:hover:text-[#ecf6f8]'
@@ -5187,7 +5191,7 @@ const ChatAreaActive: React.FC<ChatAreaProps & { chat: Chat }> = ({
             type="button"
             onClick={() => setChatInfoOpen(true)}
             title="更多与联系人资料"
-            className={`w-8 h-8 rounded-lg flex items-center justify-center transition-colors cursor-pointer ${
+            className={`w-7 h-7 @[560px]:w-8 @[560px]:h-8 rounded-lg flex items-center justify-center shrink-0 transition-colors cursor-pointer ${
               isChatInfoOpen
                 ? 'bg-[#e8f3ff] text-[#2481cc] dark:bg-[#132234] dark:text-[#2ba0ff] aurora:bg-[#112e37] aurora:text-[#5eead4] linen:bg-[#e5d6be] linen:text-[#a86a43]'
                 : 'hover:bg-[#f1f5f9] dark:hover:bg-[#142236] aurora:hover:bg-[#15252e] linen:hover:bg-[#e7dac5] hover:text-[#0f172a] dark:hover:text-white aurora:hover:text-[#ecf6f8] linen:hover:text-[#2b2118]'
@@ -5202,7 +5206,7 @@ const ChatAreaActive: React.FC<ChatAreaProps & { chat: Chat }> = ({
               type="button"
               onClick={onCloseChat}
               title="关闭 (Esc)"
-              className="w-8 h-8 rounded-lg hover:bg-[#f1f5f9] dark:hover:bg-[#142236] aurora:hover:bg-[#15252e] linen:hover:bg-[#e7dac5] flex items-center justify-center hover:text-[#0f172a] dark:hover:text-white aurora:hover:text-[#ecf6f8] linen:hover:text-[#2b2118] transition-colors cursor-pointer text-[#64748b] dark:text-[#9bb3c9] aurora:text-[#7e9aa5] linen:text-[#5f4d3b]"
+              className="w-7 h-7 @[560px]:w-8 @[560px]:h-8 rounded-lg hover:bg-[#f1f5f9] dark:hover:bg-[#142236] aurora:hover:bg-[#15252e] linen:hover:bg-[#e7dac5] flex items-center justify-center shrink-0 hover:text-[#0f172a] dark:hover:text-white aurora:hover:text-[#ecf6f8] linen:hover:text-[#2b2118] transition-colors cursor-pointer text-[#64748b] dark:text-[#9bb3c9] aurora:text-[#7e9aa5] linen:text-[#5f4d3b]"
             >
               <X className="w-4 h-4" />
             </button>
@@ -6311,7 +6315,7 @@ const ChatAreaActive: React.FC<ChatAreaProps & { chat: Chat }> = ({
                     ? `发送照片（${sendWithEnter ? 'Enter 发送 · Shift+Enter 换行' : 'Ctrl+Enter 发送 · Enter 换行'}）`
                     : `发送消息（${sendWithEnter ? 'Enter 发送 · Shift+Enter 换行' : 'Ctrl+Enter 发送 · Enter 换行'}）`
                 }
-                className={`h-7 @[520px]:h-8 px-3 @[520px]:px-4 rounded-full bg-[#2481cc] hover:bg-[#1d6fb3] dark:bg-[#2ba0ff] dark:hover:bg-[#1e8ee8] aurora:bg-[#0d9488] aurora:hover:bg-[#0f766e] linen:bg-[#3a6652] linen:hover:bg-[#2f5544] text-white text-xs font-medium flex items-center gap-1.5 whitespace-nowrap transition-all cursor-pointer shadow-xs shrink-0 disabled:opacity-55 disabled:cursor-default`}
+                className={`hs-accent-bg h-7 @[520px]:h-8 px-3 @[520px]:px-4 rounded-full bg-[#2481cc] hover:bg-[#1d6fb3] dark:bg-[#2ba0ff] dark:hover:bg-[#1e8ee8] aurora:bg-[#0d9488] aurora:hover:bg-[#0f766e] linen:bg-[#3a6652] linen:hover:bg-[#2f5544] text-white text-xs font-medium flex items-center gap-1.5 whitespace-nowrap transition-all cursor-pointer shadow-xs shrink-0 disabled:opacity-55 disabled:cursor-default`}
               >
                 {editingMessage ? <Check className="w-3.5 h-3.5" /> : <Send className="w-3.5 h-3.5" />}
                 <span>{editingMessage ? '保存' : pastedImage ? '发送照片' : '发送'}</span>
