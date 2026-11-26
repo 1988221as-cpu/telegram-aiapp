@@ -592,6 +592,64 @@ async function resolveSystemProxyForBackend() {
   }
 }
 
+let lastProxySyncCheckAt = 0;
+let lastSyncedAutoProxyValue = '';
+let inFlightProxySyncPromise = null;
+
+async function syncSystemProxyToBackendIfChanged(options = {}) {
+  if (isQuitting) return;
+  const force = Boolean(options && options.force);
+  const now = Date.now();
+  if (!force && now - lastProxySyncCheckAt < 15000) return;
+  if (inFlightProxySyncPromise) return inFlightProxySyncPromise;
+
+  inFlightProxySyncPromise = (async () => {
+    try {
+      lastProxySyncCheckAt = Date.now();
+      const nextAutoProxy = await resolveSystemProxyForBackend();
+      const currentEnvProxy = String(process.env.HS_AUTO_SYSTEM_PROXY || '').trim();
+      if (!force && nextAutoProxy === lastSyncedAutoProxyValue && nextAutoProxy === currentEnvProxy) {
+        return;
+      }
+      lastSyncedAutoProxyValue = nextAutoProxy;
+      if (nextAutoProxy) process.env.HS_AUTO_SYSTEM_PROXY = nextAutoProxy;
+      else delete process.env.HS_AUTO_SYSTEM_PROXY;
+
+      const portToNotify = Number.isInteger(currentPort) && currentPort > 0 ? currentPort : FIXED_APP_PORT;
+      const payload = JSON.stringify({ autoSystemProxy: nextAutoProxy || '' });
+      await new Promise((resolve) => {
+        const req = http.request(
+          {
+            hostname: '127.0.0.1',
+            port: portToNotify,
+            path: '/api/internal/sync-system-proxy',
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'Content-Length': Buffer.byteLength(payload),
+            },
+          },
+          (res) => {
+            res.resume();
+            resolve();
+          }
+        );
+        req.setTimeout(2000, () => {
+          req.destroy();
+          resolve();
+        });
+        req.on('error', () => resolve());
+        req.write(payload);
+        req.end();
+      });
+    } catch {}
+  })().finally(() => {
+    inFlightProxySyncPromise = null;
+  });
+
+  return inFlightProxySyncPromise;
+}
+
 // 7. Load backend in main process
 async function startBackendServer(port) {
   const appPath = __dirname;
@@ -603,6 +661,7 @@ async function startBackendServer(port) {
 
   const userDataDir = path.join(app.getPath('userData'), 'data');
   const autoSystemProxy = await resolveSystemProxyForBackend();
+  lastSyncedAutoProxyValue = autoSystemProxy || '';
   if (autoSystemProxy) {
     process.env.HS_AUTO_SYSTEM_PROXY = autoSystemProxy;
     writeLog('info', `Detected OS system proxy for Telegram/Cloud fallback: ${autoSystemProxy}`);
@@ -679,6 +738,9 @@ async function createWindow() {
   });
 
   Menu.setApplicationMenu(null);
+  mainWindow.on('focus', () => {
+    void syncSystemProxyToBackendIfChanged();
+  });
   mainWindow.on('page-title-updated', (event, nextTitle) => {
     const expected = getAppWindowTitle();
     if (nextTitle !== expected) {
@@ -903,6 +965,7 @@ function broadcastAiWindowState(extra = {}) {
 }
 
 function openOrFocusAiAssistantWindow(options = {}) {
+  void syncSystemProxyToBackendIfChanged();
   const saved = loadAiWindowBounds();
   if (typeof options.alwaysOnTop === 'boolean') {
     aiAssistantAlwaysOnTop = options.alwaysOnTop;
@@ -1019,6 +1082,24 @@ function openOrFocusAiAssistantWindow(options = {}) {
     } catch {
       event.preventDefault();
     }
+  });
+
+  aiAssistantWindow.webContents.on('render-process-gone', (_event, details) => {
+    writeLog(
+      'warn',
+      `AI Assistant window renderer process gone: ${details?.reason || 'unknown'} (exitCode: ${details?.exitCode ?? 'n/a'})`
+    );
+    const crashedWin = aiAssistantWindow;
+    pendingAiCloseAction = null;
+    aiAssistantWindow = null;
+    try {
+      if (crashedWin && !crashedWin.isDestroyed()) crashedWin.destroy();
+    } catch {}
+    broadcastAiWindowState({ action: 'close', reason: 'render-process-gone' });
+  });
+
+  aiAssistantWindow.webContents.on('unresponsive', () => {
+    writeLog('warn', 'AI Assistant window became unresponsive');
   });
 
   const persistCurrentBounds = () => {
@@ -2047,6 +2128,13 @@ app.whenReady().then(() => {
         req.end();
       } catch {}
     });
+  }
+  const proxySyncTimer = setInterval(() => {
+    if (isQuitting) return;
+    void syncSystemProxyToBackendIfChanged();
+  }, 60000);
+  if (typeof proxySyncTimer.unref === 'function') {
+    proxySyncTimer.unref();
   }
   try {
     const swapFailMarker = path.join(app.getPath('userData'), 'logs', 'portable_swap_failed.txt');

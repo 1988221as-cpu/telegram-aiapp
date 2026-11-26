@@ -152,6 +152,9 @@ export const TelegramEmojiPicker: React.FC<TelegramEmojiPickerProps> = ({
   const [remoteSearchError, setRemoteSearchError] = useState<string | null>(null);
   const [failedThumbKeys, setFailedThumbKeys] = useState<Set<string>>(new Set());
   const remoteSearchSeqRef = useRef(0);
+  const [hasAttemptedStickers, setHasAttemptedStickers] = useState(false);
+  const latestAccountIdRef = useRef(accountId);
+  latestAccountIdRef.current = accountId;
   const pickerRef = useRef<HTMLDivElement>(null);
   const [popupPos, setPopupPos] = useState<{ top: number; left: number; width: number; maxHeight: number } | null>(null);
 
@@ -209,10 +212,13 @@ export const TelegramEmojiPicker: React.FC<TelegramEmojiPickerProps> = ({
     return () => document.removeEventListener('mousedown', handleOutsideClick);
   }, [isOpen, onClose, anchorRef]);
 
-  const loadOfficialStickers = useCallback(async () => {
+  const loadOfficialStickers = useCallback(async (forceRefresh = false) => {
+    const targetAccountId = accountId;
+    setHasAttemptedStickers(true);
     setIsLoadingStickers(true);
     setStickersError(null);
-    const res = await fetchTelegramStickersApi(accountId);
+    const res = await fetchTelegramStickersApi(targetAccountId, { forceRefresh });
+    if (latestAccountIdRef.current !== targetAccountId) return;
     setIsLoadingStickers(false);
     if (!res.ok) {
       setStickerPacks([]);
@@ -234,13 +240,21 @@ export const TelegramEmojiPicker: React.FC<TelegramEmojiPickerProps> = ({
     setStickersError(null);
     setRemoteSearchError(null);
     setIsSearchingRemote(false);
+    setIsLoadingStickers(false);
+    setHasAttemptedStickers(false);
   }, [accountId]);
 
   useEffect(() => {
-    if (isOpen && tab === 'stickers' && stickerPacks.length === 0 && !isLoadingStickers) {
+    if (!isOpen) {
+      setHasAttemptedStickers(false);
+    }
+  }, [isOpen]);
+
+  useEffect(() => {
+    if (isOpen && tab === 'stickers' && !hasAttemptedStickers && stickerPacks.length === 0 && !isLoadingStickers && !stickersError) {
       void loadOfficialStickers();
     }
-  }, [isOpen, tab, stickerPacks.length, isLoadingStickers, loadOfficialStickers]);
+  }, [isOpen, tab, hasAttemptedStickers, stickerPacks.length, isLoadingStickers, stickersError, loadOfficialStickers]);
 
   const runRemoteStickerSearch = useCallback(async (rawQuery: string) => {
     const q = rawQuery.trim();
@@ -591,7 +605,7 @@ export const TelegramEmojiPicker: React.FC<TelegramEmojiPickerProps> = ({
             <p className="text-rose-600 dark:text-rose-400 aurora:text-rose-400 font-medium mb-2">{stickersError}</p>
             <button
               type="button"
-              onClick={() => void loadOfficialStickers()}
+              onClick={() => void loadOfficialStickers(true)}
               className="px-3 py-1 rounded-lg bg-[#e8f3ff] border border-[#bfdbfe] text-[#0284c7] hover:bg-[#dbeafe] dark:bg-[#2ba0ff]/15 dark:border-[#2ba0ff]/35 dark:text-[#7cc4ff] dark:hover:bg-[#2ba0ff]/25 aurora:bg-[#112d36] aurora:border-[#2dd4bf]/35 aurora:text-[#5eead4] aurora:hover:bg-[#153944] linen:bg-[#e5d5bf] linen:border-[#c2a889] linen:text-[#7c4522] linen:hover:bg-[#dcc6aa] flex items-center gap-1 cursor-pointer transition-colors"
             >
               <RefreshCw className="w-3 h-3" /> 重新加载官方贴纸
@@ -614,7 +628,7 @@ export const TelegramEmojiPicker: React.FC<TelegramEmojiPickerProps> = ({
                   setSearchQuery('');
                   setSelectedPackId('all');
                 } else {
-                  void loadOfficialStickers();
+                  void loadOfficialStickers(true);
                 }
               }}
               className="mt-2 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf] linen:text-[#8c522d] hover:underline cursor-pointer"

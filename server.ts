@@ -5437,6 +5437,7 @@ async function performPinnedHttpFetch(
   return await new Promise<globalThis.Response>((resolve, reject) => {
     let settled = false;
     let reqRef: http.ClientRequest | null = null;
+    let activeResRef: http.IncomingMessage | null = null;
     const signal = options.signal;
 
     const cleanupSignal = () => {
@@ -5456,6 +5457,16 @@ async function performPinnedHttpFetch(
     const onAbort = () => {
       const abortErr: any = new Error('The operation was aborted');
       abortErr.name = 'AbortError';
+      if (settled) {
+        cleanupSignal();
+        try {
+          activeResRef?.destroy(abortErr);
+        } catch {}
+        try {
+          reqRef?.destroy(abortErr);
+        } catch {}
+        return;
+      }
       finishError(abortErr);
     };
 
@@ -5484,7 +5495,7 @@ async function performPinnedHttpFetch(
           return;
         }
         settled = true;
-        cleanupSignal();
+        activeResRef = res;
 
         const status = Number(res.statusCode || 502);
         const respHeaders = new Headers();
@@ -5499,6 +5510,7 @@ async function performPinnedHttpFetch(
         const isNullBodyStatus =
           status === 204 || status === 205 || status === 304 || method === 'HEAD';
         if (isNullBodyStatus) {
+          cleanupSignal();
           res.resume();
           resolve(
             new globalThis.Response(null, {
@@ -5510,6 +5522,9 @@ async function performPinnedHttpFetch(
           return;
         }
 
+        res.once('end', cleanupSignal);
+        res.once('close', cleanupSignal);
+        res.once('error', cleanupSignal);
         const webBody = Readable.toWeb(res) as any;
         resolve(
           new globalThis.Response(webBody, {
@@ -7828,6 +7843,17 @@ function isSqliteBusyError(err: any): boolean {
   return code.includes('SQLITE_BUSY') || msg.includes('SQLITE_BUSY') || msg.includes('DATABASE IS LOCKED');
 }
 
+let sqliteWriteLockChain: Promise<void> = Promise.resolve();
+
+function runWithSqliteWriteLock<T>(fn: () => Promise<T>): Promise<T> {
+  const run = sqliteWriteLockChain.then(fn, fn);
+  sqliteWriteLockChain = run.then(
+    () => undefined,
+    () => undefined
+  );
+  return run;
+}
+
 async function runMessageDbBatchWithRetries(batch: MessageDbWriteTask[]): Promise<void> {
   if (batch.length === 0) return;
 
@@ -7846,7 +7872,7 @@ async function runMessageDbBatchWithRetries(batch: MessageDbWriteTask[]): Promis
   let lastErr: any = null;
   for (let attempt = 1; attempt <= 3; attempt++) {
     try {
-      const results = await attemptBatchTx();
+      const results = await runWithSqliteWriteLock(() => attemptBatchTx());
       messageDbWriteQueueStats.batchCommitsTotal += 1;
       for (let i = 0; i < batch.length; i++) {
         messageDbWriteQueueStats.committedTotal += 1;
@@ -7870,7 +7896,7 @@ async function runMessageDbBatchWithRetries(batch: MessageDbWriteTask[]): Promis
     let taskErr: any = lastErr;
     for (let attempt = 1; attempt <= 2; attempt++) {
       try {
-        const val = await task.exec();
+        const val = await runWithSqliteWriteLock(() => task.exec());
         messageDbWriteQueueStats.committedTotal += 1;
         task.resolve(val);
         settled = true;
@@ -14769,13 +14795,44 @@ async function fetchAiQaUpstreamWithResilience(
     maxRetries?: number;
     clientSignal?: AbortSignal;
   }
-): Promise<globalThis.Response> {
+): Promise<{ status: number; headers: Headers; rawText: string }> {
   const startedAt = Date.now();
   const maxRetries = Math.max(0, Math.min(2, options.maxRetries ?? 1));
   const manualProxy = getConfiguredTelegramProxy();
   const autoProxy = !manualProxy ? getAutoDetectedSystemProxy() : null;
+  let autoProxyReachable = false;
+  if (!manualProxy && autoProxy) {
+    autoProxyReachable = await isTcpEndpointReachable(autoProxy.host, autoProxy.port, 700);
+  }
 
-  const invokeDirectShortLived = async (timeoutMs: number): Promise<globalThis.Response> => {
+  const isRetryableUpstreamStatus = (status: number, headers: Headers) => {
+    const cType = String(headers.get('content-type') || '').toLowerCase();
+    // Preserve legitimate upstream JSON 503 (e.g. service_unavailable when QA key is unconfigured) without wasting a retry
+    const isUpstreamJsonConfigError = status === 503 && cType.includes('application/json');
+    return (
+      !isUpstreamJsonConfigError &&
+      (status === 502 || status === 503 || status === 504 || status === 429)
+    );
+  };
+
+  const consumeWithinController = async (
+    res: globalThis.Response,
+    canRetry: boolean
+  ): Promise<{ status: number; headers: Headers; rawText: string }> => {
+    if (canRetry && isRetryableUpstreamStatus(res.status, res.headers)) {
+      try {
+        await res.body?.cancel();
+      } catch {}
+      return { status: res.status, headers: res.headers, rawText: '' };
+    }
+    const rawText = await res.text();
+    return { status: res.status, headers: res.headers, rawText };
+  };
+
+  const invokeDirectShortLived = async (
+    timeoutMs: number,
+    canRetry: boolean
+  ): Promise<{ status: number; headers: Headers; rawText: string }> => {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     const onClientAbort = () => controller.abort();
@@ -14790,10 +14847,11 @@ async function fetchAiQaUpstreamWithResilience(
     }
     try {
       // safeSsrfFetch -> performPinnedHttpFetch enforces agent: false + Connection: close (avoids Undici keep-alive socket poisoning)
-      return await safeSsrfFetch(targetUrl, {
+      const res = await safeSsrfFetch(targetUrl, {
         ...init,
         signal: controller.signal,
       });
+      return await consumeWithinController(res, canRetry);
     } finally {
       clearTimeout(timer);
       if (options.clientSignal) {
@@ -14802,11 +14860,17 @@ async function fetchAiQaUpstreamWithResilience(
     }
   };
 
-  const invokeViaProxy = async (timeoutMs: number): Promise<globalThis.Response> => {
+  const invokeViaProxy = async (
+    timeoutMs: number,
+    canRetry: boolean,
+    fallbackOnProxyGatewayFail = false
+  ): Promise<{ status: number; headers: Headers; rawText: string; proxyGatewayFailed?: boolean }> => {
     const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
     const onClientAbort = () => controller.abort();
     if (options.clientSignal) {
       if (options.clientSignal.aborted) {
+        clearTimeout(timer);
         const err = new Error('请求已取消');
         err.name = 'AbortError';
         throw err;
@@ -14814,12 +14878,27 @@ async function fetchAiQaUpstreamWithResilience(
       options.clientSignal.addEventListener('abort', onClientAbort, { once: true });
     }
     try {
-      return await fetchWithSystemProxySupport(
+      const res = await fetchWithSystemProxySupport(
         targetUrl,
         { ...init, signal: controller.signal },
         timeoutMs
       );
+      if (fallbackOnProxyGatewayFail) {
+        const cType = String(res.headers.get('content-type') || '').toLowerCase();
+        const isProxyGatewayFail =
+          res.status === 502 ||
+          res.status === 504 ||
+          (res.status === 503 && !cType.includes('application/json'));
+        if (isProxyGatewayFail) {
+          try {
+            await res.body?.cancel();
+          } catch {}
+          return { status: res.status, headers: res.headers, rawText: '', proxyGatewayFailed: true };
+        }
+      }
+      return await consumeWithinController(res, canRetry);
     } finally {
+      clearTimeout(timer);
       if (options.clientSignal) {
         options.clientSignal.removeEventListener('abort', onClientAbort);
       }
@@ -14827,7 +14906,7 @@ async function fetchAiQaUpstreamWithResilience(
   };
 
   let lastErr: any = null;
-  let forceDirect = !manualProxy && !autoProxy;
+  let forceDirect = !manualProxy && (!autoProxy || !autoProxyReachable);
 
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
     if (options.clientSignal?.aborted) {
@@ -14838,25 +14917,18 @@ async function fetchAiQaUpstreamWithResilience(
     const remainingMs = options.totalDeadlineMs - (Date.now() - startedAt);
     if (remainingMs <= 1500) break;
     const perAttemptMs = Math.max(3000, Math.min(options.attemptTimeoutMs, remainingMs));
+    const canRetry = attempt < maxRetries;
 
     try {
-      let res: globalThis.Response;
+      let consumed: { status: number; headers: Headers; rawText: string };
       if (manualProxy) {
-        res = await invokeViaProxy(perAttemptMs);
+        consumed = await invokeViaProxy(perAttemptMs, canRetry, false);
       } else if (!forceDirect && autoProxy) {
-        let proxyRes: globalThis.Response | null = null;
+        let proxyRes: { status: number; headers: Headers; rawText: string; proxyGatewayFailed?: boolean } | null = null;
         let shouldFallbackDirect = false;
         try {
-          proxyRes = await invokeViaProxy(Math.min(perAttemptMs, 28000));
-          const cType = String(proxyRes.headers.get('content-type') || '').toLowerCase();
-          const isProxyGatewayFail =
-            proxyRes.status === 502 ||
-            proxyRes.status === 504 ||
-            (proxyRes.status === 503 && !cType.includes('application/json'));
-          if (isProxyGatewayFail) {
-            try {
-              await proxyRes.body?.cancel();
-            } catch {}
+          proxyRes = await invokeViaProxy(Math.min(perAttemptMs, 28000), canRetry, true);
+          if (proxyRes.proxyGatewayFailed) {
             proxyRes = null;
             shouldFallbackDirect = true;
           }
@@ -14872,27 +14944,18 @@ async function fetchAiQaUpstreamWithResilience(
           if (afterProxyRemaining <= 2000) {
             throw lastErr || new Error('智能问答代理连接超时');
           }
-          res = await invokeDirectShortLived(Math.min(perAttemptMs, afterProxyRemaining));
+          consumed = await invokeDirectShortLived(Math.min(perAttemptMs, afterProxyRemaining), canRetry);
         } else {
-          res = proxyRes!;
+          consumed = proxyRes!;
         }
       } else {
-        res = await invokeDirectShortLived(perAttemptMs);
+        consumed = await invokeDirectShortLived(perAttemptMs, canRetry);
       }
 
-      const cType = String(res.headers.get('content-type') || '').toLowerCase();
-      // Preserve legitimate upstream JSON 503 (e.g. service_unavailable when QA key is unconfigured) without wasting a retry
-      const isUpstreamJsonConfigError = res.status === 503 && cType.includes('application/json');
-      const isRetryableStatus =
-        !isUpstreamJsonConfigError &&
-        (res.status === 502 || res.status === 503 || res.status === 504 || res.status === 429);
-      if (!isRetryableStatus || attempt === maxRetries) {
-        return res;
+      if (!canRetry || !isRetryableUpstreamStatus(consumed.status, consumed.headers)) {
+        return consumed;
       }
-      lastErr = new Error(`云端智能问答网关暂不可用 (HTTP ${res.status})`);
-      try {
-        await res.body?.cancel();
-      } catch {}
+      lastErr = new Error(`云端智能问答网关暂不可用 (HTTP ${consumed.status})`);
     } catch (err: any) {
       lastErr = err;
       const msg = String(err?.message || err || '');
@@ -14961,7 +15024,7 @@ app.get('/api/ai/qa/workflow-playbook', requireTenantAuth, async (req: Request, 
         clientSignal: clientAbortController.signal,
       }
     );
-    const rawText = await upstreamRes.text();
+    const rawText = upstreamRes.rawText;
     if (clientAbortController.signal.aborted || res.destroyed || res.writableEnded) return;
     return sendAiQaUpstreamResponse(res, upstreamRes.status, rawText, '获取 1-7 天流程指引失败');
   } catch (error: any) {
@@ -15024,7 +15087,7 @@ app.post('/api/ai/qa', aiGenerationLimiter, requireTenantAuth, async (req: Reque
         clientSignal: clientAbortController.signal,
       }
     );
-    const rawText = await upstreamRes.text();
+    const rawText = upstreamRes.rawText;
     if (clientAbortController.signal.aborted || res.destroyed || res.writableEnded) return;
     return sendAiQaUpstreamResponse(res, upstreamRes.status, rawText, '云端智能问答网关响应异常');
   } catch (error: any) {
@@ -24048,12 +24111,43 @@ export async function fetchWithSystemProxySupport(
   const cleanHost = rawHost.startsWith('[') && rawHost.endsWith(']') ? rawHost.slice(1, -1) : rawHost;
   const proxy = getConfiguredTelegramProxy();
 
+  const runFetchWithCombinedTimeout = async (
+    target: string,
+    reqInit: RequestInit,
+    ms: number
+  ): Promise<globalThis.Response> => {
+    const extSignal = reqInit.signal;
+    if (!extSignal) {
+      return await fetch(target, { ...reqInit, signal: AbortSignal.timeout(ms) });
+    }
+    const timeoutSig = AbortSignal.timeout(ms);
+    if (typeof (AbortSignal as any).any === 'function') {
+      return await fetch(target, {
+        ...reqInit,
+        signal: (AbortSignal as any).any([extSignal, timeoutSig]),
+      });
+    }
+    const combinedController = new AbortController();
+    const onExternalAbort = () => combinedController.abort((extSignal as any)?.reason);
+    const onTimeoutAbort = () => combinedController.abort((timeoutSig as any)?.reason);
+    if (extSignal.aborted) {
+      combinedController.abort((extSignal as any)?.reason);
+    } else {
+      extSignal.addEventListener('abort', onExternalAbort, { once: true });
+    }
+    timeoutSig.addEventListener('abort', onTimeoutAbort, { once: true });
+    try {
+      return await fetch(target, { ...reqInit, signal: combinedController.signal });
+    } catch (err) {
+      extSignal.removeEventListener('abort', onExternalAbort);
+      timeoutSig.removeEventListener('abort', onTimeoutAbort);
+      throw err;
+    }
+  };
+
   // Never route local loopback traffic through external proxy
   if (isAllowedLocalhostEndpoint(cleanHost)) {
-    return await fetch(urlStr, {
-      ...options,
-      signal: options.signal || AbortSignal.timeout(timeoutMs),
-    });
+    return await runFetchWithCombinedTimeout(urlStr, options, timeoutMs);
   }
 
   let autoHttpProxy: AutoSystemProxyConfig | null = null;
@@ -24076,10 +24170,7 @@ export async function fetchWithSystemProxySupport(
         autoHttpProxy = auto;
       }
     } else {
-      return await fetch(urlStr, {
-        ...options,
-        signal: options.signal || AbortSignal.timeout(timeoutMs),
-      });
+      return await runFetchWithCombinedTimeout(urlStr, options, timeoutMs);
     }
   }
 
@@ -24119,10 +24210,7 @@ export async function fetchWithSystemProxySupport(
     }
   } catch (tunnelErr) {
     if (usingAutoProxy) {
-      return await fetch(urlStr, {
-        ...options,
-        signal: options.signal || AbortSignal.timeout(timeoutMs),
-      });
+      return await runFetchWithCombinedTimeout(urlStr, options, timeoutMs);
     }
     throw tunnelErr;
   }
@@ -24216,8 +24304,10 @@ export async function fetchWithSystemProxySupport(
       },
       (res) => {
         const chunks: Buffer[] = [];
+        let resEnded = false;
         res.on('data', (chunk: Buffer) => chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)));
         res.on('end', () => {
+          resEnded = true;
           if (reqTimer) {
             clearTimeout(reqTimer);
             reqTimer = null;
@@ -24243,6 +24333,11 @@ export async function fetchWithSystemProxySupport(
               headers: respHeaders,
             })
           );
+        });
+        res.on('close', () => {
+          if (!resEnded && !settled) {
+            finishErr(new Error('Proxy upstream connection closed prematurely'));
+          }
         });
         res.on('error', (err) => {
           finishErr(err);
@@ -27433,14 +27528,29 @@ async function writeAvatarToDiskCacheAsync(cacheKey: string, buffer: Buffer): Pr
     if (!buffer || buffer.length === 0) return;
     const filePath = resolveAvatarDiskPath(cacheKey);
     if (!filePath) return;
-    if (!avatarCacheDirReady) {
-      await fs.promises.mkdir(AVATAR_CACHE_DIR, { recursive: true });
-      avatarCacheDirReady = true;
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        if (!avatarCacheDirReady) {
+          await fs.promises.mkdir(AVATAR_CACHE_DIR, { recursive: true });
+          avatarCacheDirReady = true;
+        }
+        tmpPath = `${filePath}.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2, 7)}.tmp`;
+        await fs.promises.writeFile(tmpPath, buffer);
+        await fs.promises.rename(tmpPath, filePath);
+        tmpPath = '';
+        return;
+      } catch (err: any) {
+        if (tmpPath) {
+          await fs.promises.unlink(tmpPath).catch(() => {});
+          tmpPath = '';
+        }
+        if (err?.code === 'ENOENT' && attempt === 0) {
+          avatarCacheDirReady = false;
+          continue;
+        }
+        throw err;
+      }
     }
-    tmpPath = `${filePath}.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2, 7)}.tmp`;
-    await fs.promises.writeFile(tmpPath, buffer);
-    await fs.promises.rename(tmpPath, filePath);
-    tmpPath = '';
   } catch {
     if (tmpPath) {
       await fs.promises.unlink(tmpPath).catch(() => {});
@@ -28773,16 +28883,31 @@ export function writeTelegramMediaToDiskCache(
     }
     const paths = getTelegramMediaDiskCachePath(cacheKey);
     if (!paths) return false;
-    fs.mkdirSync(TELEGRAM_MEDIA_DISK_CACHE_DIR, { recursive: true });
-    mediaDiskCacheDirReady = true;
-    const tmpBin = `${paths.binPath}.${process.pid}.${Date.now()}.tmp`;
-    const tmpMeta = `${paths.metaPath}.${process.pid}.${Date.now()}.tmp`;
-    fs.writeFileSync(tmpBin, entry.buffer);
-    fs.writeFileSync(tmpMeta, JSON.stringify({ mime: entry.mime, fileName: entry.fileName }), 'utf8');
-    fs.renameSync(tmpBin, paths.binPath);
-    fs.renameSync(tmpMeta, paths.metaPath);
-    enforceTelegramMediaDiskCacheLimit(outboundRuntimeConfig.mediaDiskCacheMaxBytes);
-    return true;
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const tmpBin = `${paths.binPath}.${process.pid}.${Date.now()}.tmp`;
+      const tmpMeta = `${paths.metaPath}.${process.pid}.${Date.now()}.tmp`;
+      try {
+        if (!mediaDiskCacheDirReady) {
+          fs.mkdirSync(TELEGRAM_MEDIA_DISK_CACHE_DIR, { recursive: true });
+          mediaDiskCacheDirReady = true;
+        }
+        fs.writeFileSync(tmpBin, entry.buffer);
+        fs.writeFileSync(tmpMeta, JSON.stringify({ mime: entry.mime, fileName: entry.fileName }), 'utf8');
+        fs.renameSync(tmpBin, paths.binPath);
+        fs.renameSync(tmpMeta, paths.metaPath);
+        enforceTelegramMediaDiskCacheLimit(outboundRuntimeConfig.mediaDiskCacheMaxBytes);
+        return true;
+      } catch (err: any) {
+        try { fs.unlinkSync(tmpBin); } catch {}
+        try { fs.unlinkSync(tmpMeta); } catch {}
+        if (err?.code === 'ENOENT' && attempt === 0) {
+          mediaDiskCacheDirReady = false;
+          continue;
+        }
+        throw err;
+      }
+    }
+    return false;
   } catch {
     return false;
   }
@@ -28800,25 +28925,38 @@ export async function writeTelegramMediaToDiskCacheAsync(
     }
     const paths = getTelegramMediaDiskCachePath(cacheKey);
     if (!paths) return false;
-    if (!mediaDiskCacheDirReady) {
-      await fs.promises.mkdir(TELEGRAM_MEDIA_DISK_CACHE_DIR, { recursive: true });
-      mediaDiskCacheDirReady = true;
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        if (!mediaDiskCacheDirReady) {
+          await fs.promises.mkdir(TELEGRAM_MEDIA_DISK_CACHE_DIR, { recursive: true });
+          mediaDiskCacheDirReady = true;
+        }
+        const nonce = `${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2, 7)}`;
+        tmpBin = `${paths.binPath}.${nonce}.tmp`;
+        tmpMeta = `${paths.metaPath}.${nonce}.tmp`;
+        await Promise.all([
+          fs.promises.writeFile(tmpBin, entry.buffer),
+          fs.promises.writeFile(tmpMeta, JSON.stringify({ mime: entry.mime, fileName: entry.fileName }), 'utf8'),
+        ]);
+        await Promise.all([
+          fs.promises.rename(tmpBin, paths.binPath),
+          fs.promises.rename(tmpMeta, paths.metaPath),
+        ]);
+        tmpBin = '';
+        tmpMeta = '';
+        void enforceTelegramMediaDiskCacheLimitAsync(outboundRuntimeConfig.mediaDiskCacheMaxBytes);
+        return true;
+      } catch (err: any) {
+        if (tmpBin) { await fs.promises.unlink(tmpBin).catch(() => {}); tmpBin = ''; }
+        if (tmpMeta) { await fs.promises.unlink(tmpMeta).catch(() => {}); tmpMeta = ''; }
+        if (err?.code === 'ENOENT' && attempt === 0) {
+          mediaDiskCacheDirReady = false;
+          continue;
+        }
+        throw err;
+      }
     }
-    const nonce = `${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2, 7)}`;
-    tmpBin = `${paths.binPath}.${nonce}.tmp`;
-    tmpMeta = `${paths.metaPath}.${nonce}.tmp`;
-    await Promise.all([
-      fs.promises.writeFile(tmpBin, entry.buffer),
-      fs.promises.writeFile(tmpMeta, JSON.stringify({ mime: entry.mime, fileName: entry.fileName }), 'utf8'),
-    ]);
-    await Promise.all([
-      fs.promises.rename(tmpBin, paths.binPath),
-      fs.promises.rename(tmpMeta, paths.metaPath),
-    ]);
-    tmpBin = '';
-    tmpMeta = '';
-    void enforceTelegramMediaDiskCacheLimitAsync(outboundRuntimeConfig.mediaDiskCacheMaxBytes);
-    return true;
+    return false;
   } catch {
     if (tmpBin) await fs.promises.unlink(tmpBin).catch(() => {});
     if (tmpMeta) await fs.promises.unlink(tmpMeta).catch(() => {});
@@ -36852,7 +36990,7 @@ function enqueuePendingLocalUpdateDbOp(task: () => Promise<void>): void {
     .then(async () => {
       for (let attempt = 0; attempt < 3; attempt += 1) {
         try {
-          await task();
+          await runWithSqliteWriteLock(task);
           return;
         } catch (err: any) {
           const msg = String(err?.message || err || '');
@@ -40110,6 +40248,34 @@ app.post('/api/internal/system-resume', async (req: Request, res: Response) => {
   } catch (err: any) {
     return res.status(500).json({ ok: false, error: err?.message || '唤醒恢复失败' });
   }
+});
+
+app.post('/api/internal/sync-system-proxy', (req: Request, res: Response) => {
+  const remoteIp = String(req.socket?.remoteAddress || '')
+    .replace(/^::ffff:/, '')
+    .trim();
+  const hasProxyForwardHeader = Boolean(
+    req.headers['x-forwarded-for'] ||
+      req.headers['forwarded'] ||
+      req.headers['x-real-ip'] ||
+      req.headers['cf-connecting-ip'] ||
+      req.headers['true-client-ip'] ||
+      req.headers['x-forwarded-host'] ||
+      req.headers['via']
+  );
+  const secFetchSite = String(req.headers['sec-fetch-site'] || '').trim().toLowerCase();
+  const isLoopback =
+    !hasProxyForwardHeader && (remoteIp === '127.0.0.1' || remoteIp === '::1');
+  if (!isLoopback || secFetchSite === 'cross-site' || !isAllowedClientOrigin(req)) {
+    return res.status(403).json({ ok: false, error: 'Forbidden' });
+  }
+  if (typeof req.body?.autoSystemProxy === 'string') {
+    const nextAutoProxy = req.body.autoSystemProxy.trim();
+    cachedElectronAutoSystemProxy = nextAutoProxy || null;
+    if (nextAutoProxy) process.env.HS_AUTO_SYSTEM_PROXY = nextAutoProxy;
+    else delete process.env.HS_AUTO_SYSTEM_PROXY;
+  }
+  return res.json({ ok: true, autoSystemProxy: cachedElectronAutoSystemProxy || '' });
 });
 
 export const TELEGRAM_SUSPECTED_STUCK_THRESHOLD_MS = 35_000;

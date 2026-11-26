@@ -4477,6 +4477,12 @@ export function clearAccountLocalCache(accountId: string, unsharedChatIds: strin
     deletedIdSetCache.delete(delStorageKey);
     trackedPendingTombstonePromises.delete(delStorageKey);
     trackedFailedTombstoneKeys.delete(delStorageKey);
+    for (const accVar of accVariants) {
+      const stickerKey = resolveStickerCacheKey(accVar);
+      bumpStickerCacheKeyEpoch(stickerKey);
+      telegramStickersCache.delete(stickerKey);
+      telegramStickersInFlight.delete(stickerKey);
+    }
 
     const keysToRemove: string[] = [
       `tg_deleted_message_ids_${accountId}`,
@@ -4548,6 +4554,10 @@ export function purgeAllLocalChatData(): void {
     deletedIdSetCache.clear();
     trackedPendingTombstonePromises.clear();
     trackedFailedTombstoneKeys.clear();
+    telegramStickersGlobalEpoch++;
+    telegramStickersKeyEpoch.clear();
+    telegramStickersCache.clear();
+    telegramStickersInFlight.clear();
 
     const keysToRemove: string[] = [];
     for (let i = 0; i < localStorage.length; i++) {
@@ -6547,35 +6557,89 @@ export async function removeTelegramGroupMemberApi(params: {
   }
 }
 
+const TELEGRAM_STICKERS_CACHE_TTL_MS = 5 * 60 * 1000;
+const telegramStickersCache = new Map<string, { packs: TelegramStickerPack[]; cachedAt: number }>();
+const telegramStickersInFlight = new Map<
+  string,
+  Promise<{ ok: boolean; packs: TelegramStickerPack[]; error?: string }>
+>();
+let telegramStickersGlobalEpoch = 0;
+const telegramStickersKeyEpoch = new Map<string, number>();
+
+function getStickerCacheKeyEpoch(cacheKey: string): number {
+  return telegramStickersKeyEpoch.get(cacheKey) || 0;
+}
+
+function bumpStickerCacheKeyEpoch(cacheKey: string): void {
+  telegramStickersKeyEpoch.set(cacheKey, getStickerCacheKeyEpoch(cacheKey) + 1);
+}
+
+function resolveStickerCacheKey(accountId?: string): string {
+  return (accountId || '').trim() || '__default__';
+}
+
 export async function fetchTelegramStickersApi(
-  accountId?: string
+  accountId?: string,
+  options?: { forceRefresh?: boolean }
 ): Promise<{ ok: boolean; packs: TelegramStickerPack[]; error?: string }> {
-  try {
-    const query = new URLSearchParams();
-    if (accountId) query.set('accountId', accountId);
-    const res = await fetchWithTimeout(`/api/telegram/user/stickers?${query.toString()}`, {
-      headers: getAuthHeaders(accountId),
-      credentials: 'include',
-    }, 20000);
-    const data = await res.json().catch(() => null);
-    if (res.ok && data?.ok) {
-      return {
-        ok: true,
-        packs: Array.isArray(data.packs) ? data.packs : [],
-      };
+  const cacheKey = resolveStickerCacheKey(accountId);
+  const forceRefresh = Boolean(options?.forceRefresh);
+  if (!forceRefresh) {
+    const cached = telegramStickersCache.get(cacheKey);
+    if (
+      cached &&
+      Date.now() - cached.cachedAt < TELEGRAM_STICKERS_CACHE_TTL_MS &&
+      !cached.packs.some((p) => p.stickers?.some((s) => s.thumbUrl && isSignedResourceUrlExpiringSoon(s.thumbUrl, 60_000)))
+    ) {
+      return { ok: true, packs: cached.packs };
     }
-    return {
-      ok: false,
-      packs: [],
-      error: data?.error || `拉取官方贴纸库失败 (HTTP ${res.status})`,
-    };
-  } catch (err: any) {
-    return {
-      ok: false,
-      packs: [],
-      error: err?.message || '网络异常，无法连接 Telegram 贴纸服务',
-    };
+    const pending = telegramStickersInFlight.get(cacheKey);
+    if (pending) return pending;
   }
+
+  const capturedGlobalEpoch = telegramStickersGlobalEpoch;
+  const capturedKeyEpoch = getStickerCacheKeyEpoch(cacheKey);
+
+  let run!: Promise<{ ok: boolean; packs: TelegramStickerPack[]; error?: string }>;
+  run = (async () => {
+    try {
+      const query = new URLSearchParams();
+      if (accountId) query.set('accountId', accountId);
+      const res = await fetchWithTimeout(`/api/telegram/user/stickers?${query.toString()}`, {
+        headers: getAuthHeaders(accountId),
+        credentials: 'include',
+      }, 20000);
+      const data = await res.json().catch(() => null);
+      if (res.ok && data?.ok) {
+        const packs = Array.isArray(data.packs) ? data.packs : [];
+        if (
+          telegramStickersGlobalEpoch === capturedGlobalEpoch &&
+          getStickerCacheKeyEpoch(cacheKey) === capturedKeyEpoch
+        ) {
+          telegramStickersCache.set(cacheKey, { packs, cachedAt: Date.now() });
+        }
+        return { ok: true, packs };
+      }
+      return {
+        ok: false,
+        packs: [],
+        error: data?.error || `拉取官方贴纸库失败 (HTTP ${res.status})`,
+      };
+    } catch (err: any) {
+      return {
+        ok: false,
+        packs: [],
+        error: err?.message || '网络异常，无法连接 Telegram 贴纸服务',
+      };
+    } finally {
+      if (telegramStickersInFlight.get(cacheKey) === run) {
+        telegramStickersInFlight.delete(cacheKey);
+      }
+    }
+  })();
+
+  telegramStickersInFlight.set(cacheKey, run);
+  return run;
 }
 
 export async function searchTelegramStickersApi(

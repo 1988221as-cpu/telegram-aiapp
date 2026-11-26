@@ -7118,8 +7118,9 @@ export default function App() {
   const stableOpenKnowledgeEvolution = useStableCallback(() => toggleRightPanel('persona'));
   const stableOpenVoiceprintDock = useStableCallback(() => openRightPanel('voice'));
   const stableOpenAiAssistant = useStableCallback(() => {
+    const desktopBridge = getDesktopAiWindowBridge();
     if (isAiAssistantPoppedOut) {
-      void getDesktopAiWindowBridge()?.focus();
+      void desktopBridge?.focus();
       return;
     }
     setIsChatInfoOpen(false);
@@ -7129,11 +7130,38 @@ export default function App() {
       setAiAssistantRestoreSignal((n) => n + 1);
       return;
     }
-    setIsAiAssistantOpen((prev) => {
-      const next = !prev;
-      if (!next) setIsAiAssistantMinimized(false);
-      return next;
-    });
+    if (isAiAssistantOpen) {
+      setIsAiAssistantOpen(false);
+      setIsAiAssistantMinimized(false);
+      return;
+    }
+    if (desktopBridge?.isAvailable) {
+      publishAiAssistantState({
+        activeChatTitle: currentChat?.title,
+        engineLicenseKey: customLLMConfig.engineLicenseKey,
+        operatorAvatarUrl: currentAccount
+          ? resolveAccountAvatarSrc(currentAccount.id, currentAccount.avatarUrl)
+          : undefined,
+        operatorInitial: currentAccount?.avatarInitial || '我',
+        appearance,
+      });
+      void desktopBridge
+        .open()
+        .then((res) => {
+          if (res?.ok) {
+            setIsAiAssistantPoppedOut(true);
+            setIsAiAssistantOpen(true);
+            setIsAiAssistantMinimized(false);
+          } else {
+            setIsAiAssistantOpen(true);
+          }
+        })
+        .catch(() => {
+          setIsAiAssistantOpen(true);
+        });
+      return;
+    }
+    setIsAiAssistantOpen(true);
   });
   const stableSetLeftActiveTab = useStableCallback((tab: 'chats' | 'translation' | 'memory' | 'llm' | 'voice' | 'persona') => {
     if (tab === 'chats') {

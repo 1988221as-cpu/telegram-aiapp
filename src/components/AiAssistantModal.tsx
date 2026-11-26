@@ -791,7 +791,7 @@ export const AiAssistantModal: React.FC<AiAssistantModalProps> = ({
   }, [isOpen, isPoppedOut, isMinimized, onMinimizedChange]);
 
   useEffect(() => {
-    if (!isOpen || isMinimized) return;
+    if (!isOpen || isMinimized || (!isPopoutHost && isPoppedOut)) return;
     const handleEsc = (e: KeyboardEvent) => {
       if (e.key !== 'Escape') return;
       if (lightboxImage) {
@@ -814,7 +814,7 @@ export const AiAssistantModal: React.FC<AiAssistantModalProps> = ({
     };
     window.addEventListener('keydown', handleEsc);
     return () => window.removeEventListener('keydown', handleEsc);
-  }, [isOpen, isMinimized, isStandalone, isFullscreen, lightboxImage, selectedPlaybookDay, onClose]);
+  }, [isOpen, isMinimized, isPopoutHost, isPoppedOut, isStandalone, isFullscreen, lightboxImage, selectedPlaybookDay, onClose]);
 
   // Fetch 1-7 day workflow playbook whenever modal opens (zero AI token cost)
   const loadPlaybook = useCallback(async (forceRefresh = false) => {
@@ -834,11 +834,11 @@ export const AiAssistantModal: React.FC<AiAssistantModalProps> = ({
   }, [effectiveEngineLicenseKey, isLoadingPlaybook]);
 
   useEffect(() => {
-    if (sessionReady && (isOpen || isPopoutHost)) {
+    if (sessionReady && ((isOpen && !isPoppedOut) || isPopoutHost)) {
       void loadPlaybook(false);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isOpen, isPopoutHost, sessionReady]);
+  }, [isOpen, isPopoutHost, isPoppedOut, sessionReady]);
 
   // Auto-scroll messages
   useEffect(() => {
@@ -1037,41 +1037,54 @@ export const AiAssistantModal: React.FC<AiAssistantModalProps> = ({
       const dy = mv.clientY - startY;
 
       if (isStandalone && !detachedFromStandalone) {
-        if (Math.hypot(dx, dy) < 16) return;
+        if (Math.hypot(dx, dy) < 4) return;
         detachedFromStandalone = true;
         setLayoutMode('floating');
         setPreFullscreenMode('floating');
       }
 
+      const nextX = startRect.x + dx;
+      const nextY = startRect.y + dy;
       const outsideMargin = computeOutsideMargin(mv.clientX, mv.clientY);
-      if (outsideMargin >= 18) {
-        if (isDesktopPopoutSupported) {
-          setIsDraggingOutsideWindow(true);
-          if (outsideMargin >= 64) {
-            poppedOutDuringDrag = true;
-            setIsDraggingOutsideWindow(false);
-            cleanup();
-            void triggerDesktopPopOut({
-              screenX: mv.screenX,
-              screenY: mv.screenY,
-              grabOffsetX,
-              grabOffsetY,
-            });
-            return;
-          }
-        } else if (!showedWebBoundaryHint && outsideMargin >= 28) {
-          showedWebBoundaryHint = true;
-          showToast('网页端受浏览器限制仅支持窗口内移动；使用桌面客户端可拖出软件框外');
+      const isPanelCrossingEdge =
+        (nextX < -4 && dx < 0) ||
+        (nextY < -4 && dy < 0) ||
+        (nextX + startRect.width > window.innerWidth + 4 && dx > 0) ||
+        (nextY + startRect.height > window.innerHeight + 4 && dy > 0);
+
+      if (isDesktopPopoutSupported) {
+        if (outsideMargin >= 0 || isPanelCrossingEdge) {
+          poppedOutDuringDrag = true;
+          setIsDraggingOutsideWindow(false);
+          cleanup();
+          void triggerDesktopPopOut({
+            screenX: mv.screenX,
+            screenY: mv.screenY,
+            grabOffsetX,
+            grabOffsetY,
+          });
+          return;
         }
-      } else {
         setIsDraggingOutsideWindow(false);
+        setRect({
+          ...startRect,
+          x: nextX,
+          y: nextY,
+        });
+        return;
       }
+
+      if (outsideMargin >= 28 && !showedWebBoundaryHint) {
+        showedWebBoundaryHint = true;
+        showToast('网页端受浏览器限制仅支持窗口内移动；使用桌面客户端可拖出软件框外');
+      }
+      setIsDraggingOutsideWindow(false);
 
       setRect(
         clampRectToViewport({
           ...startRect,
-          x: startRect.x + dx,
-          y: startRect.y + dy,
+          x: nextX,
+          y: nextY,
         })
       );
     };
@@ -1092,7 +1105,7 @@ export const AiAssistantModal: React.FC<AiAssistantModalProps> = ({
     const onUp = (up: PointerEvent) => {
       if (up.pointerId !== pointerId) return;
       const outsideMargin = computeOutsideMargin(up.clientX, up.clientY);
-      const shouldPopOut = !poppedOutDuringDrag && isDesktopPopoutSupported && outsideMargin >= 18;
+      const shouldPopOut = !poppedOutDuringDrag && isDesktopPopoutSupported && outsideMargin >= 0;
       cleanup();
       if (shouldPopOut) {
         void triggerDesktopPopOut({
@@ -1333,7 +1346,9 @@ export const AiAssistantModal: React.FC<AiAssistantModalProps> = ({
         },
       ]);
     } catch (err: any) {
-      if (err?.name !== 'AbortError') {
+      if (err?.name === 'AbortError') {
+        showToast('已停止本次 AI 提问');
+      } else {
         setMessages((prev) => [
           ...prev,
           {
@@ -1842,82 +1857,9 @@ export const AiAssistantModal: React.FC<AiAssistantModalProps> = ({
               );
             }
 
-            // Assistant Bubble + Knowledge Citation Accordion
-            const kbList: AiQaMatchedKnowledge[] = msg.matchedKnowledge || [];
-            const hasKb = Boolean(msg.knowledgeUsed && kbList.length > 0);
-            const isKbExpanded = Boolean(expandedKbByMsg[msg.id]);
-
+            // Assistant Bubble
             return (
               <div key={msg.id} className="space-y-2">
-                {/* Knowledge Source Strip (matching reference screenshot pill) */}
-                {!msg.isError && (
-                  hasKb ? (
-                    <div className="rounded-xl border border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#1d3944] linen:border-[#d3c4ad] bg-[#eef2f6] dark:bg-[#0e1928] aurora:bg-[#0e1d24] linen:bg-[#eadcc5] overflow-hidden">
-                      <button
-                        type="button"
-                        onClick={() =>
-                          setExpandedKbByMsg((prev) => ({
-                            ...prev,
-                            [msg.id]: !prev[msg.id],
-                          }))
-                        }
-                        className="w-full px-3 py-2 flex items-center justify-between gap-2 text-xs font-medium text-[#334155] dark:text-[#cbd5e1] aurora:text-[#cbe7ec] linen:text-[#4e3b2b] hover:bg-black/[0.03] dark:hover:bg-white/[0.04] aurora:hover:bg-white/[0.05] linen:hover:bg-[#e1d1b8] cursor-pointer"
-                      >
-                        <span className="flex items-center gap-2 min-w-0">
-                          <BookOpen className="w-3.5 h-3.5 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf] linen:text-[#9c623c] shrink-0" />
-                          <span className="truncate">
-                            已参考知识库 ({msg.matchedCount || kbList.length} 条)
-                          </span>
-                        </span>
-                        {isKbExpanded ? (
-                          <ChevronUp className="w-3.5 h-3.5 shrink-0 opacity-75" />
-                        ) : (
-                          <ChevronDown className="w-3.5 h-3.5 shrink-0 opacity-75" />
-                        )}
-                      </button>
-
-                      {isKbExpanded && (
-                        <div className="px-3 pb-2.5 pt-1 space-y-2 border-t border-[#e2e8f0] dark:border-[#192b40] aurora:border-[#19303a] linen:border-[#dacbb4] bg-white/60 dark:bg-[#0a1320]/70 aurora:bg-[#0b161c]/70 linen:bg-[#f5ede0]/80">
-                          {kbList.map((kb, kbIdx) => (
-                            <div
-                              key={`${kb.id}-${kbIdx}`}
-                              className="p-2 rounded-lg border border-[#e2e8f0] dark:border-[#1a2c42] aurora:border-[#1a333d] linen:border-[#ded0ba] bg-white dark:bg-[#0e1928] aurora:bg-[#101e26] linen:bg-[#faf5ec] text-xs select-text"
-                            >
-                              <div className="flex items-center justify-between gap-2 mb-1">
-                                <span className="font-semibold text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118] truncate">
-                                  {kb.title || `知识条目 #${kbIdx + 1}`}
-                                </span>
-                                <div className="flex items-center gap-1.5 shrink-0">
-                                  {kb.category && (
-                                    <span className="px-1.5 py-0.5 rounded text-[10px] bg-black/5 dark:bg-white/10 aurora:bg-white/10 linen:bg-[#eadcc5] text-[#475569] dark:text-[#9cb2c9] aurora:text-[#8eb2bd] linen:text-[#5c4b3b]">
-                                      {kb.category}
-                                    </span>
-                                  )}
-                                  {typeof kb.finalScore === 'number' && (
-                                    <span className="text-[10px] font-mono opacity-70">
-                                      {kb.finalScore.toFixed(2)}
-                                    </span>
-                                  )}
-                                </div>
-                              </div>
-                              {kb.contentPreview && (
-                                <p className="text-[11px] text-[#475569] dark:text-[#9cb2c9] aurora:text-[#8eb2bd] linen:text-[#5c4b3b] line-clamp-3 leading-relaxed">
-                                  {kb.contentPreview}
-                                </p>
-                              )}
-                            </div>
-                          ))}
-                        </div>
-                      )}
-                    </div>
-                  ) : (
-                    <div className="px-3 py-1.5 rounded-xl border border-dashed border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#1d3944] linen:border-[#d3c4ad] text-[11px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a] flex items-center gap-1.5">
-                      <BookOpen className="w-3.5 h-3.5 shrink-0 opacity-75" />
-                      <span>知识库暂无直接收录，以下为 AI 综合解答</span>
-                    </div>
-                  )
-                )}
-
                 <div className="flex items-start gap-2">
                   <div className="w-7 h-7 rounded-lg shrink-0 bg-[#e8f3ff] dark:bg-[#132942] aurora:bg-[#112d36] linen:bg-[#dfd0b8] border border-[#bfdbfe] dark:border-[#2ba0ff]/30 aurora:border-[#2dd4bf]/35 linen:border-[#cbbba2] text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#5eead4] linen:text-[#8c522d] flex items-center justify-center mt-0.5">
                     {msg.isError ? (
@@ -1943,8 +1885,8 @@ export const AiAssistantModal: React.FC<AiAssistantModalProps> = ({
                       />
 
                       <div className="mt-2 pt-1.5 border-t border-black/[0.05] dark:border-white/[0.06] aurora:border-white/[0.06] linen:border-[#e6dac6] flex items-center justify-between gap-2 text-[10.5px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a] select-none">
-                        <span className="truncate font-mono">
-                          {msg.model ? msg.model : msg.isError ? `状态 ${msg.errorCode || '异常'}` : 'AI 解答'}
+                        <span className="truncate">
+                          {msg.isError ? `状态 ${msg.errorCode || '异常'}` : 'AI 解答'}
                         </span>
                         <button
                           type="button"
@@ -1977,7 +1919,7 @@ export const AiAssistantModal: React.FC<AiAssistantModalProps> = ({
                 <Loader2 className="w-4 h-4 animate-spin" />
               </div>
               <div className="rounded-2xl rounded-tl-sm px-3.5 py-2.5 border bg-white dark:bg-[#0e1928] aurora:bg-[#0f1d24] linen:bg-[#faf5ec] border-[#e2e8f0] dark:border-[#1a2c42] aurora:border-[#1a333d] linen:border-[#ded0ba] text-xs text-[#64748b] dark:text-[#8ea4ba] aurora:text-[#8eb2bd] linen:text-[#6e5c4a] flex items-center gap-2">
-                <span>正在检索知识库并分析解答...</span>
+                <span>正在思考并解答...</span>
               </div>
             </div>
           )}
@@ -2177,19 +2119,32 @@ export const AiAssistantModal: React.FC<AiAssistantModalProps> = ({
                 </button>
               </div>
 
-              <button
-                type="button"
-                disabled={isSending || (!inputText.trim() && pendingImages.length === 0)}
-                onClick={() => void handleSendQuestion()}
-                className="px-3.5 py-1.5 rounded-lg text-xs font-semibold bg-[#2481cc] hover:bg-[#1e6fb0] dark:bg-[#2ba0ff] dark:hover:bg-[#1d8ee8] aurora:bg-[#0d9488] aurora:hover:bg-[#0f766e] linen:bg-[#a86a43] linen:hover:bg-[#935a36] text-white flex items-center gap-1.5 cursor-pointer disabled:opacity-45 disabled:cursor-not-allowed transition-colors shadow-xs"
-              >
-                {isSending ? (
-                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                ) : (
-                  <SendHorizontal className="w-3.5 h-3.5" />
+              <div className="flex items-center gap-1.5">
+                {isSending && (
+                  <button
+                    type="button"
+                    onClick={() => abortControllerRef.current?.abort()}
+                    title="停止当前提问"
+                    className="px-2.5 py-1.5 rounded-lg text-xs font-medium border border-[#f87171]/50 bg-[#fef2f2] hover:bg-[#fee2e2] text-[#dc2626] dark:border-[#f87171]/35 dark:bg-[#2a1215] dark:hover:bg-[#3a181c] dark:text-[#fca5a5] aurora:border-[#f87171]/35 aurora:bg-[#2a1215] aurora:hover:bg-[#3a181c] aurora:text-[#fca5a5] linen:border-[#c86a5e]/45 linen:bg-[#faecea] linen:hover:bg-[#f4dcd8] linen:text-[#a8382d] flex items-center gap-1 cursor-pointer transition-colors"
+                  >
+                    <Square className="w-3 h-3 fill-current" />
+                    <span>停止</span>
+                  </button>
                 )}
-                <span>{isSending ? '思考中' : '发送'}</span>
-              </button>
+                <button
+                  type="button"
+                  disabled={isSending || (!inputText.trim() && pendingImages.length === 0)}
+                  onClick={() => void handleSendQuestion()}
+                  className="px-3.5 py-1.5 rounded-lg text-xs font-semibold bg-[#2481cc] hover:bg-[#1e6fb0] dark:bg-[#2ba0ff] dark:hover:bg-[#1d8ee8] aurora:bg-[#0d9488] aurora:hover:bg-[#0f766e] linen:bg-[#a86a43] linen:hover:bg-[#935a36] text-white flex items-center gap-1.5 cursor-pointer disabled:opacity-45 disabled:cursor-not-allowed transition-colors shadow-xs"
+                >
+                  {isSending ? (
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                  ) : (
+                    <SendHorizontal className="w-3.5 h-3.5" />
+                  )}
+                  <span>{isSending ? '思考中' : '发送'}</span>
+                </button>
+              </div>
             </div>
           </div>
         </div>

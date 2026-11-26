@@ -791,6 +791,11 @@ if (typeof window !== 'undefined' && typeof window.addEventListener === 'functio
  */
 export async function secureSetItemAsync(storageKey: string, data: any): Promise<void> {
   if (typeof window === 'undefined') return;
+  const pendingTimer = debouncedPersistTimers.get(storageKey);
+  if (pendingTimer) {
+    clearTimeout(pendingTimer);
+    debouncedPersistTimers.delete(storageKey);
+  }
   const capturedEpoch = cryptoStorageEpoch;
   const seq = (keyWriteSeq.get(storageKey) || 0) + 1;
   keyWriteSeq.set(storageKey, seq);
