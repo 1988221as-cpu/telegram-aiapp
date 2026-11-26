@@ -77,6 +77,8 @@ import {
   unsealDiskSnapshot,
   encryptBackupEnvelope,
   decryptBackupEnvelope,
+  encryptBackupEnvelopeAsync,
+  decryptBackupEnvelopeAsync,
   isEncryptedBackupEnvelope,
   isDiskSnapshotEnvelope,
   getSqliteRuntimePragmas,
@@ -4661,15 +4663,20 @@ function scheduleOutboundMediaPrune() {
   });
 }
 
+let outboundMediaDirInitialized = false;
+
 export function parseMultipartMessageUpload(req: Request, res: Response, next: NextFunction) {
   const contentType = String(req.headers['content-type'] || '').toLowerCase();
   if (!contentType.includes('multipart/form-data')) {
     return next();
   }
 
-  try {
-    fs.mkdirSync(OUTBOUND_MEDIA_DIR, { recursive: true });
-  } catch {}
+  if (!outboundMediaDirInitialized) {
+    try {
+      fs.mkdirSync(OUTBOUND_MEDIA_DIR, { recursive: true });
+      outboundMediaDirInitialized = true;
+    } catch {}
+  }
 
   let settled = false;
   let limitExceeded = false;
@@ -4827,7 +4834,13 @@ export function parseMultipartMessageUpload(req: Request, res: Response, next: N
     }
     req.body = mergedBody;
 
-    if (diskPath && fs.existsSync(diskPath)) {
+    const uploadedExists = diskPath
+      ? await fs.promises.access(diskPath).then(
+          () => true,
+          () => false
+        )
+      : false;
+    if (diskPath && uploadedExists) {
       (req as any).uploadedMedia = {
         diskPath,
         diskFileName,
@@ -6739,7 +6752,7 @@ app.get('/api/database/backup', requireTenantAuth, async (req: Request, res: Res
 
     const snapshot = await exportDatabaseSnapshot();
     const responsePayload = headerPassphrase
-      ? encryptBackupEnvelope(snapshot, headerPassphrase)
+      ? await encryptBackupEnvelopeAsync(snapshot, headerPassphrase)
       : bundleMode === 'client-encrypt'
         ? snapshot
         : sealDiskSnapshot(snapshot);
@@ -6771,7 +6784,7 @@ app.post('/api/database/backup', requireTenantAuth, async (req: Request, res: Re
       });
     }
     const snapshot = await exportDatabaseSnapshot();
-    const encryptedEnvelope = encryptBackupEnvelope(snapshot, passphrase);
+    const encryptedEnvelope = await encryptBackupEnvelopeAsync(snapshot, passphrase);
     res.setHeader('Content-Disposition', `attachment; filename="humansense_encrypted_backup_${Date.now()}.json"`);
     res.setHeader('Content-Type', 'application/json');
     res.json(encryptedEnvelope);
@@ -6819,7 +6832,7 @@ app.post('/api/database/restore', requireTenantAuth, async (req: Request, res: R
           code: 'BACKUP_PASSPHRASE_REQUIRED',
         });
       }
-      const decrypted = decryptBackupEnvelope<any>(candidatePayload, passphrase);
+      const decrypted = await decryptBackupEnvelopeAsync<any>(candidatePayload, passphrase);
       candidatePayload = decrypted?.sqliteSnapshot?.tables ? decrypted.sqliteSnapshot : decrypted;
     } else if (isDiskSnapshotEnvelope(candidatePayload)) {
       candidatePayload = unsealDiskSnapshot(candidatePayload);
@@ -17469,12 +17482,18 @@ export function sanitizeVoiceprintSampleId(rawId: unknown): string {
   return /^[a-zA-Z0-9_-]{4,64}$/.test(clean) ? clean : '';
 }
 
-function findVoiceprintSampleFile(sampleId: string): { filePath: string; mimeType: string; ext: string } | null {
+async function findVoiceprintSampleFileAsync(
+  sampleId: string
+): Promise<{ filePath: string; mimeType: string; ext: string } | null> {
   const safeId = sanitizeVoiceprintSampleId(sampleId);
   if (!safeId) return null;
   for (const ext of VOICEPRINT_ALLOWED_EXTS) {
     const candidate = path.join(VOICEPRINT_SAMPLES_DIR, `${safeId}${ext}`);
-    if (fs.existsSync(candidate)) {
+    const exists = await fs.promises.access(candidate).then(
+      () => true,
+      () => false
+    );
+    if (exists) {
       return { filePath: candidate, mimeType: EXT_TO_MIME[ext] || 'audio/wav', ext };
     }
   }
@@ -17503,7 +17522,7 @@ async function convertAudioBufferToWavIfNeeded(inputBuf: Buffer, ext: string): P
   if (cleanExt === '.wav' || cleanExt === '.mp3') {
     return { buffer: inputBuf, ext: cleanExt, mimeType: EXT_TO_MIME[cleanExt] || 'audio/wav' };
   }
-  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'hs-vp-conv-'));
+  const tmpDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'hs-vp-conv-'));
   const inPath = path.join(tmpDir, `in${cleanExt}`);
   const outPath = path.join(tmpDir, 'out.wav');
   try {
@@ -17512,7 +17531,13 @@ async function convertAudioBufferToWavIfNeeded(inputBuf: Buffer, ext: string): P
       const ffmpegBin = resolveFfmpegBinaryPath();
       const proc = spawn(ffmpegBin, ['-y', '-loglevel', 'error', '-i', inPath, '-ac', '1', '-ar', '24000', '-f', 'wav', outPath]);
       proc.on('error', reject);
-      proc.on('close', (code) => (code === 0 && fs.existsSync(outPath) ? resolve() : reject(new Error(`ffmpeg exit ${code}`))));
+      proc.on('close', (code) => {
+        if (code !== 0) return reject(new Error(`ffmpeg exit ${code}`));
+        fs.promises.access(outPath).then(
+          () => resolve(),
+          () => reject(new Error(`ffmpeg exit ${code}`))
+        );
+      });
     });
     const wavBuf = await fs.promises.readFile(outPath);
     if (wavBuf.length > 0) {
@@ -17521,7 +17546,7 @@ async function convertAudioBufferToWavIfNeeded(inputBuf: Buffer, ext: string): P
   } catch {
     // Fall back to original buffer if ffmpeg conversion is unavailable in current environment
   } finally {
-    try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch {}
+    await fs.promises.rm(tmpDir, { recursive: true, force: true }).catch(() => {});
   }
   return { buffer: inputBuf, ext: cleanExt, mimeType: EXT_TO_MIME[cleanExt] || 'audio/webm' };
 }
@@ -17546,13 +17571,12 @@ app.post('/api/audio/voiceprint-sample', requireTenantAuth, async (req: Request,
     }
 
     const safeId = sanitizeVoiceprintSampleId(requestedSampleId) || `vp_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
-    fs.mkdirSync(VOICEPRINT_SAMPLES_DIR, { recursive: true });
-    for (const oldExt of VOICEPRINT_ALLOWED_EXTS) {
-      const oldPath = path.join(VOICEPRINT_SAMPLES_DIR, `${safeId}${oldExt}`);
-      if (fs.existsSync(oldPath)) {
-        try { fs.unlinkSync(oldPath); } catch {}
-      }
-    }
+    await fs.promises.mkdir(VOICEPRINT_SAMPLES_DIR, { recursive: true });
+    await Promise.all(
+      VOICEPRINT_ALLOWED_EXTS.map((oldExt) =>
+        fs.promises.unlink(path.join(VOICEPRINT_SAMPLES_DIR, `${safeId}${oldExt}`)).catch(() => {})
+      )
+    );
     const destPath = path.join(VOICEPRINT_SAMPLES_DIR, `${safeId}${parsed.ext}`);
     await fs.promises.writeFile(destPath, parsed.buffer);
     return res.json({
@@ -17572,7 +17596,7 @@ app.get('/api/audio/voiceprint-sample/:id', requireTenantAuth, async (req: Reque
     if (!authContext?.session || authContext.session.isBot || authContext.isBot || !authContext.session.isMaster) {
       return res.status(403).json({ ok: false, error: '权限不足：仅主账号会员有权读取声纹样本' });
     }
-    const found = findVoiceprintSampleFile(req.params.id);
+    const found = await findVoiceprintSampleFileAsync(req.params.id);
     if (!found) {
       return res.status(404).json({ ok: false, error: '声纹样本不存在或已被删除' });
     }
@@ -17594,12 +17618,11 @@ app.delete('/api/audio/voiceprint-sample/:id', requireTenantAuth, async (req: Re
     if (!safeId) {
       return res.status(400).json({ ok: false, error: '无效的声纹样本 ID' });
     }
-    for (const ext of VOICEPRINT_ALLOWED_EXTS) {
-      const candidate = path.join(VOICEPRINT_SAMPLES_DIR, `${safeId}${ext}`);
-      if (fs.existsSync(candidate)) {
-        try { fs.unlinkSync(candidate); } catch {}
-      }
-    }
+    await Promise.all(
+      VOICEPRINT_ALLOWED_EXTS.map((ext) =>
+        fs.promises.unlink(path.join(VOICEPRINT_SAMPLES_DIR, `${safeId}${ext}`)).catch(() => {})
+      )
+    );
     return res.json({ ok: true });
   } catch (error: any) {
     return res.status(500).json({ ok: false, error: error?.message || '删除声纹样本失败' });
@@ -17704,7 +17727,7 @@ app.post('/api/audio/tts-clone', aiGenerationLimiter, requireTenantAuth, async (
     // 9A. Zero-shot Reference Audio Voice Cloning Mode (when user saved their own recorded/uploaded voiceprint)
     if (voiceClone && typeof voiceClone === 'object' && voiceClone.cloneMode === 'voice_clone') {
       const sampleId = sanitizeVoiceprintSampleId(voiceClone.sampleId);
-      const diskSample = sampleId ? findVoiceprintSampleFile(sampleId) : null;
+      const diskSample = sampleId ? await findVoiceprintSampleFileAsync(sampleId) : null;
       const inlineSample =
         !diskSample && typeof voiceClone.sampleAudioDataUrl === 'string'
           ? parseAudioDataUrlToBuffer(voiceClone.sampleAudioDataUrl)
@@ -18037,7 +18060,7 @@ app.post('/api/audio/tts-clone', aiGenerationLimiter, requireTenantAuth, async (
         let tmpWavDir = '';
         if (sampleBuffer && (!localWavPath || sampleExt !== '.wav')) {
           const prepared = await convertAudioBufferToWavIfNeeded(sampleBuffer, sampleExt);
-          tmpWavDir = fs.mkdtempSync(path.join(os.tmpdir(), 'hs-gptsovits-'));
+          tmpWavDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'hs-gptsovits-'));
           localWavPath = path.join(tmpWavDir, `ref${prepared.ext}`);
           await fs.promises.writeFile(localWavPath, prepared.buffer);
         }
@@ -18077,7 +18100,7 @@ app.post('/api/audio/tts-clone', aiGenerationLimiter, requireTenantAuth, async (
           });
         } finally {
           if (tmpWavDir) {
-            try { fs.rmSync(tmpWavDir, { recursive: true, force: true }); } catch {}
+            await fs.promises.rm(tmpWavDir, { recursive: true, force: true }).catch(() => {});
           }
         }
       }
@@ -27385,13 +27408,17 @@ function resolveAvatarDiskPath(cacheKey: string): string | null {
   return targetPath;
 }
 
-function readAvatarFromDiskCache(cacheKey: string): { buffer: Buffer; mime: string; isStale: boolean } | null {
+let avatarCacheDirReady = false;
+
+async function readAvatarFromDiskCacheAsync(
+  cacheKey: string
+): Promise<{ buffer: Buffer; mime: string; isStale: boolean } | null> {
   try {
     const filePath = resolveAvatarDiskPath(cacheKey);
-    if (!filePath || !fs.existsSync(filePath)) return null;
-    const stat = fs.statSync(filePath);
+    if (!filePath) return null;
+    const stat = await fs.promises.stat(filePath);
     if (!stat.isFile() || stat.size <= 0) return null;
-    const buffer = fs.readFileSync(filePath);
+    const buffer = await fs.promises.readFile(filePath);
     if (!buffer || buffer.length <= 0) return null;
     const isStale = Date.now() - stat.mtimeMs > TELEGRAM_AVATAR_DISK_REFRESH_MS;
     return { buffer, mime: 'image/jpeg', isStale };
@@ -27400,23 +27427,32 @@ function readAvatarFromDiskCache(cacheKey: string): { buffer: Buffer; mime: stri
   }
 }
 
-function writeAvatarToDiskCache(cacheKey: string, buffer: Buffer): void {
+async function writeAvatarToDiskCacheAsync(cacheKey: string, buffer: Buffer): Promise<void> {
+  let tmpPath = '';
   try {
     if (!buffer || buffer.length === 0) return;
     const filePath = resolveAvatarDiskPath(cacheKey);
     if (!filePath) return;
-    fs.mkdirSync(AVATAR_CACHE_DIR, { recursive: true });
-    const tmpPath = `${filePath}.${process.pid}.${Date.now()}.tmp`;
-    fs.writeFileSync(tmpPath, buffer);
-    fs.renameSync(tmpPath, filePath);
-  } catch {}
+    if (!avatarCacheDirReady) {
+      await fs.promises.mkdir(AVATAR_CACHE_DIR, { recursive: true });
+      avatarCacheDirReady = true;
+    }
+    tmpPath = `${filePath}.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2, 7)}.tmp`;
+    await fs.promises.writeFile(tmpPath, buffer);
+    await fs.promises.rename(tmpPath, filePath);
+    tmpPath = '';
+  } catch {
+    if (tmpPath) {
+      await fs.promises.unlink(tmpPath).catch(() => {});
+    }
+  }
 }
 
-function deleteAvatarDiskCache(cacheKey: string): void {
+async function deleteAvatarDiskCacheAsync(cacheKey: string): Promise<void> {
   try {
     const filePath = resolveAvatarDiskPath(cacheKey);
-    if (filePath && fs.existsSync(filePath)) {
-      fs.unlinkSync(filePath);
+    if (filePath) {
+      await fs.promises.unlink(filePath).catch(() => {});
     }
   } catch {}
 }
@@ -27434,7 +27470,7 @@ function invalidateTelegramAvatarCacheEntries(userId: string, peerId: string, ex
   }
   for (const k of keys) {
     telegramAvatarCache.delete(k);
-    deleteAvatarDiskCache(k);
+    void deleteAvatarDiskCacheAsync(k);
   }
 }
 
@@ -27705,7 +27741,7 @@ export async function fetchTelegramAvatarWithLimiting(opts: {
 
   let diskHit: { buffer: Buffer; mime: string; isStale: boolean } | null = null;
   for (const lk of lookupKeys) {
-    diskHit = readAvatarFromDiskCache(lk);
+    diskHit = await readAvatarFromDiskCacheAsync(lk);
     if (diskHit) break;
   }
   if (diskHit) {
@@ -27734,7 +27770,7 @@ export async function fetchTelegramAvatarWithLimiting(opts: {
           );
           if (fresh && Buffer.isBuffer(fresh) && fresh.length > 0) {
             const ts = Date.now();
-            writeAvatarToDiskCache(cacheKey, fresh);
+            void writeAvatarToDiskCacheAsync(cacheKey, fresh);
             telegramAvatarCache.set(
               cacheKey,
               { buffer: fresh, mime: 'image/jpeg', expiresAt: ts + TELEGRAM_AVATAR_CACHE_TTL_MS },
@@ -27742,7 +27778,7 @@ export async function fetchTelegramAvatarWithLimiting(opts: {
             );
           } else {
             telegramAvatarCache.delete(cacheKey);
-            deleteAvatarDiskCache(cacheKey);
+            void deleteAvatarDiskCacheAsync(cacheKey);
             setAvatarNegativeCache(cacheKey, 'no_photo', Date.now());
           }
         } catch {} finally {
@@ -27839,7 +27875,7 @@ export async function fetchTelegramAvatarWithLimiting(opts: {
           );
           if (photo && Buffer.isBuffer(photo) && photo.length > 0) {
             const finishTs = Date.now();
-            writeAvatarToDiskCache(cacheKey, photo);
+            void writeAvatarToDiskCacheAsync(cacheKey, photo);
             telegramAvatarCache.set(
               cacheKey,
               {
@@ -27947,7 +27983,7 @@ export async function prewarmAccountAvatarsOnce(
       break;
     }
     const cacheKey = `${cacheAccountScope}:${cleanId}`;
-    if (telegramAvatarCache.get(cacheKey, Date.now()) || readAvatarFromDiskCache(cacheKey)) {
+    if (telegramAvatarCache.get(cacheKey, Date.now()) || (await readAvatarFromDiskCacheAsync(cacheKey))) {
       skippedCached += 1;
       continue;
     }
@@ -28027,7 +28063,7 @@ app.get('/api/telegram/user/avatar/:chatId', async (req: Request, res: Response)
       for (const sc of fallbackScopes) {
         const k = `${sc}:${cleanId}`;
         const mem = telegramAvatarCache.get(k, Date.now());
-        const hit = mem ? { buffer: mem.buffer, mime: mem.mime } : readAvatarFromDiskCache(k);
+        const hit = mem ? { buffer: mem.buffer, mime: mem.mime } : await readAvatarFromDiskCacheAsync(k);
         if (hit?.buffer) {
           res.setHeader('Content-Type', hit.mime || 'image/jpeg');
           res.setHeader('Cache-Control', 'private, max-age=604800');
@@ -28563,6 +28599,10 @@ export function getTelegramMediaDiskCachePath(cacheKey: string): { binPath: stri
   return { binPath, metaPath };
 }
 
+let mediaDiskCacheDirReady = false;
+let mediaDiskPruneInFlight: Promise<{ totalBytes: number; evictedCount: number }> | null = null;
+let lastMediaDiskPruneAt = 0;
+
 export function readTelegramMediaFromDiskCache(
   cacheKey: string
 ): { buffer: Buffer; mime: string; fileName: string } | null {
@@ -28583,6 +28623,36 @@ export function readTelegramMediaFromDiskCache(
       fs.utimesSync(paths.binPath, nowDate, nowDate);
       fs.utimesSync(paths.metaPath, nowDate, nowDate);
     } catch {}
+    return {
+      buffer,
+      mime: String(meta.mime),
+      fileName: String(meta.fileName || 'telegram_media'),
+    };
+  } catch {
+    return null;
+  }
+}
+
+export async function readTelegramMediaFromDiskCacheAsync(
+  cacheKey: string
+): Promise<{ buffer: Buffer; mime: string; fileName: string } | null> {
+  try {
+    const paths = getTelegramMediaDiskCachePath(cacheKey);
+    if (!paths) return null;
+    const [stat, metaRaw] = await Promise.all([
+      fs.promises.stat(paths.binPath),
+      fs.promises.readFile(paths.metaPath, 'utf8'),
+    ]);
+    if (!stat.isFile() || stat.size <= 0) return null;
+    const meta = safeJsonParse<{ mime?: string; fileName?: string } | null>(metaRaw, null);
+    if (!meta || !meta.mime) return null;
+    const buffer = await fs.promises.readFile(paths.binPath);
+    if (!buffer || buffer.length <= 0) return null;
+    const nowDate = new Date();
+    void Promise.all([
+      fs.promises.utimes(paths.binPath, nowDate, nowDate).catch(() => {}),
+      fs.promises.utimes(paths.metaPath, nowDate, nowDate).catch(() => {}),
+    ]);
     return {
       buffer,
       mime: String(meta.mime),
@@ -28634,6 +28704,65 @@ export function enforceTelegramMediaDiskCacheLimit(
   return { totalBytes, evictedCount };
 }
 
+export async function enforceTelegramMediaDiskCacheLimitAsync(
+  maxBytes = outboundRuntimeConfig.mediaDiskCacheMaxBytes,
+  force = false
+): Promise<{ totalBytes: number; evictedCount: number }> {
+  const now = Date.now();
+  if (!force && mediaDiskPruneInFlight) {
+    return await mediaDiskPruneInFlight;
+  }
+  if (!force && now - lastMediaDiskPruneAt < 10_000) {
+    return { totalBytes: 0, evictedCount: 0 };
+  }
+  const run = (async () => {
+    let totalBytes = 0;
+    let evictedCount = 0;
+    try {
+      const names = await fs.promises.readdir(TELEGRAM_MEDIA_DISK_CACHE_DIR).catch(() => null);
+      if (!names) {
+        return { totalBytes: 0, evictedCount: 0 };
+      }
+      const entries: Array<{ digest: string; binPath: string; metaPath: string; size: number; mtimeMs: number }> = [];
+      for (const name of names) {
+        if (!name.endsWith('.bin')) continue;
+        const digest = name.slice(0, -4);
+        const binPath = path.join(TELEGRAM_MEDIA_DISK_CACHE_DIR, name);
+        const metaPath = path.join(TELEGRAM_MEDIA_DISK_CACHE_DIR, `${digest}.meta.json`);
+        try {
+          const st = await fs.promises.stat(binPath);
+          if (!st.isFile()) continue;
+          totalBytes += st.size;
+          entries.push({ digest, binPath, metaPath, size: st.size, mtimeMs: st.mtimeMs });
+        } catch {}
+      }
+      lastMediaDiskPruneAt = Date.now();
+      if (totalBytes <= maxBytes) {
+        return { totalBytes, evictedCount };
+      }
+      entries.sort((a, b) => a.mtimeMs - b.mtimeMs);
+      for (const item of entries) {
+        if (totalBytes <= maxBytes) break;
+        await Promise.all([
+          fs.promises.unlink(item.binPath).catch(() => {}),
+          fs.promises.unlink(item.metaPath).catch(() => {}),
+        ]);
+        totalBytes = Math.max(0, totalBytes - item.size);
+        evictedCount += 1;
+      }
+    } catch {}
+    return { totalBytes, evictedCount };
+  })();
+  mediaDiskPruneInFlight = run;
+  try {
+    return await run;
+  } finally {
+    if (mediaDiskPruneInFlight === run) {
+      mediaDiskPruneInFlight = null;
+    }
+  }
+}
+
 export function writeTelegramMediaToDiskCache(
   cacheKey: string,
   entry: { buffer: Buffer; mime: string; fileName: string }
@@ -28645,6 +28774,7 @@ export function writeTelegramMediaToDiskCache(
     const paths = getTelegramMediaDiskCachePath(cacheKey);
     if (!paths) return false;
     fs.mkdirSync(TELEGRAM_MEDIA_DISK_CACHE_DIR, { recursive: true });
+    mediaDiskCacheDirReady = true;
     const tmpBin = `${paths.binPath}.${process.pid}.${Date.now()}.tmp`;
     const tmpMeta = `${paths.metaPath}.${process.pid}.${Date.now()}.tmp`;
     fs.writeFileSync(tmpBin, entry.buffer);
@@ -28658,10 +28788,50 @@ export function writeTelegramMediaToDiskCache(
   }
 }
 
+export async function writeTelegramMediaToDiskCacheAsync(
+  cacheKey: string,
+  entry: { buffer: Buffer; mime: string; fileName: string }
+): Promise<boolean> {
+  let tmpBin = '';
+  let tmpMeta = '';
+  try {
+    if (!entry?.buffer || entry.buffer.length <= 0 || entry.buffer.length > TELEGRAM_MEDIA_STREAM_THRESHOLD_BYTES) {
+      return false;
+    }
+    const paths = getTelegramMediaDiskCachePath(cacheKey);
+    if (!paths) return false;
+    if (!mediaDiskCacheDirReady) {
+      await fs.promises.mkdir(TELEGRAM_MEDIA_DISK_CACHE_DIR, { recursive: true });
+      mediaDiskCacheDirReady = true;
+    }
+    const nonce = `${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2, 7)}`;
+    tmpBin = `${paths.binPath}.${nonce}.tmp`;
+    tmpMeta = `${paths.metaPath}.${nonce}.tmp`;
+    await Promise.all([
+      fs.promises.writeFile(tmpBin, entry.buffer),
+      fs.promises.writeFile(tmpMeta, JSON.stringify({ mime: entry.mime, fileName: entry.fileName }), 'utf8'),
+    ]);
+    await Promise.all([
+      fs.promises.rename(tmpBin, paths.binPath),
+      fs.promises.rename(tmpMeta, paths.metaPath),
+    ]);
+    tmpBin = '';
+    tmpMeta = '';
+    void enforceTelegramMediaDiskCacheLimitAsync(outboundRuntimeConfig.mediaDiskCacheMaxBytes);
+    return true;
+  } catch {
+    if (tmpBin) await fs.promises.unlink(tmpBin).catch(() => {});
+    if (tmpMeta) await fs.promises.unlink(tmpMeta).catch(() => {});
+    return false;
+  }
+}
+
 export function clearTelegramMediaCachesForTesting(): void {
   telegramMediaCache.clear();
   telegramMediaInFlight.clear();
   mediaAccountActiveDownloads.clear();
+  lastMediaDiskPruneAt = 0;
+  mediaDiskPruneInFlight = null;
   if (process.env.NODE_ENV === 'test') {
     try {
       for (const name of fs.readdirSync(TELEGRAM_MEDIA_DISK_CACHE_DIR)) {
@@ -28722,7 +28892,7 @@ app.get('/api/telegram/user/media/:chatId/:msgId', async (req: Request, res: Res
       return sendMediaBufferResponse(req, res, cached, forceDownload);
     }
 
-    const diskCached = readTelegramMediaFromDiskCache(cacheKey);
+    const diskCached = await readTelegramMediaFromDiskCacheAsync(cacheKey);
     if (diskCached) {
       telegramMediaCache.set(
         cacheKey,
@@ -28825,7 +28995,7 @@ app.get('/api/telegram/user/media/:chatId/:msgId', async (req: Request, res: Res
                   expiresAt: Date.now() + TELEGRAM_MEDIA_CACHE_TTL_MS,
                 };
                 telegramMediaCache.set(cacheKey, entry, Date.now());
-                writeTelegramMediaToDiskCache(cacheKey, entry);
+                void writeTelegramMediaToDiskCacheAsync(cacheKey, entry);
               },
             });
             if (streamStatus === 'sent' || streamStatus === 'unsatisfiable') {
@@ -28865,7 +29035,7 @@ app.get('/api/telegram/user/media/:chatId/:msgId', async (req: Request, res: Res
                 expiresAt: Date.now() + TELEGRAM_MEDIA_CACHE_TTL_MS,
               };
               telegramMediaCache.set(cacheKey, entry, Date.now());
-              writeTelegramMediaToDiskCache(cacheKey, entry);
+              void writeTelegramMediaToDiskCacheAsync(cacheKey, entry);
               return { kind: 'entry', entry };
             } catch (dlErr: any) {
               const recorded = recordTelegramFloodWait(

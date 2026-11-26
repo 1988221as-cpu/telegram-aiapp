@@ -903,7 +903,7 @@ export const TelegramSettingsModal: React.FC<TelegramSettingsModalProps> = ({
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-2.5 sm:p-4 bg-black/55 dark:bg-black/75 aurora:bg-black/80 linen:bg-black/45 backdrop-blur-xs select-none">
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-2.5 sm:p-4 bg-black/60 dark:bg-black/75 aurora:bg-black/80 linen:bg-black/50 select-none">
       <div className="relative w-full max-w-2xl bg-white dark:bg-[#0b131f] aurora:bg-[#0c151b] linen:bg-[#f8f2e7] rounded-2xl shadow-2xl linen:shadow-sm border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] linen:border-[#d5c6ae] overflow-hidden flex flex-col md:flex-row max-h-[92vh] md:max-h-[85vh]">
         {/* Left Settings Sidebar (Desktop) / Compact Horizontal Segmented Bar (Narrow < 768px) */}
         <div className="w-full md:w-56 bg-[#f8fafc] dark:bg-[#0d1726] aurora:bg-[#0e1920] linen:bg-[#f0e6d5] border-b md:border-b-0 md:border-r border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] linen:border-[#dfd2bc] px-3 pt-2.5 pb-2 md:p-3 flex flex-col gap-2 md:gap-0 shrink-0">

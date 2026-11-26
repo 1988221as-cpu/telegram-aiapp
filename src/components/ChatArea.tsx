@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useLayoutEffect, useRef, useCallback, useMemo } from 'react';
+import React, { useState, useEffect, useLayoutEffect, useRef, useCallback, useMemo, useImperativeHandle } from 'react';
 import { createPortal } from 'react-dom';
 import {
   Send,
@@ -745,6 +745,747 @@ function buildReplyPayload(replyMsg: Message, chatTitle?: string) {
 
 const chatDraftTextCache = new Map<string, string>();
 
+interface ChatComposerHandle {
+  getText: () => string;
+  setText: (next: string | ((prev: string) => string)) => void;
+  getPreviewState: () => {
+    translatedPreview: string;
+    translatedPreviewSource: string;
+    previewError: string;
+  };
+  setPreviewState: (patch: {
+    translatedPreview?: string;
+    translatedPreviewSource?: string;
+    previewError?: string;
+  }) => void;
+  clearComposer: (deleteDraftKey?: string) => void;
+  focus: () => void;
+}
+
+interface ChatComposerSectionProps {
+  draftScopeKey: string;
+  chatId: string;
+  chatFontScale: ChatFontScale;
+  composerFontClass: string;
+  secondaryFontClass: string;
+  outboundTargetLang: string;
+  effectiveOutboundEngine: 'gemini' | 'google' | 'custom_llm';
+  isLlmOutboundEngine: boolean;
+  isGroupOrChannelChat: boolean;
+  isChatTransEnabled: boolean;
+  translationSettings: TranslationSettings;
+  customLLMConfig?: any;
+  isEditingMessage: boolean;
+  translateOnEdit: boolean;
+  pastedImageInfo: { dataUrl: string; sizeKb: string } | null;
+  sendWithEnter: boolean;
+  isSending: boolean;
+  isAttachmentMenuOpen: boolean;
+  showEmojiPicker: boolean;
+  isRecordingMic: boolean;
+  recordDuration: number;
+  isGeneratingAi: boolean;
+  aiCooldownSeconds: number;
+  isSynthesizingVoice: boolean;
+  attachmentButtonRef: React.RefObject<HTMLButtonElement | null>;
+  emojiButtonRef: React.RefObject<HTMLButtonElement | null>;
+  middleSlot?: React.ReactNode;
+  onSendText: (bypassTranslation?: boolean) => void | Promise<void>;
+  onSendPastedImage: () => void;
+  onClearPastedImage: () => void;
+  onPaste: (e: React.ClipboardEvent) => void;
+  onToggleAttachmentMenu: () => void;
+  onToggleEmojiPicker: () => void;
+  onOpenVoiceprintConfig: () => void;
+  onToggleRecordMic: () => void;
+  onGenerateAiSuggestion: () => void;
+  onDirectVoiceSynthesis: () => void | Promise<void>;
+  onShowSyncNotice: (msg: string, durationMs?: number) => void;
+  hasBlockingOverlayForEscape: () => boolean;
+  onEscapeDismiss: () => void;
+}
+
+const ChatComposerSection = React.memo(
+  React.forwardRef<ChatComposerHandle, ChatComposerSectionProps>(function ChatComposerSection(
+    {
+      draftScopeKey,
+      chatId,
+      chatFontScale,
+      composerFontClass,
+      secondaryFontClass,
+      outboundTargetLang,
+      effectiveOutboundEngine,
+      isLlmOutboundEngine,
+      isGroupOrChannelChat,
+      isChatTransEnabled,
+      translationSettings,
+      customLLMConfig,
+      isEditingMessage,
+      translateOnEdit,
+      pastedImageInfo,
+      sendWithEnter,
+      isSending,
+      isAttachmentMenuOpen,
+      showEmojiPicker,
+      isRecordingMic,
+      recordDuration,
+      isGeneratingAi,
+      aiCooldownSeconds,
+      isSynthesizingVoice,
+      attachmentButtonRef,
+      emojiButtonRef,
+      middleSlot,
+      onSendText,
+      onSendPastedImage,
+      onClearPastedImage,
+      onPaste,
+      onToggleAttachmentMenu,
+      onToggleEmojiPicker,
+      onOpenVoiceprintConfig,
+      onToggleRecordMic,
+      onGenerateAiSuggestion,
+      onDirectVoiceSynthesis,
+      onShowSyncNotice,
+      hasBlockingOverlayForEscape,
+      onEscapeDismiss,
+    },
+    ref
+  ) {
+    const [inputText, setInputText] = useState(() => chatDraftTextCache.get(draftScopeKey) || '');
+    const inputTextRef = useRef<string>(inputText);
+    inputTextRef.current = inputText;
+
+    const [translatedPreview, setTranslatedPreview] = useState('');
+    const translatedPreviewRef = useRef<string>('');
+    translatedPreviewRef.current = translatedPreview;
+
+    const [translatedPreviewSource, setTranslatedPreviewSource] = useState('');
+    const translatedPreviewSourceRef = useRef<string>('');
+    translatedPreviewSourceRef.current = translatedPreviewSource;
+
+    const [previewError, setPreviewError] = useState('');
+    const previewErrorRef = useRef<string>('');
+    previewErrorRef.current = previewError;
+
+    const [previewRetryNonce, setPreviewRetryNonce] = useState(0);
+    const [isTranslatingPreview, setIsTranslatingPreview] = useState(false);
+
+    const textareaRef = useRef<HTMLTextAreaElement>(null);
+    const isComposingRef = useRef(false);
+    const previewAbortRef = useRef<AbortController | null>(null);
+    const previewContextRef = useRef<string>('');
+    const lastCommittedDraftScopeRef = useRef<string>(draftScopeKey);
+
+    useImperativeHandle(
+      ref,
+      () => ({
+        getText: () => inputTextRef.current,
+        setText: (next) => {
+          setInputText((prev) => {
+            const resolved = typeof next === 'function' ? next(prev) : next;
+            inputTextRef.current = resolved;
+            return resolved;
+          });
+        },
+        getPreviewState: () => ({
+          translatedPreview: translatedPreviewRef.current,
+          translatedPreviewSource: translatedPreviewSourceRef.current,
+          previewError: previewErrorRef.current,
+        }),
+        setPreviewState: (patch) => {
+          if (patch.translatedPreview !== undefined) {
+            translatedPreviewRef.current = patch.translatedPreview;
+            setTranslatedPreview(patch.translatedPreview);
+          }
+          if (patch.translatedPreviewSource !== undefined) {
+            translatedPreviewSourceRef.current = patch.translatedPreviewSource;
+            setTranslatedPreviewSource(patch.translatedPreviewSource);
+          }
+          if (patch.previewError !== undefined) {
+            previewErrorRef.current = patch.previewError;
+            setPreviewError(patch.previewError);
+          }
+        },
+        clearComposer: (deleteDraftKey) => {
+          chatDraftTextCache.delete(deleteDraftKey || draftScopeKey);
+          inputTextRef.current = '';
+          setInputText('');
+          translatedPreviewRef.current = '';
+          setTranslatedPreview('');
+          translatedPreviewSourceRef.current = '';
+          setTranslatedPreviewSource('');
+          previewErrorRef.current = '';
+          setPreviewError('');
+        },
+        focus: () => textareaRef.current?.focus(),
+      }),
+      [draftScopeKey]
+    );
+
+    useLayoutEffect(() => {
+      if (lastCommittedDraftScopeRef.current !== draftScopeKey) {
+        lastCommittedDraftScopeRef.current = draftScopeKey;
+        const restored = chatDraftTextCache.get(draftScopeKey) || '';
+        inputTextRef.current = restored;
+        setInputText(restored);
+        if (previewAbortRef.current) {
+          previewAbortRef.current.abort();
+          previewAbortRef.current = null;
+        }
+        translatedPreviewRef.current = '';
+        setTranslatedPreview('');
+        translatedPreviewSourceRef.current = '';
+        setTranslatedPreviewSource('');
+        previewErrorRef.current = '';
+        setPreviewError('');
+        setIsTranslatingPreview(false);
+        return;
+      }
+      if (!isEditingMessage) {
+        if (inputText) {
+          chatDraftTextCache.set(draftScopeKey, inputText);
+        } else {
+          chatDraftTextCache.delete(draftScopeKey);
+        }
+      }
+    }, [draftScopeKey, inputText, isEditingMessage]);
+
+    useEffect(() => {
+      const el = textareaRef.current;
+      if (!el) return;
+      if (!inputText) {
+        el.style.height = 'auto';
+        el.style.overflowY = 'hidden';
+        return;
+      }
+      const rafId = requestAnimationFrame(() => {
+        const currentEl = textareaRef.current;
+        if (!currentEl) return;
+        currentEl.style.height = 'auto';
+        const maxHeight = 144;
+        const nextHeight = Math.min(currentEl.scrollHeight, maxHeight);
+        currentEl.style.height = `${nextHeight}px`;
+        currentEl.style.overflowY = currentEl.scrollHeight > maxHeight ? 'auto' : 'hidden';
+      });
+      return () => cancelAnimationFrame(rafId);
+    }, [inputText, chatId, chatFontScale]);
+
+    // Real-time input translation preview (auto for free Google Translate; manual on-demand for LLM engines)
+    useEffect(() => {
+      if (previewAbortRef.current) {
+        previewAbortRef.current.abort();
+        previewAbortRef.current = null;
+      }
+
+      const queryText = inputText.trim();
+      if (
+        !queryText ||
+        !hasTranslatableLetters(queryText) ||
+        !isChatTransEnabled ||
+        translationSettings?.autoTranslateOutbound === false ||
+        (isEditingMessage && !translateOnEdit)
+      ) {
+        setTranslatedPreview('');
+        setTranslatedPreviewSource('');
+        setPreviewError('');
+        setIsTranslatingPreview(false);
+        return;
+      }
+
+      const detectedCode = normalizeChatLangCode(detectClientLangCode(queryText));
+      const targetNormCode = normalizeChatLangCode(outboundTargetLang);
+      if (detectedCode !== 'auto' && targetNormCode !== 'auto' && detectedCode === targetNormCode) {
+        setTranslatedPreview('');
+        setTranslatedPreviewSource('');
+        setPreviewError('');
+        setIsTranslatingPreview(false);
+        return;
+      }
+
+      const currentPreviewContext = `${outboundTargetLang}|${effectiveOutboundEngine}|${translationSettings?.geminiModel || ''}|${translationSettings?.customModelName || ''}`;
+      if (previewContextRef.current !== currentPreviewContext) {
+        setTranslatedPreview('');
+        setTranslatedPreviewSource('');
+        setPreviewError('');
+        previewContextRef.current = currentPreviewContext;
+      }
+      if (isLlmOutboundEngine) {
+        if (translatedPreviewSource !== queryText) {
+          setTranslatedPreview('');
+          setTranslatedPreviewSource('');
+          setPreviewError('');
+        }
+        setIsTranslatingPreview(false);
+        return;
+      }
+
+      let isCurrent = true;
+      const controller = new AbortController();
+      previewAbortRef.current = controller;
+
+      const timer = setTimeout(async () => {
+        if (!isCurrent || controller.signal.aborted) return;
+        setIsTranslatingPreview(true);
+        setPreviewError('');
+        try {
+          const trans = await translateText(
+            queryText,
+            'Auto',
+            outboundTargetLang,
+            customLLMConfig,
+            effectiveOutboundEngine,
+            translationSettings?.googleApiKey,
+            isGroupOrChannelChat ? undefined : translationSettings?.geminiModel,
+            isGroupOrChannelChat ? undefined : translationSettings?.geminiApiKey,
+            isGroupOrChannelChat ? undefined : translationSettings?.customModelName,
+            {
+              signal: controller.signal,
+              ...(isGroupOrChannelChat ? { purpose: 'group' as const, isGroup: true } : {}),
+            }
+          );
+          if (isCurrent && !controller.signal.aborted) {
+            previewContextRef.current = currentPreviewContext;
+            setTranslatedPreview(trans);
+            setTranslatedPreviewSource(queryText);
+            setPreviewError('');
+          }
+        } catch (err: any) {
+          if (err?.name === 'AbortError' || controller.signal.aborted || !isCurrent) {
+            return;
+          }
+          setTranslatedPreview('');
+          setTranslatedPreviewSource(queryText);
+          setPreviewError('翻译失败，请检查翻译通道');
+        } finally {
+          if (isCurrent) {
+            setIsTranslatingPreview(false);
+          }
+        }
+      }, 400);
+
+      return () => {
+        isCurrent = false;
+        clearTimeout(timer);
+        controller.abort();
+        if (previewAbortRef.current === controller) {
+          previewAbortRef.current = null;
+        }
+      };
+    }, [
+      inputText,
+      outboundTargetLang,
+      isChatTransEnabled,
+      translationSettings,
+      customLLMConfig,
+      isEditingMessage,
+      translateOnEdit,
+      previewRetryNonce,
+      effectiveOutboundEngine,
+      isLlmOutboundEngine,
+      isGroupOrChannelChat,
+    ]);
+
+    const handleManualLlmPreview = async () => {
+      const queryText = inputText.trim();
+      if (
+        !queryText ||
+        !hasTranslatableLetters(queryText) ||
+        !isChatTransEnabled ||
+        translationSettings?.autoTranslateOutbound === false ||
+        (isEditingMessage && !translateOnEdit)
+      ) {
+        return;
+      }
+      const detectedCode = normalizeChatLangCode(detectClientLangCode(queryText));
+      const targetNormCode = normalizeChatLangCode(outboundTargetLang);
+      if (detectedCode !== 'auto' && targetNormCode !== 'auto' && detectedCode === targetNormCode) {
+        setTranslatedPreview('');
+        setTranslatedPreviewSource('');
+        setPreviewError('');
+        onShowSyncNotice('当前输入与发送目标语种一致，无需翻译');
+        return;
+      }
+
+      if (previewAbortRef.current) {
+        previewAbortRef.current.abort();
+      }
+      const controller = new AbortController();
+      previewAbortRef.current = controller;
+      setIsTranslatingPreview(true);
+      setPreviewError('');
+      try {
+        const trans = await translateText(
+          queryText,
+          'Auto',
+          outboundTargetLang,
+          customLLMConfig,
+          effectiveOutboundEngine,
+          translationSettings?.googleApiKey,
+          isGroupOrChannelChat ? undefined : translationSettings?.geminiModel,
+          isGroupOrChannelChat ? undefined : translationSettings?.geminiApiKey,
+          isGroupOrChannelChat ? undefined : translationSettings?.customModelName,
+          {
+            signal: controller.signal,
+            ...(isGroupOrChannelChat ? { purpose: 'group' as const, isGroup: true } : {}),
+          }
+        );
+        if (
+          !controller.signal.aborted &&
+          (textareaRef.current?.value.trim() === queryText || inputTextRef.current.trim() === queryText)
+        ) {
+          previewContextRef.current = `${outboundTargetLang}|${effectiveOutboundEngine}|${translationSettings?.geminiModel || ''}|${translationSettings?.customModelName || ''}`;
+          setTranslatedPreview(trans);
+          setTranslatedPreviewSource(queryText);
+          setPreviewError('');
+        }
+      } catch (err: any) {
+        if (err?.name === 'AbortError' || controller.signal.aborted) return;
+        setTranslatedPreview('');
+        setTranslatedPreviewSource(queryText);
+        setPreviewError('翻译失败，请检查翻译通道');
+      } finally {
+        if (previewAbortRef.current === controller) {
+          previewAbortRef.current = null;
+        }
+        setIsTranslatingPreview(false);
+      }
+    };
+
+    const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+      const isImeComposing =
+        isComposingRef.current || e.nativeEvent.isComposing || e.nativeEvent.keyCode === 229;
+      const isSendTrigger = sendWithEnter
+        ? e.key === 'Enter' && !e.shiftKey && !isImeComposing
+        : e.key === 'Enter' && (e.ctrlKey || e.metaKey) && !isImeComposing;
+      if (isSendTrigger) {
+        e.preventDefault();
+        if (isSending) return;
+        if (pastedImageInfo) {
+          onSendPastedImage();
+        } else {
+          void onSendText();
+        }
+      } else if (e.key === 'Escape') {
+        if (isImeComposing) return;
+        if (translatedPreviewRef.current || hasBlockingOverlayForEscape()) return;
+        e.preventDefault();
+        e.stopPropagation();
+        onEscapeDismiss();
+      }
+    };
+
+    const trimmedQuery = inputText.trim();
+    const detectedNorm = trimmedQuery ? normalizeChatLangCode(detectClientLangCode(trimmedQuery)) : 'auto';
+    const targetNorm = normalizeChatLangCode(outboundTargetLang);
+    const sameLang = detectedNorm !== 'auto' && targetNorm !== 'auto' && detectedNorm === targetNorm;
+    const shouldShowLlmManualBar =
+      isLlmOutboundEngine &&
+      Boolean(trimmedQuery) &&
+      hasTranslatableLetters(trimmedQuery) &&
+      isChatTransEnabled &&
+      translationSettings?.autoTranslateOutbound !== false &&
+      (!isEditingMessage || translateOnEdit) &&
+      !sameLang &&
+      !(translatedPreview && translatedPreviewSource === trimmedQuery) &&
+      !previewError;
+
+    return (
+      <>
+        {/* Real-time Translation Preview / Failure Recovery Strip */}
+        {Boolean(trimmedQuery && (translatedPreview || previewError)) &&
+          (previewError ? (
+            <div className="mb-2 px-3 py-2 bg-rose-500/10 dark:bg-rose-500/15 aurora:bg-rose-500/15 border border-rose-500/30 rounded-xl flex items-center justify-between gap-2 text-xs animate-in fade-in duration-150">
+              <div className="flex items-center gap-2 min-w-0">
+                <ShieldAlert className="w-4 h-4 text-rose-500 shrink-0" />
+                <div className="min-w-0">
+                  <span className="text-[10.5px] font-semibold text-rose-700 dark:text-rose-300 block">
+                    翻译失败，请检查翻译通道
+                  </span>
+                </div>
+              </div>
+              <div className="flex items-center gap-1.5 shrink-0">
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (isLlmOutboundEngine) {
+                      void handleManualLlmPreview();
+                    } else {
+                      setPreviewRetryNonce((n) => n + 1);
+                    }
+                  }}
+                  className="px-2 py-1 rounded-md bg-white/80 dark:bg-[#0e1726] aurora:bg-[#101c23] border border-rose-500/30 hover:bg-white dark:hover:bg-[#152438] aurora:hover:bg-[#152934] text-rose-600 dark:text-rose-300 text-[11px] font-semibold cursor-pointer"
+                >
+                  重试
+                </button>
+                <button
+                  type="button"
+                  disabled={isSending}
+                  onClick={() => void onSendText(true)}
+                  className="px-2.5 py-1 rounded-md bg-rose-600 hover:bg-rose-700 text-white text-[11px] font-semibold cursor-pointer disabled:opacity-50"
+                >
+                  直接发送原文
+                </button>
+              </div>
+            </div>
+          ) : (
+            <div className="mb-2 px-3 py-1.5 bg-[#f0f7ff] dark:bg-[#0e1928] aurora:bg-[#102229] linen:bg-[#f7f0e4] border border-[#dbeafe] dark:border-[#1e3148] aurora:border-[#1f3b45] linen:border-[#d4c3aa] rounded-xl flex items-center justify-between text-xs animate-in fade-in duration-150">
+              <div className="flex items-center gap-2 min-w-0">
+                <Languages className="w-3.5 h-3.5 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf] linen:text-[#7c5838] shrink-0" />
+                <div className="min-w-0 flex items-center gap-1.5">
+                  <span className="text-[11px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#7a6957] shrink-0">
+                    译文预览：
+                  </span>
+                  <span
+                    className={`${secondaryFontClass} font-medium text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118] truncate`}
+                  >
+                    {translatedPreview}
+                  </span>
+                </div>
+              </div>
+              <div className="flex items-center gap-1.5 shrink-0 ml-2">
+                <span className="text-[10.5px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#8c522d] font-medium">
+                  {sendWithEnter ? 'Enter' : 'Ctrl+Enter'} 发送
+                </span>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setTranslatedPreview('');
+                    setTranslatedPreviewSource('');
+                    setPreviewError('');
+                  }}
+                  className="p-0.5 text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#8c522d] hover:text-[#0f172a] dark:hover:text-white aurora:hover:text-[#ecf6f8] linen:hover:text-[#2b2118] rounded hover:bg-black/5 dark:hover:bg-white/10 aurora:hover:bg-[#152934] linen:hover:bg-[#e5d6be] cursor-pointer transition-colors"
+                  title="取消此译文预览 (Esc)"
+                >
+                  <X className="w-3.5 h-3.5" />
+                </button>
+              </div>
+            </div>
+          ))}
+
+        {shouldShowLlmManualBar && (
+          <div className="mb-2 px-3 py-1.5 bg-[#f8fafc] dark:bg-[#0e1928] aurora:bg-[#102229] linen:bg-[#f7f0e4] border border-[#e2e8f0] dark:border-[#1e3148] aurora:border-[#1f3b45] linen:border-[#d4c3aa] rounded-xl flex items-center justify-between gap-2 text-xs animate-in fade-in duration-150">
+            <div className="flex items-center gap-2 min-w-0">
+              <Sparkles className="w-3.5 h-3.5 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf] linen:text-[#a86a43] shrink-0" />
+              <span className="text-[11px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#5c4a38] truncate">
+                大模型翻译已开启（打字不耗额度，发送或点击右侧按钮译为 {getLanguageDisplayName(outboundTargetLang)}）
+              </span>
+            </div>
+            <button
+              type="button"
+              disabled={isTranslatingPreview}
+              onClick={() => void handleManualLlmPreview()}
+              className="shrink-0 inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-[#2481cc]/10 hover:bg-[#2481cc]/20 dark:bg-[#2ba0ff]/15 dark:hover:bg-[#2ba0ff]/25 aurora:bg-[#14b8a6]/15 aurora:hover:bg-[#14b8a6]/25 linen:bg-[#a86a43]/12 linen:hover:bg-[#a86a43]/22 border border-[#2481cc]/25 dark:border-[#2ba0ff]/30 aurora:border-[#2dd4bf]/30 linen:border-[#a86a43]/30 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#5eead4] linen:text-[#8c522d] text-[11px] font-semibold cursor-pointer disabled:opacity-60 transition-colors"
+            >
+              <RotateCw className={`w-3 h-3 ${isTranslatingPreview ? 'animate-spin' : ''}`} />
+              <span>{isTranslatingPreview ? '生成中...' : '预览AI翻译'}</span>
+            </button>
+          </div>
+        )}
+
+        {middleSlot}
+
+        {/* Pasted Image Pending Send Strip */}
+        {pastedImageInfo && (
+          <div className="mb-2.5 p-2.5 bg-[#f0f7ff] dark:bg-[#0e1928] aurora:bg-[#102229] linen:bg-[#f7f0e4] border border-[#2481cc]/40 aurora:border-[#2dd4bf]/40 linen:border-[#a86a43]/40 rounded-xl flex items-center justify-between gap-3 animate-in fade-in slide-in-from-bottom-2 duration-150 shadow-xs">
+            <div className="flex items-center gap-3 min-w-0">
+              <div className="relative w-12 h-12 rounded-lg overflow-hidden shrink-0 border border-black/10 dark:border-white/10 aurora:border-white/10 linen:border-[#cbbba2] bg-black/5">
+                <img
+                  src={pastedImageInfo.dataUrl}
+                  alt="pasted preview"
+                  className="w-full h-full object-cover"
+                />
+              </div>
+              <div className="min-w-0">
+                <div className="text-xs font-semibold text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#5eead4] linen:text-[#8c522d] flex items-center gap-1.5">
+                  <ImageIcon className="w-3.5 h-3.5" />
+                  <span>已捕获剪贴板照片</span>
+                  <span className="text-[10px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#7a6957] font-normal">
+                    ({pastedImageInfo.sizeKb} KB)
+                  </span>
+                </div>
+                <div className="text-[11px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6f5d4b] truncate mt-0.5">
+                  {trimmedQuery
+                    ? `配文: ${inputText}`
+                    : `可在输入框输入配文，或直接点击发送 (${sendWithEnter ? 'Enter' : 'Ctrl+Enter'})`}
+                </div>
+              </div>
+            </div>
+            <div className="flex items-center gap-1.5 shrink-0">
+              <button
+                type="button"
+                onClick={onClearPastedImage}
+                className="p-1.5 text-[#64748b] hover:text-[#0f172a] dark:text-[#7b93ad] dark:hover:text-white aurora:text-[#7e9aa5] aurora:hover:text-[#ecf6f8] linen:text-[#7a6957] linen:hover:text-[#2b2118] rounded-lg hover:bg-black/5 dark:hover:bg-white/10 aurora:hover:bg-[#152934] linen:hover:bg-[#e5d6be] cursor-pointer"
+                title="取消发送此图片 (Esc)"
+              >
+                <X className="w-4 h-4" />
+              </button>
+              <button
+                type="button"
+                onClick={onSendPastedImage}
+                className="px-3 py-1.5 rounded-lg bg-[#2481cc] hover:bg-[#1d6fb3] dark:bg-[#2ba0ff] dark:hover:bg-[#1e8ee8] aurora:bg-[#0d9488] aurora:hover:bg-[#0f766e] linen:bg-[#3a6652] linen:hover:bg-[#2f5544] text-white font-medium text-xs cursor-pointer flex items-center gap-1.5 shadow-xs"
+                title={`立即发送照片 (${sendWithEnter ? 'Enter' : 'Ctrl+Enter'})`}
+              >
+                <Send className="w-3 h-3" />
+                <span>发送照片</span>
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* Main Input Container + Bottom Compact Action Row */}
+        <div className="@container rounded-xl border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#1e343e] linen:border-[#cbbba2] bg-[#f8fafc] dark:bg-[#0e1726] aurora:bg-[#111d24] linen:bg-[#fdfaf4] focus-within:bg-white dark:focus-within:bg-[#101b2c] aurora:focus-within:bg-[#13222b] linen:focus-within:bg-[#fffdf9] focus-within:border-[#2481cc] dark:focus-within:border-[#2ba0ff] aurora:focus-within:border-[#2dd4bf] linen:focus-within:border-[#a86a43] transition-all">
+          <textarea
+            ref={textareaRef}
+            rows={1}
+            value={inputText}
+            onChange={(e) => {
+              const val = e.target.value;
+              inputTextRef.current = val;
+              setInputText(val);
+            }}
+            onCompositionStart={() => {
+              isComposingRef.current = true;
+            }}
+            onCompositionEnd={() => {
+              isComposingRef.current = false;
+            }}
+            onKeyDown={handleKeyDown}
+            onPaste={onPaste}
+            placeholder={
+              isEditingMessage
+                ? '修改消息...'
+                : pastedImageInfo
+                ? '添加图片说明（可选）...'
+                : '输入消息...'
+            }
+            className={`w-full max-h-36 resize-none bg-transparent text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118] ${composerFontClass} leading-relaxed px-3.5 pt-2.5 pb-1.5 focus:outline-none placeholder-[#94a3b8] dark:placeholder-[#566d85] aurora:placeholder-[#5a7782] linen:placeholder-[#9c8c7a] overflow-y-hidden`}
+          />
+
+          <div className="px-2 @[520px]:px-2.5 pb-2 pt-1 flex items-center justify-between gap-1.5 @[520px]:gap-2 border-t border-[#e2e8f0]/60 dark:border-white/5 aurora:border-[#182b34] linen:border-[#e6dac6]">
+            {/* Left Tools */}
+            <div className="flex items-center flex-nowrap gap-0.5 @[520px]:gap-1 min-w-0 overflow-x-auto no-scrollbar">
+              <button
+                ref={attachmentButtonRef}
+                type="button"
+                onClick={onToggleAttachmentMenu}
+                title="附加文件、图片或文档"
+                className={`w-7 h-7 @[520px]:w-8 @[520px]:h-8 rounded-lg flex items-center justify-center shrink-0 transition-colors cursor-pointer ${
+                  isAttachmentMenuOpen
+                    ? 'bg-[#e8f3ff] text-[#2481cc] dark:bg-[#2ba0ff]/20 dark:text-[#2ba0ff] aurora:bg-[#112e37] aurora:text-[#5eead4] linen:bg-[#eadcc6] linen:text-[#a86a43]'
+                    : 'hover:bg-[#e2e8f0]/60 dark:hover:bg-[#152438] aurora:hover:bg-[#152934] linen:hover:bg-[#eee2cf] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#7a6957] hover:text-[#2481cc] dark:hover:text-[#2ba0ff] aurora:hover:text-[#5eead4] linen:hover:text-[#a86a43]'
+                }`}
+              >
+                <Paperclip className="w-4 h-4 -rotate-45" />
+              </button>
+
+              <button
+                ref={emojiButtonRef}
+                type="button"
+                onClick={onToggleEmojiPicker}
+                title="表情与贴纸"
+                className={`w-7 h-7 @[520px]:w-8 @[520px]:h-8 rounded-lg flex items-center justify-center shrink-0 transition-colors cursor-pointer ${
+                  showEmojiPicker
+                    ? 'bg-[#e8f3ff] text-[#2481cc] dark:bg-[#2ba0ff]/20 dark:text-[#2ba0ff] aurora:bg-[#112e37] aurora:text-[#5eead4] linen:bg-[#eadcc6] linen:text-[#a86a43]'
+                    : 'hover:bg-[#e2e8f0]/60 dark:hover:bg-[#152438] aurora:hover:bg-[#152934] linen:hover:bg-[#eee2cf] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#7a6957] hover:text-[#2481cc] dark:hover:text-[#2ba0ff] aurora:hover:text-[#5eead4] linen:hover:text-[#a86a43]'
+                }`}
+              >
+                <Smile className="w-4 h-4" />
+              </button>
+
+              <button
+                type="button"
+                onClick={onOpenVoiceprintConfig}
+                title="真人声纹样本克隆"
+                className="w-7 h-7 @[520px]:w-8 @[520px]:h-8 rounded-lg flex items-center justify-center shrink-0 text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#7a6957] hover:text-[#2481cc] dark:hover:text-[#2ba0ff] aurora:hover:text-[#5eead4] linen:hover:text-[#a86a43] hover:bg-[#e2e8f0]/60 dark:hover:bg-[#152438] aurora:hover:bg-[#152934] linen:hover:bg-[#eee2cf] transition-colors cursor-pointer"
+              >
+                <AudioWaveform className="w-4 h-4" />
+              </button>
+
+              <button
+                type="button"
+                onClick={onToggleRecordMic}
+                title={isRecordingMic ? '点击停止录音并发送' : '点击录制语音消息'}
+                className={`h-7 px-1.5 @[520px]:h-8 @[520px]:px-2 rounded-lg flex items-center gap-1 shrink-0 text-xs font-medium transition-colors cursor-pointer ${
+                  isRecordingMic
+                    ? 'bg-rose-500 text-white animate-pulse'
+                    : 'hover:bg-[#e2e8f0]/60 dark:hover:bg-[#152438] aurora:hover:bg-[#152934] linen:hover:bg-[#eee2cf] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#7a6957] hover:text-[#2481cc] dark:hover:text-[#2ba0ff] aurora:hover:text-[#5eead4] linen:hover:text-[#a86a43]'
+                }`}
+              >
+                <Volume2 className="w-4 h-4" />
+                {isRecordingMic && <span className="tabular-nums">{recordDuration}s</span>}
+              </button>
+
+              <button
+                type="button"
+                onClick={onGenerateAiSuggestion}
+                disabled={isGeneratingAi}
+                title={
+                  aiCooldownSeconds > 0
+                    ? `大模型冷却中（剩余 ${aiCooldownSeconds} 秒）`
+                    : '基于人设与最近30条对话生成 AI 拟真回复'
+                }
+                className={`ml-0.5 @[520px]:ml-1 h-7 inline-flex items-center gap-1 @[520px]:gap-1.5 px-2 @[520px]:px-2.5 rounded-full text-[11.5px] font-medium whitespace-nowrap transition-all cursor-pointer shrink-0 shadow-xs ${
+                  isGeneratingAi
+                    ? 'bg-[#e8f3ff] text-[#2481cc] dark:bg-[#2ba0ff]/20 dark:text-[#2ba0ff] aurora:bg-[#112e37] aurora:text-[#5eead4] linen:bg-[#b87b53] linen:text-white'
+                    : aiCooldownSeconds > 0
+                    ? 'bg-[#f1f5f9] text-[#64748b] hover:bg-[#e2e8f0]/80 dark:bg-[#152438] dark:text-[#7b93ad] dark:hover:bg-[#1b2f48] aurora:bg-[#13252e] aurora:text-[#7e9aa5] aurora:hover:bg-[#18303b] linen:bg-[#c9b399] linen:text-[#5c4836] linen:hover:bg-[#bfa68a]'
+                    : 'bg-[#2481cc] hover:bg-[#1d6fb3] text-white dark:bg-[#2ba0ff] dark:hover:bg-[#1e8ee8] aurora:bg-[#0d9488] aurora:hover:bg-[#0f766e] linen:bg-[#a86a43] linen:hover:bg-[#935a36] linen:text-white'
+                }`}
+              >
+                <Sparkles className={`w-3.5 h-3.5 ${isGeneratingAi ? 'animate-spin' : ''}`} />
+                <span>
+                  {isGeneratingAi
+                    ? '生成中...'
+                    : aiCooldownSeconds > 0
+                    ? `AI 建议回复 (${aiCooldownSeconds}s)`
+                    : 'AI 建议回复'}
+                </span>
+              </button>
+
+              <button
+                type="button"
+                disabled={isSynthesizingVoice}
+                onClick={() => void onDirectVoiceSynthesis()}
+                title="使用已保存声纹直接将当前文本合成为语音发送"
+                className={`ml-0.5 h-7 inline-flex items-center gap-1 @[520px]:gap-1.5 px-2 @[520px]:px-2.5 rounded-full text-[11.5px] font-medium whitespace-nowrap transition-all cursor-pointer shrink-0 shadow-xs bg-[#0f766e] hover:bg-[#115e59] text-white dark:bg-[#174857] dark:hover:bg-[#1c596b] aurora:bg-[#11434d] aurora:hover:bg-[#165562] linen:bg-[#3a6652] linen:hover:bg-[#2f5544] linen:text-white ${
+                  isSynthesizingVoice ? 'opacity-65 pointer-events-none' : ''
+                }`}
+              >
+                <Mic className={`w-3.5 h-3.5 ${isSynthesizingVoice ? 'animate-pulse' : ''}`} />
+                <span>{isSynthesizingVoice ? '合成中...' : '音色合成'}</span>
+              </button>
+            </div>
+
+            {/* Right Actions: Shortcut hint + Send Button */}
+            <div className="flex items-center gap-2 @[620px]:gap-2.5 shrink-0">
+              <span className="hidden @[620px]:inline whitespace-nowrap text-[11px] text-[#94a3b8] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#84725e] select-none">
+                {sendWithEnter ? 'Enter 发送 · Shift+Enter 换行' : 'Ctrl+Enter 发送 · Enter 换行'}
+              </span>
+
+              <button
+                type="button"
+                disabled={isSending || (!trimmedQuery && !pastedImageInfo && !isEditingMessage)}
+                onClick={pastedImageInfo ? onSendPastedImage : () => void onSendText()}
+                title={
+                  isEditingMessage
+                    ? '保存修改'
+                    : pastedImageInfo
+                    ? `发送照片（${sendWithEnter ? 'Enter 发送 · Shift+Enter 换行' : 'Ctrl+Enter 发送 · Enter 换行'}）`
+                    : `发送消息（${sendWithEnter ? 'Enter 发送 · Shift+Enter 换行' : 'Ctrl+Enter 发送 · Enter 换行'}）`
+                }
+                className={`hs-accent-bg h-7 @[520px]:h-8 px-3 @[520px]:px-4 rounded-full bg-[#2481cc] hover:bg-[#1d6fb3] dark:bg-[#2ba0ff] dark:hover:bg-[#1e8ee8] aurora:bg-[#0d9488] aurora:hover:bg-[#0f766e] linen:bg-[#3a6652] linen:hover:bg-[#2f5544] text-white text-xs font-medium flex items-center gap-1.5 whitespace-nowrap transition-all cursor-pointer shadow-xs shrink-0 disabled:opacity-55 disabled:cursor-default`}
+              >
+                {isEditingMessage ? <Check className="w-3.5 h-3.5" /> : <Send className="w-3.5 h-3.5" />}
+                <span>{isEditingMessage ? '保存' : pastedImageInfo ? '发送照片' : '发送'}</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      </>
+    );
+  })
+);
+
 const ChatAreaActive: React.FC<ChatAreaProps & { chat: Chat }> = ({
   chat,
   messages,
@@ -793,7 +1534,7 @@ const ChatAreaActive: React.FC<ChatAreaProps & { chat: Chat }> = ({
   onRefreshMediaUrls,
 }) => {
   const draftScopeKey = `${currentAccountId || 'default'}::${chat.id}`;
-  const [inputText, setInputText] = useState(() => chatDraftTextCache.get(draftScopeKey) || '');
+  const composerRef = useRef<ChatComposerHandle | null>(null);
   const DEFAULT_MSG_WINDOW = 200;
   const MAX_ACTIVE_MSG_WINDOW = 360;
   const WINDOW_STEP = 150;
@@ -832,36 +1573,6 @@ const ChatAreaActive: React.FC<ChatAreaProps & { chat: Chat }> = ({
       localStorage.setItem(CHAT_FONT_SCALE_STORAGE_KEY, '1');
     } catch {}
   }, []);
-
-  const textareaRef = useRef<HTMLTextAreaElement>(null);
-  const isComposingRef = useRef(false);
-
-  useEffect(() => {
-    const el = textareaRef.current;
-    if (!el) return;
-    if (!inputText) {
-      el.style.height = 'auto';
-      el.style.overflowY = 'hidden';
-      return;
-    }
-    const rafId = requestAnimationFrame(() => {
-      const currentEl = textareaRef.current;
-      if (!currentEl) return;
-      currentEl.style.height = 'auto';
-      const maxHeight = 144;
-      const nextHeight = Math.min(currentEl.scrollHeight, maxHeight);
-      currentEl.style.height = `${nextHeight}px`;
-      currentEl.style.overflowY = currentEl.scrollHeight > maxHeight ? 'auto' : 'hidden';
-    });
-    return () => cancelAnimationFrame(rafId);
-  }, [inputText, chat?.id, chatFontScale]);
-  const [translatedPreview, setTranslatedPreview] = useState('');
-  const [translatedPreviewSource, setTranslatedPreviewSource] = useState('');
-  const [previewError, setPreviewError] = useState('');
-  const [previewRetryNonce, setPreviewRetryNonce] = useState(0);
-  const [isTranslatingPreview, setIsTranslatingPreview] = useState(false);
-  const previewAbortRef = useRef<AbortController | null>(null);
-  const previewContextRef = useRef<string>('');
 
   const isDualOffPreview = Boolean(
     customLLMConfig && (customLLMConfig.enabled === false || customLLMConfig.explicitlyDisabled)
@@ -1672,22 +2383,6 @@ const ChatAreaActive: React.FC<ChatAreaProps & { chat: Chat }> = ({
   const backdropPointerDownTargetRef = useRef<EventTarget | null>(null);
   const messagesRef = useRef<Message[]>(messages);
   messagesRef.current = messages;
-  const lastCommittedDraftScopeRef = useRef<string>(draftScopeKey);
-
-  useLayoutEffect(() => {
-    if (lastCommittedDraftScopeRef.current !== draftScopeKey) {
-      lastCommittedDraftScopeRef.current = draftScopeKey;
-      setInputText(chatDraftTextCache.get(draftScopeKey) || '');
-      return;
-    }
-    if (!editingMessage) {
-      if (inputText) {
-        chatDraftTextCache.set(draftScopeKey, inputText);
-      } else {
-        chatDraftTextCache.delete(draftScopeKey);
-      }
-    }
-  }, [draftScopeKey, inputText, editingMessage]);
 
   useEffect(() => {
     return () => {
@@ -2667,8 +3362,7 @@ const ChatAreaActive: React.FC<ChatAreaProps & { chat: Chat }> = ({
           e.preventDefault();
           setEditingMessage(null);
           setTranslateOnEdit(false);
-          chatDraftTextCache.delete(draftScopeKey);
-          setInputText('');
+          composerRef.current?.clearComposer(draftScopeKey);
           return;
         }
         if (replyingTo) {
@@ -2723,10 +3417,12 @@ const ChatAreaActive: React.FC<ChatAreaProps & { chat: Chat }> = ({
           setHoveredMessageId(null);
           return;
         }
-        if (translatedPreview) {
+        if (composerRef.current?.getPreviewState().translatedPreview) {
           e.preventDefault();
-          setTranslatedPreview('');
-          setTranslatedPreviewSource('');
+          composerRef.current.setPreviewState({
+            translatedPreview: '',
+            translatedPreviewSource: '',
+          });
           return;
         }
 
@@ -2752,7 +3448,6 @@ const ChatAreaActive: React.FC<ChatAreaProps & { chat: Chat }> = ({
     isChatInfoOpen,
     activeRightPanel,
     aiSuggestion,
-    translatedPreview,
     messageContextMenu,
     hoveredMessageId,
     messageToDelete,
@@ -3007,16 +3702,8 @@ const ChatAreaActive: React.FC<ChatAreaProps & { chat: Chat }> = ({
     return () => observer.disconnect();
   }, [chat?.id]);
 
-  // Reset translation preview & historical AI suggestion state when switching chats
+  // Reset historical AI suggestion & chat view state when switching chats
   useEffect(() => {
-    if (previewAbortRef.current) {
-      previewAbortRef.current.abort();
-      previewAbortRef.current = null;
-    }
-    setTranslatedPreview('');
-    setTranslatedPreviewSource('');
-    setPreviewError('');
-    setIsTranslatingPreview(false);
     setShowOriginalMsgIds(new Set());
     setAiSuggestion(null);
     setAiSuggestionTranslation(null);
@@ -3048,185 +3735,23 @@ const ChatAreaActive: React.FC<ChatAreaProps & { chat: Chat }> = ({
     setSyncNotice(null);
   }, [chat?.id, currentAccountId]);
 
-  // Real-time input translation preview (auto for free Google Translate; manual on-demand for LLM engines)
-  useEffect(() => {
-    if (previewAbortRef.current) {
-      previewAbortRef.current.abort();
-      previewAbortRef.current = null;
-    }
-
-    const queryText = inputText.trim();
-    if (!queryText || !hasTranslatableLetters(queryText) || !isChatTransEnabled || translationSettings?.autoTranslateOutbound === false || (editingMessage && !translateOnEdit)) {
-      setTranslatedPreview('');
-      setTranslatedPreviewSource('');
-      setPreviewError('');
-      setIsTranslatingPreview(false);
-      return;
-    }
-
-    const detectedCode = normalizeChatLangCode(detectClientLangCode(queryText));
-    const targetNormCode = normalizeChatLangCode(outboundTargetLang);
-    if (detectedCode !== 'auto' && targetNormCode !== 'auto' && detectedCode === targetNormCode) {
-      setTranslatedPreview('');
-      setTranslatedPreviewSource('');
-      setPreviewError('');
-      setIsTranslatingPreview(false);
-      return;
-    }
-
-    const currentPreviewContext = `${outboundTargetLang}|${effectiveOutboundEngine}|${translationSettings?.geminiModel || ''}|${translationSettings?.customModelName || ''}`;
-    if (previewContextRef.current !== currentPreviewContext) {
-      setTranslatedPreview('');
-      setTranslatedPreviewSource('');
-      setPreviewError('');
-      previewContextRef.current = currentPreviewContext;
-    }
-    if (isLlmOutboundEngine) {
-      if (translatedPreviewSource !== queryText) {
-        setTranslatedPreview('');
-        setTranslatedPreviewSource('');
-        setPreviewError('');
-      }
-      setIsTranslatingPreview(false);
-      return;
-    }
-
-    let isCurrent = true;
-    const controller = new AbortController();
-    previewAbortRef.current = controller;
-
-    const timer = setTimeout(async () => {
-      if (!isCurrent || controller.signal.aborted) return;
-      setIsTranslatingPreview(true);
-      setPreviewError('');
-      try {
-        const trans = await translateText(
-          queryText,
-          'Auto',
-          outboundTargetLang,
-          customLLMConfig,
-          effectiveOutboundEngine,
-          translationSettings?.googleApiKey,
-          isGroupOrChannelChat ? undefined : translationSettings?.geminiModel,
-          isGroupOrChannelChat ? undefined : translationSettings?.geminiApiKey,
-          isGroupOrChannelChat ? undefined : translationSettings?.customModelName,
-          {
-            signal: controller.signal,
-            ...(isGroupOrChannelChat ? { purpose: 'group' as const, isGroup: true } : {}),
-          }
-        );
-        if (isCurrent && !controller.signal.aborted) {
-          previewContextRef.current = currentPreviewContext;
-          setTranslatedPreview(trans);
-          setTranslatedPreviewSource(queryText);
-          setPreviewError('');
-        }
-      } catch (err: any) {
-        if (err?.name === 'AbortError' || controller.signal.aborted || !isCurrent) {
-          return;
-        }
-        setTranslatedPreview('');
-        setTranslatedPreviewSource(queryText);
-        setPreviewError('翻译失败，请检查翻译通道');
-      } finally {
-        if (isCurrent) {
-          setIsTranslatingPreview(false);
-        }
-      }
-    }, 400);
-
-    return () => {
-      isCurrent = false;
-      clearTimeout(timer);
-      controller.abort();
-      if (previewAbortRef.current === controller) {
-        previewAbortRef.current = null;
-      }
-    };
-  }, [
-    inputText,
-    outboundTargetLang,
-    isChatTransEnabled,
-    translationSettings,
-    customLLMConfig,
-    editingMessage,
-    translateOnEdit,
-    previewRetryNonce,
-    effectiveOutboundEngine,
-    isLlmOutboundEngine,
-  ]);
-
-  const handleManualLlmPreview = async () => {
-    const queryText = inputText.trim();
-    if (
-      !queryText ||
-      !hasTranslatableLetters(queryText) ||
-      !isChatTransEnabled ||
-      translationSettings?.autoTranslateOutbound === false ||
-      (editingMessage && !translateOnEdit)
-    ) {
-      return;
-    }
-    const detectedCode = normalizeChatLangCode(detectClientLangCode(queryText));
-    const targetNormCode = normalizeChatLangCode(outboundTargetLang);
-    if (detectedCode !== 'auto' && targetNormCode !== 'auto' && detectedCode === targetNormCode) {
-      setTranslatedPreview('');
-      setTranslatedPreviewSource('');
-      setPreviewError('');
-      showSyncNotice('当前输入与发送目标语种一致，无需翻译');
-      return;
-    }
-
-    if (previewAbortRef.current) {
-      previewAbortRef.current.abort();
-    }
-    const controller = new AbortController();
-    previewAbortRef.current = controller;
-    setIsTranslatingPreview(true);
-    setPreviewError('');
-    try {
-      const trans = await translateText(
-        queryText,
-        'Auto',
-        outboundTargetLang,
-        customLLMConfig,
-        effectiveOutboundEngine,
-        translationSettings?.googleApiKey,
-        isGroupOrChannelChat ? undefined : translationSettings?.geminiModel,
-        isGroupOrChannelChat ? undefined : translationSettings?.geminiApiKey,
-        isGroupOrChannelChat ? undefined : translationSettings?.customModelName,
-        {
-          signal: controller.signal,
-          ...(isGroupOrChannelChat ? { purpose: 'group' as const, isGroup: true } : {}),
-        }
-      );
-      if (!controller.signal.aborted && (textareaRef.current?.value.trim() === queryText || inputText.trim() === queryText)) {
-        previewContextRef.current = `${outboundTargetLang}|${effectiveOutboundEngine}|${translationSettings?.geminiModel || ''}|${translationSettings?.customModelName || ''}`;
-        setTranslatedPreview(trans);
-        setTranslatedPreviewSource(queryText);
-        setPreviewError('');
-      }
-    } catch (err: any) {
-      if (err?.name === 'AbortError' || controller.signal.aborted) return;
-      setTranslatedPreview('');
-      setTranslatedPreviewSource(queryText);
-      setPreviewError('翻译失败，请检查翻译通道');
-    } finally {
-      if (previewAbortRef.current === controller) {
-        previewAbortRef.current = null;
-      }
-      setIsTranslatingPreview(false);
-    }
-  };
-
   // Send message
   const handleSendText = async (bypassTranslation = false) => {
     if (isSending) return;
-    const textToSend = inputText.trim();
+    const textToSend = (composerRef.current?.getText() || '').trim();
     if (!textToSend || !chat) return;
     const originChatId = chat.id;
     const originAccountId = currentAccountId;
     const originReplyPayload = replyingTo ? buildReplyPayload(replyingTo, chat.title) : undefined;
+    const {
+      translatedPreview: curTranslatedPreview,
+      translatedPreviewSource: curTranslatedPreviewSource,
+      previewError: curPreviewError,
+    } = composerRef.current?.getPreviewState() || {
+      translatedPreview: '',
+      translatedPreviewSource: '',
+      previewError: '',
+    };
 
     setIsSending(true);
     try {
@@ -3247,7 +3772,7 @@ const ChatAreaActive: React.FC<ChatAreaProps & { chat: Chat }> = ({
           inputNormCode !== 'auto' && targetNormCode !== 'auto' && inputNormCode === targetNormCode;
 
         if (!isAlreadyTargetLang) {
-          if (previewError && translatedPreviewSource === textToSend) {
+          if (curPreviewError && curTranslatedPreviewSource === textToSend) {
             if (isSameOriginScope(originChatId, originAccountId)) {
               showSyncNotice('翻译预览失败，可点击输入框上方「重试」或「直接发送原文」', 5000);
             }
@@ -3255,8 +3780,8 @@ const ChatAreaActive: React.FC<ChatAreaProps & { chat: Chat }> = ({
           }
 
           // Anti-race condition protection: verify preview text matches current textToSend
-          const isPreviewFresh = Boolean(translatedPreview && translatedPreviewSource === textToSend);
-          targetText = isPreviewFresh ? translatedPreview : '';
+          const isPreviewFresh = Boolean(curTranslatedPreview && curTranslatedPreviewSource === textToSend);
+          targetText = isPreviewFresh ? curTranslatedPreview : '';
           translationOfTarget = textToSend;
 
           if (!targetText) {
@@ -3276,9 +3801,11 @@ const ChatAreaActive: React.FC<ChatAreaProps & { chat: Chat }> = ({
             } catch {
               const errMsg = '翻译失败，请检查翻译通道';
               if (isSameOriginScope(originChatId, originAccountId)) {
-                setPreviewError(errMsg);
-                setTranslatedPreview('');
-                setTranslatedPreviewSource(textToSend);
+                composerRef.current?.setPreviewState({
+                  previewError: errMsg,
+                  translatedPreview: '',
+                  translatedPreviewSource: textToSend,
+                });
                 showSyncNotice(errMsg, 5000);
               }
               return;
@@ -3329,10 +3856,7 @@ const ChatAreaActive: React.FC<ChatAreaProps & { chat: Chat }> = ({
         if (isSameOriginScope(originChatId, originAccountId)) {
           setEditingMessage(null);
           setTranslateOnEdit(false);
-          setInputText('');
-          setTranslatedPreview('');
-          setTranslatedPreviewSource('');
-          setPreviewError('');
+          composerRef.current?.clearComposer(`${originAccountId || 'default'}::${originChatId}`);
         }
         return;
       }
@@ -3350,10 +3874,7 @@ const ChatAreaActive: React.FC<ChatAreaProps & { chat: Chat }> = ({
       chatDraftTextCache.delete(`${originAccountId || 'default'}::${originChatId}`);
       if (isSameOriginScope(originChatId, originAccountId)) {
         setReplyingTo(null);
-        setInputText('');
-        setTranslatedPreview('');
-        setTranslatedPreviewSource('');
-        setPreviewError('');
+        composerRef.current?.clearComposer(`${originAccountId || 'default'}::${originChatId}`);
       }
     } finally {
       setIsSending(false);
@@ -3373,7 +3894,7 @@ const ChatAreaActive: React.FC<ChatAreaProps & { chat: Chat }> = ({
         return;
       }
       const previewUrl = URL.createObjectURL(file);
-      const userCaption = inputText.trim();
+      const userCaption = (composerRef.current?.getText() || '').trim();
       onSendMessage({
         chatId: originChatId,
         accountId: originAccountId,
@@ -3388,9 +3909,7 @@ const ChatAreaActive: React.FC<ChatAreaProps & { chat: Chat }> = ({
       });
       if (originReplyPayload && isSameOriginScope(originChatId, originAccountId)) setReplyingTo(null);
       if (userCaption && isSameOriginScope(originChatId, originAccountId)) {
-        setInputText('');
-        setTranslatedPreview('');
-        setTranslatedPreviewSource('');
+        composerRef.current?.clearComposer(`${originAccountId || 'default'}::${originChatId}`);
       }
     } catch (err: any) {
       console.warn('Failed to upload image', err);
@@ -3416,7 +3935,7 @@ const ChatAreaActive: React.FC<ChatAreaProps & { chat: Chat }> = ({
         return;
       }
       const previewUrl = URL.createObjectURL(file);
-      const userCaption = inputText.trim();
+      const userCaption = (composerRef.current?.getText() || '').trim();
 
       let duration = 0;
       try {
@@ -3448,9 +3967,7 @@ const ChatAreaActive: React.FC<ChatAreaProps & { chat: Chat }> = ({
       if (isSameOriginScope(originChatId, originAccountId)) {
         if (originReplyPayload) setReplyingTo(null);
         if (userCaption) {
-          setInputText('');
-          setTranslatedPreview('');
-          setTranslatedPreviewSource('');
+          composerRef.current?.clearComposer(`${originAccountId || 'default'}::${originChatId}`);
         }
       }
     } catch (err: any) {
@@ -3540,7 +4057,7 @@ const ChatAreaActive: React.FC<ChatAreaProps & { chat: Chat }> = ({
       const replyPayload = replyingTo ? buildReplyPayload(replyingTo, chat.title) : undefined;
 
       if (isImg) {
-        const userCaption = inputText.trim();
+        const userCaption = (composerRef.current?.getText() || '').trim();
         onSendMessage({
           chatId: originChatId,
           accountId: originAccountId,
@@ -3554,12 +4071,10 @@ const ChatAreaActive: React.FC<ChatAreaProps & { chat: Chat }> = ({
           timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false }),
         });
         if (userCaption && isSameOriginScope(originChatId, originAccountId)) {
-          setInputText('');
-          setTranslatedPreview('');
-          setTranslatedPreviewSource('');
+          composerRef.current?.clearComposer(`${originAccountId || 'default'}::${originChatId}`);
         }
       } else if (isVid) {
-        const userCaption = inputText.trim();
+        const userCaption = (composerRef.current?.getText() || '').trim();
         let duration = 0;
         try {
           const tempVideo = document.createElement('video');
@@ -3587,9 +4102,7 @@ const ChatAreaActive: React.FC<ChatAreaProps & { chat: Chat }> = ({
           timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false }),
         });
         if (userCaption && isSameOriginScope(originChatId, originAccountId)) {
-          setInputText('');
-          setTranslatedPreview('');
-          setTranslatedPreviewSource('');
+          composerRef.current?.clearComposer(`${originAccountId || 'default'}::${originChatId}`);
         }
       } else if (isAud) {
         let duration = 0;
@@ -3700,59 +4213,39 @@ const ChatAreaActive: React.FC<ChatAreaProps & { chat: Chat }> = ({
     });
   };
 
-  const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
-    const isImeComposing =
-      isComposingRef.current || e.nativeEvent.isComposing || e.nativeEvent.keyCode === 229;
-    const isSendTrigger = sendWithEnter
-      ? e.key === 'Enter' && !e.shiftKey && !isImeComposing
-      : e.key === 'Enter' && (e.ctrlKey || e.metaKey) && !isImeComposing;
-    if (isSendTrigger) {
-      e.preventDefault();
-      if (isSending) return;
-      if (pastedImage) {
-        handleSendPastedImage();
-      } else {
-        handleSendText();
-      }
-    } else if (e.key === 'Escape') {
-      if (isImeComposing) return;
-      const hasBlockingOverlay =
-        Boolean(
-          lightboxMedia ||
-            memberProfileModal ||
-            readReceiptsModal ||
-            inviteModalState ||
-            forwardModalMessages ||
-            showBatchDeleteModal ||
-            showClearGroupNoticesModal ||
-            messageToDelete ||
-            activeRightPanel ||
-            isChatInfoOpen ||
-            showEmojiPicker ||
-            isAttachmentMenuOpen ||
-            isHeaderMoreMenuOpen ||
-            isLangMenuOpen ||
-            isSearchingInChat ||
-            aiSuggestion ||
-            messageContextMenu ||
-            translatedPreview
-        ) ||
-        Boolean(document.querySelector('[role="dialog"], .z-50, .z-\\[70\\], .z-\\[9996\\]'));
-      if (hasBlockingOverlay) return;
-      e.preventDefault();
-      e.stopPropagation();
-      if (pastedImage) {
-        clearPastedImage(true);
-      } else if (editingMessage) {
-        setEditingMessage(null);
-        setTranslateOnEdit(false);
-        chatDraftTextCache.delete(draftScopeKey);
-        setInputText('');
-      } else if (replyingTo) {
-        setReplyingTo(null);
-      } else {
-        onCloseChat?.();
-      }
+  const hasBlockingOverlayForEscape = () =>
+    Boolean(
+      lightboxMedia ||
+        memberProfileModal ||
+        readReceiptsModal ||
+        inviteModalState ||
+        forwardModalMessages ||
+        showBatchDeleteModal ||
+        showClearGroupNoticesModal ||
+        messageToDelete ||
+        activeRightPanel ||
+        isChatInfoOpen ||
+        showEmojiPicker ||
+        isAttachmentMenuOpen ||
+        isHeaderMoreMenuOpen ||
+        isLangMenuOpen ||
+        isSearchingInChat ||
+        aiSuggestion ||
+        messageContextMenu ||
+        composerRef.current?.getPreviewState().translatedPreview
+    ) || Boolean(document.querySelector('[role="dialog"], .z-50, .z-\\[70\\], .z-\\[9996\\]'));
+
+  const handleEscapeDismissFromComposer = () => {
+    if (pastedImage) {
+      clearPastedImage(true);
+    } else if (editingMessage) {
+      setEditingMessage(null);
+      setTranslateOnEdit(false);
+      composerRef.current?.clearComposer(draftScopeKey);
+    } else if (replyingTo) {
+      setReplyingTo(null);
+    } else {
+      onCloseChat?.();
     }
   };
 
@@ -3890,7 +4383,7 @@ const ChatAreaActive: React.FC<ChatAreaProps & { chat: Chat }> = ({
             setPastedImage({
               dataUrl: previewUrl,
               file,
-              caption: inputText.trim() || undefined,
+              caption: (composerRef.current?.getText() || '').trim() || undefined,
             });
             setSyncNotice('已捕获剪贴板照片，点击发送或按 Enter 即可发出');
             setTimeout(() => setSyncNotice(null), 3000);
@@ -3909,7 +4402,7 @@ const ChatAreaActive: React.FC<ChatAreaProps & { chat: Chat }> = ({
     if (!pastedImage || !chat) return;
     const originChatId = chat.id;
     const originAccountId = currentAccountId;
-    const userCaption = inputText.trim() || pastedImage.caption || '';
+    const userCaption = (composerRef.current?.getText() || '').trim() || pastedImage.caption || '';
     onSendMessage({
       chatId: originChatId,
       accountId: originAccountId,
@@ -3924,10 +4417,7 @@ const ChatAreaActive: React.FC<ChatAreaProps & { chat: Chat }> = ({
     });
     if (replyingTo) setReplyingTo(null);
     clearPastedImage(false);
-    chatDraftTextCache.delete(`${originAccountId || 'default'}::${originChatId}`);
-    setInputText('');
-    setTranslatedPreview('');
-    setTranslatedPreviewSource('');
+    composerRef.current?.clearComposer(`${originAccountId || 'default'}::${originChatId}`);
   };
 
   const handleTranscribeAudio = async (msg: Message) => {
@@ -4408,16 +4898,15 @@ const ChatAreaActive: React.FC<ChatAreaProps & { chat: Chat }> = ({
     }
     if (!targetChatId || isSameOriginScope(targetChatId, targetAccountId)) {
       if (replyingTo) setReplyingTo(null);
-      setInputText('');
-      setTranslatedPreview('');
-      setTranslatedPreviewSource('');
-      setPreviewError('');
+      composerRef.current?.clearComposer(
+        targetChatId ? `${targetAccountId || 'default'}::${targetChatId}` : undefined
+      );
     }
   };
 
   const handleDirectVoiceSynthesis = async () => {
     if (isSynthesizingVoice || isSending) return;
-    const rawText = inputText.trim();
+    const rawText = (composerRef.current?.getText() || '').trim();
     if (!rawText) {
       showSyncNotice('请先输入内容', 3000);
       return;
@@ -4457,15 +4946,24 @@ const ChatAreaActive: React.FC<ChatAreaProps & { chat: Chat }> = ({
           inputNormCode !== 'auto' && targetNormCode !== 'auto' && inputNormCode === targetNormCode;
 
         if (!isAlreadyTargetLang) {
-          if (previewError && translatedPreviewSource === rawText) {
+          const {
+            translatedPreview: curTranslatedPreview,
+            translatedPreviewSource: curTranslatedPreviewSource,
+            previewError: curPreviewError,
+          } = composerRef.current?.getPreviewState() || {
+            translatedPreview: '',
+            translatedPreviewSource: '',
+            previewError: '',
+          };
+          if (curPreviewError && curTranslatedPreviewSource === rawText) {
             showSyncNotice('请确认翻译通道流畅', 4000);
             return;
           }
           const hasFreshPreview = Boolean(
-            translatedPreview.trim() && translatedPreviewSource === rawText
+            curTranslatedPreview.trim() && curTranslatedPreviewSource === rawText
           );
           if (hasFreshPreview) {
-            speechText = translatedPreview.trim();
+            speechText = curTranslatedPreview.trim();
           } else {
             try {
               const trans = await translateText(
@@ -4481,17 +4979,21 @@ const ChatAreaActive: React.FC<ChatAreaProps & { chat: Chat }> = ({
                 isGroupOrChannelChat ? { purpose: 'group', isGroup: true } : undefined
               );
               if (!trans || !trans.trim()) {
-                setPreviewError('译文为空');
-                setTranslatedPreview('');
-                setTranslatedPreviewSource(rawText);
+                composerRef.current?.setPreviewState({
+                  previewError: '译文为空',
+                  translatedPreview: '',
+                  translatedPreviewSource: rawText,
+                });
                 showSyncNotice('请确认翻译通道流畅', 4000);
                 return;
               }
               speechText = trans.trim();
             } catch (err: any) {
-              setPreviewError(err?.message || '翻译失败');
-              setTranslatedPreview('');
-              setTranslatedPreviewSource(rawText);
+              composerRef.current?.setPreviewState({
+                previewError: err?.message || '翻译失败',
+                translatedPreview: '',
+                translatedPreviewSource: rawText,
+              });
               showSyncNotice('请确认翻译通道流畅', 4000);
               return;
             }
@@ -4719,7 +5221,7 @@ const ChatAreaActive: React.FC<ChatAreaProps & { chat: Chat }> = ({
     onStartEditMessage: (target) => {
       setEditingMessage(target);
       setTranslateOnEdit(false);
-      setInputText(target.text);
+      composerRef.current?.setText(target.text);
       setReplyingTo(null);
     },
     onClearHoveredMenu: () => setHoveredMessageId(null),
@@ -4776,7 +5278,7 @@ const ChatAreaActive: React.FC<ChatAreaProps & { chat: Chat }> = ({
     onStartEditMessage: (target) => {
       setEditingMessage(target);
       setTranslateOnEdit(false);
-      setInputText(target.text);
+      composerRef.current?.setText(target.text);
       setReplyingTo(null);
     },
     onClearHoveredMenu: () => setHoveredMessageId(null),
@@ -4802,6 +5304,110 @@ const ChatAreaActive: React.FC<ChatAreaProps & { chat: Chat }> = ({
   const hasRetranslateHandler = Boolean(onRetranslateMessage);
   const hasDeleteHandler = Boolean(onDeleteMessage);
   const showOriginalAndTranslationPref = translationSettings?.showOriginalAndTranslation !== false;
+
+  const composerHandlersRef = useRef({
+    onSendText: handleSendText,
+    onSendPastedImage: handleSendPastedImage,
+    onClearPastedImage: () => clearPastedImage(true),
+    onPaste: handlePaste,
+    onToggleAttachmentMenu: () => setIsAttachmentMenuOpen((prev) => !prev),
+    onToggleEmojiPicker: () => setShowEmojiPicker((prev) => !prev),
+    onOpenVoiceprintConfig: () => {
+      if (onOpenVoiceprintConfig) {
+        onOpenVoiceprintConfig();
+      } else {
+        setIsVoiceprintModalOpen(true);
+      }
+    },
+    onToggleRecordMic: handleToggleRecordMic,
+    onGenerateAiSuggestion: handleGenerateAiSuggestion,
+    onDirectVoiceSynthesis: handleDirectVoiceSynthesis,
+    onShowSyncNotice: showSyncNotice,
+    hasBlockingOverlayForEscape: hasBlockingOverlayForEscape,
+    onEscapeDismiss: handleEscapeDismissFromComposer,
+  });
+  composerHandlersRef.current = {
+    onSendText: handleSendText,
+    onSendPastedImage: handleSendPastedImage,
+    onClearPastedImage: () => clearPastedImage(true),
+    onPaste: handlePaste,
+    onToggleAttachmentMenu: () => setIsAttachmentMenuOpen((prev) => !prev),
+    onToggleEmojiPicker: () => setShowEmojiPicker((prev) => !prev),
+    onOpenVoiceprintConfig: () => {
+      if (onOpenVoiceprintConfig) {
+        onOpenVoiceprintConfig();
+      } else {
+        setIsVoiceprintModalOpen(true);
+      }
+    },
+    onToggleRecordMic: handleToggleRecordMic,
+    onGenerateAiSuggestion: handleGenerateAiSuggestion,
+    onDirectVoiceSynthesis: handleDirectVoiceSynthesis,
+    onShowSyncNotice: showSyncNotice,
+    hasBlockingOverlayForEscape: hasBlockingOverlayForEscape,
+    onEscapeDismiss: handleEscapeDismissFromComposer,
+  };
+
+  const stableOnSendText = useCallback(
+    (bypass?: boolean) => composerHandlersRef.current.onSendText(bypass),
+    []
+  );
+  const stableOnSendPastedImage = useCallback(
+    () => composerHandlersRef.current.onSendPastedImage(),
+    []
+  );
+  const stableOnClearPastedImage = useCallback(
+    () => composerHandlersRef.current.onClearPastedImage(),
+    []
+  );
+  const stableOnPaste = useCallback(
+    (e: React.ClipboardEvent) => composerHandlersRef.current.onPaste(e),
+    []
+  );
+  const stableOnToggleAttachmentMenu = useCallback(
+    () => composerHandlersRef.current.onToggleAttachmentMenu(),
+    []
+  );
+  const stableOnToggleEmojiPicker = useCallback(
+    () => composerHandlersRef.current.onToggleEmojiPicker(),
+    []
+  );
+  const stableOnOpenVoiceprintConfig = useCallback(
+    () => composerHandlersRef.current.onOpenVoiceprintConfig(),
+    []
+  );
+  const stableOnToggleRecordMic = useCallback(
+    () => composerHandlersRef.current.onToggleRecordMic(),
+    []
+  );
+  const stableOnGenerateAiSuggestion = useCallback(
+    () => composerHandlersRef.current.onGenerateAiSuggestion(),
+    []
+  );
+  const stableOnDirectVoiceSynthesis = useCallback(
+    () => composerHandlersRef.current.onDirectVoiceSynthesis(),
+    []
+  );
+  const stableOnShowSyncNotice = useCallback(
+    (msg: string, durationMs?: number) => composerHandlersRef.current.onShowSyncNotice(msg, durationMs),
+    []
+  );
+  const stableHasBlockingOverlayForEscape = useCallback(
+    () => composerHandlersRef.current.hasBlockingOverlayForEscape(),
+    []
+  );
+  const stableOnEscapeDismiss = useCallback(
+    () => composerHandlersRef.current.onEscapeDismiss(),
+    []
+  );
+
+  const pastedImageInfo = useMemo(
+    () =>
+      pastedImage
+        ? { dataUrl: pastedImage.dataUrl, sizeKb: (pastedImage.file.size / 1024).toFixed(0) }
+        : null,
+    [pastedImage]
+  );
 
   const renderedMessageNodes = useMemo(() => {
     const isGroupChat = Boolean(chat.isGroup);
@@ -4904,7 +5510,7 @@ const ChatAreaActive: React.FC<ChatAreaProps & { chat: Chat }> = ({
   return (
     <div className="@container flex-1 min-w-0 bg-[#f4f7fb] dark:bg-[#060b12] aurora:bg-[#081116] linen:bg-[#ddd2bc] flex flex-col h-full relative overflow-hidden transition-colors">
       {/* 1. Official Telegram Top Bar Header (Image 2 Layout) */}
-      <header className="h-[56px] bg-white/90 dark:bg-[#09111d]/90 aurora:bg-[#0d171d]/92 linen:bg-[#f2e8d9]/95 backdrop-blur-md border-b border-[#e2e8f0] dark:border-[#162436] aurora:border-[#182b34] linen:border-[#cbbba2] flex items-center justify-between px-2.5 @[560px]:px-4 shrink-0 z-10 transition-colors gap-1.5">
+      <header className="h-[56px] bg-white/98 dark:bg-[#09111d]/98 aurora:bg-[#0d171d]/98 linen:bg-[#f2e8d9]/98 border-b border-[#e2e8f0] dark:border-[#162436] aurora:border-[#182b34] linen:border-[#cbbba2] flex items-center justify-between px-2.5 @[560px]:px-4 shrink-0 z-10 transition-colors gap-1.5">
         {onCloseChat && (
           <button
             type="button"
@@ -5363,7 +5969,7 @@ const ChatAreaActive: React.FC<ChatAreaProps & { chat: Chat }> = ({
 
       {/* 2. Official Telegram Native Translate Bar (Image 2 Layout) */}
       {isTranslateBarVisible && (
-        <div className="bg-[#f8fafc]/90 dark:bg-[#0c1624]/90 aurora:bg-[#0c171d]/92 linen:bg-[#ede3d2]/95 backdrop-blur-xs border-b border-[#e2e8f0] dark:border-[#162436] aurora:border-[#182b34] linen:border-[#cbbba2] px-4 py-1.5 flex flex-wrap items-center justify-between gap-x-2 gap-y-1 text-xs text-[#0f172a] dark:text-[#d3e2ef] aurora:text-[#d5ebee] linen:text-[#3d2e20] transition-colors shrink-0 min-w-0">
+        <div className="bg-[#f8fafc]/98 dark:bg-[#0c1624]/98 aurora:bg-[#0c171d]/98 linen:bg-[#ede3d2]/98 border-b border-[#e2e8f0] dark:border-[#162436] aurora:border-[#182b34] linen:border-[#cbbba2] px-4 py-1.5 flex flex-wrap items-center justify-between gap-x-2 gap-y-1 text-xs text-[#0f172a] dark:text-[#d3e2ef] aurora:text-[#d5ebee] linen:text-[#3d2e20] transition-colors shrink-0 min-w-0">
           <div className="flex items-center gap-1.5 min-w-0 flex-1">
             <Languages className={`w-3.5 h-3.5 shrink-0 ${isChatTransEnabled ? 'text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf] linen:text-[#7c5838]' : 'text-[#94a3b8] dark:text-[#64748b] linen:text-[#9c8c7a]'}`} />
             {isChatTransEnabled ? (
@@ -5672,7 +6278,7 @@ const ChatAreaActive: React.FC<ChatAreaProps & { chat: Chat }> = ({
       )}
 
       {/* 4. Official Telegram Composer (Image 1 Structured Layout) */}
-      <footer onPaste={handlePaste} className="bg-white/95 dark:bg-[#09111d]/95 aurora:bg-[#0d171d]/95 linen:bg-[#f2e8d9]/95 backdrop-blur-md border-t border-[#e2e8f0] dark:border-[#162436] aurora:border-[#182b34] linen:border-[#cbbba2] px-4 py-2.5 shrink-0 transition-colors">
+      <footer onPaste={handlePaste} className="bg-white/98 dark:bg-[#09111d]/98 aurora:bg-[#0d171d]/98 linen:bg-[#f2e8d9]/98 border-t border-[#e2e8f0] dark:border-[#162436] aurora:border-[#182b34] linen:border-[#cbbba2] px-4 py-2.5 shrink-0 transition-colors">
         {/* AI Generating Indicator */}
         {isGeneratingAi && (
           <div className="mb-2 px-3 py-2 bg-[#e8f3ff] dark:bg-[#2ba0ff]/12 aurora:bg-[#112d36] linen:bg-[#efe2ce] border border-[#bfdbfe] dark:border-[#2ba0ff]/35 aurora:border-[#2dd4bf]/35 linen:border-[#cbbba2] rounded-xl flex items-center gap-2 text-xs text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#5eead4] linen:text-[#8c522d] animate-pulse">
@@ -5781,7 +6387,7 @@ const ChatAreaActive: React.FC<ChatAreaProps & { chat: Chat }> = ({
               <button
                 type="button"
                 onClick={() => {
-                  setInputText(aiSuggestion);
+                  composerRef.current?.setText(aiSuggestion);
                   setAiSuggestion(null);
                   setAiSuggestionTranslation(null);
                 }}
@@ -5871,231 +6477,171 @@ const ChatAreaActive: React.FC<ChatAreaProps & { chat: Chat }> = ({
           </div>
         )}
 
-        {/* Real-time Translation Preview / Failure Recovery Strip */}
-        {Boolean(inputText.trim() && (translatedPreview || previewError)) && (
-          previewError ? (
-            <div className="mb-2 px-3 py-2 bg-rose-500/10 dark:bg-rose-500/15 aurora:bg-rose-500/15 border border-rose-500/30 rounded-xl flex items-center justify-between gap-2 text-xs animate-in fade-in duration-150">
-              <div className="flex items-center gap-2 min-w-0">
-                <ShieldAlert className="w-4 h-4 text-rose-500 shrink-0" />
-                <div className="min-w-0">
-                  <span className="text-[10.5px] font-semibold text-rose-700 dark:text-rose-300 block">
-                    翻译失败，请检查翻译通道
-                  </span>
-                </div>
-              </div>
-              <div className="flex items-center gap-1.5 shrink-0">
-                <button
-                  type="button"
-                  onClick={() => {
-                    if (isLlmOutboundEngine) {
-                      void handleManualLlmPreview();
-                    } else {
-                      setPreviewRetryNonce((n) => n + 1);
-                    }
-                  }}
-                  className="px-2 py-1 rounded-md bg-white/80 dark:bg-[#0e1726] aurora:bg-[#101c23] border border-rose-500/30 hover:bg-white dark:hover:bg-[#152438] aurora:hover:bg-[#152934] text-rose-600 dark:text-rose-300 text-[11px] font-semibold cursor-pointer"
-                >
-                  重试
-                </button>
-                <button
-                  type="button"
-                  disabled={isSending}
-                  onClick={() => void handleSendText(true)}
-                  className="px-2.5 py-1 rounded-md bg-rose-600 hover:bg-rose-700 text-white text-[11px] font-semibold cursor-pointer disabled:opacity-50"
-                >
-                  直接发送原文
-                </button>
-              </div>
-            </div>
-          ) : (
-            <div className="mb-2 px-3 py-1.5 bg-[#f0f7ff] dark:bg-[#0e1928] aurora:bg-[#102229] linen:bg-[#f7f0e4] border border-[#dbeafe] dark:border-[#1e3148] aurora:border-[#1f3b45] linen:border-[#d4c3aa] rounded-xl flex items-center justify-between text-xs animate-in fade-in duration-150">
-              <div className="flex items-center gap-2 min-w-0">
-                <Languages className="w-3.5 h-3.5 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf] linen:text-[#7c5838] shrink-0" />
-                <div className="min-w-0 flex items-center gap-1.5">
-                  <span className="text-[11px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#7a6957] shrink-0">
-                    译文预览：
-                  </span>
-                  <span className={`${chatFontClasses.secondary} font-medium text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118] truncate`}>
-                    {translatedPreview}
-                  </span>
-                </div>
-              </div>
-              <div className="flex items-center gap-1.5 shrink-0 ml-2">
-                <span className="text-[10.5px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#8c522d] font-medium">
-                  {sendWithEnter ? 'Enter' : 'Ctrl+Enter'} 发送
-                </span>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setTranslatedPreview('');
-                    setTranslatedPreviewSource('');
-                    setPreviewError('');
-                  }}
-                  className="p-0.5 text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#8c522d] hover:text-[#0f172a] dark:hover:text-white aurora:hover:text-[#ecf6f8] linen:hover:text-[#2b2118] rounded hover:bg-black/5 dark:hover:bg-white/10 aurora:hover:bg-[#152934] linen:hover:bg-[#e5d6be] cursor-pointer transition-colors"
-                  title="取消此译文预览 (Esc)"
-                >
-                  <X className="w-3.5 h-3.5" />
-                </button>
-              </div>
-            </div>
-          )
-        )}
-
-        {(() => {
-          const trimmedQuery = inputText.trim();
-          const detectedNorm = trimmedQuery ? normalizeChatLangCode(detectClientLangCode(trimmedQuery)) : 'auto';
-          const targetNorm = normalizeChatLangCode(outboundTargetLang);
-          const sameLang = detectedNorm !== 'auto' && targetNorm !== 'auto' && detectedNorm === targetNorm;
-          const shouldShowLlmManualBar =
-            isLlmOutboundEngine &&
-            Boolean(trimmedQuery) &&
-            hasTranslatableLetters(trimmedQuery) &&
-            isChatTransEnabled &&
-            translationSettings?.autoTranslateOutbound !== false &&
-            (!editingMessage || translateOnEdit) &&
-            !sameLang &&
-            !(translatedPreview && translatedPreviewSource === trimmedQuery) &&
-            !previewError;
-          if (!shouldShowLlmManualBar) return null;
-          return (
-            <div className="mb-2 px-3 py-1.5 bg-[#f8fafc] dark:bg-[#0e1928] aurora:bg-[#102229] linen:bg-[#f7f0e4] border border-[#e2e8f0] dark:border-[#1e3148] aurora:border-[#1f3b45] linen:border-[#d4c3aa] rounded-xl flex items-center justify-between gap-2 text-xs animate-in fade-in duration-150">
-              <div className="flex items-center gap-2 min-w-0">
-                <Sparkles className="w-3.5 h-3.5 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#2dd4bf] linen:text-[#a86a43] shrink-0" />
-                <span className="text-[11px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#5c4a38] truncate">
-                  大模型翻译已开启（打字不耗额度，发送或点击右侧按钮译为 {getLanguageDisplayName(outboundTargetLang)}）
-                </span>
-              </div>
-              <button
-                type="button"
-                disabled={isTranslatingPreview}
-                onClick={() => void handleManualLlmPreview()}
-                className="shrink-0 inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-[#2481cc]/10 hover:bg-[#2481cc]/20 dark:bg-[#2ba0ff]/15 dark:hover:bg-[#2ba0ff]/25 aurora:bg-[#14b8a6]/15 aurora:hover:bg-[#14b8a6]/25 linen:bg-[#a86a43]/12 linen:hover:bg-[#a86a43]/22 border border-[#2481cc]/25 dark:border-[#2ba0ff]/30 aurora:border-[#2dd4bf]/30 linen:border-[#a86a43]/30 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#5eead4] linen:text-[#8c522d] text-[11px] font-semibold cursor-pointer disabled:opacity-60 transition-colors"
-              >
-                <RotateCw className={`w-3 h-3 ${isTranslatingPreview ? 'animate-spin' : ''}`} />
-                <span>{isTranslatingPreview ? '生成中...' : '预览AI翻译'}</span>
-              </button>
-            </div>
-          );
-        })()}
-
-        {/* Reply Quote Banner above Input */}
-        {replyingTo && (
-          <div className="mb-2 p-2 px-3 bg-[#f0f7ff] dark:bg-[#0e1928] aurora:bg-[#102229] linen:bg-[#f7f0e4] border border-[#bfdbfe] dark:border-[#2ba0ff]/35 aurora:border-[#2dd4bf]/35 linen:border-[#cbbba2] rounded-xl flex items-center justify-between text-xs animate-in fade-in duration-150">
-            <div className="min-w-0 pr-2">
-              <div className="font-semibold text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#5eead4] linen:text-[#8c522d] flex items-center gap-1.5">
-                <Reply className="w-3.5 h-3.5" />
-                <span>回复 {replyingTo.sender === 'me' ? '我' : (chat.title || '对方')}</span>
-              </div>
-              <div className="text-[11px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6f5d4b] truncate mt-0.5">
-                {replyingTo.text}
-              </div>
-            </div>
-            <button
-              type="button"
-              onClick={() => setReplyingTo(null)}
-              className="p-1 text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#7a6957] hover:text-[#0f172a] dark:hover:text-white aurora:hover:text-[#ecf6f8] linen:hover:text-[#2b2118] cursor-pointer shrink-0"
-              title="取消回复"
-            >
-              <X className="w-3.5 h-3.5" />
-            </button>
-          </div>
-        )}
-
-        {/* Edit Message Banner above Input */}
-        {editingMessage && (
-          <div className="mb-2 p-2 px-3 bg-amber-50 dark:bg-amber-500/12 aurora:bg-amber-500/12 linen:bg-[#f4e8d3] border border-amber-300/70 dark:border-amber-500/35 aurora:border-amber-500/35 linen:border-[#c9a977] rounded-xl flex items-center justify-between gap-2 text-xs animate-in fade-in duration-150">
-            <div className="min-w-0 pr-2 flex-1">
-              <div className="font-semibold text-amber-700 dark:text-amber-400 linen:text-[#8c522d] flex items-center gap-2 flex-wrap">
-                <span className="inline-flex items-center gap-1.5">
-                  <Edit2 className="w-3.5 h-3.5" />
-                  <span>正在编辑消息</span>
-                </span>
-                {isChatTransEnabled && translationSettings?.autoTranslateOutbound !== false && (
-                  <label className="inline-flex items-center gap-1 text-[11px] font-normal text-[#475569] dark:text-[#b4c6d8] aurora:text-[#b7d0d8] linen:text-[#5c4a38] cursor-pointer select-none">
-                    <input
-                      type="checkbox"
-                      checked={translateOnEdit}
-                      onChange={(e) => setTranslateOnEdit(e.target.checked)}
-                      className="rounded border-amber-400 text-[#2481cc] aurora:text-[#14b8a6] linen:text-[#a86a43] focus:ring-[#2481cc] aurora:focus:ring-[#2dd4bf] linen:focus:ring-[#a86a43]"
-                    />
-                    <span>重新翻译为外文</span>
-                  </label>
+        <ChatComposerSection
+          ref={composerRef}
+          draftScopeKey={draftScopeKey}
+          chatId={chat.id}
+          chatFontScale={chatFontScale}
+          composerFontClass={chatFontClasses.composer}
+          secondaryFontClass={chatFontClasses.secondary}
+          outboundTargetLang={outboundTargetLang}
+          effectiveOutboundEngine={effectiveOutboundEngine}
+          isLlmOutboundEngine={isLlmOutboundEngine}
+          isGroupOrChannelChat={isGroupOrChannelChat}
+          isChatTransEnabled={isChatTransEnabled}
+          translationSettings={translationSettings}
+          customLLMConfig={customLLMConfig}
+          isEditingMessage={Boolean(editingMessage)}
+          translateOnEdit={translateOnEdit}
+          pastedImageInfo={pastedImageInfo}
+          sendWithEnter={sendWithEnter}
+          isSending={isSending}
+          isAttachmentMenuOpen={isAttachmentMenuOpen}
+          showEmojiPicker={showEmojiPicker}
+          isRecordingMic={isRecordingMic}
+          recordDuration={recordDuration}
+          isGeneratingAi={isGeneratingAi}
+          aiCooldownSeconds={aiCooldownSeconds}
+          isSynthesizingVoice={isSynthesizingVoice}
+          attachmentButtonRef={attachmentButtonRef}
+          emojiButtonRef={emojiButtonRef}
+          onSendText={stableOnSendText}
+          onSendPastedImage={stableOnSendPastedImage}
+          onClearPastedImage={stableOnClearPastedImage}
+          onPaste={stableOnPaste}
+          onToggleAttachmentMenu={stableOnToggleAttachmentMenu}
+          onToggleEmojiPicker={stableOnToggleEmojiPicker}
+          onOpenVoiceprintConfig={stableOnOpenVoiceprintConfig}
+          onToggleRecordMic={stableOnToggleRecordMic}
+          onGenerateAiSuggestion={stableOnGenerateAiSuggestion}
+          onDirectVoiceSynthesis={stableOnDirectVoiceSynthesis}
+          onShowSyncNotice={stableOnShowSyncNotice}
+          hasBlockingOverlayForEscape={stableHasBlockingOverlayForEscape}
+          onEscapeDismiss={stableOnEscapeDismiss}
+          middleSlot={
+            replyingTo || editingMessage || (isAttachmentMenuOpen && attachmentMenuPos) ? (
+              <>
+                {/* Reply Quote Banner above Input */}
+                {replyingTo && (
+                  <div className="mb-2 p-2 px-3 bg-[#f0f7ff] dark:bg-[#0e1928] aurora:bg-[#102229] linen:bg-[#f7f0e4] border border-[#bfdbfe] dark:border-[#2ba0ff]/35 aurora:border-[#2dd4bf]/35 linen:border-[#cbbba2] rounded-xl flex items-center justify-between text-xs animate-in fade-in duration-150">
+                    <div className="min-w-0 pr-2">
+                      <div className="font-semibold text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#5eead4] linen:text-[#8c522d] flex items-center gap-1.5">
+                        <Reply className="w-3.5 h-3.5" />
+                        <span>回复 {replyingTo.sender === 'me' ? '我' : (chat.title || '对方')}</span>
+                      </div>
+                      <div className="text-[11px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6f5d4b] truncate mt-0.5">
+                        {replyingTo.text}
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setReplyingTo(null)}
+                      className="p-1 text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#7a6957] hover:text-[#0f172a] dark:hover:text-white aurora:hover:text-[#ecf6f8] linen:hover:text-[#2b2118] cursor-pointer shrink-0"
+                      title="取消回复"
+                    >
+                      <X className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
                 )}
-              </div>
-              <div className="text-[11px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6f5d4b] truncate mt-0.5">
-                原消息: {editingMessage.text}
-              </div>
-            </div>
-            <button
-              type="button"
-              onClick={() => {
-                setEditingMessage(null);
-                setTranslateOnEdit(false);
-                chatDraftTextCache.delete(draftScopeKey);
-                setInputText('');
-              }}
-              className="p-1 text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#7a6957] hover:text-[#0f172a] dark:hover:text-white aurora:hover:text-[#ecf6f8] linen:hover:text-[#2b2118] cursor-pointer shrink-0"
-              title="取消编辑"
-            >
-              <X className="w-3.5 h-3.5" />
-            </button>
-          </div>
-        )}
 
-        {/* Attachment Menu Popup */}
-        {isAttachmentMenuOpen && attachmentMenuPos && typeof document !== 'undefined' && createPortal(
-          <div
-            ref={attachmentMenuRef}
-            style={{ top: `${attachmentMenuPos.top}px`, left: `${attachmentMenuPos.left}px` }}
-            className="fixed z-[9990] w-44 bg-white dark:bg-[#0e1726] aurora:bg-[#101c23] linen:bg-[#f8f2e7] rounded-2xl shadow-2xl linen:shadow-sm border border-[#e2e8f0] dark:border-[#1e3148] aurora:border-[#203742] linen:border-[#d5c6ae] p-2 flex flex-col gap-1 animate-in fade-in zoom-in-95 duration-150 text-xs select-none"
-          >
-            <button
-              type="button"
-              onClick={() => {
-                imageInputRef.current?.click();
-                setIsAttachmentMenuOpen(false);
-              }}
-              className="flex items-center gap-3 px-3 py-2 rounded-xl hover:bg-[#f1f5f9] dark:hover:bg-[#152438] aurora:hover:bg-[#152934] linen:hover:bg-[#efe4d3] text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118] cursor-pointer font-medium"
-            >
-              <ImageIcon className="w-4 h-4 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#5eead4] linen:text-[#a86a43]" />
-              <span>照片或图片</span>
-            </button>
-            <button
-              type="button"
-              onClick={() => {
-                videoInputRef.current?.click();
-                setIsAttachmentMenuOpen(false);
-              }}
-              className="flex items-center gap-3 px-3 py-2 rounded-xl hover:bg-[#f1f5f9] dark:hover:bg-[#152438] aurora:hover:bg-[#152934] linen:hover:bg-[#efe4d3] text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118] cursor-pointer font-medium"
-            >
-              <Video className="w-4 h-4 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#5eead4] linen:text-[#a86a43]" />
-              <span>视频消息</span>
-            </button>
-            <button
-              type="button"
-              onClick={() => {
-                audioInputRef.current?.click();
-                setIsAttachmentMenuOpen(false);
-              }}
-              className="flex items-center gap-3 px-3 py-2 rounded-xl hover:bg-[#f1f5f9] dark:hover:bg-[#152438] aurora:hover:bg-[#152934] linen:hover:bg-[#efe4d3] text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118] cursor-pointer font-medium"
-            >
-              <Music className="w-4 h-4 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#5eead4] linen:text-[#a86a43]" />
-              <span>音频与语音</span>
-            </button>
-            <button
-              type="button"
-              onClick={() => {
-                fileInputRef.current?.click();
-                setIsAttachmentMenuOpen(false);
-              }}
-              className="flex items-center gap-3 px-3 py-2 rounded-xl hover:bg-[#f1f5f9] dark:hover:bg-[#152438] aurora:hover:bg-[#152934] linen:hover:bg-[#efe4d3] text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118] cursor-pointer font-medium"
-            >
-              <FileText className="w-4 h-4 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#5eead4] linen:text-[#a86a43]" />
-              <span>文档与文件</span>
-            </button>
-          </div>,
-          document.body
-        )}
+                {/* Edit Message Banner above Input */}
+                {editingMessage && (
+                  <div className="mb-2 p-2 px-3 bg-amber-50 dark:bg-amber-500/12 aurora:bg-amber-500/12 linen:bg-[#f4e8d3] border border-amber-300/70 dark:border-amber-500/35 aurora:border-amber-500/35 linen:border-[#c9a977] rounded-xl flex items-center justify-between gap-2 text-xs animate-in fade-in duration-150">
+                    <div className="min-w-0 pr-2 flex-1">
+                      <div className="font-semibold text-amber-700 dark:text-amber-400 linen:text-[#8c522d] flex items-center gap-2 flex-wrap">
+                        <span className="inline-flex items-center gap-1.5">
+                          <Edit2 className="w-3.5 h-3.5" />
+                          <span>正在编辑消息</span>
+                        </span>
+                        {isChatTransEnabled && translationSettings?.autoTranslateOutbound !== false && (
+                          <label className="inline-flex items-center gap-1 text-[11px] font-normal text-[#475569] dark:text-[#b4c6d8] aurora:text-[#b7d0d8] linen:text-[#5c4a38] cursor-pointer select-none">
+                            <input
+                              type="checkbox"
+                              checked={translateOnEdit}
+                              onChange={(e) => setTranslateOnEdit(e.target.checked)}
+                              className="rounded border-amber-400 text-[#2481cc] aurora:text-[#14b8a6] linen:text-[#a86a43] focus:ring-[#2481cc] aurora:focus:ring-[#2dd4bf] linen:focus:ring-[#a86a43]"
+                            />
+                            <span>重新翻译为外文</span>
+                          </label>
+                        )}
+                      </div>
+                      <div className="text-[11px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6f5d4b] truncate mt-0.5">
+                        原消息: {editingMessage.text}
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setEditingMessage(null);
+                        setTranslateOnEdit(false);
+                        composerRef.current?.clearComposer(draftScopeKey);
+                      }}
+                      className="p-1 text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#7a6957] hover:text-[#0f172a] dark:hover:text-white aurora:hover:text-[#ecf6f8] linen:hover:text-[#2b2118] cursor-pointer shrink-0"
+                      title="取消编辑"
+                    >
+                      <X className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                )}
+
+                {/* Attachment Menu Popup */}
+                {isAttachmentMenuOpen && attachmentMenuPos && typeof document !== 'undefined' && createPortal(
+                  <div
+                    ref={attachmentMenuRef}
+                    style={{ top: `${attachmentMenuPos.top}px`, left: `${attachmentMenuPos.left}px` }}
+                    className="fixed z-[9990] w-44 bg-white dark:bg-[#0e1726] aurora:bg-[#101c23] linen:bg-[#f8f2e7] rounded-2xl shadow-2xl linen:shadow-sm border border-[#e2e8f0] dark:border-[#1e3148] aurora:border-[#203742] linen:border-[#d5c6ae] p-2 flex flex-col gap-1 animate-in fade-in zoom-in-95 duration-150 text-xs select-none"
+                  >
+                    <button
+                      type="button"
+                      onClick={() => {
+                        imageInputRef.current?.click();
+                        setIsAttachmentMenuOpen(false);
+                      }}
+                      className="flex items-center gap-3 px-3 py-2 rounded-xl hover:bg-[#f1f5f9] dark:hover:bg-[#152438] aurora:hover:bg-[#152934] linen:hover:bg-[#efe4d3] text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118] cursor-pointer font-medium"
+                    >
+                      <ImageIcon className="w-4 h-4 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#5eead4] linen:text-[#a86a43]" />
+                      <span>照片或图片</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        videoInputRef.current?.click();
+                        setIsAttachmentMenuOpen(false);
+                      }}
+                      className="flex items-center gap-3 px-3 py-2 rounded-xl hover:bg-[#f1f5f9] dark:hover:bg-[#152438] aurora:hover:bg-[#152934] linen:hover:bg-[#efe4d3] text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118] cursor-pointer font-medium"
+                    >
+                      <Video className="w-4 h-4 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#5eead4] linen:text-[#a86a43]" />
+                      <span>视频消息</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        audioInputRef.current?.click();
+                        setIsAttachmentMenuOpen(false);
+                      }}
+                      className="flex items-center gap-3 px-3 py-2 rounded-xl hover:bg-[#f1f5f9] dark:hover:bg-[#152438] aurora:hover:bg-[#152934] linen:hover:bg-[#efe4d3] text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118] cursor-pointer font-medium"
+                    >
+                      <Music className="w-4 h-4 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#5eead4] linen:text-[#a86a43]" />
+                      <span>音频与语音</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        fileInputRef.current?.click();
+                        setIsAttachmentMenuOpen(false);
+                      }}
+                      className="flex items-center gap-3 px-3 py-2 rounded-xl hover:bg-[#f1f5f9] dark:hover:bg-[#152438] aurora:hover:bg-[#152934] linen:hover:bg-[#efe4d3] text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118] cursor-pointer font-medium"
+                    >
+                      <FileText className="w-4 h-4 text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#5eead4] linen:text-[#a86a43]" />
+                      <span>文档与文件</span>
+                    </button>
+                  </div>,
+                  document.body
+                )}
+              </>
+            ) : null
+          }
+        />
 
         {/* Hidden File Inputs */}
         <input
@@ -6125,304 +6671,118 @@ const ChatAreaActive: React.FC<ChatAreaProps & { chat: Chat }> = ({
           className="hidden"
           onChange={handleFileSelect}
         />
-
-        {/* Pasted Image Pending Send Strip */}
-        {pastedImage && (
-          <div className="mb-2.5 p-2.5 bg-[#f0f7ff] dark:bg-[#0e1928] aurora:bg-[#102229] linen:bg-[#f7f0e4] border border-[#2481cc]/40 aurora:border-[#2dd4bf]/40 linen:border-[#a86a43]/40 rounded-xl flex items-center justify-between gap-3 animate-in fade-in slide-in-from-bottom-2 duration-150 shadow-xs">
-            <div className="flex items-center gap-3 min-w-0">
-              <div className="relative w-12 h-12 rounded-lg overflow-hidden shrink-0 border border-black/10 dark:border-white/10 aurora:border-white/10 linen:border-[#cbbba2] bg-black/5">
-                <img
-                  src={pastedImage.dataUrl}
-                  alt="pasted preview"
-                  className="w-full h-full object-cover"
-                />
-              </div>
-              <div className="min-w-0">
-                <div className="text-xs font-semibold text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#5eead4] linen:text-[#8c522d] flex items-center gap-1.5">
-                  <ImageIcon className="w-3.5 h-3.5" />
-                  <span>已捕获剪贴板照片</span>
-                  <span className="text-[10px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#7a6957] font-normal">
-                    ({(pastedImage.file.size / 1024).toFixed(0)} KB)
-                  </span>
-                </div>
-                <div className="text-[11px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6f5d4b] truncate mt-0.5">
-                  {inputText.trim() ? `配文: ${inputText}` : `可在输入框输入配文，或直接点击发送 (${sendWithEnter ? 'Enter' : 'Ctrl+Enter'})`}
-                </div>
-              </div>
-            </div>
-            <div className="flex items-center gap-1.5 shrink-0">
-              <button
-                type="button"
-                onClick={() => clearPastedImage(true)}
-                className="p-1.5 text-[#64748b] hover:text-[#0f172a] dark:text-[#7b93ad] dark:hover:text-white aurora:text-[#7e9aa5] aurora:hover:text-[#ecf6f8] linen:text-[#7a6957] linen:hover:text-[#2b2118] rounded-lg hover:bg-black/5 dark:hover:bg-white/10 aurora:hover:bg-[#152934] linen:hover:bg-[#e5d6be] cursor-pointer"
-                title="取消发送此图片 (Esc)"
-              >
-                <X className="w-4 h-4" />
-              </button>
-              <button
-                type="button"
-                onClick={handleSendPastedImage}
-                className="px-3 py-1.5 rounded-lg bg-[#2481cc] hover:bg-[#1d6fb3] dark:bg-[#2ba0ff] dark:hover:bg-[#1e8ee8] aurora:bg-[#0d9488] aurora:hover:bg-[#0f766e] linen:bg-[#3a6652] linen:hover:bg-[#2f5544] text-white font-medium text-xs cursor-pointer flex items-center gap-1.5 shadow-xs"
-                title={`立即发送照片 (${sendWithEnter ? 'Enter' : 'Ctrl+Enter'})`}
-              >
-                <Send className="w-3 h-3" />
-                <span>发送照片</span>
-              </button>
-            </div>
-          </div>
-        )}
-
-        {/* Main Input Container + Bottom Compact Action Row */}
-        <div className="@container rounded-xl border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#1e343e] linen:border-[#cbbba2] bg-[#f8fafc] dark:bg-[#0e1726] aurora:bg-[#111d24] linen:bg-[#fdfaf4] focus-within:bg-white dark:focus-within:bg-[#101b2c] aurora:focus-within:bg-[#13222b] linen:focus-within:bg-[#fffdf9] focus-within:border-[#2481cc] dark:focus-within:border-[#2ba0ff] aurora:focus-within:border-[#2dd4bf] linen:focus-within:border-[#a86a43] transition-all">
-          <textarea
-            ref={textareaRef}
-            rows={1}
-            value={inputText}
-            onChange={(e) => setInputText(e.target.value)}
-            onCompositionStart={() => {
-              isComposingRef.current = true;
-            }}
-            onCompositionEnd={() => {
-              isComposingRef.current = false;
-            }}
-            onKeyDown={handleKeyDown}
-            onPaste={handlePaste}
-            placeholder={
-              editingMessage
-                ? '修改消息...'
-                : pastedImage
-                ? '添加图片说明（可选）...'
-                : '输入消息...'
-            }
-            className={`w-full max-h-36 resize-none bg-transparent text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118] ${chatFontClasses.composer} leading-relaxed px-3.5 pt-2.5 pb-1.5 focus:outline-none placeholder-[#94a3b8] dark:placeholder-[#566d85] aurora:placeholder-[#5a7782] linen:placeholder-[#9c8c7a] overflow-y-hidden`}
-          />
-
-          <div className="px-2 @[520px]:px-2.5 pb-2 pt-1 flex items-center justify-between gap-1.5 @[520px]:gap-2 border-t border-[#e2e8f0]/60 dark:border-white/5 aurora:border-[#182b34] linen:border-[#e6dac6]">
-            {/* Left Tools */}
-            <div className="flex items-center flex-nowrap gap-0.5 @[520px]:gap-1 min-w-0 overflow-x-auto no-scrollbar">
-              <button
-                ref={attachmentButtonRef}
-                type="button"
-                onClick={() => setIsAttachmentMenuOpen(!isAttachmentMenuOpen)}
-                title="附加文件、图片或文档"
-                className={`w-7 h-7 @[520px]:w-8 @[520px]:h-8 rounded-lg flex items-center justify-center shrink-0 transition-colors cursor-pointer ${
-                  isAttachmentMenuOpen
-                    ? 'bg-[#e8f3ff] text-[#2481cc] dark:bg-[#2ba0ff]/20 dark:text-[#2ba0ff] aurora:bg-[#112e37] aurora:text-[#5eead4] linen:bg-[#eadcc6] linen:text-[#a86a43]'
-                    : 'hover:bg-[#e2e8f0]/60 dark:hover:bg-[#152438] aurora:hover:bg-[#152934] linen:hover:bg-[#eee2cf] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#7a6957] hover:text-[#2481cc] dark:hover:text-[#2ba0ff] aurora:hover:text-[#5eead4] linen:hover:text-[#a86a43]'
-                }`}
-              >
-                <Paperclip className="w-4 h-4 -rotate-45" />
-              </button>
-
-              <button
-                ref={emojiButtonRef}
-                type="button"
-                onClick={() => setShowEmojiPicker(!showEmojiPicker)}
-                title="表情与贴纸"
-                className={`w-7 h-7 @[520px]:w-8 @[520px]:h-8 rounded-lg flex items-center justify-center shrink-0 transition-colors cursor-pointer ${
-                  showEmojiPicker
-                    ? 'bg-[#e8f3ff] text-[#2481cc] dark:bg-[#2ba0ff]/20 dark:text-[#2ba0ff] aurora:bg-[#112e37] aurora:text-[#5eead4] linen:bg-[#eadcc6] linen:text-[#a86a43]'
-                    : 'hover:bg-[#e2e8f0]/60 dark:hover:bg-[#152438] aurora:hover:bg-[#152934] linen:hover:bg-[#eee2cf] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#7a6957] hover:text-[#2481cc] dark:hover:text-[#2ba0ff] aurora:hover:text-[#5eead4] linen:hover:text-[#a86a43]'
-                }`}
-              >
-                <Smile className="w-4 h-4" />
-              </button>
-
-              <button
-                type="button"
-                onClick={() => {
-                  if (onOpenVoiceprintConfig) {
-                    onOpenVoiceprintConfig();
-                  } else {
-                    setIsVoiceprintModalOpen(true);
-                  }
-                }}
-                title="真人声纹样本克隆"
-                className="w-7 h-7 @[520px]:w-8 @[520px]:h-8 rounded-lg flex items-center justify-center shrink-0 text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#7a6957] hover:text-[#2481cc] dark:hover:text-[#2ba0ff] aurora:hover:text-[#5eead4] linen:hover:text-[#a86a43] hover:bg-[#e2e8f0]/60 dark:hover:bg-[#152438] aurora:hover:bg-[#152934] linen:hover:bg-[#eee2cf] transition-colors cursor-pointer"
-              >
-                <AudioWaveform className="w-4 h-4" />
-              </button>
-
-              <button
-                type="button"
-                onClick={handleToggleRecordMic}
-                title={isRecordingMic ? '点击停止录音并发送' : '点击录制语音消息'}
-                className={`h-7 px-1.5 @[520px]:h-8 @[520px]:px-2 rounded-lg flex items-center gap-1 shrink-0 text-xs font-medium transition-colors cursor-pointer ${
-                  isRecordingMic
-                    ? 'bg-rose-500 text-white animate-pulse'
-                    : 'hover:bg-[#e2e8f0]/60 dark:hover:bg-[#152438] aurora:hover:bg-[#152934] linen:hover:bg-[#eee2cf] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#7a6957] hover:text-[#2481cc] dark:hover:text-[#2ba0ff] aurora:hover:text-[#5eead4] linen:hover:text-[#a86a43]'
-                }`}
-              >
-                <Volume2 className="w-4 h-4" />
-                {isRecordingMic && <span className="tabular-nums">{recordDuration}s</span>}
-              </button>
-
-              <button
-                type="button"
-                onClick={handleGenerateAiSuggestion}
-                disabled={isGeneratingAi}
-                title={
-                  aiCooldownSeconds > 0
-                    ? `大模型冷却中（剩余 ${aiCooldownSeconds} 秒）`
-                    : '基于人设与最近30条对话生成 AI 拟真回复'
-                }
-                className={`ml-0.5 @[520px]:ml-1 h-7 inline-flex items-center gap-1 @[520px]:gap-1.5 px-2 @[520px]:px-2.5 rounded-full text-[11.5px] font-medium whitespace-nowrap transition-all cursor-pointer shrink-0 shadow-xs ${
-                  isGeneratingAi
-                    ? 'bg-[#e8f3ff] text-[#2481cc] dark:bg-[#2ba0ff]/20 dark:text-[#2ba0ff] aurora:bg-[#112e37] aurora:text-[#5eead4] linen:bg-[#b87b53] linen:text-white'
-                    : aiCooldownSeconds > 0
-                    ? 'bg-[#f1f5f9] text-[#64748b] hover:bg-[#e2e8f0]/80 dark:bg-[#152438] dark:text-[#7b93ad] dark:hover:bg-[#1b2f48] aurora:bg-[#13252e] aurora:text-[#7e9aa5] aurora:hover:bg-[#18303b] linen:bg-[#c9b399] linen:text-[#5c4836] linen:hover:bg-[#bfa68a]'
-                    : 'bg-[#2481cc] hover:bg-[#1d6fb3] text-white dark:bg-[#2ba0ff] dark:hover:bg-[#1e8ee8] aurora:bg-[#0d9488] aurora:hover:bg-[#0f766e] linen:bg-[#a86a43] linen:hover:bg-[#935a36] linen:text-white'
-                }`}
-              >
-                <Sparkles className={`w-3.5 h-3.5 ${isGeneratingAi ? 'animate-spin' : ''}`} />
-                <span>
-                  {isGeneratingAi
-                    ? '生成中...'
-                    : aiCooldownSeconds > 0
-                    ? `AI 建议回复 (${aiCooldownSeconds}s)`
-                    : 'AI 建议回复'}
-                </span>
-              </button>
-
-              <button
-                type="button"
-                disabled={isSynthesizingVoice}
-                onClick={() => void handleDirectVoiceSynthesis()}
-                title="使用已保存声纹直接将当前文本合成为语音发送"
-                className={`ml-0.5 h-7 inline-flex items-center gap-1 @[520px]:gap-1.5 px-2 @[520px]:px-2.5 rounded-full text-[11.5px] font-medium whitespace-nowrap transition-all cursor-pointer shrink-0 shadow-xs bg-[#0f766e] hover:bg-[#115e59] text-white dark:bg-[#174857] dark:hover:bg-[#1c596b] aurora:bg-[#11434d] aurora:hover:bg-[#165562] linen:bg-[#3a6652] linen:hover:bg-[#2f5544] linen:text-white ${
-                  isSynthesizingVoice ? 'opacity-65 pointer-events-none' : ''
-                }`}
-              >
-                <Mic className={`w-3.5 h-3.5 ${isSynthesizingVoice ? 'animate-pulse' : ''}`} />
-                <span>{isSynthesizingVoice ? '合成中...' : '音色合成'}</span>
-              </button>
-            </div>
-
-            {/* Right Actions: Shortcut hint + Send Button */}
-            <div className="flex items-center gap-2 @[620px]:gap-2.5 shrink-0">
-              <span className="hidden @[620px]:inline whitespace-nowrap text-[11px] text-[#94a3b8] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#84725e] select-none">
-                {sendWithEnter ? 'Enter 发送 · Shift+Enter 换行' : 'Ctrl+Enter 发送 · Enter 换行'}
-              </span>
-
-              <button
-                type="button"
-                disabled={isSending || (!inputText.trim() && !pastedImage && !editingMessage)}
-                onClick={pastedImage ? handleSendPastedImage : () => void handleSendText()}
-                title={
-                  editingMessage
-                    ? '保存修改'
-                    : pastedImage
-                    ? `发送照片（${sendWithEnter ? 'Enter 发送 · Shift+Enter 换行' : 'Ctrl+Enter 发送 · Enter 换行'}）`
-                    : `发送消息（${sendWithEnter ? 'Enter 发送 · Shift+Enter 换行' : 'Ctrl+Enter 发送 · Enter 换行'}）`
-                }
-                className={`hs-accent-bg h-7 @[520px]:h-8 px-3 @[520px]:px-4 rounded-full bg-[#2481cc] hover:bg-[#1d6fb3] dark:bg-[#2ba0ff] dark:hover:bg-[#1e8ee8] aurora:bg-[#0d9488] aurora:hover:bg-[#0f766e] linen:bg-[#3a6652] linen:hover:bg-[#2f5544] text-white text-xs font-medium flex items-center gap-1.5 whitespace-nowrap transition-all cursor-pointer shadow-xs shrink-0 disabled:opacity-55 disabled:cursor-default`}
-              >
-                {editingMessage ? <Check className="w-3.5 h-3.5" /> : <Send className="w-3.5 h-3.5" />}
-                <span>{editingMessage ? '保存' : pastedImage ? '发送照片' : '发送'}</span>
-              </button>
-            </div>
-          </div>
-        </div>
       </footer>
 
       {/* Telegram Emoji & Official Stickers Picker Popover */}
-      <TelegramEmojiPicker
-        isOpen={showEmojiPicker}
-        onClose={() => setShowEmojiPicker(false)}
-        onSelectEmoji={(emoji) => setInputText((prev) => prev + emoji)}
-        onSelectSticker={handleSendSticker}
-        accountId={currentAccountId}
-        anchorRef={emojiButtonRef}
-      />
+      {showEmojiPicker && (
+        <TelegramEmojiPicker
+          isOpen={showEmojiPicker}
+          onClose={() => setShowEmojiPicker(false)}
+          onSelectEmoji={(emoji) => composerRef.current?.setText((prev) => prev + emoji)}
+          onSelectSticker={handleSendSticker}
+          accountId={currentAccountId}
+          anchorRef={emojiButtonRef}
+        />
+      )}
 
 
       {/* Telegram Chat Info & Shared Media Drawer */}
-      <TelegramChatInfoDrawer
-        isOpen={isChatInfoOpen}
-        onClose={() => setChatInfoOpen(false)}
-        chat={chat}
-        accountId={currentAccountId}
-        messages={messages}
-        onClearHistory={
-          onClearHistory
-            ? async (targetChatId, options) => {
-                const res = await onClearHistory(targetChatId, options);
-                if (!res || res.ok !== false) {
-                  delete sharedPhotoGalleryCacheRef.current[`${currentAccountId || 'default'}::${targetChatId}`];
+      {isChatInfoOpen && (
+        <TelegramChatInfoDrawer
+          isOpen={isChatInfoOpen}
+          onClose={() => setChatInfoOpen(false)}
+          chat={chat}
+          accountId={currentAccountId}
+          messages={messages}
+          onClearHistory={
+            onClearHistory
+              ? async (targetChatId, options) => {
+                  const res = await onClearHistory(targetChatId, options);
+                  if (!res || res.ok !== false) {
+                    delete sharedPhotoGalleryCacheRef.current[`${currentAccountId || 'default'}::${targetChatId}`];
+                  }
+                  return res;
                 }
-                return res;
-              }
-            : undefined
-        }
-        onToggleMute={onToggleMuteChat}
-        onTogglePin={onTogglePinChat}
-        onUpdateTitle={onUpdateChatTitle}
-        onChatInfoUpdated={onChatInfoUpdated}
-        onAddContact={onAddContact}
-        onRemoveContact={onRemoveContact}
-        onRefreshMediaUrls={onRefreshMediaUrls}
-        onOpenMediaPreview={(targetMsg, allMedia) => {
-          openImageGalleryLightbox(targetMsg, allMedia);
-        }}
-        onJumpToMessage={handleJumpToMessage}
-        onSelectMember={(member) => {
-          void handleOpenGroupMemberProfile({
-            senderId: member.id,
-            name: member.name,
-            username: member.username,
-            avatarUrl: member.avatarUrl,
-            statusText: member.statusText,
-            isOnline: member.isOnline,
-            isBot: member.isBot,
-          });
-        }}
-        onSelectCommonGroup={(group) => {
-          const existing = availableChats.find((c) => c.id === group.id);
-          if (existing && onSelectChat) {
-            onSelectChat(existing.id);
-            return;
+              : undefined
           }
-          if (onJoinOrOpenChat) {
-            onJoinOrOpenChat({
-              id: group.id,
-              accountId: currentAccountId || chat.accountId,
-              title: group.title,
-              username: group.username,
-              avatarUrl: group.avatarUrl,
-              avatarBg: '#2481cc',
-              avatarInitial: (group.title || '群').slice(0, 2).toUpperCase(),
-              isGroup: !group.isChannel,
-              isChannel: Boolean(group.isChannel),
-              memberCount: group.memberCount,
-              lastMessage: '',
-              lastTime: '',
-              unreadCount: 0,
-              sourceLang: 'Auto',
-              targetLang: 'Auto',
+          onToggleMute={onToggleMuteChat}
+          onTogglePin={onTogglePinChat}
+          onUpdateTitle={onUpdateChatTitle}
+          onChatInfoUpdated={onChatInfoUpdated}
+          onAddContact={onAddContact}
+          onRemoveContact={onRemoveContact}
+          onRefreshMediaUrls={onRefreshMediaUrls}
+          onOpenMediaPreview={(targetMsg, allMedia) => {
+            openImageGalleryLightbox(targetMsg, allMedia);
+          }}
+          onJumpToMessage={handleJumpToMessage}
+          onSelectMember={(member) => {
+            void handleOpenGroupMemberProfile({
+              senderId: member.id,
+              name: member.name,
+              username: member.username,
+              avatarUrl: member.avatarUrl,
+              statusText: member.statusText,
+              isOnline: member.isOnline,
+              isBot: member.isBot,
             });
-            return;
-          }
-          onSelectChat?.(group.id);
-        }}
-      />
+          }}
+          onSelectCommonGroup={(group) => {
+            const existing = availableChats.find((c) => c.id === group.id);
+            if (existing && onSelectChat) {
+              onSelectChat(existing.id);
+              return;
+            }
+            if (onJoinOrOpenChat) {
+              onJoinOrOpenChat({
+                id: group.id,
+                accountId: currentAccountId || chat.accountId,
+                title: group.title,
+                username: group.username,
+                avatarUrl: group.avatarUrl,
+                avatarBg: '#2481cc',
+                avatarInitial: (group.title || '群').slice(0, 2).toUpperCase(),
+                isGroup: !group.isChannel,
+                isChannel: Boolean(group.isChannel),
+                memberCount: group.memberCount,
+                lastMessage: '',
+                lastTime: '',
+                unreadCount: 0,
+                sourceLang: 'Auto',
+                targetLang: 'Auto',
+              });
+              return;
+            }
+            onSelectChat?.(group.id);
+          }}
+        />
+      )}
 
       {/* Voice Clone Studio Modal */}
-      <VoiceCloneStudioModal
-        isOpen={isVoiceStudioOpen}
-        onClose={() => setIsVoiceStudioOpen(false)}
-        initialText={inputText.trim() || translatedPreview}
-        translatedText={translatedPreview}
-        targetLangName={getLanguageDisplayName(outboundTargetLang)}
-        customConfig={customLLMConfig}
-        onSendVoice={handleTriggerVoiceCloneSend}
-      />
+      {isVoiceStudioOpen && (
+        <VoiceCloneStudioModal
+          isOpen={isVoiceStudioOpen}
+          onClose={() => setIsVoiceStudioOpen(false)}
+          initialText={
+            (composerRef.current?.getText() || '').trim() ||
+            composerRef.current?.getPreviewState().translatedPreview ||
+            ''
+          }
+          translatedText={composerRef.current?.getPreviewState().translatedPreview || ''}
+          targetLangName={getLanguageDisplayName(outboundTargetLang)}
+          customConfig={customLLMConfig}
+          onSendVoice={handleTriggerVoiceCloneSend}
+        />
+      )}
 
       {/* Fallback Standalone MasterVoiceprintModal when onOpenVoiceprintConfig is not provided */}
-      <MasterVoiceprintModal
-        isOpen={isVoiceprintModalOpen}
-        onClose={() => setIsVoiceprintModalOpen(false)}
-        onVoiceprintSaved={(vp) => setMasterVoiceprint(vp)}
-      />
+      {isVoiceprintModalOpen && (
+        <MasterVoiceprintModal
+          isOpen={isVoiceprintModalOpen}
+          onClose={() => setIsVoiceprintModalOpen(false)}
+          onVoiceprintSaved={(vp) => setMasterVoiceprint(vp)}
+        />
+      )}
 
       {/* Telegram Message Context Menu Popup (Right-Click) */}
       {messageContextMenu && typeof document !== 'undefined' && createPortal(
@@ -6579,7 +6939,7 @@ const ChatAreaActive: React.FC<ChatAreaProps & { chat: Chat }> = ({
               onClick={() => {
                 setEditingMessage(messageContextMenu.message);
                 setTranslateOnEdit(false);
-                setInputText(messageContextMenu.message.text);
+                composerRef.current?.setText(messageContextMenu.message.text);
                 setReplyingTo(null);
                 setMessageContextMenu(null);
               }}
@@ -6639,7 +6999,7 @@ const ChatAreaActive: React.FC<ChatAreaProps & { chat: Chat }> = ({
               backdropPointerDownTargetRef.current = null;
               if (shouldClose) setMessageToDelete(null);
             }}
-            className="fixed inset-0 bg-black/55 dark:bg-black/75 aurora:bg-black/80 backdrop-blur-xs flex items-center justify-center z-50 p-4 animate-in fade-in duration-150"
+            className="fixed inset-0 bg-black/60 dark:bg-black/75 aurora:bg-black/80 flex items-center justify-center z-50 p-4 animate-in fade-in duration-150"
           >
             <div
               onClick={(e) => e.stopPropagation()}
@@ -6735,7 +7095,7 @@ const ChatAreaActive: React.FC<ChatAreaProps & { chat: Chat }> = ({
             backdropPointerDownTargetRef.current = null;
             if (shouldClose && !isBatchDeleting) setShowBatchDeleteModal(false);
           }}
-          className="fixed inset-0 bg-black/55 dark:bg-black/75 aurora:bg-black/80 backdrop-blur-xs flex items-center justify-center z-50 p-4 animate-in fade-in duration-150"
+          className="fixed inset-0 bg-black/60 dark:bg-black/75 aurora:bg-black/80 flex items-center justify-center z-50 p-4 animate-in fade-in duration-150"
         >
           <div
             onClick={(e) => e.stopPropagation()}
@@ -6817,7 +7177,7 @@ const ChatAreaActive: React.FC<ChatAreaProps & { chat: Chat }> = ({
               backdropPointerDownTargetRef.current = null;
               if (shouldClose && !isClearingGroupNotices) setShowClearGroupNoticesModal(false);
             }}
-            className="fixed inset-0 bg-black/55 dark:bg-black/75 aurora:bg-black/80 backdrop-blur-xs flex items-center justify-center z-50 p-4 animate-in fade-in duration-150"
+            className="fixed inset-0 bg-black/60 dark:bg-black/75 aurora:bg-black/80 flex items-center justify-center z-50 p-4 animate-in fade-in duration-150"
           >
             <div
               onClick={(e) => e.stopPropagation()}
@@ -6896,7 +7256,7 @@ const ChatAreaActive: React.FC<ChatAreaProps & { chat: Chat }> = ({
             backdropPointerDownTargetRef.current = null;
             if (shouldClose && !isForwarding) setForwardModalMessages(null);
           }}
-          className="fixed inset-0 bg-black/55 dark:bg-black/75 aurora:bg-black/80 backdrop-blur-xs flex items-center justify-center z-50 p-4 animate-in fade-in duration-150"
+          className="fixed inset-0 bg-black/60 dark:bg-black/75 aurora:bg-black/80 flex items-center justify-center z-50 p-4 animate-in fade-in duration-150"
         >
           <div
             onClick={(e) => e.stopPropagation()}
@@ -7005,7 +7365,7 @@ const ChatAreaActive: React.FC<ChatAreaProps & { chat: Chat }> = ({
           <div
             role="dialog"
             aria-modal="true"
-            className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-black/55 backdrop-blur-xs"
+            className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-black/65"
             onMouseDown={(e) => {
               backdropPointerDownTargetRef.current = e.target === e.currentTarget ? e.currentTarget : null;
             }}
@@ -7149,7 +7509,7 @@ const ChatAreaActive: React.FC<ChatAreaProps & { chat: Chat }> = ({
           <div
             role="dialog"
             aria-modal="true"
-            className="fixed inset-0 z-[75] bg-black/50 backdrop-blur-xs flex items-center justify-center p-4 animate-in fade-in duration-150"
+            className="fixed inset-0 z-[75] bg-black/60 flex items-center justify-center p-4 animate-in fade-in duration-150"
             onMouseDown={(e) => {
               backdropPointerDownTargetRef.current = e.target === e.currentTarget ? e.currentTarget : null;
             }}
@@ -7492,7 +7852,7 @@ const ChatAreaActive: React.FC<ChatAreaProps & { chat: Chat }> = ({
           <div
             role="dialog"
             aria-modal="true"
-            className="fixed inset-0 z-[75] bg-black/50 backdrop-blur-xs flex items-center justify-center p-4 animate-in fade-in duration-150"
+            className="fixed inset-0 z-[75] bg-black/60 flex items-center justify-center p-4 animate-in fade-in duration-150"
             onMouseDown={(e) => {
               backdropPointerDownTargetRef.current = e.target === e.currentTarget ? e.currentTarget : null;
             }}
@@ -7655,7 +8015,7 @@ const ChatAreaActive: React.FC<ChatAreaProps & { chat: Chat }> = ({
           <div
             role="dialog"
             aria-modal="true"
-            className="fixed inset-0 z-[80] bg-black/90 backdrop-blur-xs flex flex-col items-center justify-center p-4 sm:p-8 select-none animate-in fade-in duration-150"
+            className="fixed inset-0 z-[80] bg-black/92 flex flex-col items-center justify-center p-4 sm:p-8 select-none animate-in fade-in duration-150"
             onMouseDown={(e) => {
               backdropPointerDownTargetRef.current = e.target === e.currentTarget ? e.currentTarget : null;
             }}
@@ -7837,7 +8197,7 @@ export const ChatArea: React.FC<ChatAreaProps> = React.memo((props) => {
   if (!props.chat) {
     return (
       <div className="hidden lg:flex flex-1 min-w-0 bg-[#f4f7fb] dark:bg-[#060b12] aurora:bg-[#081116] linen:bg-[#ddd2bc] tg-chat-pattern flex-col items-center justify-center select-none text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6f5d4b] transition-colors px-6">
-        <div className="flex flex-col items-center text-center max-w-xs space-y-2.5 px-6 py-5 rounded-2xl bg-white/80 dark:bg-[#0a1320]/80 aurora:bg-[#0e1b23]/82 linen:bg-[#f7f1e5]/92 backdrop-blur-md border border-[#e2e8f0] dark:border-[#162436] aurora:border-[#2dd4bf]/35 linen:border-[#cbbba2] shadow-xs aurora:shadow-[0_0_28px_rgba(34,211,238,0.12)]">
+        <div className="flex flex-col items-center text-center max-w-xs space-y-2.5 px-6 py-5 rounded-2xl bg-white/96 dark:bg-[#0a1320]/96 aurora:bg-[#0e1b23]/96 linen:bg-[#f7f1e5]/96 border border-[#e2e8f0] dark:border-[#162436] aurora:border-[#2dd4bf]/35 linen:border-[#cbbba2] shadow-xs aurora:shadow-[0_0_28px_rgba(34,211,238,0.12)]">
           <div className="w-10 h-10 rounded-xl bg-[#e8f3ff] dark:bg-[#2ba0ff]/12 aurora:bg-[#112d36] linen:bg-[#efe2ce] border border-[#bfdbfe] dark:border-[#2ba0ff]/25 aurora:border-[#2dd4bf]/35 linen:border-[#d4bc9c] flex items-center justify-center text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#5eead4] linen:text-[#a86a43]">
             <Sparkles className="w-5 h-5" />
           </div>

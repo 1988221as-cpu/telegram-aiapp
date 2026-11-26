@@ -254,7 +254,7 @@ export const MemberAuthModal: React.FC<MemberAuthModalProps> = ({
     (errorMsg ? /无法连接|超时|代理|network|fetch/i.test(errorMsg) : false);
 
   return (
-    <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/55 dark:bg-black/80 aurora:bg-black/85 linen:bg-[#2b2118]/55 backdrop-blur-md select-none animate-in fade-in duration-200">
+    <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/60 dark:bg-black/80 aurora:bg-black/85 linen:bg-[#2b2118]/60 select-none animate-in fade-in duration-200">
       <div className="relative w-full max-w-md bg-white dark:bg-[#0b131f] aurora:bg-[#0c151b] linen:bg-[#f7f0e3] border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] linen:border-[#d5c6ae] rounded-3xl shadow-2xl linen:shadow-sm flex flex-col overflow-hidden text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118]">
         {/* Top HumanSense Brand Header */}
         <div className="p-6 pb-4 bg-gradient-to-b from-[#f0f7ff] to-white dark:from-[#101c2d] dark:to-[#0b131f] aurora:from-[#10222b] aurora:to-[#0c151b] linen:from-[#efe4d2] linen:to-[#f7f0e3] border-b border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] linen:border-[#d8c8b0] flex flex-col items-center text-center relative">

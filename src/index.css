@@ -362,6 +362,10 @@
   content-visibility: visible;
   contain-intrinsic-size: auto;
 }
+.hs-chat-item {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 64px;
+}
 
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after {

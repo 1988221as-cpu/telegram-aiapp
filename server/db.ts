@@ -1078,20 +1078,28 @@ export function isDiskSnapshotEnvelope(obj: any): obj is SealedDiskSnapshotEnvel
   );
 }
 
-export function encryptBackupEnvelope(payload: unknown, passphrase: string): EncryptedBackupEnvelope {
-  if (typeof passphrase !== 'string' || passphrase.length < BACKUP_MIN_PASSPHRASE_LENGTH) {
-    throw new SnapshotValidationError(`备份加密口令至少需要 ${BACKUP_MIN_PASSPHRASE_LENGTH} 个字符`);
-  }
-  const salt = crypto.randomBytes(16);
-  const iv = crypto.randomBytes(12);
-  const exportedAt = new Date().toISOString();
-  const derived = crypto.pbkdf2Sync(
-    Buffer.from(passphrase, 'utf8'),
-    salt,
-    BACKUP_KDF_ITERATIONS,
-    64,
-    'sha256'
-  );
+function pbkdf2Async(
+  password: string | Buffer,
+  salt: Buffer,
+  iterations: number,
+  keylen: number,
+  digest: string
+): Promise<Buffer> {
+  return new Promise((resolve, reject) => {
+    crypto.pbkdf2(password, salt, iterations, keylen, digest, (err, derivedKey) => {
+      if (err) reject(err);
+      else resolve(derivedKey);
+    });
+  });
+}
+
+function finalizeBackupEncryption(
+  payload: unknown,
+  derived: Buffer,
+  salt: Buffer,
+  iv: Buffer,
+  exportedAt: string
+): EncryptedBackupEnvelope {
   const aesKey = derived.subarray(0, 32);
   const hmacKey = derived.subarray(32, 64);
 
@@ -1127,7 +1135,7 @@ export function encryptBackupEnvelope(payload: unknown, passphrase: string): Enc
   return { ...unsignedEnvelope, hmac };
 }
 
-export function decryptBackupEnvelope<T = any>(envelope: unknown, passphrase: string): T {
+function parseAndValidateBackupEnvelopeInputs(envelope: unknown, passphrase: string) {
   if (!isEncryptedBackupEnvelope(envelope)) {
     throw new SnapshotValidationError('无效的加密备份文件格式');
   }
@@ -1155,13 +1163,16 @@ export function decryptBackupEnvelope<T = any>(envelope: unknown, passphrase: st
     throw new SnapshotValidationError('加密备份字段长度非法');
   }
 
-  const derived = crypto.pbkdf2Sync(
-    Buffer.from(passphrase, 'utf8'),
-    salt,
-    envelope.kdf.iterations,
-    64,
-    'sha256'
-  );
+  return { envelope, salt, iv, ciphertext, providedHmac };
+}
+
+function finalizeBackupDecryption<T = any>(
+  envelope: EncryptedBackupEnvelope,
+  derived: Buffer,
+  iv: Buffer,
+  ciphertext: Buffer,
+  providedHmac: Buffer
+): T {
   const aesKey = derived.subarray(0, 32);
   const hmacKey = derived.subarray(32, 64);
 
@@ -1185,6 +1196,72 @@ export function decryptBackupEnvelope<T = any>(envelope: unknown, passphrase: st
   } catch {
     throw new SnapshotValidationError('备份解密失败：口令错误或密文已损坏');
   }
+}
+
+export function encryptBackupEnvelope(payload: unknown, passphrase: string): EncryptedBackupEnvelope {
+  if (typeof passphrase !== 'string' || passphrase.length < BACKUP_MIN_PASSPHRASE_LENGTH) {
+    throw new SnapshotValidationError(`备份加密口令至少需要 ${BACKUP_MIN_PASSPHRASE_LENGTH} 个字符`);
+  }
+  const salt = crypto.randomBytes(16);
+  const iv = crypto.randomBytes(12);
+  const exportedAt = new Date().toISOString();
+  const derived = crypto.pbkdf2Sync(
+    Buffer.from(passphrase, 'utf8'),
+    salt,
+    BACKUP_KDF_ITERATIONS,
+    64,
+    'sha256'
+  );
+  return finalizeBackupEncryption(payload, derived, salt, iv, exportedAt);
+}
+
+export async function encryptBackupEnvelopeAsync(
+  payload: unknown,
+  passphrase: string
+): Promise<EncryptedBackupEnvelope> {
+  if (typeof passphrase !== 'string' || passphrase.length < BACKUP_MIN_PASSPHRASE_LENGTH) {
+    throw new SnapshotValidationError(`备份加密口令至少需要 ${BACKUP_MIN_PASSPHRASE_LENGTH} 个字符`);
+  }
+  const salt = crypto.randomBytes(16);
+  const iv = crypto.randomBytes(12);
+  const exportedAt = new Date().toISOString();
+  const derived = await pbkdf2Async(
+    Buffer.from(passphrase, 'utf8'),
+    salt,
+    BACKUP_KDF_ITERATIONS,
+    64,
+    'sha256'
+  );
+  return finalizeBackupEncryption(payload, derived, salt, iv, exportedAt);
+}
+
+export function decryptBackupEnvelope<T = any>(envelope: unknown, passphrase: string): T {
+  const { envelope: validEnv, salt, iv, ciphertext, providedHmac } =
+    parseAndValidateBackupEnvelopeInputs(envelope, passphrase);
+  const derived = crypto.pbkdf2Sync(
+    Buffer.from(passphrase, 'utf8'),
+    salt,
+    validEnv.kdf.iterations,
+    64,
+    'sha256'
+  );
+  return finalizeBackupDecryption<T>(validEnv, derived, iv, ciphertext, providedHmac);
+}
+
+export async function decryptBackupEnvelopeAsync<T = any>(
+  envelope: unknown,
+  passphrase: string
+): Promise<T> {
+  const { envelope: validEnv, salt, iv, ciphertext, providedHmac } =
+    parseAndValidateBackupEnvelopeInputs(envelope, passphrase);
+  const derived = await pbkdf2Async(
+    Buffer.from(passphrase, 'utf8'),
+    salt,
+    validEnv.kdf.iterations,
+    64,
+    'sha256'
+  );
+  return finalizeBackupDecryption<T>(validEnv, derived, iv, ciphertext, providedHmac);
 }
 
 export function sealDiskSnapshot(snapshot: any): SealedDiskSnapshotEnvelope {
@@ -1255,15 +1332,13 @@ export function unsealDiskSnapshot(envelope: unknown): any {
   }
 }
 
-function writeSealedDiskSnapshotFile(snapshot: any): void {
+async function writeSealedDiskSnapshotFileAsync(snapshot: any): Promise<void> {
   const sealed = sealDiskSnapshot(snapshot);
-  fs.writeFileSync(snapshotFilePath, JSON.stringify(sealed, null, 2), {
+  await fs.promises.writeFile(snapshotFilePath, JSON.stringify(sealed, null, 2), {
     encoding: 'utf-8',
     mode: 0o600,
   });
-  try {
-    fs.chmodSync(snapshotFilePath, 0o600);
-  } catch {}
+  await fs.promises.chmod(snapshotFilePath, 0o600).catch(() => {});
 }
 
 const ALLOWED_SNAPSHOT_TABLES = new Set([
@@ -1584,7 +1659,7 @@ export async function exportDatabaseSnapshot() {
 
   // Persist sealed (AES-256-GCM + HMAC-SHA256 + 0o600) snapshot file to data directory (never plaintext on disk)
   try {
-    writeSealedDiskSnapshotFile(snapshot);
+    await writeSealedDiskSnapshotFileAsync(snapshot);
   } catch (err: any) {
     console.warn('[Database Snapshot] Failed to write sealed snapshot file to disk:', err.message);
   }
@@ -1879,8 +1954,11 @@ export async function restoreDatabaseSnapshot(snapshot: any): Promise<{ success:
 // Automatically restore data from encrypted (or legacy) disk snapshot if SQLite file was wiped/empty
 export async function autoRestoreSnapshotIfAvailable(): Promise<boolean> {
   try {
-    if (fs.existsSync(snapshotFilePath)) {
-      const raw = fs.readFileSync(snapshotFilePath, 'utf-8');
+    const raw = await fs.promises.readFile(snapshotFilePath, 'utf-8').catch((err: any) => {
+      if (err?.code === 'ENOENT') return null;
+      throw err;
+    });
+    if (raw) {
       const parsed = JSON.parse(raw);
       let snapshotData: any = null;
       let isLegacyPlaintext = false;
@@ -1896,9 +1974,7 @@ export async function autoRestoreSnapshotIfAvailable(): Promise<boolean> {
         console.log(`[Database Auto-Recovery] Detected snapshot at ${snapshotFilePath}, auto-restoring records...`);
         await restoreDatabaseSnapshot(snapshotData);
         if (isLegacyPlaintext) {
-          try {
-            writeSealedDiskSnapshotFile(snapshotData);
-          } catch {}
+          await writeSealedDiskSnapshotFileAsync(snapshotData).catch(() => {});
         }
         console.log(`[Database Auto-Recovery] Successfully restored ${snapshotData.counts?.messages || 0} messages and ${snapshotData.counts?.profiles || 0} customer profiles!`);
         return true;
@@ -1965,9 +2041,9 @@ export async function purgeDatabaseBusinessData(): Promise<{
 
   // Remove disk snapshot file so shredded records do not auto-restore on next boot
   try {
-    if (fs.existsSync(snapshotFilePath)) {
-      fs.unlinkSync(snapshotFilePath);
-    }
+    await fs.promises.unlink(snapshotFilePath).catch((err: any) => {
+      if (err?.code !== 'ENOENT') throw err;
+    });
   } catch (err: any) {
     console.warn('[Database Purge] Failed to remove snapshot file:', err.message);
   }

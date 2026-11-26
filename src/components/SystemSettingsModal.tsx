@@ -181,7 +181,7 @@ export const SystemSettingsModal: React.FC<SystemSettingsModalProps> = ({
           onClose();
         }
       }}
-      className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/55 dark:bg-black/75 aurora:bg-black/80 backdrop-blur-xs animate-in fade-in duration-200 select-none"
+      className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 dark:bg-black/75 aurora:bg-black/80 animate-in fade-in duration-200 select-none"
     >
       <div
         onClick={(e) => e.stopPropagation()}

@@ -155,7 +155,14 @@ import {
 } from './services/telegramConnectionStatus';
 
 
-import { secureGetItemSync, secureSetItemSync, secureGetItemAsync, secureRemoveItem } from './services/cryptoStorage';
+import {
+  secureGetItemSync,
+  secureSetItemSync,
+  secureSetItemAsyncWithResult,
+  secureSetItemDebounced,
+  secureGetItemAsync,
+  secureRemoveItem,
+} from './services/cryptoStorage';
 import {
   savePendingMediaBlob,
   getPendingMediaBlob,
@@ -166,6 +173,16 @@ import {
   purgeAllPendingMediaBlobs,
   type PendingMediaField,
 } from './services/pendingMediaStorage';
+
+const EMPTY_CHAT_FOLDERS: TelegramOfficialDialogFilter[] = [];
+const EMPTY_CHAT_ORDER: string[] = [];
+const EMPTY_MESSAGES: Message[] = [];
+
+function useStableCallback<T extends (...args: any[]) => any>(fn: T): T {
+  const fnRef = useRef<T>(fn);
+  fnRef.current = fn;
+  return useCallback((...args: Parameters<T>): ReturnType<T> => fnRef.current(...args), []) as T;
+}
 
 // Helper to purge only explicitly marked legacy dummy accounts from local storage
 function sanitizeAccounts(accs: Account[]): Account[] {
@@ -1179,23 +1196,34 @@ export default function App() {
 
       const reconstructed: Record<string, Message[]> = {};
       const chatsToScan = nextChats || chatsRef.current;
-      for (const c of chatsToScan) {
-        const acc = c.accountId || resolvedActiveAccId || activeAccountIdRef.current;
-        const scopedKey = acc ? `tg_desktop_msgs_${acc}_${c.id}` : `tg_desktop_msgs_${c.id}`;
-        let msgs = await secureGetItemAsync<Message[]>(scopedKey);
-        if ((!msgs || msgs.length === 0) && acc) {
-          const legacy = await secureGetItemAsync<Message[]>(`tg_desktop_msgs_${c.id}`);
-          if (Array.isArray(legacy)) {
-            msgs = legacy.filter((m) => m.accountId === acc);
-          }
-        }
-        if (Array.isArray(msgs) && msgs.length > 0) {
-          reconstructed[msgBucketKey(acc, c.id)] = normalizeStalePendingMessages(
-            msgs.filter(
-              (m) => m && m.id && !isMessageDeleted(m.id, acc, m.chatId || c.id) && (!acc || m.accountId === acc)
-            )
-          );
-        }
+      const orderedChatsToScan = [...chatsToScan].sort((a, b) => {
+        const aActive = a.id === activeChatIdRef.current && a.accountId === resolvedActiveAccId ? 0 : 1;
+        const bActive = b.id === activeChatIdRef.current && b.accountId === resolvedActiveAccId ? 0 : 1;
+        return aActive - bActive;
+      });
+      const HYDRATE_BATCH_SIZE = 16;
+      for (let i = 0; i < orderedChatsToScan.length; i += HYDRATE_BATCH_SIZE) {
+        const batch = orderedChatsToScan.slice(i, i + HYDRATE_BATCH_SIZE);
+        await Promise.all(
+          batch.map(async (c) => {
+            const acc = c.accountId || resolvedActiveAccId || activeAccountIdRef.current;
+            const scopedKey = acc ? `tg_desktop_msgs_${acc}_${c.id}` : `tg_desktop_msgs_${c.id}`;
+            let msgs = await secureGetItemAsync<Message[]>(scopedKey);
+            if ((!msgs || msgs.length === 0) && acc) {
+              const legacy = await secureGetItemAsync<Message[]>(`tg_desktop_msgs_${c.id}`);
+              if (Array.isArray(legacy)) {
+                msgs = legacy.filter((m) => m.accountId === acc);
+              }
+            }
+            if (Array.isArray(msgs) && msgs.length > 0) {
+              reconstructed[msgBucketKey(acc, c.id)] = normalizeStalePendingMessages(
+                msgs.filter(
+                  (m) => m && m.id && !isMessageDeleted(m.id, acc, m.chatId || c.id) && (!acc || m.accountId === acc)
+                )
+              );
+            }
+          })
+        );
       }
 
       if (savedMsgs && typeof savedMsgs === 'object' && Object.keys(savedMsgs).length > 0) {
@@ -1436,12 +1464,12 @@ export default function App() {
   // Sync to encrypted local storage strictly AFTER hydration is verified, preventing default overwrite
   useEffect(() => {
     if (!isHydrated) return;
-    secureSetItemSync('tg_pro_accounts', accounts);
+    secureSetItemDebounced('tg_pro_accounts', accounts, 250);
   }, [accounts, isHydrated]);
 
   useEffect(() => {
     if (!isHydrated) return;
-    secureSetItemSync('tg_pro_account_groups', accountGroups);
+    secureSetItemDebounced('tg_pro_account_groups', accountGroups, 250);
     if (!isMemberAuthenticated || !accountMetaHydratedRef.current) return;
     const timer = setTimeout(() => {
       void saveTelegramAccountMetaApi({ groups: accountGroups }).catch(() => {});
@@ -1452,7 +1480,7 @@ export default function App() {
   useEffect(() => {
     if (!isHydrated) return;
     const timer = setTimeout(() => {
-      secureSetItemSync('tg_pro_chats', chatsRef.current);
+      void secureSetItemAsyncWithResult('tg_pro_chats', chatsRef.current);
     }, 350);
     return () => clearTimeout(timer);
   }, [chats, isHydrated]);
@@ -1461,7 +1489,7 @@ export default function App() {
     if (!isHydrated || typeof window === 'undefined') return;
     const flushChatsNow = () => {
       if (chatsRef.current.length > 0) {
-        secureSetItemSync('tg_pro_chats', chatsRef.current);
+        void secureSetItemAsyncWithResult('tg_pro_chats', chatsRef.current);
       }
     };
     const onVis = () => {
@@ -1478,7 +1506,7 @@ export default function App() {
 
   useEffect(() => {
     if (!isHydrated) return;
-    secureSetItemSync('tg_pro_chat_order_map', chatOrderByAccount);
+    secureSetItemDebounced('tg_pro_chat_order_map', chatOrderByAccount, 250);
   }, [chatOrderByAccount, isHydrated]);
 
   // Post-commit message bucket persistence & unified cleanup (eliminates StrictMode double-writes & updater side-effects)
@@ -1572,7 +1600,7 @@ export default function App() {
     if (!isHydrated) return;
     const targetAcc = activeAccountIdRef.current;
     if (translationAccountScopeRef.current !== targetAcc) return;
-    secureSetItemSync(getScopedTranslationSettingsKey(targetAcc), translationSettings);
+    secureSetItemDebounced(getScopedTranslationSettingsKey(targetAcc), translationSettings, 250);
     if (isMemberAuthenticated) {
       syncTranslationSettingsApi(translationSettings, targetAcc).catch(() => {});
     }
@@ -1778,7 +1806,7 @@ export default function App() {
 
   useEffect(() => {
     if (!isHydrated) return;
-    secureSetItemSync('tg_pro_llm_config', customLLMConfig);
+    secureSetItemDebounced('tg_pro_llm_config', customLLMConfig, 250);
     if (isMemberAuthenticated) {
       syncCustomLLMConfigApi(customLLMConfig).catch(() => {});
     }
@@ -3144,6 +3172,10 @@ export default function App() {
     const currentMsgs = activeBackfillMessages;
     if (!currentMsgs || currentMsgs.length === 0) return;
 
+    let effectCancelled = false;
+    const startTimer = setTimeout(() => {
+    if (effectCancelled || controller.signal.aborted) return;
+
     const nowTs = Date.now();
     const targetNorm = normalizeLanguageCode(backfillTargetLang);
     const candidates: Array<{ msg: Message; rawText: string; dedupeKey: string }> = [];
@@ -3388,13 +3420,19 @@ export default function App() {
       } finally {
         if (backfillRunningTokenRef.current === runToken) {
           backfillRunningTokenRef.current = 0;
-          if (backfillPendingRescanRef.current && !controller.signal.aborted) {
+          if (backfillPendingRescanRef.current && !controller.signal.aborted && !effectCancelled) {
             backfillPendingRescanRef.current = false;
             setBackfillRetryNonce((n) => n + 1);
           }
         }
       }
     })();
+    }, 120);
+
+    return () => {
+      effectCancelled = true;
+      clearTimeout(startTimer);
+    };
   }, [
     isMemberAuthenticated,
     activeChatId,
@@ -4860,21 +4898,77 @@ export default function App() {
   }, [isMemberAuthenticated]);
 
   // Active Chats for currently selected account strictly isolated
-  const currentAccountChats = chats.filter((c) => {
-    if (!activeAccountId) return true;
-    return c.accountId === activeAccountId;
-  });
-  const currentChat = currentAccountChats.find((c) => c.id === activeChatId) || null;
-  const currentMessages = activeChatId ? getBucketMessages(messagesMap, activeAccountId, activeChatId) : [];
+  const currentAccountChats = useMemo(
+    () =>
+      chats.filter((c) => {
+        if (!activeAccountId) return true;
+        return c.accountId === activeAccountId;
+      }),
+    [chats, activeAccountId]
+  );
+  const currentChat = useMemo(
+    () => currentAccountChats.find((c) => c.id === activeChatId) || null,
+    [currentAccountChats, activeChatId]
+  );
+  const currentMessages = useMemo(
+    () => (activeChatId ? getBucketMessages(messagesMap, activeAccountId, activeChatId) : EMPTY_MESSAGES),
+    [messagesMap, activeAccountId, activeChatId]
+  );
 
-  // Handle select chat (Saved Messages connects to real 'me' / InputPeerSelf cloud dialog)
+  // Handle select chat (Saved Messages switches immediately, then syncs real 'me' / InputPeerSelf cloud dialog)
   const handleSelectChat = async (chatId: string) => {
     const callSeq = ++selectChatSeqRef.current;
     const targetAccId = activeAccountIdRef.current || activeAccountId;
 
     if (chatId === 'chat_saved_messages') {
+      const preExistingSaved = chatsRef.current.find(
+        (c) =>
+          c.accountId === targetAccId &&
+          (c.id === 'chat_saved_messages' ||
+            c.title === '我的收藏夹' ||
+            c.title === 'Saved Messages')
+      );
+      const immediateChatId = preExistingSaved?.id || 'chat_saved_messages';
+      let createdPlaceholder = false;
+      if (!preExistingSaved) {
+        createdPlaceholder = true;
+        const placeholderChat: Chat = {
+          id: 'chat_saved_messages',
+          accountId: targetAccId,
+          title: '我的收藏夹',
+          avatarBg: '#2481cc',
+          avatarInitial: '收',
+          isGroup: false,
+          lastMessage: '正在同步云端收藏夹消息...',
+          lastTime: '',
+          unreadCount: 0,
+          sourceLang: 'Auto',
+          targetLang: 'Auto',
+        };
+        setChats((prev) =>
+          prev.some((c) => c.accountId === targetAccId && c.id === 'chat_saved_messages')
+            ? prev
+            : [placeholderChat, ...prev]
+        );
+      }
+      activeChatIdRef.current = immediateChatId;
+      setActiveChatId(immediateChatId);
+
       const res = await fetchTelegramSavedMessagesApi(targetAccId);
       if (!res.ok || !res.chat) {
+        if (createdPlaceholder) {
+          setChats((prev) =>
+            prev.filter((c) => !(c.accountId === targetAccId && c.id === 'chat_saved_messages'))
+          );
+          if (
+            activeAccountIdRef.current === targetAccId &&
+            selectChatSeqRef.current === callSeq &&
+            activeChatIdRef.current === 'chat_saved_messages'
+          ) {
+            activeChatIdRef.current = null;
+            setActiveChatId(null);
+          }
+        }
         if (activeAccountIdRef.current === targetAccId && selectChatSeqRef.current === callSeq) {
           showCloudError(res.error || '当前账号未连接 Telegram，无法打开官方云端收藏夹 (Saved Messages)');
         }
@@ -5368,15 +5462,13 @@ export default function App() {
     if (targetAccountId) {
       recordDialogMutationOverride(targetAccountId, chatId, { title: trimmed });
     }
-    setChats((prev) => {
-      const updated = prev.map((c) =>
+    setChats((prev) =>
+      prev.map((c) =>
         c.id === chatId && (!targetAccountId || c.accountId === targetAccountId)
           ? { ...c, title: trimmed, hasCustomRemark: true }
           : c
-      );
-      secureSetItemSync('tg_pro_chats', updated);
-      return updated;
-    });
+      )
+    );
     let updatedExistingContact = false;
     setContacts((prev) => {
       let changed = false;
@@ -5527,8 +5619,8 @@ export default function App() {
     });
     setMessagesMap(nextMessagesMap);
     if (isHydrated) {
-      secureSetItemSync('tg_pro_accounts', remaining);
-      secureSetItemSync('tg_pro_chats', remainingChats);
+      void secureSetItemAsyncWithResult('tg_pro_accounts', remaining);
+      void secureSetItemAsyncWithResult('tg_pro_chats', remainingChats);
     }
 
     if (activeAccountId === id) {
@@ -5557,19 +5649,15 @@ export default function App() {
   // Update per-chat translation language pair strictly scoped to activeAccountId (never mutate global defaultSourceLang/defaultTargetLang)
   const handleUpdateChatLanguage = (chatId: string, sourceLang: string, targetLang: string) => {
     let curEnabled: boolean | undefined;
-    setChats((prev) => {
-      const updated = prev.map((c) => {
+    setChats((prev) =>
+      prev.map((c) => {
         if (c.id === chatId && (!activeAccountId || c.accountId === activeAccountId)) {
           curEnabled = c.translationEnabled;
           return { ...c, sourceLang, targetLang };
         }
         return c;
-      });
-      if (isHydrated) {
-        secureSetItemSync('tg_pro_chats', updated);
-      }
-      return updated;
-    });
+      })
+    );
     if (isMemberAuthenticated) {
       saveChatLanguagePrefApi(
         chatId,
@@ -5584,20 +5672,16 @@ export default function App() {
   const handleToggleChatTranslation = (chatId: string, enabled: boolean) => {
     let curSource = 'Auto';
     let curTarget = 'Auto';
-    setChats((prev) => {
-      const updated = prev.map((c) => {
+    setChats((prev) =>
+      prev.map((c) => {
         if (c.id === chatId && (!activeAccountId || c.accountId === activeAccountId)) {
           curSource = c.sourceLang || 'Auto';
           curTarget = c.targetLang || 'Auto';
           return { ...c, translationEnabled: enabled };
         }
         return c;
-      });
-      if (isHydrated) {
-        secureSetItemSync('tg_pro_chats', updated);
-      }
-      return updated;
-    });
+      })
+    );
     if (isMemberAuthenticated) {
       saveChatLanguagePrefApi(chatId, curSource, curTarget, activeAccountId, enabled).catch(() => {});
     }
@@ -6690,9 +6774,6 @@ export default function App() {
           }
           return patched;
         });
-        if (changed && isHydrated) {
-          secureSetItemSync('tg_pro_chats', next);
-        }
         return changed ? next : prev;
       });
     }
@@ -6995,6 +7076,205 @@ export default function App() {
     ? undefined
     : Math.max(180, viewportWidth - leftRailWidth - MIN_CHAT_AREA_WIDTH);
 
+  const activeAccountFolders = activeAccountId
+    ? (foldersByAccount[activeAccountId] || EMPTY_CHAT_FOLDERS)
+    : EMPTY_CHAT_FOLDERS;
+  const activeAccountChatOrder = activeAccountId
+    ? (chatOrderByAccount[activeAccountId] || EMPTY_CHAT_ORDER)
+    : EMPTY_CHAT_ORDER;
+  const activeChatHasMore = activeChatId
+    ? chatHasMoreMap[msgBucketKey(activeAccountId, activeChatId)] ??
+      Boolean(activeChatId.startsWith('tg_') || currentMessages.length >= 40)
+    : false;
+
+  const stableLeftSelectAccount = useStableCallback((accountId: string) => {
+    handleSelectAccount(accountId);
+    setIsMultiAccountOpen(false);
+  });
+  const stableLeftUpdateRemark = useStableCallback((accountId: string, remark: string) => {
+    const normalized = remark.trim();
+    handleUpdateCurrentAccount({ remark: normalized || undefined }, accountId);
+    if (isMemberAuthenticated) {
+      void saveTelegramAccountMetaApi({ accountId, remark: normalized }).catch(() => {});
+    }
+  });
+  const stableUpdateAccountMeta = useStableCallback(handleUpdateAccountMeta);
+  const stableCreateAccountGroup = useStableCallback(handleCreateAccountGroup);
+  const stableRenameAccountGroup = useStableCallback(handleRenameAccountGroup);
+  const stableDeleteAccountGroup = useStableCallback(handleDeleteAccountGroup);
+  const stableToggleAccountGroupCollapse = useStableCallback(handleToggleAccountGroupCollapse);
+  const stableReorderAccountGroups = useStableCallback(handleReorderAccountGroups);
+  const stableReorderAccounts = useStableCallback(handleReorderAccounts);
+  const stableMoveAccountToGroup = useStableCallback(handleMoveAccountToGroup);
+  const stableOpenMenuDrawer = useStableCallback(() => setIsTelegramMenuOpen(true));
+  const stableOpenTranslation = useStableCallback(() => toggleRightPanel('translation'));
+  const stableOpenAddAccount = useStableCallback(() => {
+    setReloginAccount(null);
+    setIsMultiAccountOpen(true);
+  });
+  const stableOpenCustomLLM = useStableCallback(() => toggleRightPanel('llm'));
+  const stableOpenCustomerMemory = useStableCallback(() => toggleRightPanel('memory'));
+  const stableOpenMasterVoiceprint = useStableCallback(() => toggleRightPanel('voice'));
+  const stableOpenKnowledgeEvolution = useStableCallback(() => toggleRightPanel('persona'));
+  const stableOpenVoiceprintDock = useStableCallback(() => openRightPanel('voice'));
+  const stableOpenAiAssistant = useStableCallback(() => {
+    if (isAiAssistantPoppedOut) {
+      void getDesktopAiWindowBridge()?.focus();
+      return;
+    }
+    setIsChatInfoOpen(false);
+    setActiveRightPanel(null);
+    if (isAiAssistantOpen && isAiAssistantMinimized) {
+      setIsAiAssistantMinimized(false);
+      setAiAssistantRestoreSignal((n) => n + 1);
+      return;
+    }
+    setIsAiAssistantOpen((prev) => {
+      const next = !prev;
+      if (!next) setIsAiAssistantMinimized(false);
+      return next;
+    });
+  });
+  const stableSetLeftActiveTab = useStableCallback((tab: 'chats' | 'translation' | 'memory' | 'llm' | 'voice' | 'persona') => {
+    if (tab === 'chats') {
+      setActiveRightPanel(null);
+      setIsMultiAccountOpen(false);
+      if (!isAiAssistantPoppedOut) {
+        setIsAiAssistantOpen(false);
+        setIsAiAssistantMinimized(false);
+      }
+    }
+  });
+
+  const stableSelectChat = useStableCallback(handleSelectChat);
+  const stableTogglePinChat = useStableCallback(handleTogglePinChat);
+  const stableToggleArchiveChat = useStableCallback(handleToggleArchiveChat);
+  const stableToggleMuteChat = useStableCallback(handleToggleMuteChat);
+  const stableToggleMarkUnread = useStableCallback(handleToggleMarkUnread);
+  const stableDeleteChat = useStableCallback(handleDeleteChat);
+  const stableOpenContacts = useStableCallback(() => setIsContactsOpen(true));
+  const stableReconnectTelegram = useStableCallback(handleReconnectTelegram);
+  const stableReloginCurrentAccount = useStableCallback(() => {
+    if (currentAccount) {
+      setReloginAccount(currentAccount);
+    }
+    setIsMultiAccountOpen(true);
+  });
+  const stableRefreshMediaUrls = useStableCallback(handleRefreshMediaUrls);
+  const stableReorderChats = useStableCallback(handleReorderChats);
+  const stableResetChatOrder = useStableCallback(handleResetChatOrder);
+
+  const stableSendMessage = useStableCallback(handleSendMessage);
+  const stableCloseChat = useStableCallback(() => setActiveChatId(null));
+  const stableUpdateChatLanguage = useStableCallback(handleUpdateChatLanguage);
+  const stableToggleChatTranslation = useStableCallback(handleToggleChatTranslation);
+  const stableToggleChatMemoryPanel = useStableCallback(toggleChatMemoryPanel);
+  const stableChatInfoOpenChange = useStableCallback((open: boolean) => {
+    setIsChatInfoOpen(open);
+    if (open) {
+      setActiveRightPanel(null);
+    }
+  });
+  const stableDeleteMessage = useStableCallback(handleDeleteMessage);
+  const stableBatchDeleteMessages = useStableCallback(handleBatchDeleteMessages);
+  const stableForwardMessages = useStableCallback(handleForwardMessages);
+  const stableLoadOlderMessages = useStableCallback(handleLoadOlderMessages);
+  const stableEditMessage = useStableCallback(handleEditMessage);
+  const stableUpdateMessage = useStableCallback(handleUpdateMessage);
+  const stableRetranslateMessage = useStableCallback(handleRetranslateMessage);
+  const stableRetryMessage = useStableCallback(handleRetryMessage);
+  const stableResumePausedMessage = useStableCallback(handleResumePausedMessage);
+  const stableDiscardPausedMessage = useStableCallback(handleDiscardPausedMessage);
+  const stableToggleReaction = useStableCallback(handleToggleReaction);
+  const stableTogglePinMessage = useStableCallback(handleTogglePinMessage);
+  const stableClearHistory = useStableCallback(handleClearHistory);
+  const stableUpdateChatTitle = useStableCallback(handleUpdateChatTitle);
+  const stableAddContact = useStableCallback(handleAddContact);
+  const stableCreateGroup = useStableCallback(handleCreateGroup);
+  const stableSelectChatAsync = useStableCallback((targetChatId: string) => {
+    void handleSelectChat(targetChatId);
+  });
+  const stableRemoveContact = useStableCallback(handleRemoveContact);
+  const stableChatInfoUpdated = useStableCallback((chatId: string, patch: Partial<Chat>) => {
+    const existingChat = chatsRef.current.find(
+      (c) => c.id === chatId && (!activeAccountId || c.accountId === activeAccountId)
+    );
+    const preserveCustomTitle = Boolean(existingChat?.hasCustomRemark);
+    setChats((prev) =>
+      prev.map((c) => {
+        if (c.id === chatId && (!activeAccountId || c.accountId === activeAccountId)) {
+          if (c.hasCustomRemark) {
+            const { title: _ignoredTitle, ...restPatch } = patch;
+            return { ...c, ...restPatch };
+          }
+          return { ...c, ...patch };
+        }
+        return c;
+      })
+    );
+    if (typeof patch.isBlocked === 'boolean') {
+      handleContactBlockChanged(chatId, patch.isBlocked);
+    }
+    if (!preserveCustomTitle && typeof patch.title === 'string' && patch.title.trim()) {
+      const nextTitle = patch.title.trim();
+      setContacts((prev) => {
+        let changed = false;
+        const next = prev.map((ct) => {
+          if (ct.id === chatId && ct.name !== nextTitle) {
+            changed = true;
+            return { ...ct, name: nextTitle };
+          }
+          return ct;
+        });
+        if (changed) saveScopedContacts(next, activeAccountIdRef.current);
+        return changed ? next : prev;
+      });
+    }
+  });
+  const stableMessagesSynced = useStableCallback((synced: Message[], meta?: {
+    hasMore?: boolean;
+    readOutboxMaxId?: number;
+    fromLocalFallback?: boolean;
+    chatId?: string;
+    accountId?: string;
+  }) => {
+    const syncChatId = meta?.chatId || activeChatIdRef.current || activeChatId;
+    const syncAccountId = meta?.accountId || activeAccountIdRef.current || activeAccountId;
+    if (syncChatId) {
+      const bucketKey = msgBucketKey(syncAccountId, syncChatId);
+      if (meta && typeof meta.hasMore === 'boolean') {
+        setChatHasMoreMap((prev) => ({ ...prev, [bucketKey]: meta.hasMore! }));
+      }
+      if (meta && typeof meta.readOutboxMaxId === 'number') {
+        setChats((prev) =>
+          prev.map((c) =>
+            c.id === syncChatId && (!syncAccountId || c.accountId === syncAccountId)
+              ? { ...c, readOutboxMaxId: Math.max(c.readOutboxMaxId || 0, meta.readOutboxMaxId!) }
+              : c
+          )
+        );
+      }
+      if (synced.length > 0 || !meta?.fromLocalFallback) {
+        setMessagesMap((prev) => {
+          const base = getBucketMessages(prev, syncAccountId, syncChatId);
+          const merged = mergeCloudMessagesWithLocal(
+            base.length > 0 ? base : getLocalMessages(syncChatId, syncAccountId),
+            synced,
+            {
+              accountId: syncAccountId,
+              chatId: syncChatId,
+              allowEmptyCloudPrune: !meta?.fromLocalFallback,
+            }
+          );
+          return {
+            ...prev,
+            [bucketKey]: merged,
+          };
+        });
+      }
+    }
+  });
+
   return (
     <div className="flex h-screen w-screen overflow-hidden bg-[#f4f7fb] text-[#0f172a] dark:bg-[#05080f] dark:text-[#eef4fb] aurora:bg-[#081116] aurora:text-[#ecf6f8] linen:bg-[#ddd2bc] linen:text-[#2b2118] font-sans antialiased transition-colors">
       {/* 1. Leftmost Features & Multi-Account Activity Rail (120px default / 68px compact) */}
@@ -7003,66 +7283,28 @@ export default function App() {
         accounts={accountsWithUnread}
         accountGroups={accountGroups}
         activeAccountId={activeAccountId}
-        onSelectAccount={(accountId) => {
-          handleSelectAccount(accountId);
-          setIsMultiAccountOpen(false);
-        }}
-        onUpdateAccountRemark={(accountId, remark) => {
-          const normalized = remark.trim();
-          handleUpdateCurrentAccount({ remark: normalized || undefined }, accountId);
-          if (isMemberAuthenticated) {
-            void saveTelegramAccountMetaApi({ accountId, remark: normalized }).catch(() => {});
-          }
-        }}
-        onUpdateAccountMeta={handleUpdateAccountMeta}
-        onCreateAccountGroup={handleCreateAccountGroup}
-        onRenameAccountGroup={handleRenameAccountGroup}
-        onDeleteAccountGroup={handleDeleteAccountGroup}
-        onToggleAccountGroupCollapse={handleToggleAccountGroupCollapse}
-        onReorderAccountGroups={handleReorderAccountGroups}
-        onReorderAccounts={handleReorderAccounts}
-        onMoveAccountToGroup={handleMoveAccountToGroup}
-        onOpenMenuDrawer={() => setIsTelegramMenuOpen(true)}
-        onOpenTranslation={() => toggleRightPanel('translation')}
-        onOpenAddAccount={() => {
-          setReloginAccount(null);
-          setIsMultiAccountOpen(true);
-        }}
-        onOpenCustomLLM={() => toggleRightPanel('llm')}
-        onOpenCustomerMemory={() => toggleRightPanel('memory')}
-        onOpenMasterVoiceprint={() => toggleRightPanel('voice')}
-        onOpenKnowledgeEvolution={() => toggleRightPanel('persona')}
-        onOpenAiAssistant={() => {
-          if (isAiAssistantPoppedOut) {
-            void getDesktopAiWindowBridge()?.focus();
-            return;
-          }
-          setIsChatInfoOpen(false);
-          setActiveRightPanel(null);
-          if (isAiAssistantOpen && isAiAssistantMinimized) {
-            setIsAiAssistantMinimized(false);
-            setAiAssistantRestoreSignal((n) => n + 1);
-            return;
-          }
-          setIsAiAssistantOpen((prev) => {
-            const next = !prev;
-            if (!next) setIsAiAssistantMinimized(false);
-            return next;
-          });
-        }}
+        onSelectAccount={stableLeftSelectAccount}
+        onUpdateAccountRemark={stableLeftUpdateRemark}
+        onUpdateAccountMeta={stableUpdateAccountMeta}
+        onCreateAccountGroup={stableCreateAccountGroup}
+        onRenameAccountGroup={stableRenameAccountGroup}
+        onDeleteAccountGroup={stableDeleteAccountGroup}
+        onToggleAccountGroupCollapse={stableToggleAccountGroupCollapse}
+        onReorderAccountGroups={stableReorderAccountGroups}
+        onReorderAccounts={stableReorderAccounts}
+        onMoveAccountToGroup={stableMoveAccountToGroup}
+        onOpenMenuDrawer={stableOpenMenuDrawer}
+        onOpenTranslation={stableOpenTranslation}
+        onOpenAddAccount={stableOpenAddAccount}
+        onOpenCustomLLM={stableOpenCustomLLM}
+        onOpenCustomerMemory={stableOpenCustomerMemory}
+        onOpenMasterVoiceprint={stableOpenMasterVoiceprint}
+        onOpenKnowledgeEvolution={stableOpenKnowledgeEvolution}
+        onOpenAiAssistant={stableOpenAiAssistant}
         isAiAssistantOpen={isAiAssistantOpen}
         isMasterVoiceActive={isMasterVoiceActive}
         activeTab={activeRightPanel || 'chats'}
-        setActiveTab={(tab) => {
-          if (tab === 'chats') {
-            setActiveRightPanel(null);
-            setIsMultiAccountOpen(false);
-            if (!isAiAssistantPoppedOut) {
-              setIsAiAssistantOpen(false);
-              setIsAiAssistantMinimized(false);
-            }
-          }
-        }}
+        setActiveTab={stableSetLeftActiveTab}
       />
 
       {/* Main Workspace Area right of LeftSidebar (Top Recovery Banner + ChatList + ChatArea + RightDock) */}
@@ -7177,32 +7419,27 @@ export default function App() {
         <ChatList
           chats={currentAccountChats}
           activeChatId={activeChatId}
-          onSelectChat={handleSelectChat}
-          onOpenMenuDrawer={() => setIsTelegramMenuOpen(true)}
+          onSelectChat={stableSelectChat}
+          onOpenMenuDrawer={stableOpenMenuDrawer}
           searchQuery={searchQuery}
           setSearchQuery={setSearchQuery}
-          onTogglePinChat={handleTogglePinChat}
-          onToggleArchiveChat={handleToggleArchiveChat}
-          onToggleMuteChat={handleToggleMuteChat}
-          onToggleMarkUnread={handleToggleMarkUnread}
-          onDeleteChat={handleDeleteChat}
-          onNewChatClick={() => setIsContactsOpen(true)}
+          onTogglePinChat={stableTogglePinChat}
+          onToggleArchiveChat={stableToggleArchiveChat}
+          onToggleMuteChat={stableToggleMuteChat}
+          onToggleMarkUnread={stableToggleMarkUnread}
+          onDeleteChat={stableDeleteChat}
+          onNewChatClick={stableOpenContacts}
           currentAccountStatus={currentAccount?.status}
           currentAccountOfflineReason={currentAccount ? offlineReasonByAccount[currentAccount.id] : null}
           isReconnecting={isReconnectingAccount}
-          onReconnectAccount={handleReconnectTelegram}
-          onReloginCurrentAccount={() => {
-            if (currentAccount) {
-              setReloginAccount(currentAccount);
-            }
-            setIsMultiAccountOpen(true);
-          }}
-          onRefreshMediaUrls={handleRefreshMediaUrls}
-          customFolders={activeAccountId ? (foldersByAccount[activeAccountId] || []) : []}
+          onReconnectAccount={stableReconnectTelegram}
+          onReloginCurrentAccount={stableReloginCurrentAccount}
+          onRefreshMediaUrls={stableRefreshMediaUrls}
+          customFolders={activeAccountFolders}
           contactChatIds={contactChatIdSet}
-          customChatOrder={activeAccountId ? (chatOrderByAccount[activeAccountId] || []) : []}
-          onReorderChats={handleReorderChats}
-          onResetChatOrder={handleResetChatOrder}
+          customChatOrder={activeAccountChatOrder}
+          onReorderChats={stableReorderChats}
+          onResetChatOrder={stableResetChatOrder}
           maxWidthCap={maxChatListWidthCap}
           hiddenOnNarrow={isNarrowViewport && Boolean(activeChatId)}
           expandOnNarrow={isNarrowViewport && !activeChatId}
@@ -7213,131 +7450,51 @@ export default function App() {
           chat={currentChat}
           messages={currentMessages}
           translationSettings={translationSettings}
-          onSendMessage={handleSendMessage}
-          onCloseChat={() => setActiveChatId(null)}
-          onUpdateChatLanguage={handleUpdateChatLanguage}
-          onToggleChatTranslation={handleToggleChatTranslation}
-          onOpenTranslation={() => toggleRightPanel('translation')}
-          onOpenCustomLLM={() => toggleRightPanel('llm')}
+          onSendMessage={stableSendMessage}
+          onCloseChat={stableCloseChat}
+          onUpdateChatLanguage={stableUpdateChatLanguage}
+          onToggleChatTranslation={stableToggleChatTranslation}
+          onOpenTranslation={stableOpenTranslation}
+          onOpenCustomLLM={stableOpenCustomLLM}
           customLLMConfig={customLLMConfig}
           currentAccountId={activeAccountId}
-          onOpenKnowledgeEvolution={() => toggleRightPanel('persona')}
-          onOpenVoiceprintConfig={() => openRightPanel('voice')}
-          onOpenCustomerMemory={toggleChatMemoryPanel}
+          onOpenKnowledgeEvolution={stableOpenKnowledgeEvolution}
+          onOpenVoiceprintConfig={stableOpenVoiceprintDock}
+          onOpenCustomerMemory={stableToggleChatMemoryPanel}
           isCustomerMemoryOpen={activeRightPanel === 'memory'}
           activeRightPanel={activeRightPanel}
           isChatInfoOpenExternal={isChatInfoOpen}
-          onChatInfoOpenChange={(open) => {
-            setIsChatInfoOpen(open);
-            if (open) {
-              setActiveRightPanel(null);
-            }
-          }}
-          onDeleteMessage={handleDeleteMessage}
-          onBatchDeleteMessages={handleBatchDeleteMessages}
-          onForwardMessages={handleForwardMessages}
+          onChatInfoOpenChange={stableChatInfoOpenChange}
+          onDeleteMessage={stableDeleteMessage}
+          onBatchDeleteMessages={stableBatchDeleteMessages}
+          onForwardMessages={stableForwardMessages}
           availableChats={currentAccountChats}
-          hasMoreHistory={
-            activeChatId
-              ? chatHasMoreMap[msgBucketKey(activeAccountId, activeChatId)] ??
-                Boolean(activeChatId.startsWith('tg_') || currentMessages.length >= 40)
-              : false
-          }
-          onLoadOlderMessages={handleLoadOlderMessages}
-          onRefreshMediaUrls={handleRefreshMediaUrls}
-          onEditMessage={handleEditMessage}
-          onUpdateMessage={handleUpdateMessage}
-          onRetranslateMessage={handleRetranslateMessage}
-          onRetryMessage={handleRetryMessage}
-          onResumePausedMessage={handleResumePausedMessage}
-          onDiscardPausedMessage={handleDiscardPausedMessage}
-          onToggleReaction={handleToggleReaction}
-          onTogglePinMessage={handleTogglePinMessage}
-          onClearHistory={handleClearHistory}
-          onToggleMuteChat={handleToggleMuteChat}
-          onTogglePinChat={handleTogglePinChat}
-          onUpdateChatTitle={handleUpdateChatTitle}
-          onAddContact={handleAddContact}
-          onJoinOrOpenChat={handleCreateGroup}
-          onSelectChat={(targetChatId) => void handleSelectChat(targetChatId)}
-          onRemoveContact={handleRemoveContact}
-          onChatInfoUpdated={(chatId, patch) => {
-            const existingChat = chatsRef.current.find(
-              (c) => c.id === chatId && (!activeAccountId || c.accountId === activeAccountId)
-            );
-            const preserveCustomTitle = Boolean(existingChat?.hasCustomRemark);
-            setChats((prev) =>
-              prev.map((c) => {
-                if (c.id === chatId && (!activeAccountId || c.accountId === activeAccountId)) {
-                  if (c.hasCustomRemark) {
-                    const { title: _ignoredTitle, ...restPatch } = patch;
-                    return { ...c, ...restPatch };
-                  }
-                  return { ...c, ...patch };
-                }
-                return c;
-              })
-            );
-            if (typeof patch.isBlocked === 'boolean') {
-              handleContactBlockChanged(chatId, patch.isBlocked);
-            }
-            if (!preserveCustomTitle && typeof patch.title === 'string' && patch.title.trim()) {
-              const nextTitle = patch.title.trim();
-              setContacts((prev) => {
-                let changed = false;
-                const next = prev.map((ct) => {
-                  if (ct.id === chatId && ct.name !== nextTitle) {
-                    changed = true;
-                    return { ...ct, name: nextTitle };
-                  }
-                  return ct;
-                });
-                if (changed) saveScopedContacts(next, activeAccountIdRef.current);
-                return changed ? next : prev;
-              });
-            }
-          }}
+          hasMoreHistory={activeChatHasMore}
+          onLoadOlderMessages={stableLoadOlderMessages}
+          onRefreshMediaUrls={stableRefreshMediaUrls}
+          onEditMessage={stableEditMessage}
+          onUpdateMessage={stableUpdateMessage}
+          onRetranslateMessage={stableRetranslateMessage}
+          onRetryMessage={stableRetryMessage}
+          onResumePausedMessage={stableResumePausedMessage}
+          onDiscardPausedMessage={stableDiscardPausedMessage}
+          onToggleReaction={stableToggleReaction}
+          onTogglePinMessage={stableTogglePinMessage}
+          onClearHistory={stableClearHistory}
+          onToggleMuteChat={stableToggleMuteChat}
+          onTogglePinChat={stableTogglePinChat}
+          onUpdateChatTitle={stableUpdateChatTitle}
+          onAddContact={stableAddContact}
+          onJoinOrOpenChat={stableCreateGroup}
+          onSelectChat={stableSelectChatAsync}
+          onRemoveContact={stableRemoveContact}
+          onChatInfoUpdated={stableChatInfoUpdated}
           sendWithEnter={clientPrefs.sendWithEnter}
-          onMessagesSynced={(synced, meta) => {
-            const syncChatId = meta?.chatId || activeChatIdRef.current || activeChatId;
-            const syncAccountId = meta?.accountId || activeAccountIdRef.current || activeAccountId;
-            if (syncChatId) {
-              const bucketKey = msgBucketKey(syncAccountId, syncChatId);
-              if (meta && typeof meta.hasMore === 'boolean') {
-                setChatHasMoreMap((prev) => ({ ...prev, [bucketKey]: meta.hasMore! }));
-              }
-              if (meta && typeof meta.readOutboxMaxId === 'number') {
-                setChats((prev) =>
-                  prev.map((c) =>
-                    c.id === syncChatId && (!syncAccountId || c.accountId === syncAccountId)
-                      ? { ...c, readOutboxMaxId: Math.max(c.readOutboxMaxId || 0, meta.readOutboxMaxId!) }
-                      : c
-                  )
-                );
-              }
-              if (synced.length > 0 || !meta?.fromLocalFallback) {
-                setMessagesMap((prev) => {
-                  const base = getBucketMessages(prev, syncAccountId, syncChatId);
-                  const merged = mergeCloudMessagesWithLocal(
-                    base.length > 0 ? base : getLocalMessages(syncChatId, syncAccountId),
-                    synced,
-                    {
-                      accountId: syncAccountId,
-                      chatId: syncChatId,
-                      allowEmptyCloudPrune: !meta?.fromLocalFallback,
-                    }
-                  );
-                  return {
-                    ...prev,
-                    [bucketKey]: merged,
-                  };
-                });
-              }
-            }
-          }}
+          onMessagesSynced={stableMessagesSynced}
         />
 
         {/* 3.45 Standalone Detached AI助手 Desktop Overlay */}
+        {(isAiAssistantOpen || isAiAssistantPoppedOut) && (
         <AiAssistantModal
           isOpen={isAiAssistantOpen}
           restoreSignal={aiAssistantRestoreSignal}
@@ -7357,8 +7514,10 @@ export default function App() {
           operatorInitial={currentAccount?.avatarInitial || '我'}
           appearance={appearance}
         />
+        )}
 
         {/* 3.5 Unified Feature Modal Page Overlay (Standalone 5-Tab Modal) */}
+        {Boolean(activeRightPanel) && (
         <UnifiedRightDock
           activePanel={activeRightPanel}
           onSelectPanel={openRightPanel}
@@ -7395,10 +7554,12 @@ export default function App() {
           isMasterVoiceActive={isMasterVoiceActive}
           currentAccount={currentAccount}
         />
+        )}
         </div>
       </div>
 
       {/* 4. Telegram Slide-Out Menu Drawer (Slide-out from Left) */}
+      {isTelegramMenuOpen && (
       <TelegramMenuDrawer
         isOpen={isTelegramMenuOpen}
         onClose={() => setIsTelegramMenuOpen(false)}
@@ -7432,8 +7593,10 @@ export default function App() {
           setIsUpdateModalOpen(true);
         }}
       />
+      )}
 
       {/* 5. Multi-Account Switcher & Login Modal */}
+      {isMultiAccountOpen && (
       <MultiAccountModal
         isOpen={isMultiAccountOpen}
         onClose={() => {
@@ -7452,8 +7615,10 @@ export default function App() {
         onDeleteAccountGroup={handleDeleteAccountGroup}
         reloginAccount={reloginAccount}
       />
+      )}
 
       {/* 6. Local Data & Zero-DB Security Center Modal */}
+      {isDatabaseOpen && (
       <DatabaseModal
         isOpen={isDatabaseOpen}
         onClose={() => setIsDatabaseOpen(false)}
@@ -7471,8 +7636,10 @@ export default function App() {
           void rehydrateFromLocalStorage(true);
         }}
       />
+      )}
 
       {/* 7. Centralized Internal System Settings Modal */}
+      {isSystemSettingsOpen && (
       <SystemSettingsModal
         isOpen={isSystemSettingsOpen}
         onClose={() => setIsSystemSettingsOpen(false)}
@@ -7485,8 +7652,10 @@ export default function App() {
           setIsUpdateModalOpen(true);
         }}
       />
+      )}
 
       {/* 14. Telegram New Group Dialog */}
+      {isNewGroupOpen && (
       <TelegramNewGroupModal
         isOpen={isNewGroupOpen}
         onClose={() => setIsNewGroupOpen(false)}
@@ -7495,16 +7664,20 @@ export default function App() {
         onCreateGroup={handleCreateGroup}
         onSyncContacts={handleSyncContacts}
       />
+      )}
 
       {/* 15. Telegram New Channel Dialog */}
+      {isNewChannelOpen && (
       <TelegramNewChannelModal
         isOpen={isNewChannelOpen}
         onClose={() => setIsNewChannelOpen(false)}
         currentAccountId={activeAccountId}
         onCreateChannel={handleCreateChannel}
       />
+      )}
 
       {/* 16. Telegram Contacts Manager Modal */}
+      {isContactsOpen && (
       <TelegramContactsModal
         isOpen={isContactsOpen}
         onClose={() => setIsContactsOpen(false)}
@@ -7517,15 +7690,19 @@ export default function App() {
         onRenameContact={handleUpdateChatTitle}
         onStartChatWithContact={handleStartChatWithContact}
       />
+      )}
 
       {/* 17. Telegram Call Records Modal (read-only archive, strictly scoped by active account; VoIP dialing offlined) */}
+      {isCallsOpen && (
       <TelegramCallsModal
         isOpen={isCallsOpen}
         onClose={() => setIsCallsOpen(false)}
         callRecords={callRecords.filter((rec) => !activeAccountId || rec.accountId === activeAccountId)}
       />
+      )}
 
       {/* 18. Official Telegram Account & Client Settings Modal */}
+      {isTelegramSettingsOpen && (
       <TelegramSettingsModal
         isOpen={isTelegramSettingsOpen}
         refreshSignal={telegramSettingsRefreshNonce}
@@ -7548,8 +7725,10 @@ export default function App() {
           setFoldersByAccount((prev) => ({ ...prev, [targetId]: folders }));
         }}
       />
+      )}
 
       {/* 22. Member Authentication Gate Modal */}
+      {!isAuthChecking && !isMemberAuthenticated && (
       <MemberAuthModal
         isOpen={!isAuthChecking && !isMemberAuthenticated}
         totalMembers={totalMembersCount}
@@ -7580,6 +7759,7 @@ export default function App() {
             .catch(() => {});
         }}
       />
+      )}
 
       {/* Non-blocking Telegram Cloud Action Error Toast */}
       {cloudActionToast && (
@@ -7658,7 +7838,7 @@ export default function App() {
         };
 
         return (
-          <div className="fixed inset-0 z-[70] bg-black/55 backdrop-blur-xs flex items-center justify-center p-4 select-none">
+          <div className="fixed inset-0 z-[70] bg-black/65 flex items-center justify-center p-4 select-none">
             <div className="w-full max-w-md bg-white dark:bg-[#0b131f] aurora:bg-[#0c151b] linen:bg-[#f8f2e7] border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] linen:border-[#d5c6ae] rounded-2xl shadow-2xl linen:shadow-sm overflow-hidden text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118]">
               <div className="px-5 py-4 border-b border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] linen:border-[#dfd2bc] bg-[#f8fafc] dark:bg-[#0d1726] aurora:bg-[#0e1920] linen:bg-[#f0e6d5] flex items-center justify-between">
                 <div className="text-sm font-bold">

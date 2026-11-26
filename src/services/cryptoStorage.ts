@@ -23,6 +23,8 @@ interface ElectronCryptoBridge {
   getStatus: () => { isElectron: boolean; hardwareProtected: boolean; storageMode: string };
   encryptSync: (plaintext: string) => string | null;
   decryptSync: (ciphertext: string) => string | null;
+  encryptAsync?: (plaintext: string) => Promise<string | null>;
+  decryptAsync?: (ciphertext: string) => Promise<string | null>;
   migrateLegacySeed: (legacySeedBase64: string) => boolean;
   purgeMasterKey: () => boolean;
 }
@@ -45,6 +47,7 @@ const failedAsyncWriteKeys = new Map<string, string>();
 const lastCommittedCiphertext = new Map<string, string>();
 const keyWriteSeq = new Map<string, number>();
 let cryptoStorageEpoch = 0;
+const debouncedPersistTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
 export interface CryptoSyncWriteResult {
   ok: boolean;
@@ -514,7 +517,10 @@ export async function encryptDataAsync(data: any): Promise<string> {
 
   const bridge = getElectronBridge();
   if (bridge) {
-    const gcmCipher = bridge.encryptSync(jsonStr);
+    const gcmCipher =
+      typeof bridge.encryptAsync === 'function'
+        ? await bridge.encryptAsync(jsonStr)
+        : bridge.encryptSync(jsonStr);
     if (gcmCipher && isTrueAesGcmCiphertext(gcmCipher)) {
       return gcmCipher;
     }
@@ -549,7 +555,19 @@ export async function encryptDataAsync(data: any): Promise<string> {
 export async function decryptDataAsync<T = any>(encryptedStr: string | null): Promise<T | null> {
   if (!encryptedStr) return null;
 
-  // Try sync decrypt first (covers Electron DPAPI AES-GCM, s256, sync, raw, and plain JSON)
+  if (isTrueAesGcmCiphertext(encryptedStr)) {
+    const bridge = getElectronBridge();
+    if (bridge && typeof bridge.decryptAsync === 'function') {
+      try {
+        const plain = await bridge.decryptAsync(encryptedStr);
+        if (plain !== null) {
+          return parseDecodedValue<T>(plain);
+        }
+      } catch {}
+    }
+  }
+
+  // Try sync decrypt (covers Electron DPAPI sync fallback, s256, sync, raw, and plain JSON)
   const syncResult = decryptDataSync<T>(encryptedStr);
   if (syncResult !== null) return syncResult;
 
@@ -685,6 +703,21 @@ function enqueueAsyncAesGcmPersist(
 export async function flushPendingCryptoWritesWithResult(targetKeys?: string[]): Promise<CryptoFlushResult> {
   const startEpoch = cryptoStorageEpoch;
   const scopedList = Array.isArray(targetKeys) && targetKeys.length > 0 ? Array.from(new Set(targetKeys)) : null;
+
+  // Promote any matching debounced writes so flush verifies latest in-memory values
+  const keysToPromote = scopedList
+    ? scopedList.filter((k) => debouncedPersistTimers.has(k))
+    : Array.from(debouncedPersistTimers.keys());
+  for (const k of keysToPromote) {
+    const timer = debouncedPersistTimers.get(k);
+    if (timer) {
+      clearTimeout(timer);
+      debouncedPersistTimers.delete(k);
+    }
+    if (inMemoryCache.has(k)) {
+      void secureSetItemAsyncWithResult(k, inMemoryCache.get(k));
+    }
+  }
 
   // Drain any writes queued for these keys (or all keys if unscoped)
   for (let round = 0; round < 4; round++) {
@@ -835,7 +868,58 @@ export function secureSetItemSyncWithResult(storageKey: string, data: any): Cryp
  * - In insecure context without DPAPI/WebCrypto: keeps in memory only; never writes downgraded XOR ciphertext.
  */
 export function secureSetItemSync(storageKey: string, data: any): void {
+  const pendingTimer = debouncedPersistTimers.get(storageKey);
+  if (pendingTimer) {
+    clearTimeout(pendingTimer);
+    debouncedPersistTimers.delete(storageKey);
+  }
   void secureSetItemSyncWithResult(storageKey, data);
+}
+
+/**
+ * Updates in-memory cache synchronously and persists via non-blocking async AES-256-GCM
+ * when Electron async IPC or WebCrypto is available (falls back to sync bridge if async is absent).
+ */
+export function secureSetItemAsyncWithResult(storageKey: string, data: any): CryptoSyncWriteResult {
+  if (typeof window === 'undefined' && typeof localStorage === 'undefined') {
+    return { ok: false, mode: 'none', error: 'storage unavailable' };
+  }
+  const pendingTimer = debouncedPersistTimers.get(storageKey);
+  if (pendingTimer) {
+    clearTimeout(pendingTimer);
+    debouncedPersistTimers.delete(storageKey);
+  }
+  inMemoryCache.set(storageKey, data);
+  failedAsyncWriteKeys.delete(storageKey);
+
+  const bridge = getElectronBridge();
+  if (bridge && typeof bridge.encryptAsync === 'function') {
+    const outcomePromise = enqueueAsyncAesGcmPersist(storageKey, data);
+    return {
+      ok: true,
+      mode: 'dpapi',
+      writePromise: outcomePromise.then((res) => Boolean(res.ok && !res.aborted)),
+    };
+  }
+  return secureSetItemSyncWithResult(storageKey, data);
+}
+
+/**
+ * Updates in-memory cache immediately and coalesces frequent writes into a single async encrypted flush.
+ */
+export function secureSetItemDebounced(storageKey: string, data: any, delayMs = 250): void {
+  if (typeof window === 'undefined' && typeof localStorage === 'undefined') return;
+  inMemoryCache.set(storageKey, data);
+  failedAsyncWriteKeys.delete(storageKey);
+  const prevTimer = debouncedPersistTimers.get(storageKey);
+  if (prevTimer) clearTimeout(prevTimer);
+  const capturedEpoch = cryptoStorageEpoch;
+  const timer = setTimeout(() => {
+    debouncedPersistTimers.delete(storageKey);
+    if (capturedEpoch !== cryptoStorageEpoch || !inMemoryCache.has(storageKey)) return;
+    void secureSetItemAsyncWithResult(storageKey, inMemoryCache.get(storageKey));
+  }, Math.max(0, delayMs));
+  debouncedPersistTimers.set(storageKey, timer);
 }
 
 /**
@@ -872,6 +956,11 @@ export async function secureGetItemAsync<T = any>(storageKey: string): Promise<T
  */
 export function secureRemoveItem(storageKey: string): void {
   keyWriteSeq.set(storageKey, (keyWriteSeq.get(storageKey) || 0) + 1);
+  const pendingTimer = debouncedPersistTimers.get(storageKey);
+  if (pendingTimer) {
+    clearTimeout(pendingTimer);
+    debouncedPersistTimers.delete(storageKey);
+  }
   inMemoryCache.delete(storageKey);
   pendingAsyncWrites.delete(storageKey);
   pendingAsyncWriteOutcomes.delete(storageKey);
@@ -890,6 +979,10 @@ export function secureRemoveItem(storageKey: string): void {
  */
 export function clearCryptoStorageCache(): void {
   cryptoStorageEpoch++;
+  for (const timer of debouncedPersistTimers.values()) {
+    clearTimeout(timer);
+  }
+  debouncedPersistTimers.clear();
   inMemoryCache.clear();
   pendingAsyncWrites.clear();
   pendingAsyncWriteOutcomes.clear();

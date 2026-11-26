@@ -322,7 +322,7 @@ export const LeftSidebar: React.FC<LeftSidebarProps> = React.memo(({
   return (
     <aside
       ref={asideRef}
-      className={`${compact ? 'w-[68px] py-2.5' : 'w-[120px] py-3.5'} bg-[#f8fafc]/95 dark:bg-[#060b13]/95 aurora:bg-[#0b1318]/95 linen:hs-linen-rail-bg backdrop-blur-md border-r border-[#e2e8f0] dark:border-[#162436] aurora:border-[#182b34] linen:border-[#5d4c3e] flex flex-col items-center shrink-0 select-none h-full z-30 relative transition-[width,colors] duration-150 text-[#475569] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#f5ede2]`}
+      className={`${compact ? 'w-[68px] py-2.5' : 'w-[120px] py-3.5'} bg-[#f8fafc] dark:bg-[#060b13] aurora:bg-[#0b1318] linen:hs-linen-rail-bg border-r border-[#e2e8f0] dark:border-[#162436] aurora:border-[#182b34] linen:border-[#5d4c3e] flex flex-col items-center shrink-0 select-none h-full z-30 relative transition-[width,colors] duration-150 text-[#475569] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#f5ede2]`}
     >
       {/* 1. Top Section: HumanSense Brand Logo + Main Menu + Feature Activity Rail */}
       <div ref={topSectionRef} className={`flex flex-col items-center w-full ${compact ? 'gap-1.5' : 'gap-2'} shrink-0`}>

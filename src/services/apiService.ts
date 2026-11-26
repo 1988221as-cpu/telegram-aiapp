@@ -27,6 +27,7 @@ import {
   secureGetItemSync,
   secureSetItemSync,
   secureSetItemSyncWithResult,
+  secureSetItemAsyncWithResult,
   flushPendingCryptoWritesWithResult,
   getCryptoStorageEpoch,
   secureRemoveItem,
@@ -3753,16 +3754,34 @@ function buildDeletedIdEntryKey(messageId: string, chatId?: string): string {
   return cleanId;
 }
 
+const deletedIdSetCache = new Map<string, { epoch: number; listRef: string[]; set: Set<string> }>();
+
+function getDeletedIdSetForKey(scopedKey: string): Set<string> | null {
+  const list = secureGetItemSync<string[]>(scopedKey);
+  if (!Array.isArray(list)) {
+    deletedIdSetCache.delete(scopedKey);
+    return null;
+  }
+  const epoch = getCryptoStorageEpoch();
+  const cached = deletedIdSetCache.get(scopedKey);
+  if (cached && cached.epoch === epoch && cached.listRef === list) {
+    return cached.set;
+  }
+  const nextSet = new Set<string>(list);
+  deletedIdSetCache.set(scopedKey, { epoch, listRef: list, set: nextSet });
+  return nextSet;
+}
+
 export function isMessageDeleted(messageId: string, accountId?: string, chatId?: string): boolean {
   try {
     const scopedKey = getDeletedMessageStorageKey(accountId);
-    const list = secureGetItemSync<string[]>(scopedKey);
-    if (!Array.isArray(list)) return false;
+    const idSet = getDeletedIdSetForKey(scopedKey);
+    if (!idSet) return false;
     const cleanId = String(messageId || '').trim();
     if (chatId && isLegacyAmbiguousTelegramMessageId(cleanId)) {
-      return list.includes(buildDeletedIdEntryKey(cleanId, chatId));
+      return idSet.has(buildDeletedIdEntryKey(cleanId, chatId));
     }
-    return list.includes(cleanId);
+    return idSet.has(cleanId);
   } catch {
     return false;
   }
@@ -3829,7 +3848,12 @@ export function recordDeletedMessageIds(messageIds: string[], accountId?: string
     }
     const arr = Array.from(set);
     const trimmed = arr.length > MAX_DELETED_MESSAGE_IDS ? arr.slice(-MAX_DELETED_MESSAGE_IDS) : arr;
-    const writeRes = secureSetItemSyncWithResult(scopedKey, trimmed);
+    deletedIdSetCache.set(scopedKey, {
+      epoch: getCryptoStorageEpoch(),
+      listRef: trimmed,
+      set: new Set(trimmed),
+    });
+    const writeRes = secureSetItemAsyncWithResult(scopedKey, trimmed);
     if (!writeRes.ok) {
       trackedFailedTombstoneKeys.add(scopedKey);
       trackedPendingTombstonePromises.delete(scopedKey);
@@ -4023,11 +4047,11 @@ async function flushLocalMessagesPersistInternal(): Promise<LocalMessagesPersist
     ) {
       continue;
     }
-    const writeRes = secureSetItemSyncWithResult(bucket.storageKey, bucket.messages);
+    const writeRes = secureSetItemAsyncWithResult(bucket.storageKey, bucket.messages);
     targetCryptoKeys.add(bucket.storageKey);
     if (!writeRes.ok) {
       failedKeySet.add(bucket.storageKey);
-    } else if (writeRes.mode === 'dpapi' || writeRes.mode === 'node_fallback') {
+    } else if (!writeRes.writePromise && (writeRes.mode === 'dpapi' || writeRes.mode === 'node_fallback')) {
       flushedSyncCount++;
     } else if (writeRes.writePromise) {
       bucketWritePromises.push(
@@ -4057,7 +4081,7 @@ async function flushLocalMessagesPersistInternal(): Promise<LocalMessagesPersist
   for (const failedTombKey of Array.from(trackedFailedTombstoneKeys)) {
     const cachedTombList = secureGetItemSync<string[]>(failedTombKey);
     if (Array.isArray(cachedTombList)) {
-      const retryRes = secureSetItemSyncWithResult(failedTombKey, cachedTombList);
+      const retryRes = secureSetItemAsyncWithResult(failedTombKey, cachedTombList);
       targetCryptoKeys.add(failedTombKey);
       if (retryRes.ok && !retryRes.writePromise) {
         trackedFailedTombstoneKeys.delete(failedTombKey);
@@ -4369,7 +4393,7 @@ export function saveLocalCustomerProfile(chatId: string, profile: CustomerProfil
     const acc = accountId || profile.accountId || currentActiveAccountId;
     const canonicalId = normalizeProfileChatId(chatId) || chatId;
     const scopedKey = acc ? `tg_desktop_profile_${acc}_${canonicalId}` : `tg_desktop_profile_${canonicalId}`;
-    secureSetItemSync(scopedKey, {
+    void secureSetItemAsyncWithResult(scopedKey, {
       ...profile,
       chatId: canonicalId,
       ...(acc ? { accountId: acc } : {}),
@@ -4450,6 +4474,7 @@ export function clearAccountLocalCache(accountId: string, unsharedChatIds: strin
     }
 
     const delStorageKey = getDeletedMessageStorageKey(accountId);
+    deletedIdSetCache.delete(delStorageKey);
     trackedPendingTombstonePromises.delete(delStorageKey);
     trackedFailedTombstoneKeys.delete(delStorageKey);
 
@@ -4520,6 +4545,7 @@ export function purgeAllLocalChatData(): void {
     localPersistFirstQueuedAt = 0;
     dirtyLocalMessageBuckets.clear();
     deletedChatEpochs.clear();
+    deletedIdSetCache.clear();
     trackedPendingTombstonePromises.clear();
     trackedFailedTombstoneKeys.clear();
 
@@ -5620,7 +5646,7 @@ export function saveScopedContacts(contacts: TelegramContact[], accountId?: stri
     const cleaned = (Array.isArray(contacts) ? contacts : []).filter(
       (c) => c && c.id && !c.id.startsWith('contact_')
     );
-    secureSetItemSync(`tg_desktop_contacts_${acc}`, cleaned);
+    void secureSetItemAsyncWithResult(`tg_desktop_contacts_${acc}`, cleaned);
     try {
       localStorage.removeItem('tg_pro_contacts');
     } catch {}

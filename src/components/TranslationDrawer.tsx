@@ -734,7 +734,7 @@ export const TranslationDrawer: React.FC<TranslationDrawerProps> = ({
   }
 
   return (
-    <div className="fixed inset-0 bg-black/55 dark:bg-black/75 aurora:bg-black/80 backdrop-blur-xs flex items-center justify-center z-50 p-4 select-none">
+    <div className="fixed inset-0 bg-black/60 dark:bg-black/75 aurora:bg-black/80 flex items-center justify-center z-50 p-4 select-none">
       <div className="bg-white dark:bg-[#0b131f] aurora:bg-[#0c151b] linen:bg-[#f8f2e7] border border-[#e2e8f0] dark:border-[#1e3148] aurora:border-[#203742] linen:border-[#d5c6ae] w-full max-w-lg rounded-2xl shadow-2xl linen:shadow-sm flex flex-col overflow-hidden max-h-[92vh] text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118]">
         {innerContent}
       </div>

@@ -125,7 +125,7 @@ export const TelegramMenuDrawer: React.FC<TelegramMenuDrawerProps> = ({
     >
       {/* Backdrop */}
       <div
-        className="fixed inset-0 bg-black/55 dark:bg-black/75 aurora:bg-black/80 backdrop-blur-xs transition-opacity cursor-pointer"
+        className="fixed inset-0 bg-black/60 dark:bg-black/75 aurora:bg-black/80 transition-opacity cursor-pointer"
         onClick={onClose}
       />
 

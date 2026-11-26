@@ -1454,7 +1454,7 @@ export const AiAssistantModal: React.FC<AiAssistantModalProps> = ({
           transform: `translate3d(${activeCapsulePos.x}px, ${activeCapsulePos.y}px, 0)`,
         }}
         title="按住可自由拖动到任意位置，轻点展开 AI助手"
-        className={`fixed top-0 left-0 z-[60] flex items-center gap-1 rounded-full pl-2 pr-1.5 py-1.5 shadow-lg border bg-white/95 dark:bg-[#0b1523]/95 aurora:bg-[#0c1a21]/95 linen:bg-[#f6efe2]/95 border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#1f3b46] linen:border-[#cbbba2] text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118] backdrop-blur-md select-none touch-none ${
+        className={`fixed top-0 left-0 z-[60] flex items-center gap-1 rounded-full pl-2 pr-1.5 py-1.5 shadow-lg border bg-white/98 dark:bg-[#0b1523]/98 aurora:bg-[#0c1a21]/98 linen:bg-[#f6efe2]/98 border-[#cbd5e1] dark:border-[#1e3148] aurora:border-[#1f3b46] linen:border-[#cbbba2] text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118] select-none touch-none ${
           isDraggingCapsule
             ? 'cursor-grabbing shadow-xl ring-2 ring-[#2481cc]/35 dark:ring-[#2ba0ff]/35 aurora:ring-[#2dd4bf]/35 linen:ring-[#a86a43]/35'
             : 'cursor-grab transition-shadow duration-150'
@@ -1986,7 +1986,7 @@ export const AiAssistantModal: React.FC<AiAssistantModalProps> = ({
 
           {/* Playbook Day Detail Card Overlay (Zero AI Key Cost) */}
           {selectedPlaybookDay && (
-            <div className="sticky bottom-1 z-20 rounded-2xl border shadow-xl p-3.5 bg-white/98 dark:bg-[#0d1827]/98 aurora:bg-[#0e1c23]/98 linen:bg-[#fcf7ee]/98 border-[#cbd5e1] dark:border-[#243b57] aurora:border-[#20424e] linen:border-[#cbbba2] backdrop-blur-md">
+            <div className="sticky bottom-1 z-20 rounded-2xl border shadow-xl p-3.5 bg-white dark:bg-[#0d1827] aurora:bg-[#0e1c23] linen:bg-[#fcf7ee] border-[#cbd5e1] dark:border-[#243b57] aurora:border-[#20424e] linen:border-[#cbbba2]">
               <div className="flex items-start justify-between gap-2 mb-2">
                 <div className="min-w-0">
                   <div className="inline-flex items-center gap-1.5 text-[11px] font-semibold px-2 py-0.5 rounded-md bg-[#e8f3ff] dark:bg-[#132942] aurora:bg-[#112d36] linen:bg-[#eadcc5] text-[#2481cc] dark:text-[#2ba0ff] aurora:text-[#5eead4] linen:text-[#8c522d] mb-1">
@@ -2260,7 +2260,7 @@ export const AiAssistantModal: React.FC<AiAssistantModalProps> = ({
             pointerDownOnBackdropRef.current = false;
             if (shouldClose) onClose();
           }}
-          className="fixed inset-0 z-[55] flex items-center justify-center p-3 sm:p-6 bg-black/55 backdrop-blur-sm animate-in fade-in duration-150"
+          className="fixed inset-0 z-[55] flex items-center justify-center p-3 sm:p-6 bg-black/65 animate-in fade-in duration-150"
         >
           {panelNode}
         </div>
@@ -2269,7 +2269,7 @@ export const AiAssistantModal: React.FC<AiAssistantModalProps> = ({
           {isFullscreen && (
             <div
               onClick={onClose}
-              className="fixed inset-0 z-[54] bg-black/55 backdrop-blur-sm animate-in fade-in duration-150"
+              className="fixed inset-0 z-[54] bg-black/65 animate-in fade-in duration-150"
               aria-hidden="true"
             />
           )}
@@ -2281,7 +2281,7 @@ export const AiAssistantModal: React.FC<AiAssistantModalProps> = ({
       {lightboxImage && (
         <div
           onClick={() => setLightboxImage(null)}
-          className="fixed inset-0 z-[70] bg-black/75 backdrop-blur-xs flex flex-col items-center justify-center p-6"
+          className="fixed inset-0 z-[70] bg-black/80 flex flex-col items-center justify-center p-6"
         >
           <div
             onClick={(e) => e.stopPropagation()}

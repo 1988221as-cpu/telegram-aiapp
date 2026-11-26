@@ -560,7 +560,7 @@ export const TelegramChatInfoDrawer: React.FC<TelegramChatInfoDrawerProps> = ({
     <div className="fixed inset-0 z-50 flex justify-end animate-in fade-in duration-200 select-none">
       {/* Backdrop */}
       <div
-        className="fixed inset-0 bg-black/45 dark:bg-black/65 aurora:bg-black/70 linen:bg-black/40 backdrop-blur-xs cursor-pointer"
+        className="fixed inset-0 bg-black/55 dark:bg-black/70 aurora:bg-black/75 linen:bg-black/45 cursor-pointer"
         onClick={onClose}
       />
 

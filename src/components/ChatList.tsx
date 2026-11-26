@@ -292,11 +292,15 @@ export const ChatList: React.FC<ChatListProps> = React.memo(({
     [onRefreshMediaUrls, refreshedAvatars]
   );
 
+  const refreshedAvatarsRef = useRef(refreshedAvatars);
+  refreshedAvatarsRef.current = refreshedAvatars;
+
   useEffect(() => {
     const expiring: string[] = [];
+    const currentRefreshed = refreshedAvatarsRef.current;
     for (const c of chats) {
       if (!c.avatarUrl) continue;
-      const effective = refreshedAvatars[c.avatarUrl] || c.avatarUrl;
+      const effective = currentRefreshed[c.avatarUrl] || c.avatarUrl;
       if (isSignedResourceUrlExpiringSoon(effective) && !attemptedAvatarRefreshRef.current.has(effective)) {
         expiring.push(effective);
       }
@@ -324,7 +328,7 @@ export const ChatList: React.FC<ChatListProps> = React.memo(({
     return () => {
       cancelled = true;
     };
-  }, [chats, onRefreshMediaUrls, refreshedAvatars]);
+  }, [chats, onRefreshMediaUrls]);
 
   // Drag-to-resize handlers
   const handleMouseDownResize = (e: React.MouseEvent) => {
@@ -440,10 +444,6 @@ export const ChatList: React.FC<ChatListProps> = React.memo(({
     setContextMenu({ chat, x, y });
   };
 
-  // Filtered Chats
-  const archivedCount = chats.filter((c) => c.isArchived).length;
-  const unreadCount = chats.filter((c) => !c.isArchived && c.unreadCount > 0).length;
-
   const matchesDialogFilter = useCallback(
     (c: Chat, f: TelegramOfficialDialogFilter, hasSearchQuery: boolean): boolean => {
       if (Array.isArray(f.excludePeerIds) && f.excludePeerIds.includes(c.id)) return false;
@@ -470,6 +470,25 @@ export const ChatList: React.FC<ChatListProps> = React.memo(({
     },
     [contactChatIds]
   );
+
+  // Filtered Chats & Folder Unread Counts (memoized in one pass)
+  const { archivedCount, unreadCount, folderUnreadById } = useMemo(() => {
+    let archived = 0;
+    let unread = 0;
+    const folderMap = new Map<number, number>();
+    for (const c of chats) {
+      if (c.isArchived) archived += 1;
+      else if (c.unreadCount > 0) unread += 1;
+      if (c.unreadCount > 0 && customFolders.length > 0) {
+        for (const f of customFolders) {
+          if (matchesDialogFilter(c, f, false)) {
+            folderMap.set(f.id, (folderMap.get(f.id) || 0) + 1);
+          }
+        }
+      }
+    }
+    return { archivedCount: archived, unreadCount: unread, folderUnreadById: folderMap };
+  }, [chats, customFolders, matchesDialogFilter]);
 
   const activeCustomFolder = activeFolder.startsWith('folder:')
     ? customFolders.find((f) => f.id === Number(activeFolder.slice(7))) || null
@@ -732,7 +751,7 @@ export const ChatList: React.FC<ChatListProps> = React.memo(({
 
         {customFolders.map((folder) => {
           const folderKey = `folder:${folder.id}` as const;
-          const folderUnread = chats.filter((c) => matchesDialogFilter(c, folder, false) && c.unreadCount > 0).length;
+          const folderUnread = folderUnreadById.get(folder.id) || 0;
           return (
             <button
               key={folder.id}
@@ -890,7 +909,7 @@ export const ChatList: React.FC<ChatListProps> = React.memo(({
                 }}
                 onClick={() => onSelectChat(chat.id)}
                 onContextMenu={(e) => handleOpenContextMenu(chat, e)}
-                className={`mx-1.5 flex items-center px-2.5 py-2.5 rounded-xl cursor-pointer transition-colors relative group border ${
+                className={`hs-chat-item mx-1.5 flex items-center px-2.5 py-2.5 rounded-xl cursor-pointer transition-colors relative group border ${
                   isDraggingThis ? 'opacity-45 ' : ''
                 }${
                   isDropBefore ? 'border-t-2 border-t-[#2481cc] dark:border-t-[#2ba0ff] aurora:border-t-[#2dd4bf] linen:border-t-[#a86a43] ' : ''
@@ -1301,7 +1320,7 @@ export const ChatList: React.FC<ChatListProps> = React.memo(({
               setPreviewChat(null);
             }
           }}
-          className="fixed inset-0 z-[9996] flex items-center justify-center p-4 bg-black/55 dark:bg-black/75 aurora:bg-black/80 backdrop-blur-xs select-none"
+          className="fixed inset-0 z-[9996] flex items-center justify-center p-4 bg-black/60 dark:bg-black/75 aurora:bg-black/80 select-none"
         >
           <div
             onClick={(e) => e.stopPropagation()}
@@ -1411,7 +1430,7 @@ export const ChatList: React.FC<ChatListProps> = React.memo(({
               setRevokeDeleteChat(false);
             }
           }}
-          className="fixed inset-0 z-[9996] flex items-center justify-center p-4 bg-black/55 dark:bg-black/75 aurora:bg-black/80 backdrop-blur-xs select-none"
+          className="fixed inset-0 z-[9996] flex items-center justify-center p-4 bg-black/60 dark:bg-black/75 aurora:bg-black/80 select-none"
         >
           <div
             onClick={(e) => e.stopPropagation()}

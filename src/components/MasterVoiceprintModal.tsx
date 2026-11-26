@@ -942,7 +942,7 @@ export const MasterVoiceprintModal: React.FC<MasterVoiceprintModalProps> = ({
   }
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/55 dark:bg-black/75 aurora:bg-black/80 backdrop-blur-xs animate-in fade-in duration-150 select-none">
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 dark:bg-black/75 aurora:bg-black/80 animate-in fade-in duration-150 select-none">
       <div className="relative w-full max-w-md bg-white dark:bg-[#0b131f] aurora:bg-[#0c151b] linen:bg-[#f8f2e7] border border-[#e2e8f0] dark:border-[#1e3148] aurora:border-[#203742] linen:border-[#d5c6ae] rounded-xl shadow-xl linen:shadow-sm flex flex-col overflow-hidden text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118]">
         {innerContent}
       </div>

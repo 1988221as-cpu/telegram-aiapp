@@ -27,8 +27,34 @@ function resolveAppIcon() {
   return candidates.find((p) => fs.existsSync(p));
 }
 
-// 1. Disable hardware acceleration to eliminate Windows GPU driver black screen issues
-app.disableHardwareAcceleration();
+// 1. Enable GPU hardware acceleration by default, with automatic crash-fallback switch
+function getGpuFallbackMarkerPath() {
+  return path.join(app.getPath('userData'), 'data', '.hs_gpu_fallback.json');
+}
+
+let gpuAccelerationEnabled = true;
+(() => {
+  const forceEnableGpu = process.argv.includes('--enable-gpu') || process.env.HS_ENABLE_GPU === '1';
+  const forceDisableGpu = process.argv.includes('--disable-gpu') || process.env.HS_DISABLE_GPU === '1';
+  const markerPath = getGpuFallbackMarkerPath();
+  if (forceEnableGpu) {
+    try {
+      if (fs.existsSync(markerPath)) fs.unlinkSync(markerPath);
+    } catch {}
+  }
+  let hasFallbackMarker = false;
+  if (!forceDisableGpu) {
+    try {
+      hasFallbackMarker = fs.existsSync(markerPath);
+    } catch {
+      hasFallbackMarker = false;
+    }
+  }
+  if (forceDisableGpu || hasFallbackMarker) {
+    gpuAccelerationEnabled = false;
+    app.disableHardwareAcceleration();
+  }
+})();
 
 // 2. Single-instance lock to prevent port collisions from multiple instances
 const gotTheLock = app.requestSingleInstanceLock();
@@ -138,6 +164,43 @@ function isAuthorizedCryptoIpcEvent(event) {
   }
 }
 
+function encryptPlaintextWithMasterKey(plaintext) {
+  if (typeof plaintext !== 'string') return null;
+  const key = getOrCreateMasterKeyBytes();
+  if (!key) return null;
+  const iv = crypto.randomBytes(12);
+  const cipher = crypto.createCipheriv('aes-256-gcm', key, iv);
+  const encrypted = Buffer.concat([cipher.update(plaintext, 'utf8'), cipher.final()]);
+  const tag = cipher.getAuthTag();
+  const payload = Buffer.concat([encrypted, tag]);
+  return `${AES_GCM_PREFIX}${iv.toString('base64')}:${payload.toString('base64')}`;
+}
+
+function decryptCiphertextWithMasterKey(ciphertext) {
+  if (typeof ciphertext !== 'string' || !ciphertext.startsWith(AES_GCM_PREFIX)) {
+    return null;
+  }
+  const rest = ciphertext.slice(AES_GCM_PREFIX.length);
+  const parts = rest.split(':');
+  if (parts.length !== 2) {
+    return null;
+  }
+  const iv = Buffer.from(parts[0], 'base64');
+  const combined = Buffer.from(parts[1], 'base64');
+  if (iv.length !== 12 || combined.length < 16) {
+    return null;
+  }
+  const tag = combined.subarray(combined.length - 16);
+  const enc = combined.subarray(0, combined.length - 16);
+  const key = getOrCreateMasterKeyBytes();
+  if (!key) {
+    return null;
+  }
+  const decipher = crypto.createDecipheriv('aes-256-gcm', key, iv);
+  decipher.setAuthTag(tag);
+  return Buffer.concat([decipher.update(enc), decipher.final()]).toString('utf8');
+}
+
 function registerCryptoIpcHandlers() {
   ipcMain.on('hs-crypto:status', (event) => {
     if (!isAuthorizedCryptoIpcEvent(event)) {
@@ -158,17 +221,7 @@ function registerCryptoIpcHandlers() {
       return;
     }
     try {
-      const key = getOrCreateMasterKeyBytes();
-      if (!key) {
-        event.returnValue = null;
-        return;
-      }
-      const iv = crypto.randomBytes(12);
-      const cipher = crypto.createCipheriv('aes-256-gcm', key, iv);
-      const encrypted = Buffer.concat([cipher.update(plaintext, 'utf8'), cipher.final()]);
-      const tag = cipher.getAuthTag();
-      const payload = Buffer.concat([encrypted, tag]);
-      event.returnValue = `${AES_GCM_PREFIX}${iv.toString('base64')}:${payload.toString('base64')}`;
+      event.returnValue = encryptPlaintextWithMasterKey(plaintext);
     } catch (err) {
       writeLog('warn', `hs-crypto encrypt-sync error: ${err.message}`);
       event.returnValue = null;
@@ -181,35 +234,32 @@ function registerCryptoIpcHandlers() {
       return;
     }
     try {
-      if (!ciphertext.startsWith(AES_GCM_PREFIX)) {
-        event.returnValue = null;
-        return;
-      }
-      const rest = ciphertext.slice(AES_GCM_PREFIX.length);
-      const parts = rest.split(':');
-      if (parts.length !== 2) {
-        event.returnValue = null;
-        return;
-      }
-      const iv = Buffer.from(parts[0], 'base64');
-      const combined = Buffer.from(parts[1], 'base64');
-      if (iv.length !== 12 || combined.length < 16) {
-        event.returnValue = null;
-        return;
-      }
-      const tag = combined.subarray(combined.length - 16);
-      const enc = combined.subarray(0, combined.length - 16);
-      const key = getOrCreateMasterKeyBytes();
-      if (!key) {
-        event.returnValue = null;
-        return;
-      }
-      const decipher = crypto.createDecipheriv('aes-256-gcm', key, iv);
-      decipher.setAuthTag(tag);
-      const decrypted = Buffer.concat([decipher.update(enc), decipher.final()]).toString('utf8');
-      event.returnValue = decrypted;
+      event.returnValue = decryptCiphertextWithMasterKey(ciphertext);
     } catch {
       event.returnValue = null;
+    }
+  });
+
+  ipcMain.handle('hs-crypto:encrypt-async', (event, plaintext) => {
+    if (!isAuthorizedCryptoIpcEvent(event) || typeof plaintext !== 'string') {
+      return null;
+    }
+    try {
+      return encryptPlaintextWithMasterKey(plaintext);
+    } catch (err) {
+      writeLog('warn', `hs-crypto encrypt-async error: ${err.message}`);
+      return null;
+    }
+  });
+
+  ipcMain.handle('hs-crypto:decrypt-async', (event, ciphertext) => {
+    if (!isAuthorizedCryptoIpcEvent(event) || typeof ciphertext !== 'string') {
+      return null;
+    }
+    try {
+      return decryptCiphertextWithMasterKey(ciphertext);
+    } catch {
+      return null;
     }
   });
 
@@ -1935,6 +1985,33 @@ app.whenReady().then(() => {
   registerCryptoIpcHandlers();
   registerAiWindowIpcHandlers();
   registerUpdaterIpcHandlers();
+  writeLog(
+    'info',
+    `[GPU] Hardware acceleration ${gpuAccelerationEnabled ? 'enabled' : 'disabled (software fallback active)'}`
+  );
+  let gpuCrashCount = 0;
+  app.on('child-process-gone', (_event, details) => {
+    if (!details || details.type !== 'GPU' || details.reason === 'clean-exit') return;
+    gpuCrashCount += 1;
+    writeLog('warn', `[GPU] Child process gone: reason=${details.reason} exitCode=${details.exitCode} count=${gpuCrashCount}`);
+    if (gpuAccelerationEnabled && (gpuCrashCount >= 2 || details.reason === 'launch-failed')) {
+      try {
+        const markerPath = getGpuFallbackMarkerPath();
+        const markerDir = path.dirname(markerPath);
+        if (!fs.existsSync(markerDir)) fs.mkdirSync(markerDir, { recursive: true });
+        fs.writeFileSync(
+          markerPath,
+          JSON.stringify({
+            disabledAt: new Date().toISOString(),
+            reason: details.reason,
+            exitCode: details.exitCode ?? null,
+          }),
+          'utf8'
+        );
+        writeLog('warn', `[GPU] Wrote software-rendering fallback marker for next launch: ${markerPath}`);
+      } catch {}
+    }
+  });
   if (powerMonitor && typeof powerMonitor.on === 'function') {
     let lastResumeNotifyAt = 0;
     powerMonitor.on('resume', async () => {

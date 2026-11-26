@@ -153,7 +153,7 @@ export const TelegramVoiceCallModal: React.FC<TelegramVoiceCallModalProps> = ({
   const displayAvatarUrl = chat?.avatarUrl;
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/55 dark:bg-black/75 aurora:bg-black/80 backdrop-blur-md animate-in fade-in duration-200 select-none">
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 dark:bg-black/75 aurora:bg-black/80 animate-in fade-in duration-200 select-none">
       <div className="relative w-full max-w-sm rounded-3xl bg-gradient-to-b from-[#f8fafc] to-white dark:from-[#101c2d] dark:to-[#09111c] aurora:from-[#10222b] linen:from-[#efe6d6] aurora:to-[#081116] linen:to-[#f8f2e7] text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118] p-6 shadow-2xl linen:shadow-sm border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] linen:border-[#d5c6ae] flex flex-col items-center">
         {/* Top Signaling Indicator */}
         <div className="flex items-center gap-1.5 text-[11px] text-[#475569] dark:text-[#b4c6d8] aurora:text-[#b7d0d8] linen:text-[#4e3f32] font-medium mb-6">

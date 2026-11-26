@@ -1445,7 +1445,7 @@ export const MultiAccountModal: React.FC<MultiAccountModalProps> = ({
 
                   {/* Scanned Confirmation Overlay */}
                   {qrIsScanned && !qrError && (
-                    <div className="absolute inset-0 bg-white/95 dark:bg-[#0b131f]/92 aurora:bg-[#0c151b]/92 linen:bg-[#f8f2e7]/95 backdrop-blur-xs rounded-2xl flex flex-col items-center justify-center gap-2 p-4 text-center animate-in fade-in">
+                    <div className="absolute inset-0 bg-white/98 dark:bg-[#0b131f]/98 aurora:bg-[#0c151b]/98 linen:bg-[#f8f2e7]/98 rounded-2xl flex flex-col items-center justify-center gap-2 p-4 text-center animate-in fade-in">
                       <div className="w-11 h-11 rounded-full bg-emerald-500/15 border border-emerald-500/35 flex items-center justify-center text-emerald-600 dark:text-emerald-400">
                         <CheckCircle2 className="w-6 h-6" />
                       </div>
@@ -1456,7 +1456,7 @@ export const MultiAccountModal: React.FC<MultiAccountModalProps> = ({
 
                   {/* Expired / Error Overlay (always surfaces over stale QR or post-scan network error) */}
                   {!isLoadingQr && qrError && (
-                    <div className="absolute inset-0 bg-white/95 dark:bg-[#0b131f]/92 aurora:bg-[#0c151b]/92 linen:bg-[#f8f2e7]/95 backdrop-blur-xs rounded-2xl flex flex-col items-center justify-center gap-3 p-4 text-center animate-in fade-in">
+                    <div className="absolute inset-0 bg-white/98 dark:bg-[#0b131f]/98 aurora:bg-[#0c151b]/98 linen:bg-[#f8f2e7]/98 rounded-2xl flex flex-col items-center justify-center gap-3 p-4 text-center animate-in fade-in">
                       <AlertCircle className="w-7 h-7 text-rose-600 dark:text-rose-400" />
                       <span className="text-xs text-rose-700 dark:text-rose-200 leading-relaxed line-clamp-3">{qrError}</span>
                       <button

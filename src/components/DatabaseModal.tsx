@@ -431,7 +431,7 @@ export const DatabaseModal: React.FC<DatabaseModalProps> = ({ isOpen, onClose, o
   const totalLocalKb = Math.max(Math.round(localMetrics.approxBytes / 1024), 1);
 
   return (
-    <div className="fixed inset-0 bg-black/55 dark:bg-black/75 aurora:bg-black/80 backdrop-blur-xs flex items-center justify-center z-50 p-4 select-none">
+    <div className="fixed inset-0 bg-black/60 dark:bg-black/75 aurora:bg-black/80 flex items-center justify-center z-50 p-4 select-none">
       <div className="bg-white dark:bg-[#0b131f] aurora:bg-[#0c151b] linen:bg-[#f8f2e7] border border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] linen:border-[#d5c6ae] text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118] w-full max-w-xl rounded-2xl shadow-2xl linen:shadow-sm flex flex-col overflow-hidden max-h-[90vh]">
         {/* Header */}
         <div className="px-5 py-4 border-b border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] linen:border-[#dfd2bc] flex items-center justify-between bg-[#f8fafc] dark:bg-[#0d1726] aurora:bg-[#0e1920] linen:bg-[#f0e6d5]">

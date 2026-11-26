@@ -1138,7 +1138,7 @@ export const CustomerMemoryDrawer: React.FC<CustomerMemoryDrawerProps> = ({
       <>
         <div
           onClick={onClose}
-          className={`fixed inset-0 bg-black/50 backdrop-blur-[2px] z-30 ${forceOverlay ? '' : 'lg:hidden'} animate-in fade-in duration-150`}
+          className={`fixed inset-0 bg-black/60 z-30 ${forceOverlay ? '' : 'lg:hidden'} animate-in fade-in duration-150`}
           aria-hidden="true"
         />
         <aside
@@ -1155,7 +1155,7 @@ export const CustomerMemoryDrawer: React.FC<CustomerMemoryDrawerProps> = ({
   }
 
   return (
-    <div className="fixed inset-0 bg-black/55 dark:bg-black/75 aurora:bg-black/80 linen:bg-black/40 backdrop-blur-xs flex justify-end z-50 select-none">
+    <div className="fixed inset-0 bg-black/60 dark:bg-black/75 aurora:bg-black/80 linen:bg-black/50 flex justify-end z-50 select-none">
       <div className="bg-white dark:bg-[#0b131f] aurora:bg-[#0c151b] linen:bg-[#f8f2e7] border-l border-[#e2e8f0] dark:border-[#18273a] aurora:border-[#182b34] linen:border-[#d5c6ae] w-full max-w-md h-full shadow-2xl linen:shadow-sm flex flex-col overflow-hidden animate-in slide-in-from-right duration-200 text-[#0f172a] dark:text-[#eef4fb] aurora:text-[#ecf6f8] linen:text-[#2b2118]">
         {bodyContent}
       </div>
