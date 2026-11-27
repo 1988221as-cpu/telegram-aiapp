@@ -310,13 +310,199 @@ function engineToLiveErrorChannel(engine?: string): Message['translationErrorCha
   return 'live_gemini';
 }
 
+const MEDIA_IMAGE_PLACEHOLDERS = new Set([
+  '🖼️ 图片',
+  '🖼️ [图片]',
+  '🖼️ 图片消息',
+  '[图片]',
+  '图片',
+  '图片消息',
+]);
+
+const MEDIA_VIDEO_PLACEHOLDERS = new Set([
+  '🎬 视频',
+  '🎬 [视频]',
+  '🎥 视频消息',
+  '[视频]',
+  '视频',
+  '视频消息',
+]);
+
+const MEDIA_AUDIO_PLACEHOLDERS = new Set([
+  '🎤 语音消息',
+  '🎤 [语音]',
+  '[语音]',
+  '语音消息',
+]);
+
+function extractRealMediaCaption(msg: Partial<Message>): string {
+  const caption = String(msg.imageCaption || '').trim();
+  if (
+    caption &&
+    !MEDIA_IMAGE_PLACEHOLDERS.has(caption) &&
+    !MEDIA_VIDEO_PLACEHOLDERS.has(caption) &&
+    !MEDIA_AUDIO_PLACEHOLDERS.has(caption) &&
+    !caption.startsWith('📁 [文件]') &&
+    !caption.startsWith('[文件]') &&
+    !caption.startsWith('[视频] ')
+  ) {
+    return caption;
+  }
+  const rawText = String(msg.text || '').trim();
+  if (!rawText) return '';
+  if (
+    MEDIA_IMAGE_PLACEHOLDERS.has(rawText) ||
+    MEDIA_VIDEO_PLACEHOLDERS.has(rawText) ||
+    MEDIA_AUDIO_PLACEHOLDERS.has(rawText) ||
+    rawText.startsWith('📁 [文件]') ||
+    rawText.startsWith('[文件]') ||
+    rawText.startsWith('[视频] ') ||
+    rawText.startsWith('📎 ')
+  ) {
+    return '';
+  }
+  return rawText;
+}
+
+function normalizeMediaSummaryForCompare(summary?: string | null): string {
+  const trimmed = String(summary || '').trim();
+  if (!trimmed) return '';
+  if (MEDIA_IMAGE_PLACEHOLDERS.has(trimmed)) {
+    return '__MEDIA_IMAGE__';
+  }
+  if (MEDIA_VIDEO_PLACEHOLDERS.has(trimmed) || trimmed.startsWith('[视频] ')) {
+    return '__MEDIA_VIDEO__';
+  }
+  if (MEDIA_AUDIO_PLACEHOLDERS.has(trimmed) || trimmed.startsWith('🎵 音频')) {
+    return '__MEDIA_AUDIO__';
+  }
+  let fileTail: string | null = null;
+  if (trimmed.startsWith('📁 [文件]')) {
+    fileTail = trimmed.slice('📁 [文件]'.length).trim();
+  } else if (trimmed.startsWith('[文件]')) {
+    fileTail = trimmed.slice('[文件]'.length).trim();
+  } else if (trimmed.startsWith('📎')) {
+    fileTail = trimmed.slice('📎'.length).trim();
+  }
+  if (fileTail !== null) {
+    if (!fileTail || fileTail === '文件' || fileTail === '文件附件' || fileTail === '媒体消息') {
+      return '__MEDIA_FILE__';
+    }
+    return `__MEDIA_FILE__:${fileTail}`;
+  }
+  return trimmed;
+}
+
+function isLegacyMediaPlaceholderSummary(summary?: string | null): boolean {
+  const trimmed = String(summary || '').trim();
+  if (!trimmed) return false;
+  return (
+    trimmed === '🖼️ [图片]' ||
+    trimmed === '🖼️ 图片消息' ||
+    trimmed === '[图片]' ||
+    trimmed === '🎬 [视频]' ||
+    trimmed === '[视频]' ||
+    trimmed.startsWith('[视频] ') ||
+    trimmed.startsWith('📁 [文件]') ||
+    trimmed.startsWith('[文件]') ||
+    trimmed === '📎 文件附件' ||
+    trimmed === '🎤 [语音]' ||
+    trimmed === '[语音]'
+  );
+}
+
 function formatChatMessageSummary(msg: Partial<Message>, emptyFallback = '暂无消息'): string {
   if (msg.isCall) return msg.text || (msg.isVideoCall ? '📹 视频通话' : '📞 语音通话');
-  if (msg.isAudio) return '🎤 语音消息';
-  if (msg.isVideo) return '🎬 [视频]';
-  if (msg.isImage) return '🖼️ [图片]';
-  if (msg.isFile) return `📁 [文件] ${msg.fileName || ''}`.trim();
+  const rawText = String(msg.text || '').trim();
+  if ((msg.isImage || msg.isVideo) && (rawText === '🖼️ 贴纸' || rawText.endsWith('[贴纸]'))) {
+    return rawText;
+  }
+  if (msg.isAudio) {
+    const caption = extractRealMediaCaption(msg);
+    return caption || '🎤 语音消息';
+  }
+  if (msg.isVideo) {
+    const caption = extractRealMediaCaption(msg);
+    return caption || '🎬 视频';
+  }
+  if (msg.isImage) {
+    const caption = extractRealMediaCaption(msg);
+    return caption || '🖼️ 图片';
+  }
+  if (msg.isFile) {
+    const caption = extractRealMediaCaption(msg);
+    if (caption) return caption;
+    const cleanName = String(msg.fileName || '').trim();
+    return `📎 ${cleanName || '文件'}`;
+  }
   return msg.text || emptyFallback;
+}
+
+function reconcileChatsWithLocalMessages(
+  chatList: Chat[],
+  messagesByBucket: Record<string, Message[]>,
+  fallbackAccountId?: string
+): { chats: Chat[]; changed: boolean } {
+  if (!Array.isArray(chatList) || chatList.length === 0) {
+    return { chats: chatList, changed: false };
+  }
+  let changed = false;
+  const nextChats = chatList.map((chat) => {
+    const acc = chat.accountId || fallbackAccountId || '';
+    const msgs = getBucketMessages(messagesByBucket, acc, chat.id);
+    if (!Array.isArray(msgs) || msgs.length === 0) {
+      return chat;
+    }
+    let latestMsg: Message | undefined;
+    let latestTimeMs = -1;
+    for (let i = 0; i < msgs.length; i++) {
+      const m = msgs[i];
+      if (!m || m.deliveryStatus === 'paused') continue;
+      const ms = typeof m.createdAt === 'number' && m.createdAt > 0 ? m.createdAt : i;
+      if (!latestMsg || ms >= latestTimeMs) {
+        latestMsg = m;
+        latestTimeMs = ms;
+      }
+    }
+    if (!latestMsg) return chat;
+
+    const latestSummary = formatChatMessageSummary(latestMsg);
+    if (!latestSummary || latestSummary === '暂无消息') return chat;
+
+    const currentLast = String(chat.lastMessage || '').trim();
+    const translated = String(latestMsg.translatedText || '').trim();
+    const isCachedTranslation = Boolean(
+      translated &&
+        currentLast &&
+        currentLast === translated &&
+        translated !== latestSummary
+    );
+    const isLegacyMedia =
+      isLegacyMediaPlaceholderSummary(currentLast) &&
+      normalizeMediaSummaryForCompare(currentLast) === normalizeMediaSummaryForCompare(latestSummary) &&
+      currentLast !== latestSummary;
+    const latestMsgSec =
+      typeof latestMsg.createdAt === 'number' && latestMsg.createdAt > 0
+        ? Math.floor(latestMsg.createdAt / 1000)
+        : 0;
+    const chatLastSec = typeof chat.lastDate === 'number' ? chat.lastDate : 0;
+    const isSameOrNewerThanChat = latestMsgSec > 0 && latestMsgSec >= chatLastSec;
+
+    if (
+      (isCachedTranslation || isLegacyMedia || (isSameOrNewerThanChat && currentLast !== latestSummary)) &&
+      currentLast !== latestSummary
+    ) {
+      changed = true;
+      return {
+        ...chat,
+        lastMessage: latestSummary,
+        ...(latestMsg.timestamp && isSameOrNewerThanChat ? { lastTime: latestMsg.timestamp } : {}),
+        ...(latestMsgSec > chatLastSec ? { lastDate: latestMsgSec } : {}),
+      };
+    }
+    return chat;
+  });
+  return { chats: changed ? nextChats : chatList, changed };
 }
 
 function mergeCloudMessagesWithLocal(
@@ -676,38 +862,24 @@ export default function App() {
     return resolved;
   });
 
-  const [chats, setChats] = useState<Chat[]>(() => {
-    const saved = secureGetItemSync<Chat[]>('tg_pro_chats');
-    if (saved && Array.isArray(saved)) {
+  const initialBootSnapshotRef = useRef<{
+    chats: Chat[];
+    messagesMap: Record<string, Message[]>;
+  } | null>(null);
+  if (!initialBootSnapshotRef.current) {
+    const savedChats = secureGetItemSync<Chat[]>('tg_pro_chats');
+    let baseChats: Chat[] = INITIAL_CHATS;
+    if (savedChats && Array.isArray(savedChats)) {
       try {
-        return sanitizeChats(saved);
+        baseChats = sanitizeChats(savedChats);
       } catch {
-        return INITIAL_CHATS;
+        baseChats = INITIAL_CHATS;
       }
     }
-    return INITIAL_CHATS;
-  });
 
-  const [chatOrderByAccount, setChatOrderByAccount] = useState<Record<string, string[]>>(() => {
-    const saved = secureGetItemSync<Record<string, string[]>>('tg_pro_chat_order_map');
-    if (saved && typeof saved === 'object' && !Array.isArray(saved)) {
-      const normalized: Record<string, string[]> = {};
-      for (const [accId, list] of Object.entries(saved)) {
-        if (accId && Array.isArray(list)) {
-          normalized[accId] = list.filter((id) => typeof id === 'string' && id.length > 0);
-        }
-      }
-      return normalized;
-    }
-    return {};
-  });
-
-  const [activeChatId, setActiveChatId] = useState<string | null>(null);
-
-  const [messagesMap, setMessagesMap] = useState<Record<string, Message[]>>(() => {
     const initialMap: Record<string, Message[]> = {};
     const fallbackAcc = activeAccountId || accounts[0]?.id || '';
-    for (const c of chats) {
+    for (const c of baseChats) {
       const acc = c.accountId || fallbackAcc;
       const localList = getLocalMessages(c.id, acc);
       if (localList.length > 0) {
@@ -729,8 +901,38 @@ export default function App() {
         }
       }
     }
-    return initialMap;
+
+    const reconciledBoot = reconcileChatsWithLocalMessages(baseChats, initialMap, fallbackAcc);
+    if (reconciledBoot.changed) {
+      void secureSetItemAsyncWithResult('tg_pro_chats', reconciledBoot.chats);
+    }
+    initialBootSnapshotRef.current = {
+      chats: reconciledBoot.chats,
+      messagesMap: initialMap,
+    };
+  }
+
+  const [chats, setChats] = useState<Chat[]>(() => initialBootSnapshotRef.current!.chats);
+
+  const [chatOrderByAccount, setChatOrderByAccount] = useState<Record<string, string[]>>(() => {
+    const saved = secureGetItemSync<Record<string, string[]>>('tg_pro_chat_order_map');
+    if (saved && typeof saved === 'object' && !Array.isArray(saved)) {
+      const normalized: Record<string, string[]> = {};
+      for (const [accId, list] of Object.entries(saved)) {
+        if (accId && Array.isArray(list)) {
+          normalized[accId] = list.filter((id) => typeof id === 'string' && id.length > 0);
+        }
+      }
+      return normalized;
+    }
+    return {};
   });
+
+  const [activeChatId, setActiveChatId] = useState<string | null>(null);
+
+  const [messagesMap, setMessagesMap] = useState<Record<string, Message[]>>(
+    () => initialBootSnapshotRef.current!.messagesMap
+  );
 
   const [translationSettings, setTranslationSettings] = useState<TranslationSettings>(() => {
     const saved =
@@ -1178,7 +1380,6 @@ export default function App() {
       let nextChats: Chat[] | null = null;
       if (savedChats && Array.isArray(savedChats) && savedChats.length > 0) {
         nextChats = sanitizeChats(savedChats);
-        setChats(nextChats);
       }
 
       const deletedKeySet = new Set<string>([
@@ -1254,6 +1455,19 @@ export default function App() {
             reconstructed[msgBucketKey(curAccId, curChatId)] = normalizeStalePendingMessages(localMsgs);
           }
         }
+      }
+
+      const baseChatsForReconcile = nextChats || chatsRef.current;
+      const reconciledBootChats = reconcileChatsWithLocalMessages(
+        baseChatsForReconcile,
+        reconstructed,
+        resolvedActiveAccId || activeAccountIdRef.current
+      );
+      if (nextChats || reconciledBootChats.changed) {
+        setChats(reconciledBootChats.chats);
+      }
+      if (reconciledBootChats.changed) {
+        void secureSetItemAsyncWithResult('tg_pro_chats', reconciledBootChats.chats);
       }
 
       if (Object.keys(reconstructed).length > 0 || isRestore) {
@@ -2280,7 +2494,8 @@ export default function App() {
         !meta?.isCached &&
           matchedActiveDlg?.lastMessage &&
           prevActiveChat?.lastMessage &&
-          String(matchedActiveDlg.lastMessage).trim() !== String(prevActiveChat.lastMessage).trim()
+          normalizeMediaSummaryForCompare(matchedActiveDlg.lastMessage) !==
+            normalizeMediaSummaryForCompare(prevActiveChat.lastMessage)
       );
       if (meta?.forceSyncActiveChat || (matchedActiveDlg && (hasNewerDate || cloudUnread > 0 || hasNewSummary))) {
         void refreshActiveChatMessagesRef.current?.(targetAccId, curActiveChatId, {
