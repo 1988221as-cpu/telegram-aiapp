@@ -55,6 +55,15 @@ function compareSharedMessagesDesc(a: Message, b: Message): number {
   return (b.createdAt || 0) - (a.createdAt || 0);
 }
 
+function buildGridThumbUrl(rawUrl?: string): string | undefined {
+  if (!rawUrl || !rawUrl.startsWith('/api/telegram/user/media/')) return rawUrl;
+  const [base, qs = ''] = rawUrl.split('?');
+  const params = new URLSearchParams(qs);
+  params.set('thumb', '1');
+  params.set('wait', '1');
+  return `${base}?${params.toString()}`;
+}
+
 interface TelegramChatInfoDrawerProps {
   isOpen: boolean;
   onClose: () => void;
@@ -158,6 +167,10 @@ export const TelegramChatInfoDrawer: React.FC<TelegramChatInfoDrawerProps> = ({
   const copyTimerRef = useRef<number | null>(null);
   const [refreshedUrlsMap, setRefreshedUrlsMap] = useState<Record<string, string>>({});
   const attemptedRefreshUrlsRef = useRef<Set<string>>(new Set());
+  const [mediaRetryState, setMediaRetryState] = useState<
+    Record<string, { attempts: number; failed: boolean; nonce: number }>
+  >({});
+  const mediaRetryTimersRef = useRef<Record<string, number>>({});
 
   const commonChats =
     !chat?.isGroup && !chat?.isChannel && Array.isArray(fullInfo?.commonChats)
@@ -270,6 +283,9 @@ export const TelegramChatInfoDrawer: React.FC<TelegramChatInfoDrawerProps> = ({
     setMemberActionError(null);
     setCopiedField(null);
     setAddContactName(chat.title || '');
+    Object.values(mediaRetryTimersRef.current).forEach((t) => window.clearTimeout(t));
+    mediaRetryTimersRef.current = {};
+    setMediaRetryState({});
     sharedMediaReqGenRef.current += 1;
     setSharedMediaStore({
       scopeKey: currentSharedScopeKey,
@@ -283,6 +299,10 @@ export const TelegramChatInfoDrawer: React.FC<TelegramChatInfoDrawerProps> = ({
     if (chat.id.startsWith('tg_')) {
       void loadFullInfo();
     }
+    return () => {
+      Object.values(mediaRetryTimersRef.current).forEach((t) => window.clearTimeout(t));
+      mediaRetryTimersRef.current = {};
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isOpen, chat?.id, accountId]);
 
@@ -421,12 +441,14 @@ export const TelegramChatInfoDrawer: React.FC<TelegramChatInfoDrawerProps> = ({
     };
     pushIfExpiring(chat.avatarUrl);
     for (const m of messages) {
+      pushIfExpiring(m.thumbUrl);
       pushIfExpiring(m.imageUrl);
       pushIfExpiring(m.videoUrl);
       pushIfExpiring(m.fileUrl);
       pushIfExpiring(m.audioUrl);
     }
     for (const m of sharedMediaState.media.items) {
+      pushIfExpiring(m.thumbUrl);
       pushIfExpiring(m.imageUrl);
       pushIfExpiring(m.videoUrl);
     }
@@ -1184,7 +1206,13 @@ export const TelegramChatInfoDrawer: React.FC<TelegramChatInfoDrawerProps> = ({
                     {mediaMessages.map((m) => {
                       const isVid = Boolean((m.isVideo || m.videoUrl) && m.videoUrl);
                       const resolvedVideoSrc = isVid ? resolveDisplayUrl(m.videoUrl) : undefined;
-                      const resolvedImageSrc = m.imageUrl ? resolveDisplayUrl(m.imageUrl) : undefined;
+                      const rawThumbCandidate = !isVid ? m.thumbUrl || buildGridThumbUrl(m.imageUrl) : undefined;
+                      const baseThumbSrc = rawThumbCandidate ? resolveDisplayUrl(rawThumbCandidate) : undefined;
+                      const retryEntry = mediaRetryState[m.id];
+                      const resolvedImageSrc =
+                        baseThumbSrc && retryEntry?.nonce
+                          ? `${baseThumbSrc}${baseThumbSrc.includes('?') ? '&' : '?'}r=${retryEntry.nonce}`
+                          : baseThumbSrc;
                       const handleLocateMedia = () => {
                         onClose();
                         onJumpToMessage?.(m);
@@ -1199,10 +1227,10 @@ export const TelegramChatInfoDrawer: React.FC<TelegramChatInfoDrawerProps> = ({
                       return (
                         <div
                           key={m.id}
-                          onClick={!isVid ? handlePreviewMedia : undefined}
-                          title={!isVid ? (onOpenMediaPreview ? '点击全屏查看聊天所有图片' : '点击前往聊天中的该消息位置') : undefined}
+                          onClick={!isVid && !retryEntry?.failed ? handlePreviewMedia : undefined}
+                          title={!isVid && !retryEntry?.failed ? (onOpenMediaPreview ? '点击全屏查看聊天所有图片' : '点击前往聊天中的该消息位置') : undefined}
                           className={`aspect-square rounded-lg overflow-hidden bg-[#f1f5f9] dark:bg-[#132234] aurora:bg-[#13252e] linen:bg-[#efe6d6] relative group ${
-                            !isVid && (onOpenMediaPreview || onJumpToMessage) ? 'cursor-pointer' : ''
+                            !isVid && !retryEntry?.failed && (onOpenMediaPreview || onJumpToMessage) ? 'cursor-pointer' : ''
                           }`}
                         >
                           {isVid && resolvedVideoSrc ? (
@@ -1235,22 +1263,51 @@ export const TelegramChatInfoDrawer: React.FC<TelegramChatInfoDrawerProps> = ({
                                 </button>
                               )}
                             </>
-                          ) : resolvedImageSrc ? (
+                          ) : resolvedImageSrc && !retryEntry?.failed ? (
                             <>
                               <img
                                 src={resolvedImageSrc}
                                 loading="lazy"
+                                decoding="async"
                                 alt={m.imageCaption || 'media'}
                                 className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-200"
-                                onLoad={(e) => {
-                                  e.currentTarget.style.display = '';
+                                onLoad={() => {
+                                  if (mediaRetryTimersRef.current[m.id]) {
+                                    window.clearTimeout(mediaRetryTimersRef.current[m.id]);
+                                    delete mediaRetryTimersRef.current[m.id];
+                                  }
+                                  setMediaRetryState((prev) => {
+                                    if (!prev[m.id]) return prev;
+                                    const next = { ...prev };
+                                    delete next[m.id];
+                                    return next;
+                                  });
                                 }}
-                                onError={(e) => {
-                                  const imgEl = e.currentTarget;
-                                  void triggerSilentUrlRefresh(m.imageUrl, true).then((nextUrl) => {
-                                    if (!nextUrl) {
-                                      imgEl.style.display = 'none';
-                                    }
+                                onError={() => {
+                                  void triggerSilentUrlRefresh(rawThumbCandidate, true).then((nextUrl) => {
+                                    if (nextUrl) return;
+                                    setMediaRetryState((prev) => {
+                                      const cur = prev[m.id] || { attempts: 0, failed: false, nonce: 0 };
+                                      if (cur.attempts >= 2) {
+                                        return { ...prev, [m.id]: { ...cur, failed: true } };
+                                      }
+                                      const nextAttempt = cur.attempts + 1;
+                                      if (!mediaRetryTimersRef.current[m.id]) {
+                                        const delayMs =
+                                          nextAttempt === 1
+                                            ? 900 + Math.floor(Math.random() * 500)
+                                            : 2200 + Math.floor(Math.random() * 700);
+                                        mediaRetryTimersRef.current[m.id] = window.setTimeout(() => {
+                                          delete mediaRetryTimersRef.current[m.id];
+                                          setMediaRetryState((p) => {
+                                            const latest = p[m.id];
+                                            if (!latest || latest.failed) return p;
+                                            return { ...p, [m.id]: { ...latest, nonce: latest.nonce + 1 } };
+                                          });
+                                        }, delayMs);
+                                      }
+                                      return { ...prev, [m.id]: { ...cur, attempts: nextAttempt } };
+                                    });
                                   });
                                 }}
                               />
@@ -1269,6 +1326,26 @@ export const TelegramChatInfoDrawer: React.FC<TelegramChatInfoDrawerProps> = ({
                                 </button>
                               )}
                             </>
+                          ) : retryEntry?.failed && baseThumbSrc ? (
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setMediaRetryState((prev) => ({
+                                  ...prev,
+                                  [m.id]: {
+                                    attempts: 0,
+                                    failed: false,
+                                    nonce: (prev[m.id]?.nonce || 0) + 1,
+                                  },
+                                }));
+                              }}
+                              title="点击重新加载缩略图"
+                              className="w-full h-full flex flex-col items-center justify-center text-[10px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a] gap-1 p-1 text-center hover:bg-black/5 dark:hover:bg-white/5 cursor-pointer"
+                            >
+                              <RefreshCw className="w-4 h-4 opacity-70" />
+                              <span>点击重试</span>
+                            </button>
                           ) : (
                             <div className="w-full h-full flex flex-col items-center justify-center text-[10px] text-[#64748b] dark:text-[#7b93ad] aurora:text-[#7e9aa5] linen:text-[#6e5c4a] gap-1 p-1 text-center">
                               <ImageIcon className="w-4 h-4 opacity-60" />

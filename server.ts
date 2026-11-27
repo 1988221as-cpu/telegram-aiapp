@@ -6928,6 +6928,7 @@ export interface UnifiedChatMessage {
   voiceTone: string;
   isImage: boolean;
   imageUrl: string;
+  thumbUrl?: string;
   imageCaption: string;
   isVideo: boolean;
   videoUrl: string;
@@ -8767,7 +8768,7 @@ app.get('/api/chats', requireTenantAuth, async (req: Request, res: Response) => 
     const chatsData = await Promise.all(
       profiles.map(async (p: any) => {
         const lastMsg = (await db.prepare(`
-          SELECT text, translated_text, is_audio, timestamp, created_at, sender
+          SELECT text, is_audio, is_image, is_video, is_file, file_name, timestamp, created_at, sender
           FROM messages
           WHERE chat_id = ? AND account_id = ?
           ORDER BY created_at DESC
@@ -8776,6 +8777,16 @@ app.get('/api/chats', requireTenantAuth, async (req: Request, res: Response) => 
 
         const isTgOfficial = p.chat_id.startsWith('tg_');
         const langPref = langPrefsMap.get(`${p.account_id}::${p.chat_id}`) || langPrefsMap.get(p.chat_id);
+        const rawLastText = String(lastMsg?.text || '').trim();
+        const dbLastMessage = lastMsg?.is_audio
+          ? '🎤 语音消息'
+          : lastMsg?.is_video
+            ? (rawLastText || '🎬 视频')
+            : lastMsg?.is_image
+              ? (rawLastText || '🖼️ 图片')
+              : lastMsg?.is_file
+                ? (rawLastText || `📎 ${lastMsg?.file_name || '文件'}`)
+                : (rawLastText || '暂无消息');
         return {
           id: p.chat_id,
           accountId: p.account_id,
@@ -8784,7 +8795,7 @@ app.get('/api/chats', requireTenantAuth, async (req: Request, res: Response) => 
           avatarInitial: (p.client_name || 'TG').slice(0, 2).toUpperCase(),
           isGroup: false,
           isVerified: isTgOfficial,
-          lastMessage: lastMsg?.is_audio ? '🎤 语音消息' : (lastMsg?.translated_text || lastMsg?.text || '暂无消息'),
+          lastMessage: dbLastMessage,
           lastTime: lastMsg?.timestamp || '刚刚',
           ...(typeof lastMsg?.created_at === 'number' && lastMsg.created_at > 0
             ? { lastDate: Math.floor(lastMsg.created_at / 1000) }
@@ -28659,6 +28670,8 @@ export async function streamTelegramMediaViaIterDownload(params: {
 
 export const TELEGRAM_MEDIA_DISK_CACHE_DIR = path.resolve(dbDir, 'telegram_media_cache');
 export const TELEGRAM_MEDIA_MAX_CONCURRENT_PER_ACCOUNT = 2;
+export const TELEGRAM_MEDIA_WAIT_QUEUE_MAX = 48;
+export const TELEGRAM_MEDIA_WAIT_TIMEOUT_MS = 12_000;
 try {
   fs.mkdirSync(TELEGRAM_MEDIA_DISK_CACHE_DIR, { recursive: true });
 } catch {}
@@ -28671,6 +28684,15 @@ interface TelegramMediaInFlightResult {
 
 const telegramMediaInFlight = new Map<string, Promise<TelegramMediaInFlightResult>>();
 const mediaAccountActiveDownloads = new Map<string, number>();
+
+interface MediaSlotWaiter {
+  resolve: (acquired: boolean) => void;
+  signal?: AbortSignal;
+  abortHandler?: () => void;
+  timer?: ReturnType<typeof setTimeout>;
+  settled: boolean;
+}
+const mediaAccountWaiters = new Map<string, MediaSlotWaiter[]>();
 
 function getMediaAccountSlotScope(accountScope: string): string {
   return resolveTelegramAccountRuntimeKey({ accountId: accountScope }) || accountScope || 'global';
@@ -28686,13 +28708,103 @@ function acquireMediaDownloadSlot(accountScope: string): boolean {
   return true;
 }
 
+async function acquireMediaDownloadSlotQueued(
+  accountScope: string,
+  signal?: AbortSignal,
+  maxQueue = TELEGRAM_MEDIA_WAIT_QUEUE_MAX,
+  timeoutMs = TELEGRAM_MEDIA_WAIT_TIMEOUT_MS
+): Promise<'acquired' | 'busy' | 'aborted'> {
+  if (signal?.aborted) return 'aborted';
+  if (acquireMediaDownloadSlot(accountScope)) return 'acquired';
+
+  const key = getMediaAccountSlotScope(accountScope);
+  let queue = mediaAccountWaiters.get(key);
+  if (!queue) {
+    queue = [];
+    mediaAccountWaiters.set(key, queue);
+  }
+  if (queue.length >= maxQueue) return 'busy';
+
+  return new Promise<'acquired' | 'busy' | 'aborted'>((resolve) => {
+    const cleanupWaiter = (waiter: MediaSlotWaiter) => {
+      if (waiter.timer) {
+        clearTimeout(waiter.timer);
+        waiter.timer = undefined;
+      }
+      if (waiter.signal && waiter.abortHandler) {
+        try {
+          waiter.signal.removeEventListener('abort', waiter.abortHandler);
+        } catch {}
+      }
+      const q = mediaAccountWaiters.get(key);
+      if (q) {
+        const idx = q.indexOf(waiter);
+        if (idx >= 0) q.splice(idx, 1);
+        if (q.length === 0) mediaAccountWaiters.delete(key);
+      }
+    };
+
+    const waiter: MediaSlotWaiter = {
+      settled: false,
+      signal,
+      resolve: (acquired) => {
+        if (waiter.settled) return;
+        waiter.settled = true;
+        cleanupWaiter(waiter);
+        resolve(acquired ? 'acquired' : 'busy');
+      },
+    };
+
+    if (signal) {
+      const onAbort = () => {
+        if (waiter.settled) return;
+        waiter.settled = true;
+        cleanupWaiter(waiter);
+        resolve('aborted');
+      };
+      waiter.abortHandler = onAbort;
+      signal.addEventListener('abort', onAbort, { once: true });
+    }
+
+    waiter.timer = setTimeout(() => {
+      waiter.resolve(false);
+    }, timeoutMs);
+
+    queue!.push(waiter);
+  });
+}
+
 function releaseMediaDownloadSlot(accountScope: string): void {
   const key = getMediaAccountSlotScope(accountScope);
   const current = mediaAccountActiveDownloads.get(key) || 0;
-  if (current <= 1) {
+  const nextActive = Math.max(0, current - 1);
+  if (nextActive === 0) {
     mediaAccountActiveDownloads.delete(key);
   } else {
-    mediaAccountActiveDownloads.set(key, current - 1);
+    mediaAccountActiveDownloads.set(key, nextActive);
+  }
+  const queue = mediaAccountWaiters.get(key);
+  while (
+    queue &&
+    queue.length > 0 &&
+    (mediaAccountActiveDownloads.get(key) || 0) < TELEGRAM_MEDIA_MAX_CONCURRENT_PER_ACCOUNT
+  ) {
+    const next = queue.shift()!;
+    if (queue.length === 0) {
+      mediaAccountWaiters.delete(key);
+    }
+    if (next.settled || next.signal?.aborted) {
+      if (next.timer) clearTimeout(next.timer);
+      if (next.signal && next.abortHandler) {
+        try {
+          next.signal.removeEventListener('abort', next.abortHandler);
+        } catch {}
+      }
+      continue;
+    }
+    mediaAccountActiveDownloads.set(key, (mediaAccountActiveDownloads.get(key) || 0) + 1);
+    next.resolve(true);
+    break;
   }
 }
 
@@ -28968,6 +29080,12 @@ export function clearTelegramMediaCachesForTesting(): void {
   telegramMediaCache.clear();
   telegramMediaInFlight.clear();
   mediaAccountActiveDownloads.clear();
+  for (const queue of mediaAccountWaiters.values()) {
+    for (const waiter of [...queue]) {
+      waiter.resolve(false);
+    }
+  }
+  mediaAccountWaiters.clear();
   lastMediaDiskPruneAt = 0;
   mediaDiskPruneInFlight = null;
   if (process.env.NODE_ENV === 'test') {
@@ -28999,6 +29117,7 @@ app.get('/api/telegram/user/media/:chatId/:msgId', async (req: Request, res: Res
     const accountId = typeof req.query.accountId === 'string' ? req.query.accountId.trim() : '';
     const forceDownload = req.query.download === '1' || req.query.download === 'true';
     const wantThumb = req.query.thumb === '1' || req.query.thumb === 'true';
+    const wantWait = req.query.wait === '1' || req.query.wait === 'true';
     const cleanChatId = String(chatId || '').replace(/^tg_/, '');
 
     const primaryConnected = accountId ? resolveConnectedTelegramUser(accountId) : undefined;
@@ -29060,8 +29179,33 @@ app.get('/api/telegram/user/media/:chatId/:msgId', async (req: Request, res: Res
       return res.status(404).send('Media not found');
     }
 
-    if (!acquireMediaDownloadSlot(cacheAccountScope)) {
+    const abortController = new AbortController();
+    const onClientClose = () => {
+      if (!res.writableEnded) {
+        abortController.abort();
+      }
+    };
+    req.on('close', onClientClose);
+    res.once('close', onClientClose);
+
+    let slotAcquired = false;
+    if (wantThumb && wantWait) {
+      const slotOutcome = await acquireMediaDownloadSlotQueued(cacheAccountScope, abortController.signal);
+      if (slotOutcome === 'aborted' || res.writableEnded) {
+        req.off('close', onClientClose);
+        res.off('close', onClientClose);
+        return;
+      }
+      slotAcquired = slotOutcome === 'acquired';
+    } else {
+      slotAcquired = acquireMediaDownloadSlot(cacheAccountScope);
+    }
+
+    if (!slotAcquired) {
+      req.off('close', onClientClose);
+      res.off('close', onClientClose);
       res.setHeader('Retry-After', '2');
+      res.setHeader('Cache-Control', 'no-store');
       return res.status(503).json({
         ok: false,
         code: 'MEDIA_DOWNLOAD_BUSY',
@@ -29234,6 +29378,8 @@ app.get('/api/telegram/user/media/:chatId/:msgId', async (req: Request, res: Res
         return res.status(404).send('Media not found');
       }
     } finally {
+      req.off('close', onClientClose);
+      res.off('close', onClientClose);
       safeReleaseSlot();
     }
   } catch {
@@ -35937,6 +36083,7 @@ function extractTelegramMediaFields(
     audioUrl: isAudio ? mediaProxyUrl : '',
     isImage,
     imageUrl: isImage ? (isStickerThumb ? `${mediaProxyUrl}&thumb=1` : mediaProxyUrl) : '',
+    thumbUrl: isImage ? `${mediaProxyUrl}&thumb=1&wait=1` : '',
     imageCaption: isImage ? caption : '',
     isVideo,
     videoDuration: isVideo ? Number(videoAttr?.duration || 0) : 0,
@@ -36652,6 +36799,15 @@ export async function querySqliteSharedMediaFallback(
       voiceTone: r.voiceTone || '',
       isImage: Boolean(r.isImage),
       imageUrl: resignUrlIfNeeded(r.imageUrl, r.accountId) || '',
+      ...(() => {
+        const resolvedImg = resignUrlIfNeeded(r.imageUrl, r.accountId) || '';
+        if (!r.isImage || !resolvedImg.startsWith('/api/telegram/user/media/')) return {};
+        const [base, qs = ''] = resolvedImg.split('?');
+        const p = new URLSearchParams(qs);
+        p.set('thumb', '1');
+        p.set('wait', '1');
+        return { thumbUrl: `${base}?${p.toString()}` };
+      })(),
       imageCaption: r.imageCaption || '',
       isVideo: Boolean(r.isVideo),
       videoUrl: resignUrlIfNeeded(r.videoUrl, r.accountId) || '',
@@ -39810,6 +39966,19 @@ export async function restoreTelegramUserSessionsOnStartup(
               await destroyFn(oldClient);
             }
 
+            if (sseUpdateSubscribers.size > 0) {
+              const restoredAccountId = uidStr ? `acc_tg_${uidStr}` : cleanPhone;
+              sendSseWakeupToSubscribers(restoredAccountId, {
+                kind: 'wakeup',
+                mode: 'immediate',
+                type: 'session_restored',
+                accountId: restoredAccountId,
+                chatId: getActiveFocusChat(restoredAccountId) || undefined,
+                reason,
+                ts: nowFn(),
+              });
+            }
+
             if (uidStr && process.env.NODE_ENV !== 'test') {
               void fetchTelegramAvatarWithLimiting({
                 cacheAccountScope: `acc_tg_${uidStr}`,
@@ -40110,6 +40279,17 @@ export async function handleSystemResumeWakeup(source = 'power_resume'): Promise
         runtime.reconnectingSinceAt = null;
         runtime.suspectedStuckWarningAt = null;
         runtime.reconnectProbeFailures = 0;
+        if (sseUpdateSubscribers.size > 0) {
+          sendSseWakeupToSubscribers(connAccountId, {
+            kind: 'wakeup',
+            mode: 'immediate',
+            type: 'session_restored',
+            accountId: connAccountId,
+            chatId: getActiveFocusChat(connAccountId) || undefined,
+            reason: `resume.${source}`,
+            ts: Date.now(),
+          });
+        }
       } catch (probeErr: any) {
         if (isTelegramSessionExpiredError(probeErr)) {
           let canonicalUid = conn.userId ? String(conn.userId).trim() : '';

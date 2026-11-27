@@ -184,6 +184,7 @@ export interface Message {
   isTranscribing?: boolean;
   isImage?: boolean;
   imageUrl?: string;
+  thumbUrl?: string;
   imageCaption?: string;
   isVideo?: boolean;
   videoUrl?: string;
